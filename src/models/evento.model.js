@@ -15,6 +15,9 @@ export const EventoModel = sequelize.define("evento", {
   image: {
     type: DataTypes.STRING,
   },
+  date: {
+    type: DataTypes.DATE,
+  },
   state: {
     type: DataTypes.BOOLEAN,
   },

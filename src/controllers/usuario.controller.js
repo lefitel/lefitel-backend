@@ -60,6 +60,39 @@ export async function updateUsuario(req, res) {
     return res.status(500).json({ message: error.message });
   }
 }
+export async function updateUserName(req, res) {
+  const { id } = req.params;
+
+  const { user } = req.body;
+
+  try {
+    const TempUsuario = await UsuarioModel.findOne({
+      where: { id },
+    });
+    TempUsuario.set({ ...TempUsuario, user: user });
+    await TempUsuario.save();
+    res.status(200).json(TempUsuario);
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+}
+
+export async function updateUserPass(req, res) {
+  const { id } = req.params;
+  req.body.pass = await bcryptjs.hash(req.body.pass, 8);
+
+  const { pass } = req.body;
+  try {
+    const TempUsuario = await UsuarioModel.findOne({
+      where: { id },
+    });
+    TempUsuario.set({ ...TempUsuario, pass: pass });
+    await TempUsuario.save();
+    res.status(200).json(TempUsuario);
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+}
 export async function deteleUsuario(req, res) {
   const { id } = req.params;
   try {

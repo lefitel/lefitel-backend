@@ -5,6 +5,7 @@ import multer from "multer";
 
 const router = Router();
 
+/*
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     return cb(null, "./public/images");
@@ -15,7 +16,14 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage });
-// Routes
+
 router.post("/", upload.single("file"), UploadImage);
+
+*/
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+router.post("/", upload.single("file"), UploadImage);
+// Routes
 
 export default router;

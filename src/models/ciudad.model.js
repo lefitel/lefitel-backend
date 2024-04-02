@@ -11,6 +11,9 @@ export const CiudadModel = sequelize.define("ciudad", {
   name: {
     type: DataTypes.STRING,
   },
+  image: {
+    type: DataTypes.STRING,
+  },
   lat: {
     allowNull: false,
     type: DataTypes.DOUBLE,

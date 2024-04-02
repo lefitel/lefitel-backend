@@ -16,7 +16,11 @@ export async function loginUsuario(req, res) {
     if (!confirmPass)
       return res.status(500).json({ message: "contraseña incorrecta" });
 
-    const usuario = { id: TempUsuario.id, id_rol: TempUsuario.id_rol };
+    const usuario = {
+      id: TempUsuario.id,
+      id_rol: TempUsuario.id_rol,
+      user: TempUsuario.user,
+    };
     const token = jwt.sign(usuario, secretKey);
     res.status(200).json({ usuario: usuario, message: token });
   } catch (error) {
