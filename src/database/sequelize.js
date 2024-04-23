@@ -5,6 +5,7 @@ import pgConect from "pg-connection-string";
 const { parse } = pgConect;
 dotenv.config();
 
+//Pruebas en localhost con BD local
 /*
 const database = process.env.PG_DATABASE;
 const user = process.env.PG_USER;
@@ -16,12 +17,16 @@ export const sequelize = new Sequelize(database, user, pass, {
   dialect: "postgres",
 });
 */
+
 const connectionString = process.env.DATABASE_URL;
 const connector = parse(connectionString);
 
+//Producción
 export const sequelize = new Sequelize(connectionString);
 
-/*export const sequelize = new Sequelize(
+//Pruebas en localhost con BD externa
+/*
+export const sequelize = new Sequelize(
   connector.database,
   connector.user,
   connector.password,
@@ -33,13 +38,3 @@ export const sequelize = new Sequelize(connectionString);
     },
   }
 );*/
-
-/*export const sequelize = new Sequelize(
-    connector.database,
-    connector.user,
-    connector.password,
-    {
-        dialect: "postgres",
-        host: connector.host,
-    }
-)*/

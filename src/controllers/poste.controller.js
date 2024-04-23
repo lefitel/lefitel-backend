@@ -3,6 +3,7 @@ import { CiudadModel } from "../models/ciudad.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
+import { UsuarioModel } from "../models/usuario.model.js";
 
 export async function getPoste(req, res) {
   try {
@@ -13,6 +14,7 @@ export async function getPoste(req, res) {
         { model: PropietarioModel },
         { model: CiudadModel, as: "ciudadA" },
         { model: CiudadModel, as: "ciudadB" },
+        { model: UsuarioModel },
       ],
     });
     res.status(200).json(TempPoste);

@@ -17,13 +17,13 @@ export async function UploadImage(req, res) {
   // Ruta del archivo cargado temporalmente
   const inputImagePath = req.file.path;
   // Ruta de la imagen de salida comprimida
-  const path = "images/" + `${Date.now()}_${req.file.originalname}`;
+  const path = "/" + `${Date.now()}_${req.file.originalname}`;
 
   // Comprimir la imagen
   sharp(req.file.buffer)
     .resize({ height: 1000 })
     .jpeg({ quality: 60 })
-    .toFile(`./public/${path}`, (err, info) => {
+    .toFile(`./images${path}`, (err, info) => {
       if (err) {
         return res.status(500).send("Error al comprimir la imagen");
       } else {

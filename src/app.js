@@ -56,7 +56,7 @@ function authenticateToken(req, res, next) {
 }
 
 // Routes
-app.use(express.static("public"));
+app.use(express.static("images"));
 app.use("/api/login", loginRoutes);
 
 app.use("/api/upload", authenticateToken, uploadRoutes);
@@ -76,7 +76,7 @@ app.use("/api/propietario", authenticateToken, propietarioRoutes);
 app.use("/api/revicion", authenticateToken, revicionRoutes);
 app.use("/api/solucion", authenticateToken, solucionRoutes);
 app.use("/api/tipoObs", authenticateToken, tipoObsRoutes);
-app.use("/api/rol", authenticateToken, rolRoutes);
-app.use("/api/usuario", authenticateToken, usuarioRoutes);
+app.use("/api/rol", rolRoutes);
+app.use("/api/usuario", usuarioRoutes);
 
 export default app;

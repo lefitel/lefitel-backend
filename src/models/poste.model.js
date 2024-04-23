@@ -1,7 +1,7 @@
 import { DataTypes } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { PropietarioModel } from "./propietario.model.js";
-import { AdssModel } from "./adss.model.js";
+import { UsuarioModel } from "./usuario.model.js";
 import { CiudadModel } from "./ciudad.model.js";
 import { MaterialModel } from "./material.model.js";
 /*import { MaterialModel } from "./material.model.js";
@@ -47,6 +47,10 @@ export const PosteModel = sequelize.define("poste", {
     type: DataTypes.INTEGER,
     allowNull: false,
   },
+  id_usuario: {
+    type: DataTypes.INTEGER,
+    //allowNull: false,
+  },
 });
 
 //Relacion con poste
@@ -61,3 +65,6 @@ PosteModel.belongsTo(CiudadModel, { foreignKey: "id_ciudadA", as: "ciudadA" });
 
 CiudadModel.hasMany(PosteModel, { foreignKey: "id_ciudadB", as: "ciudadB" });
 PosteModel.belongsTo(CiudadModel, { foreignKey: "id_ciudadB", as: "ciudadB" });
+
+UsuarioModel.hasMany(PosteModel, { foreignKey: "id_usuario" });
+PosteModel.belongsTo(UsuarioModel, { foreignKey: "id_usuario" });
