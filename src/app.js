@@ -56,7 +56,7 @@ function authenticateToken(req, res, next) {
 }
 
 // Routes
-app.use(express.static("images"));
+app.use(express.static("/images"));
 app.use("/api/login", loginRoutes);
 
 app.use("/api/upload", authenticateToken, uploadRoutes);

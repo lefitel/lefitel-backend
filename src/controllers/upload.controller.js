@@ -23,7 +23,7 @@ export async function UploadImage(req, res) {
   sharp(req.file.buffer)
     .resize({ height: 1000 })
     .jpeg({ quality: 60 })
-    .toFile(`./images${path}`, (err, info) => {
+    .toFile(`/images${path}`, (err, info) => {
       if (err) {
         return res.status(500).send("Error al comprimir la imagen");
       } else {
