@@ -14,9 +14,9 @@ export async function putReporteGeneral(req, res) {
   const { fechaInicial, fechaFinal } = req.body;
   const fechaInicio = new Date(fechaInicial);
   const fechaFin = new Date(fechaFinal);
-  fechaInicio.setHours(4, 0, 0, 0);
-  fechaFin.setHours(4, 0, 0, 0);
-  fechaFin.setDate(fechaFin.getDate() + 1);
+  //fechaInicio.setHours(4, 0, 0, 0);
+  //fechaFin.setHours(4, 0, 0, 0);
+  //fechaFin.setDate(fechaFin.getDate() + 1);
   try {
     const TempReporte = await EventoModel.findAll({
       order: [["id", "DESC"]],
@@ -49,9 +49,6 @@ export async function putReporteTramo(req, res) {
   const { fechaInicial, fechaFinal, TramoInicial, TramoFinal } = req.body;
   const fechaInicio = new Date(fechaInicial);
   const fechaFin = new Date(fechaFinal);
-  fechaInicio.setHours(4, 0, 0, 0);
-  fechaFin.setHours(4, 0, 0, 0);
-  fechaFin.setDate(fechaFin.getDate() + 1);
 
   try {
     console.log("================");
