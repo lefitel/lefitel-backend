@@ -46,7 +46,7 @@ export async function putReporteGeneral(req, res) {
   }
 }
 export async function putReporteTramo(req, res) {
-  const { fechaInicial, fechaFinal, TramoInicial, TramoFinal } = req.body;
+  const { fechaInicial, fechaFinal } = req.body;
   const fechaInicio = new Date(fechaInicial);
   const fechaFin = new Date(fechaFinal);
 
@@ -73,10 +73,10 @@ export async function putReporteTramo(req, res) {
               as: "ciudadB",
             },
           ],
-          where: {
+          /* where: {
             [Op.or]: [{ id_ciudadA: TramoInicial }, { id_ciudadA: TramoFinal }],
             [Op.or]: [{ id_ciudadB: TramoInicial }, { id_ciudadB: TramoFinal }],
-          },
+          },*/
         },
         { model: SolucionModel },
         { model: RevicionModel },
