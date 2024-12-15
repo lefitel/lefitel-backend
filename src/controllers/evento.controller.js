@@ -21,7 +21,7 @@ export async function getEvento(req, res) {
           ],
         },
         { model: UsuarioModel },
-        { model: EventoObsModel },
+        { model: EventoObsModel, include: [{ model: EventoModel }] },
       ],
     });
     //console.log(JSON.stringify(TempEvento, null, 2));
