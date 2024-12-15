@@ -1,5 +1,6 @@
 import { CiudadModel } from "../models/ciudad.model.js";
 import { EventoModel } from "../models/evento.model.js";
+import { EventoObsModel } from "../models/eventoObs.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
@@ -20,6 +21,7 @@ export async function getEvento(req, res) {
           ],
         },
         { model: UsuarioModel },
+        { model: EventoObsModel },
       ],
     });
     //console.log(JSON.stringify(TempEvento, null, 2));
