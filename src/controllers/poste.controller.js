@@ -36,6 +36,13 @@ export async function searchPoste(req, res) {
   try {
     const TempPoste = await PosteModel.findOne({
       where: { id },
+      include: [
+        { model: MaterialModel },
+        { model: PropietarioModel },
+        { model: CiudadModel, as: "ciudadA" },
+        { model: CiudadModel, as: "ciudadB" },
+        { model: UsuarioModel },
+      ],
     });
     res.status(200).json(TempPoste);
   } catch (error) {
