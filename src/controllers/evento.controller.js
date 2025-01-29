@@ -51,6 +51,19 @@ export async function searchEvento(req, res) {
   try {
     const TempEvento = await EventoModel.findOne({
       where: { id },
+      include: [
+        { model: RevicionModel },
+        {
+          model: PosteModel,
+          include: [
+            { model: CiudadModel, as: "ciudadA" },
+            { model: CiudadModel, as: "ciudadB" },
+            { model: PropietarioModel },
+          ],
+        },
+        { model: UsuarioModel },
+        { model: EventoObsModel, include: [{ model: ObsModel }] },
+      ],
     });
     res.status(200).json(TempEvento);
   } catch (error) {
