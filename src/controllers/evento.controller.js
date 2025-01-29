@@ -18,10 +18,10 @@ export async function getEvento(req, res) {
           include: [
             { model: CiudadModel, as: "ciudadA" },
             { model: CiudadModel, as: "ciudadB" },
+            { model: PropietarioModel },
           ],
         },
         { model: UsuarioModel },
-        { model: PropietarioModel },
         { model: EventoObsModel, include: [{ model: ObsModel }] },
       ],
     });
