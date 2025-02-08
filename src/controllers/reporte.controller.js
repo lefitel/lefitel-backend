@@ -9,6 +9,7 @@ import { CiudadModel } from "../models/ciudad.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
+import {} from "sequelize"; // Asegúrate de importar Sequelize
 
 export async function putReporteGeneral(req, res) {
   const { fechaInicial, fechaFinal } = req.body;
@@ -33,18 +34,13 @@ export async function putReporteGeneral(req, res) {
         { model: SolucionModel },
         { model: RevicionModel },
       ],
-      where: {
-        date: {
-          [Op.gte]: fechaInicio,
-          [Op.lt]: fechaFin,
-        },
-      },
     });
     res.status(200).json(TempReporte);
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
 }
+
 export async function putReporteTramo(req, res) {
   const { fechaInicial, fechaFinal } = req.body;
   const fechaInicio = new Date(fechaInicial);
@@ -81,12 +77,6 @@ export async function putReporteTramo(req, res) {
         { model: SolucionModel },
         { model: RevicionModel },
       ],
-      where: {
-        date: {
-          [Op.gte]: fechaInicio,
-          [Op.lt]: fechaFin,
-        },
-      },
     });
     console.log("Model");
     console.log(TempReporte);
@@ -96,3 +86,43 @@ export async function putReporteTramo(req, res) {
     return res.status(500).json({ message: error.message });
   }
 }
+
+/**
+ * 
+ * export async function putReporteGeneral(req, res) {
+  const { fechaInicial, fechaFinal } = req.body;
+  const fechaInicio = new Date(fechaInicial);
+  const fechaFin = new Date(fechaFinal);
+  //fechaInicio.setHours(4, 0, 0, 0);
+  //fechaFin.setHours(4, 0, 0, 0);
+  //fechaFin.setDate(fechaFin.getDate() + 1);
+  try {
+    const TempReporte = await EventoModel.findAll({
+      order: [["id", "DESC"]],
+      include: [
+        {
+          model: PosteModel,
+          include: [
+            { model: MaterialModel },
+            { model: PropietarioModel },
+            { model: CiudadModel, as: "ciudadA" },
+            { model: CiudadModel, as: "ciudadB" },
+          ],
+        },
+        { model: SolucionModel },
+        { model: RevicionModel },
+      ],
+      where: {
+        date: {
+          [Op.gte]: fechaInicio,
+          [Op.lt]: fechaFin,
+        },
+      },
+    });
+    res.status(200).json(TempReporte);
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+}
+
+ */
