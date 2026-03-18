@@ -13,41 +13,80 @@ import { SolucionModel } from "../models/solucion.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 
 export async function getEvento(req: Request, res: Response) {
-  const isArchived = req.query.archived === "true";
+  const { archived, page, limit, filterColumn, filterValue, export: isExport } = req.query;
+  const isArchived = archived === "true";
+
+  const where: Record<string, unknown> = isArchived ? { deletedAt: { [Op.ne]: null } } : {};
+
+  if (filterColumn && filterValue && typeof filterValue === "string" && filterValue.trim()) {
+    if (filterColumn === "description") {
+      where["description"] = { [Op.iLike]: `%${filterValue.trim()}%` };
+    }
+  }
+
+  const posteWhere = filterColumn === "poste" && filterValue && typeof filterValue === "string" && filterValue.trim()
+    ? { name: { [Op.iLike]: `%${filterValue.trim()}%` } }
+    : undefined;
+
+  const queryOptions = {
+    order: [["id", "DESC"]] as [[string, string]],
+    paranoid: !isArchived,
+    where,
+    attributes: { exclude: ["image"] },
+    include: [
+      {
+        model: RevicionModel,
+        separate: true,
+        attributes: ["id", "date", "id_evento"],
+      },
+      {
+        model: PosteModel,
+        paranoid: false,
+        attributes: ["id", "name", "id_ciudadA", "id_ciudadB", "id_propietario"],
+        ...(posteWhere ? { where: posteWhere, required: true } : {}),
+        include: [
+          { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
+          { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+          { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
+        ],
+      },
+      {
+        model: EventoObsModel,
+        separate: true,
+        attributes: ["id", "id_obs", "id_evento"],
+        include: [{ model: ObsModel, paranoid: false, attributes: ["id", "name"] }],
+      },
+      {
+        model: UsuarioModel,
+        attributes: ["id", "name", "lastname"],
+      },
+    ],
+  };
+
   try {
-    const TempEvento = await EventoModel.findAll({
-      order: [["id", "DESC"]],
-      paranoid: !isArchived,
-      where: isArchived ? { deletedAt: { [Op.ne]: null } } : {},
-      include: [
-        {
-          model: RevicionModel,
-          separate: true,
-          attributes: ["id", "date", "id_evento"],
-        },
-        {
-          model: PosteModel,
-          paranoid: false,
-          attributes: ["id", "name", "id_ciudadA", "id_ciudadB", "id_propietario"],
-          include: [
-            { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
-            { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
-            { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
-          ],
-        },
-        {
-          model: EventoObsModel,
-          separate: true,
-          attributes: ["id", "id_obs", "id_evento"],
-          include: [{ model: ObsModel, paranoid: false, attributes: ["id", "name"] }],
-        },
-        {
-          model: UsuarioModel,
-          attributes: ["id", "name", "lastname"],
-        },
-      ],
+    if (isExport === "true") {
+      const data = await EventoModel.findAll(queryOptions);
+      return res.status(200).json(data);
+    }
+
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.min(100, Math.max(10, Number(limit) || 50));
+    const offset = (pageNum - 1) * limitNum;
+
+    const { count, rows } = await EventoModel.findAndCountAll({
+      ...queryOptions,
+      limit: limitNum,
+      offset,
+      distinct: true,
     });
-    res.status(200).json(TempEvento);
+
+    return res.status(200).json({
+      data: rows,
+      total: count,
+      page: pageNum,
+      totalPages: Math.ceil(count / limitNum),
+      limit: limitNum,
+    });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }

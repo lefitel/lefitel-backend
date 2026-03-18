@@ -9,9 +9,10 @@ import { PropietarioModel } from "../models/propietario.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 
 export async function getPoste(req: Request, res: Response) {
-  const { ciudadA, ciudadB, ciudadId, archived } = req.query;
+  const { ciudadA, ciudadB, ciudadId, archived, page, limit, filterColumn, filterValue, export: isExport } = req.query;
   const isArchived = archived === "true";
-  const where = isArchived
+
+  const where: Record<string, unknown> = isArchived
     ? { deletedAt: { [Op.ne]: null } }
     : ciudadId
     ? { [Op.or]: [{ id_ciudadA: Number(ciudadId) }, { id_ciudadB: Number(ciudadId) }] }
@@ -23,27 +24,56 @@ export async function getPoste(req: Request, res: Response) {
           ],
         }
       : {};
+
+  if (filterColumn && filterValue && typeof filterValue === "string" && filterValue.trim()) {
+    if (filterColumn === "name") {
+      where["name"] = { [Op.iLike]: `%${filterValue.trim()}%` };
+    }
+  }
+
+  const queryOptions = {
+    where,
+    paranoid: !isArchived,
+    order: [["id", ciudadA && ciudadB ? "ASC" : "DESC"]] as [[string, string]],
+    attributes: {
+      include: [[
+        literal(`(SELECT COUNT(*) FROM "eventos" WHERE "eventos"."id_poste" = "poste"."id" AND "eventos"."state" = false AND "eventos"."deletedAt" IS NULL)`),
+        "pendingEvents",
+      ] as [ReturnType<typeof literal>, string]],
+      exclude: ["image"],
+    },
+    include: [
+      { model: MaterialModel, paranoid: false, attributes: ["id", "name"] },
+      { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
+      { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
+      { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+      { model: UsuarioModel, attributes: ["id", "name", "lastname"] },
+    ],
+  };
+
   try {
-    const TempPoste = await PosteModel.findAll({
-      where,
-      paranoid: !isArchived,
-      order: [["id", ciudadA && ciudadB ? "ASC" : "DESC"]],
-      attributes: {
-        include: [[
-          literal(`(SELECT COUNT(*) FROM "eventos" WHERE "eventos"."id_poste" = "poste"."id" AND "eventos"."state" = false AND "eventos"."deletedAt" IS NULL)`),
-          "pendingEvents",
-        ]],
-        exclude: ["image"],
-      },
-      include: [
-        { model: MaterialModel, paranoid: false, attributes: ["id", "name"] },
-        { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
-        { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
-        { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
-        { model: UsuarioModel, attributes: ["id", "name", "lastname"] },
-      ],
+    if (isExport === "true") {
+      const data = await PosteModel.findAll(queryOptions);
+      return res.status(200).json(data);
+    }
+
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.min(100, Math.max(10, Number(limit) || 50));
+    const offset = (pageNum - 1) * limitNum;
+
+    const { count, rows } = await PosteModel.findAndCountAll({
+      ...queryOptions,
+      limit: limitNum,
+      offset,
     });
-    res.status(200).json(TempPoste);
+
+    return res.status(200).json({
+      data: rows,
+      total: count,
+      page: pageNum,
+      totalPages: Math.ceil(count / limitNum),
+      limit: limitNum,
+    });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
