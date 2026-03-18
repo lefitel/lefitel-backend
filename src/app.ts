@@ -38,6 +38,7 @@ import tipoObsRoutes from "./routes/tipoObs.routes.js";
 import usuarioRoutes from "./routes/usuario.routes.js";
 import loginRoutes from "./routes/login.routes.js";
 import reporteRoutes from "./routes/reporte.routes.js";
+import dashboardRoutes from "./routes/dashboard.routes.js";
 
 const app = express();
 
@@ -82,6 +83,7 @@ app.use("/api/login", (req, res, next) => {
 
 app.use("/api/upload", authenticateToken, uploadRoutes);
 app.use("/api/reporte", authenticateToken, reporteRoutes);
+app.use("/api/dashboard", authenticateToken, dashboardRoutes);
 
 app.use("/api/adss", authenticateToken, adssRoutes);
 app.use("/api/adssposte", authenticateToken, adssPosteRoutes);
