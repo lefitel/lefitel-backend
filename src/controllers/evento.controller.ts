@@ -20,18 +20,31 @@ export async function getEvento(req: Request, res: Response) {
       paranoid: !isArchived,
       where: isArchived ? { deletedAt: { [Op.ne]: null } } : {},
       include: [
-        { model: RevicionModel },
+        {
+          model: RevicionModel,
+          separate: true,
+          attributes: ["id", "date", "id_evento"],
+        },
         {
           model: PosteModel,
           paranoid: false,
+          attributes: ["id", "name", "id_ciudadA", "id_ciudadB", "id_propietario"],
           include: [
-            { model: CiudadModel, as: "ciudadA", paranoid: false },
-            { model: CiudadModel, as: "ciudadB", paranoid: false },
-            { model: PropietarioModel, paranoid: false },
+            { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
+            { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+            { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
           ],
         },
-        { model: UsuarioModel },
-        { model: EventoObsModel, include: [{ model: ObsModel, paranoid: false }] },
+        {
+          model: EventoObsModel,
+          separate: true,
+          attributes: ["id", "id_obs", "id_evento"],
+          include: [{ model: ObsModel, paranoid: false, attributes: ["id", "name"] }],
+        },
+        {
+          model: UsuarioModel,
+          attributes: ["id", "name", "lastname"],
+        },
       ],
     });
     res.status(200).json(TempEvento);

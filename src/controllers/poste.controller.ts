@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { Op } from "sequelize";
+import { literal, Op } from "sequelize";
 import { deleteImageFile } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
 import { CiudadModel } from "../models/ciudad.model.js";
@@ -28,6 +28,12 @@ export async function getPoste(req: Request, res: Response) {
       where,
       paranoid: !isArchived,
       order: [["id", ciudadA && ciudadB ? "ASC" : "DESC"]],
+      attributes: {
+        include: [[
+          literal(`(SELECT COUNT(*) FROM "eventos" WHERE "eventos"."id_poste" = "poste"."id" AND "eventos"."state" = false AND "eventos"."deletedAt" IS NULL)`),
+          "pendingEvents",
+        ]],
+      },
       include: [
         { model: MaterialModel, paranoid: false },
         { model: PropietarioModel, paranoid: false },
