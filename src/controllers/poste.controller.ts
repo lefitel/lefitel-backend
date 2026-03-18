@@ -33,13 +33,14 @@ export async function getPoste(req: Request, res: Response) {
           literal(`(SELECT COUNT(*) FROM "eventos" WHERE "eventos"."id_poste" = "poste"."id" AND "eventos"."state" = false AND "eventos"."deletedAt" IS NULL)`),
           "pendingEvents",
         ]],
+        exclude: ["image"],
       },
       include: [
-        { model: MaterialModel, paranoid: false },
-        { model: PropietarioModel, paranoid: false },
-        { model: CiudadModel, as: "ciudadA", paranoid: false },
-        { model: CiudadModel, as: "ciudadB", paranoid: false },
-        { model: UsuarioModel },
+        { model: MaterialModel, paranoid: false, attributes: ["id", "name"] },
+        { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
+        { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
+        { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+        { model: UsuarioModel, attributes: ["id", "name", "lastname"] },
       ],
     });
     res.status(200).json(TempPoste);
