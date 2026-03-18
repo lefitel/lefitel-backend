@@ -70,7 +70,7 @@ export async function getEvento(req: Request, res: Response) {
     }
 
     const pageNum = Math.max(1, Number(page) || 1);
-    const limitNum = Math.min(100, Math.max(10, Number(limit) || 50));
+    const limitNum = Math.min(100, Math.max(15, Number(limit) || 50));
     const offset = (pageNum - 1) * limitNum;
 
     const { count, rows } = await EventoModel.findAndCountAll({
