@@ -4,17 +4,21 @@ import { PosteModel } from "../models/poste.model.js";
 import { CiudadModel } from "../models/ciudad.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { MaterialModel } from "../models/material.model.js";
+import { RevicionModel } from "../models/revicion.model.js";
 
 export async function getDashboard(req: Request, res: Response) {
   try {
     const [eventos, postes] = await Promise.all([
       EventoModel.findAll({
         attributes: ["id", "description", "state", "date", "priority", "id_poste"],
-        include: [{
-          model: PosteModel,
-          attributes: ["id", "name", "lat", "lng"],
-          include: [{ model: PropietarioModel, attributes: ["name"] }],
-        }],
+        include: [
+          {
+            model: PosteModel,
+            attributes: ["id", "name", "lat", "lng"],
+            include: [{ model: PropietarioModel, attributes: ["name"] }],
+          },
+          { model: RevicionModel, attributes: ["id", "date"], separate: true },
+        ],
       }),
       PosteModel.findAll({
         attributes: ["id", "name", "lat", "lng", "date"],

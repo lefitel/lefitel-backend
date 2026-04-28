@@ -47,14 +47,18 @@ const getEventIdsInRange = async (fechaInicial: Date, fechaFinal: Date): Promise
 };
 
 export async function putReporteGeneral(req: Request, res: Response) {
-  const { fechaInicial, fechaFinal } = req.body;
+  const { fechaInicial, fechaFinal, excludeOld } = req.body;
   if (!fechaInicial || !fechaFinal) {
     return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
   }
   try {
-    const eventIds = await getEventIdsInRange(new Date(fechaInicial), new Date(fechaFinal));
+    const fi = new Date(fechaInicial);
+    const ff = new Date(fechaFinal);
+    const eventIds = await getEventIdsInRange(fi, ff);
+    const eventoWhere: Record<string, unknown> = { id: { [Op.in]: eventIds } };
+    if (excludeOld) eventoWhere.date = { [Op.between]: [fi, ff] };
     const data = await EventoModel.findAll({
-      where: { id: { [Op.in]: eventIds } },
+      where: eventoWhere,
       order: [["id", "DESC"]],
       include: [
         {
@@ -78,7 +82,7 @@ export async function putReporteGeneral(req: Request, res: Response) {
 }
 
 export async function putReporteTramo(req: Request, res: Response) {
-  const { fechaInicial, fechaFinal, TramoInicial, TramoFinal } = req.body;
+  const { fechaInicial, fechaFinal, TramoInicial, TramoFinal, excludeOld } = req.body;
   if (!fechaInicial || !fechaFinal) {
     return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
   }
@@ -93,9 +97,13 @@ export async function putReporteTramo(req: Request, res: Response) {
     : undefined;
 
   try {
-    const eventIds = await getEventIdsInRange(new Date(fechaInicial), new Date(fechaFinal));
+    const fi = new Date(fechaInicial);
+    const ff = new Date(fechaFinal);
+    const eventIds = await getEventIdsInRange(fi, ff);
+    const eventoWhere: Record<string, unknown> = { id: { [Op.in]: eventIds } };
+    if (excludeOld) eventoWhere.date = { [Op.between]: [fi, ff] };
     const data = await EventoModel.findAll({
-      where: { id: { [Op.in]: eventIds } },
+      where: eventoWhere,
       order: [["id", "DESC"]],
       include: [
         { model: EventoObsModel },
@@ -123,7 +131,7 @@ export async function putReporteTramo(req: Request, res: Response) {
 }
 
 export async function putReporteRecorrido(req: Request, res: Response) {
-  const { TramoInicial, TramoFinal, fechaInicial, fechaFinal } = req.body;
+  const { TramoInicial, TramoFinal, fechaInicial, fechaFinal, excludeOld } = req.body;
   if (!TramoInicial || !TramoFinal) {
     return res.status(400).json({ message: "TramoInicial y TramoFinal son requeridos" });
   }
@@ -131,9 +139,13 @@ export async function putReporteRecorrido(req: Request, res: Response) {
     return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
   }
   try {
-    const eventIds = await getEventIdsInRange(new Date(fechaInicial), new Date(fechaFinal));
+    const fi = new Date(fechaInicial);
+    const ff = new Date(fechaFinal);
+    const eventIds = await getEventIdsInRange(fi, ff);
+    const eventoWhere: Record<string, unknown> = { id: { [Op.in]: eventIds } };
+    if (excludeOld) eventoWhere.date = { [Op.between]: [fi, ff] };
     const data = await EventoModel.findAll({
-      where: { id: { [Op.in]: eventIds } },
+      where: eventoWhere,
       order: [["id", "DESC"]],
       include: [
         {
