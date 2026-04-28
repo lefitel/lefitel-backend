@@ -12,6 +12,7 @@ import morgan from "morgan";
 import cors from "cors";
 import jwt from "jsonwebtoken";
 import rateLimit from "express-rate-limit";
+import { UsuarioModel } from "./models/usuario.model.js";
 
 // Import routes
 import uploadRoutes from "./routes/upload.routes.js";
@@ -50,14 +51,24 @@ app.use(express.json());
 app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
 
 // Middleware para verificar el token en rutas protegidas (+ sliding expiry)
+// Además valida que el usuario siga existiendo (no archivado) para revocar acceso al instante.
 function authenticateToken(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
   if (token == null) return res.sendStatus(401);
 
-  jwt.verify(token, secretKey, (err, user) => {
+  jwt.verify(token, secretKey, async (err, user) => {
     if (err) return res.sendStatus(403);
-    req.user = user as { id: number; id_rol: number };
+    const u = user as { id: number; id_rol: number };
+
+    try {
+      const exists = await UsuarioModel.findByPk(u.id, { attributes: ["id"] });
+      if (!exists) return res.sendStatus(401);
+    } catch {
+      return res.sendStatus(500);
+    }
+
+    req.user = u;
     // Re-issue a fresh 7d token on every authenticated request (sliding expiry)
     const { iat: _iat, exp: _exp, ...payload } = user as Record<string, unknown>;
     const newToken = jwt.sign(payload, secretKey, { expiresIn: "7d" });
