@@ -18,7 +18,11 @@ async function main() {
   }
 
   const isDev = process.env.NODE_ENV !== "production";
-  await sequelize.sync({ alter: isDev });
+  if (isDev) {
+    await sequelize.sync({ alter: true });
+  } else {
+    await sequelize.authenticate();
+  }
   console.log("--> Conexión establecida con PostgreSQL <--");
 
   app.listen(port, () => {
