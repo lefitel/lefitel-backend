@@ -13,11 +13,12 @@ export async function UploadImage(req: Request, res: Response) {
   // Crear directorio si no existe (útil en desarrollo local)
   if (!fs.existsSync(IMAGES_DIR)) fs.mkdirSync(IMAGES_DIR, { recursive: true });
 
-  const path = "/" + `${Date.now()}_${req.file.originalname}`;
+  const baseName = req.file.originalname.replace(/\.[^/.]+$/, "");
+  const path = "/" + `${Date.now()}_${baseName}.webp`;
 
   sharp(req.file.buffer)
-    .resize({ height: 1000 })
-    .jpeg({ quality: 60 })
+    .resize({ height: 1920, withoutEnlargement: true })
+    .webp({ quality: 80 })
     .toFile(`${IMAGES_DIR}${path}`, (err, _info) => {
       if (err) {
         return res.status(500).send("Error al comprimir la imagen");
