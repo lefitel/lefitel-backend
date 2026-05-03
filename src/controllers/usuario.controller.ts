@@ -60,7 +60,7 @@ export async function createUsuario(req: Request, res: Response) {
     req.body.pass = await bcryptjs.hash(req.body.pass, 8);
 
     const TempUsuario = await UsuarioModel.create(req.body);
-    logAction({ id_usuario: req.user?.id, action: "CREATE_USUARIO", entity: "Usuario", entity_id: TempUsuario.dataValues.id as number, detail: `Creó usuario @${req.body.user}` });
+    logAction({ id_usuario: req.user?.id, action: "CREATE_USUARIO", entity: "Usuario", entity_id: TempUsuario.dataValues.id as number, detail: `Creó usuario @${req.body.user}`, metadata: { after: { user: req.body.user } }, severity: 'info' });
     res.status(200).json(TempUsuario);
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -79,11 +79,32 @@ export async function updateUsuario(req: Request, res: Response) {
     const TempUsuario = await UsuarioModel.findOne({ where: { id } });
     if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
     const oldImage = TempUsuario.dataValues.image;
+    const udv = TempUsuario.dataValues as unknown as Record<string, unknown>;
+    const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
+    const beforeMeta: Record<string, unknown> = {};
+    const afterMeta:  Record<string, unknown> = {};
+    for (const k of Object.keys(req.body)) {
+      const bv = udv[k];
+      if (bv === undefined || k === "id_rol") continue;
+      if (isPrimVal(bv) && isPrimVal(req.body[k])) { beforeMeta[k] = bv; afterMeta[k] = req.body[k]; }
+    }
+    const bvRol = udv["id_rol"] as number | null | undefined;
+    const avRol = req.body["id_rol"] as number | null | undefined;
+    if (bvRol !== undefined && bvRol !== avRol) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fkRef = async (pkVal: number | null | undefined) => {
+        if (pkVal == null) return null;
+        const row = await (RolModel as any).findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
+        return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
+      };
+      [beforeMeta["id_rol"], afterMeta["id_rol"]] = await Promise.all([fkRef(bvRol), fkRef(avRol)]);
+    }
     TempUsuario.set(req.body);
     await TempUsuario.save();
     if (oldImage && req.body.image && oldImage !== req.body.image) {
       deleteImageFile(oldImage);
     }
+    logAction({ id_usuario: req.user?.id, action: "UPDATE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Editó perfil del usuario #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
     res.status(200).json(TempUsuario);
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -110,10 +131,10 @@ export async function updateUserName(req: Request, res: Response) {
       where: { id },
     });
     if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
-    
+    const oldUser = TempUsuario.dataValues.user;
     TempUsuario.set({ ...TempUsuario, user: user });
     await TempUsuario.save();
-    logAction({ id_usuario: req.user?.id, action: "CHANGE_USERNAME", entity: "Usuario", entity_id: Number(id), detail: `Cambió nombre de usuario a @${user}` });
+    logAction({ id_usuario: req.user?.id, action: "CHANGE_USERNAME", entity: "Usuario", entity_id: Number(id), detail: `Cambió nombre de usuario a @${user}`, metadata: { before: { user: oldUser }, after: { user } }, severity: 'warning', ip_address: req.ip ?? null });
     res.status(200).json(TempUsuario);
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -151,7 +172,7 @@ export async function updateUserPass(req: Request, res: Response) {
     TempUsuario.set({ ...TempUsuario, pass: hashedPass });
     await TempUsuario.save();
     const isSelf = req.user?.id === Number(id);
-    logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}` });
+    logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf }, severity: 'critical', ip_address: req.ip ?? null });
     res.status(200).json(TempUsuario);
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -164,7 +185,7 @@ export async function deleteUsuario(req: Request, res: Response) {
   }
   try {
     await UsuarioModel.destroy({ where: { id } });
-    logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}` });
+    logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, severity: 'critical' });
     return res.sendStatus(200);
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -177,7 +198,7 @@ export async function desarchivarUsuario(req: Request, res: Response) {
   }
   try {
     await UsuarioModel.restore({ where: { id } });
-    logAction({ id_usuario: req.user?.id, action: "RESTORE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Desarchivó usuario #${id}` });
+    logAction({ id_usuario: req.user?.id, action: "RESTORE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Desarchivó usuario #${id}`, severity: 'info' });
     return res.sendStatus(200);
   } catch (error) {
     return res.status(500).json({ message: error.message });

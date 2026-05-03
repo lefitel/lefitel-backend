@@ -78,6 +78,8 @@ export interface IObs {
   name: string;
   description: string;
   id_tipoObs: number;
+  /** Criticality level 1-9 (1 = catastrophic, 9 = maintenance). Null = unclassified. */
+  criticality?: number | null;
   deletedAt?: Date | null;
 }
 
@@ -97,7 +99,7 @@ export interface ISolucion {
   deletedAt?: Date | null;
 }
 
-export interface IRevicion {
+export interface IRevision {
   id: number;
   description: string;
   date: Date;
@@ -112,6 +114,9 @@ export interface IBitacora {
   entity: string;
   entity_id: number | null;
   id_usuario: number;
+  metadata?: Record<string, unknown> | null;
+  severity?: 'info' | 'warning' | 'critical';
+  ip_address?: string | null;
 }
 
 export interface IAdss {

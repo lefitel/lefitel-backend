@@ -117,20 +117,3 @@ Eliminar un índice (reversible, no modifica datos):
 ```sql
 DROP INDEX nombre_del_indice;
 ```
-
----
-
-## Docker local (simulación de servidor)
-
-```bash
-docker build -t lefitel-backend .
-docker run -d \
-  --name lefitel-sim \
-  --env-file .env.docker \
-  --memory="192m" \
-  --cpus="0.5" \
-  -p 3001:3000 \
-  lefitel-backend
-```
-
-`.env.docker` usa `PG_IP=host.docker.internal` para conectarse a la base de datos local del host.

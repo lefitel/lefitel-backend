@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { EventoModel } from "../models/evento.model.js";
 import { Op } from "sequelize";
 import { EventoObsModel } from "../models/eventoObs.model.js";
-import { RevicionModel } from "../models/revicion.model.js";
+import { RevisionModel } from "../models/revision.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { SolucionModel } from "../models/solucion.model.js";
 import { CiudadModel } from "../models/ciudad.model.js";
@@ -11,7 +11,7 @@ import { MaterialModel } from "../models/material.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { TipoObsModel } from "../models/tipoObs.model.js";
-import { ICiudad, IEvento, IEventoObs, IObs, IPoste, IRevicion, ITipoObs } from "../interfaces/index.js";
+import { ICiudad, IEvento, IEventoObs, IObs, IPoste, IRevision, ITipoObs } from "../interfaces/index.js";
 
 // ─── Tipos para datos con asociaciones (resultado de toJSON) ──────────────────
 
@@ -22,14 +22,14 @@ interface IPosteConEventos extends IPoste {
 }
 
 interface IEventoObsConOb extends IEventoObs {
-  ob: (Pick<IObs, "id" | "name"> & {
+  ob: (Pick<IObs, "id" | "name" | "criticality"> & {
     tipoObs: Pick<ITipoObs, "id" | "name"> | null;
   }) | null;
 }
 
-interface IEventoConReviciones extends IEvento {
+interface IEventoConRevisions extends IEvento {
   createdAt: Date;
-  revicions: Pick<IRevicion, "date">[];
+  revisions: Pick<IRevision, "date">[];
   poste: (Pick<IPoste, "id" | "id_ciudadA" | "id_ciudadB"> & {
     ciudadA: Pick<ICiudad, "id" | "name"> | null;
     ciudadB: Pick<ICiudad, "id" | "name"> | null;
@@ -38,7 +38,7 @@ interface IEventoConReviciones extends IEvento {
 
 // IDs de eventos que tienen al menos una revisión dentro del rango de fechas
 const getEventIdsInRange = async (fechaInicial: Date, fechaFinal: Date): Promise<number[]> => {
-  const rows = await RevicionModel.findAll({
+  const rows = await RevisionModel.findAll({
     where: { date: { [Op.between]: [fechaInicial, fechaFinal] } },
     attributes: ["id_evento"],
     group: ["id_evento"],
@@ -71,7 +71,12 @@ export async function putReporteGeneral(req: Request, res: Response) {
           ],
         },
         { model: SolucionModel },
-        { model: RevicionModel },
+        { model: RevisionModel },
+        {
+          model: EventoObsModel,
+          attributes: ["id", "id_obs"],
+          include: [{ model: ObsModel, as: "ob", attributes: ["id", "name", "criticality"] }],
+        },
       ],
     });
     res.status(200).json(data);
@@ -120,7 +125,7 @@ export async function putReporteTramo(req: Request, res: Response) {
           ],
         },
         { model: SolucionModel },
-        { model: RevicionModel },
+        { model: RevisionModel },
       ],
     });
     res.status(200).json(data);
@@ -165,7 +170,12 @@ export async function putReporteRecorrido(req: Request, res: Response) {
           ],
         },
         { model: SolucionModel },
-        { model: RevicionModel },
+        { model: RevisionModel },
+        {
+          model: EventoObsModel,
+          attributes: ["id", "id_obs"],
+          include: [{ model: ObsModel, as: "ob", attributes: ["id", "name", "criticality"] }],
+        },
       ],
     });
     res.status(200).json(data);
@@ -211,13 +221,19 @@ export async function putEstadoRed(req: Request, res: Response) {
 
     for (const p of postes) {
       const pd = p.toJSON() as unknown as IPosteConEventos;
-      const key = `${pd.id_ciudadA}-${pd.id_ciudadB}`;
+      // Normalizar tramo: el de menor id siempre como ciudadA. Así (1,2) y (2,1) se cuentan juntos.
+      const aIsMin = pd.id_ciudadA <= pd.id_ciudadB;
+      const minId = aIsMin ? pd.id_ciudadA : pd.id_ciudadB;
+      const maxId = aIsMin ? pd.id_ciudadB : pd.id_ciudadA;
+      const minName = (aIsMin ? pd.ciudadA?.name : pd.ciudadB?.name) ?? `#${minId}`;
+      const maxName = (aIsMin ? pd.ciudadB?.name : pd.ciudadA?.name) ?? `#${maxId}`;
+      const key = `${minId}-${maxId}`;
       if (!tramoMap.has(key)) {
         tramoMap.set(key, {
-          ciudadAId: pd.id_ciudadA,
-          ciudadBId: pd.id_ciudadB,
-          ciudadAName: pd.ciudadA?.name ?? `#${pd.id_ciudadA}`,
-          ciudadBName: pd.ciudadB?.name ?? `#${pd.id_ciudadB}`,
+          ciudadAId: minId,
+          ciudadBId: maxId,
+          ciudadAName: minName,
+          ciudadBName: maxName,
           totalPostes: 0, conPendientes: 0,
           totalPendientes: 0, totalEventos: 0,
         });
@@ -263,18 +279,19 @@ export async function putObsFrecuencia(req: Request, res: Response) {
       attributes: ["id_obs"],
       include: [{
         model: ObsModel,
-        attributes: ["id", "name"],
+        attributes: ["id", "name", "criticality"],
         include: [{ model: TipoObsModel, as: "tipoObs", attributes: ["id", "name"] }],
       }],
     });
 
-    const map = new Map<number, { tipoObs: string; obs: string; count: number }>();
+    const map = new Map<number, { tipoObs: string; obs: string; criticality: number | null; count: number }>();
     for (const r of rows) {
       const rd = r.toJSON() as unknown as IEventoObsConOb;
       if (!rd.ob) continue;
       const curr = map.get(rd.id_obs) ?? {
         tipoObs: rd.ob.tipoObs?.name ?? "—",
         obs: rd.ob.name,
+        criticality: rd.ob.criticality ?? null,
         count: 0,
       };
       curr.count++;
@@ -309,7 +326,7 @@ export async function putTiemposResumen(req: Request, res: Response) {
       attributes: ["id", "createdAt"],
       include: [
         {
-          model: RevicionModel,
+          model: RevisionModel,
           attributes: ["date"],
         },
         {
@@ -329,22 +346,28 @@ export async function putTiemposResumen(req: Request, res: Response) {
     }>();
 
     for (const e of eventos) {
-      const ed = e.toJSON() as unknown as IEventoConReviciones;
+      const ed = e.toJSON() as unknown as IEventoConRevisions;
       const p = ed.poste;
       if (!p || !ed.createdAt) continue;
 
       // Fecha de resolución = fecha de la última revisión registrada
-      const revicions = ed.revicions ?? [];
-      if (revicions.length === 0) continue;
-      const fechaResolucion = new Date(Math.max(...revicions.map((r) => new Date(r.date).getTime())));
+      const revisions = ed.revisions ?? [];
+      if (revisions.length === 0) continue;
+      const fechaResolucion = new Date(Math.max(...revisions.map((r) => new Date(r.date).getTime())));
 
-      const key = `${p.id_ciudadA}-${p.id_ciudadB}`;
+      // Normalizar tramo: el de menor id siempre como ciudadA. Así (1,2) y (2,1) se cuentan juntos.
+      const aIsMin = p.id_ciudadA <= p.id_ciudadB;
+      const minId = aIsMin ? p.id_ciudadA : p.id_ciudadB;
+      const maxId = aIsMin ? p.id_ciudadB : p.id_ciudadA;
+      const minName = (aIsMin ? p.ciudadA?.name : p.ciudadB?.name) ?? `#${minId}`;
+      const maxName = (aIsMin ? p.ciudadB?.name : p.ciudadA?.name) ?? `#${maxId}`;
+      const key = `${minId}-${maxId}`;
       if (!tramoMap.has(key)) {
         tramoMap.set(key, {
-          ciudadAId: p.id_ciudadA ?? null,
-          ciudadBId: p.id_ciudadB ?? null,
-          ciudadAName: p.ciudadA?.name ?? `#${p.id_ciudadA}`,
-          ciudadBName: p.ciudadB?.name ?? `#${p.id_ciudadB}`,
+          ciudadAId: minId,
+          ciudadBId: maxId,
+          ciudadAName: minName,
+          ciudadBName: maxName,
           dias: [],
         });
       }

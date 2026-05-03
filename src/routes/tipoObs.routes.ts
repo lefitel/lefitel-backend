@@ -4,6 +4,7 @@ import {
   deleteTipoObs,
   desarchivarTipoObs,
   getTipoObs,
+  getTipoObsStats,
   updateTipoObs,
 } from "../controllers/tipoObs.controller.js";
 
@@ -13,6 +14,7 @@ const router = Router();
 router.post("/", createTipoObs);
 router.put("/:id", updateTipoObs);
 router.patch("/:id/desarchivar", desarchivarTipoObs);
+router.get("/stats", getTipoObsStats);
 router.get("/", getTipoObs);
 router.delete("/:id", deleteTipoObs);
 

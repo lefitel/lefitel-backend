@@ -7,6 +7,7 @@ import {
   getEvento_poste,
   getEvento_usuario,
   reabrirEvento,
+  resolverEvento,
   searchEvento,
   updateEvento,
 } from "../controllers/evento.controller.js";
@@ -16,6 +17,7 @@ const router = Router();
 // Routes
 router.post("/", createEvento);
 router.post("/:id/reabrir", reabrirEvento);
+router.post("/:id/resolver", resolverEvento);
 router.put("/:id", updateEvento);
 router.get("/", getEvento);
 router.get("/poste/:id_poste", getEvento_poste);

@@ -4,6 +4,7 @@ import {
   deleteAdss,
   desarchivarAdss,
   getAdss,
+  getAdssStats,
   updateAdss,
 } from "../controllers/adss.controller.js";
 
@@ -13,6 +14,7 @@ const router = Router();
 router.post("/", createAdss);
 router.put("/:id", updateAdss);
 router.patch("/:id/desarchivar", desarchivarAdss);
+router.get("/stats", getAdssStats);
 router.get("/", getAdss);
 router.delete("/:id", deleteAdss);
 

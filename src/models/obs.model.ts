@@ -19,6 +19,11 @@ export const ObsModel: ModelDefined<IObs, ObsCreation> = sequelize.define("obs",
     type: DataTypes.INTEGER,
     allowNull: false,
   },
+  criticality: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    validate: { min: 1, max: 9 },
+  },
 }, { paranoid: true });
 
 TipoObsModel.hasMany(ObsModel, {

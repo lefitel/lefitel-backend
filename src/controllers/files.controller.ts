@@ -7,6 +7,7 @@ import { PosteModel } from "../models/poste.model.js";
 import { SolucionModel } from "../models/solucion.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { IMAGES_DIR } from "../utils/fileUtils.js";
+import { logAction } from "../utils/logAction.js";
 
 interface FileInfo {
   name: string;
@@ -87,6 +88,7 @@ export async function deleteFile(req: Request, res: Response) {
   const name = req.params.name as string;
   try {
     fs.unlinkSync(path.join(IMAGES_DIR, name));
+    logAction({ id_usuario: req.user?.id, action: "DELETE_FILE", entity: "File", entity_id: null, detail: `Eliminó archivo ${name}`, metadata: { filename: name }, severity: 'critical' });
     res.sendStatus(200);
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -187,6 +189,7 @@ export async function clearBrokenImageRefs(req: Request, res: Response) {
       ...soluciones.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
     ]);
 
+    logAction({ id_usuario: req.user?.id, action: "CLEAR_BROKEN_REFS", entity: "File", entity_id: null, detail: `Limpió ${cleared} referencias rotas de imágenes`, metadata: { cleared }, severity: 'warning' });
     res.status(200).json({ cleared });
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -201,6 +204,7 @@ export async function deleteOrphanFiles(req: Request, res: Response) {
     ]);
     const orphans = files.filter((f) => !dbMap.has(f.path));
     await Promise.all(orphans.map((f) => fs.promises.unlink(path.join(IMAGES_DIR, f.name))));
+    logAction({ id_usuario: req.user?.id, action: "DELETE_ORPHANS", entity: "File", entity_id: null, detail: `Eliminó ${orphans.length} archivos huérfanos`, metadata: { deleted: orphans.length, files: orphans.map((f) => f.name) }, severity: 'warning' });
     res.status(200).json({ deleted: orphans.length, files: orphans.map((f) => f.name) });
   } catch (error) {
     return res.status(500).json({ message: error.message });

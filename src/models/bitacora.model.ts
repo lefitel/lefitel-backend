@@ -29,6 +29,19 @@ export const BitacoraModel: ModelDefined<IBitacora, BitacoraCreation> = sequeliz
     type: DataTypes.INTEGER,
     allowNull: false,
   },
+  metadata: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+  },
+  severity: {
+    type: DataTypes.ENUM('info', 'warning', 'critical'),
+    allowNull: false,
+    defaultValue: 'info',
+  },
+  ip_address: {
+    type: DataTypes.STRING(45),
+    allowNull: true,
+  },
 });
 
 UsuarioModel.hasMany(BitacoraModel, {

@@ -4,6 +4,7 @@ import {
   deletePropietario,
   desarchivarPropietario,
   getPropietario,
+  getPropietarioStats,
   updatePropietario,
 } from "../controllers/propietario.controller.js";
 
@@ -13,6 +14,7 @@ const router = Router();
 router.post("/", createPropietario);
 router.put("/:id", updatePropietario);
 router.patch("/:id/desarchivar", desarchivarPropietario);
+router.get("/stats", getPropietarioStats);
 router.get("/", getPropietario);
 router.delete("/:id", deletePropietario);
 

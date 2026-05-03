@@ -4,7 +4,7 @@ import { PosteModel } from "../models/poste.model.js";
 import { CiudadModel } from "../models/ciudad.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { MaterialModel } from "../models/material.model.js";
-import { RevicionModel } from "../models/revicion.model.js";
+import { RevisionModel } from "../models/revision.model.js";
 
 export async function getDashboard(req: Request, res: Response) {
   try {
@@ -17,7 +17,7 @@ export async function getDashboard(req: Request, res: Response) {
             attributes: ["id", "name", "lat", "lng"],
             include: [{ model: PropietarioModel, attributes: ["name"] }],
           },
-          { model: RevicionModel, attributes: ["id", "date"], separate: true },
+          { model: RevisionModel, attributes: ["id", "date"], separate: true },
         ],
       }),
       PosteModel.findAll({

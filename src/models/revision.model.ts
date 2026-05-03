@@ -1,9 +1,9 @@
 import { DataTypes, ModelDefined, Optional } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { EventoModel } from "./evento.model.js";
-import { IRevicion } from "../interfaces/index.js";
-type RevicionCreation = Optional<IRevicion, "id">;
-export const RevicionModel: ModelDefined<IRevicion, RevicionCreation> = sequelize.define("revicion", {
+import { IRevision } from "../interfaces/index.js";
+type RevisionCreation = Optional<IRevision, "id">;
+export const RevisionModel: ModelDefined<IRevision, RevisionCreation> = sequelize.define("revision", {
   id: {
     type: DataTypes.INTEGER,
     primaryKey: true,
@@ -19,12 +19,12 @@ export const RevicionModel: ModelDefined<IRevicion, RevicionCreation> = sequeliz
     type: DataTypes.INTEGER,
     allowNull: false,
   },
-}, { paranoid: true });
+}, { tableName: "revicions", paranoid: true });
 
-EventoModel.hasMany(RevicionModel, {
+EventoModel.hasMany(RevisionModel, {
   foreignKey: "id_evento",
   onDelete: "CASCADE",
 });
-RevicionModel.belongsTo(EventoModel, {
+RevisionModel.belongsTo(EventoModel, {
   foreignKey: "id_evento",
 });

@@ -24,7 +24,7 @@ import adssPosteRoutes from "./routes/adssPoste.routes.js";
 import rolRoutes from "./routes/rol.routes.js";
 
 import solucionRoutes from "./routes/solucion.routes.js";
-import revicionRoutes from "./routes/revicion.routes.js";
+import revisionRoutes from "./routes/revision.routes.js";
 
 import eventoRoutes from "./routes/evento.routes.js";
 
@@ -107,7 +107,7 @@ app.use("/api/material", authenticateToken, materialRoutes);
 app.use("/api/obs", authenticateToken, obsRoutes);
 app.use("/api/poste", authenticateToken, posteRoutes);
 app.use("/api/propietario", authenticateToken, propietarioRoutes);
-app.use("/api/revicion", authenticateToken, revicionRoutes);
+app.use("/api/revision", authenticateToken, revisionRoutes);
 app.use("/api/solucion", authenticateToken, solucionRoutes);
 app.use("/api/tipoObs", authenticateToken, tipoObsRoutes);
 app.use("/api/rol", authenticateToken, rolRoutes);

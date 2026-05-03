@@ -16,8 +16,10 @@ export async function loginUsuario(req: Request, res: Response) {
       return res.status(400).json({ message: "Usuario inexistente" });
     const data = TempUsuario.dataValues;
     const confirmPass = await bcryptjs.compare(pass, data.pass);
-    if (!confirmPass)
+    if (!confirmPass) {
+      logAction({ id_usuario: data.id, action: "LOGIN_FAILED", entity: "Usuario", entity_id: data.id, detail: `Login fallido para @${user}`, metadata: { user }, severity: 'warning', ip_address: req.ip ?? null });
       return res.status(400).json({ message: "Contraseña incorrecta" });
+    }
 
     const usuario = {
       id: data.id,
@@ -28,7 +30,7 @@ export async function loginUsuario(req: Request, res: Response) {
       image: data.image,
     };
     const token = jwt.sign(usuario, secretKey, { expiresIn: "7d" });
-    logAction({ id_usuario: data.id, action: "LOGIN", entity: "Usuario", entity_id: data.id, detail: "Inició sesión" });
+    logAction({ id_usuario: data.id, action: "LOGIN", entity: "Usuario", entity_id: data.id, detail: "Inició sesión", metadata: { user: data.user }, severity: 'info', ip_address: req.ip ?? null });
     res.status(200).json({ usuario: { ...usuario, token }, message: "Login exitoso" });
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Error desconocido";
