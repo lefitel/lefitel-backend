@@ -12,7 +12,7 @@ import { PropietarioModel } from "../models/propietario.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 
 export async function getPoste(req: Request, res: Response) {
-  const { ciudadA, ciudadB, ciudadId, archived, page, limit, filterColumn, filterValue, export: isExport } = req.query;
+  const { ciudadA, ciudadB, ciudadId, archived, page, limit, filterColumn, filterValue, export: isExport, sortBy, sortOrder } = req.query;
   const isArchived = archived === "true";
 
   const where: Record<string, unknown> = isArchived
@@ -28,16 +28,26 @@ export async function getPoste(req: Request, res: Response) {
         }
       : {};
 
-  if (filterColumn && filterValue && typeof filterValue === "string" && filterValue.trim()) {
-    if (filterColumn === "name") {
-      where["name"] = { [Op.iLike]: `%${filterValue.trim()}%` };
-    }
-  }
+  const filterCols = Array.isArray(filterColumn) ? filterColumn as string[] : filterColumn ? [filterColumn as string] : [];
+  const filterVals = Array.isArray(filterValue) ? filterValue as string[] : filterValue ? [filterValue as string] : [];
+  filterCols.forEach((col, i) => {
+    const val = filterVals[i];
+    if (typeof val !== "string" || !val.trim()) return;
+    if (col === "name") where["name"] = { [Op.iLike]: `%${val.trim()}%` };
+  });
+
+  const SORTABLE = new Set(["id", "name", "date", "createdAt"]);
+  const sortByCols = Array.isArray(sortBy) ? sortBy as string[] : sortBy ? [sortBy as string] : [];
+  const sortOrderVals = Array.isArray(sortOrder) ? sortOrder as string[] : sortOrder ? [sortOrder as string] : [];
+  const orderEntries = sortByCols.map((col, i) => {
+    const dir = sortOrderVals[i] === "asc" ? "ASC" : "DESC";
+    return SORTABLE.has(col) ? [col, col === "id" && !!ciudadA && !!ciudadB ? "ASC" : dir] : null;
+  }).filter(Boolean);
 
   const queryOptions = {
     where,
     paranoid: !isArchived,
-    order: [["id", ciudadA && ciudadB ? "ASC" : "DESC"]] as [[string, string]],
+    order: (orderEntries.length ? orderEntries : [["id", ciudadA && ciudadB ? "ASC" : "DESC"]]) as [[string, string]],
     attributes: {
       include: [[
         literal(`(SELECT COUNT(*) FROM "eventos" WHERE "eventos"."id_poste" = "poste"."id" AND "eventos"."state" = false AND "eventos"."deletedAt" IS NULL)`),

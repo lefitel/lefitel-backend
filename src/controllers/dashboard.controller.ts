@@ -5,6 +5,9 @@ import { CiudadModel } from "../models/ciudad.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { RevisionModel } from "../models/revision.model.js";
+import { SolucionModel } from "../models/solucion.model.js";
+import { EventoObsModel } from "../models/eventoObs.model.js";
+import { ObsModel } from "../models/obs.model.js";
 
 export async function getDashboard(req: Request, res: Response) {
   try {
@@ -18,6 +21,13 @@ export async function getDashboard(req: Request, res: Response) {
             include: [{ model: PropietarioModel, attributes: ["name"] }],
           },
           { model: RevisionModel, attributes: ["id", "date"], separate: true },
+          { model: SolucionModel, attributes: ["id", "date"], separate: true },
+          {
+            model: EventoObsModel,
+            attributes: ["id"],
+            separate: true,
+            include: [{ model: ObsModel, attributes: ["id", "name", "criticality"] }],
+          },
         ],
       }),
       PosteModel.findAll({

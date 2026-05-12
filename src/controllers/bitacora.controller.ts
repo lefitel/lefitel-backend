@@ -7,7 +7,7 @@ export async function getAllBitacora(req: Request, res: Response) {
   const page   = Math.max(Number(req.query.page)  || 1,   1);
   const limit  = Math.min(Number(req.query.limit) || 50, 100);
   const offset = (page - 1) * limit;
-  const { id_usuario, action, entity, entity_id, from, to, severity } = req.query;
+  const { id_usuario, action, entity, entity_id, from, to, severity, sortBy, sortOrder } = req.query;
 
   const where: WhereOptions = {};
   if (id_usuario) where["id_usuario"] = Number(id_usuario);
@@ -23,9 +23,17 @@ export async function getAllBitacora(req: Request, res: Response) {
   }
 
   try {
+    const SORTABLE = new Set(["id", "action", "entity", "severity", "createdAt"]);
+    const sortByCols = Array.isArray(sortBy) ? sortBy as string[] : sortBy ? [sortBy as string] : [];
+    const sortOrderVals = Array.isArray(sortOrder) ? sortOrder as string[] : sortOrder ? [sortOrder as string] : [];
+    const orderEntries = sortByCols.map((col, i) => {
+      const dir = sortOrderVals[i] === "asc" ? "ASC" : "DESC";
+      return SORTABLE.has(col) ? [col, dir] : null;
+    }).filter(Boolean);
+
     const { count, rows } = await BitacoraModel.findAndCountAll({
       where,
-      order: [["id", "DESC"]],
+      order: orderEntries.length ? orderEntries as [[string, string]] : [["id", "DESC"]],
       limit,
       offset,
       include: [{ model: UsuarioModel, attributes: ["id", "name", "lastname", "user"] }],

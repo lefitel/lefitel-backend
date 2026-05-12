@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { Op } from "sequelize";
+import { literal, Op, Order } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { deleteImageFile } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
@@ -14,23 +14,41 @@ import { SolucionModel } from "../models/solucion.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 
 export async function getEvento(req: Request, res: Response) {
-  const { archived, page, limit, filterColumn, filterValue, export: isExport } = req.query;
+  const { archived, page, limit, filterColumn, filterValue, export: isExport, sortBy, sortOrder } = req.query;
   const isArchived = archived === "true";
+
+  const filterCols = Array.isArray(filterColumn) ? filterColumn as string[] : filterColumn ? [filterColumn as string] : [];
+  const filterVals = Array.isArray(filterValue) ? filterValue as string[] : filterValue ? [filterValue as string] : [];
+  const getFilterVal = (col: string) => {
+    const idx = filterCols.indexOf(col);
+    if (idx < 0) return undefined;
+    const v = filterVals[idx];
+    return typeof v === "string" && v.trim() ? v.trim() : undefined;
+  };
 
   const where: Record<string, unknown> = isArchived ? { deletedAt: { [Op.ne]: null } } : {};
 
-  if (filterColumn && filterValue && typeof filterValue === "string" && filterValue.trim()) {
-    if (filterColumn === "description") {
-      where["description"] = { [Op.iLike]: `%${filterValue.trim()}%` };
-    }
-  }
+  const descVal = getFilterVal("description");
+  if (descVal) where["description"] = { [Op.iLike]: `%${descVal}%` };
 
-  const posteWhere = filterColumn === "poste" && filterValue && typeof filterValue === "string" && filterValue.trim()
-    ? { name: { [Op.iLike]: `%${filterValue.trim()}%` } }
-    : undefined;
+  const posteVal = getFilterVal("poste");
+  const posteWhere = posteVal ? { name: { [Op.iLike]: `%${posteVal}%` } } : undefined;
+
+  const SORTABLE = new Set(["id", "description", "date", "state", "priority", "createdAt"]);
+  const sortByCols = Array.isArray(sortBy) ? sortBy as string[] : sortBy ? [sortBy as string] : [];
+  const sortOrderVals = Array.isArray(sortOrder) ? sortOrder as string[] : sortOrder ? [sortOrder as string] : [];
+  const orderEntries = sortByCols.map((col, i) => {
+    const dir = sortOrderVals[i] === "asc" ? "ASC" : "DESC";
+    if (col === "ultimaRev")        return [literal('(SELECT MAX("date") FROM "revicions" WHERE "revicions"."id_evento" = "evento"."id" AND "revicions"."deletedAt" IS NULL)'), `${dir} NULLS LAST`];
+    if (col === "fechaResolucion")  return [literal('(SELECT "date" FROM "solucions" WHERE "solucions"."id_evento" = "evento"."id" AND "solucions"."deletedAt" IS NULL LIMIT 1)'), `${dir} NULLS LAST`];
+    if (col === "poste")            return [PosteModel, "name", dir];
+    if (col === "usuario")      return [UsuarioModel, "name", dir];
+    if (col === "propietario")  return [PosteModel, PropietarioModel, "name", dir];
+    return SORTABLE.has(col) ? [col, dir] : null;
+  }).filter(Boolean);
 
   const queryOptions = {
-    order: [["id", "DESC"]] as [[string, string]],
+    order: (orderEntries.length ? orderEntries : [["id", "DESC"]]) as Order,
     paranoid: !isArchived,
     where,
     attributes: { exclude: ["image"] },
@@ -41,9 +59,14 @@ export async function getEvento(req: Request, res: Response) {
         attributes: ["id", "date", "id_evento"],
       },
       {
+        model: SolucionModel,
+        separate: true,
+        attributes: ["id", "date", "id_evento"],
+      },
+      {
         model: PosteModel,
         paranoid: false,
-        attributes: ["id", "name", "id_ciudadA", "id_ciudadB", "id_propietario"],
+        attributes: ["id", "name", "lat", "lng", "id_ciudadA", "id_ciudadB", "id_propietario"],
         ...(posteWhere ? { where: posteWhere, required: true } : {}),
         include: [
           { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
