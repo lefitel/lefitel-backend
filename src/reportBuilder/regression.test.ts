@@ -20,14 +20,17 @@ const FROM = "2000-01-01";
 const TO = "2030-12-31";
 const ADMIN = 1;
 
-let dbAvailable = false;
+// Resolved before the suite is registered so the tests report as SKIPPED rather
+// than passing vacuously when Postgres is unreachable — a green tick that
+// asserts nothing is worse than a red one.
+const dbAvailable = await sequelize
+  .authenticate()
+  .then(() => true)
+  .catch(() => false);
 
-beforeAll(async () => {
-  try {
-    await sequelize.authenticate();
-    dbAvailable = true;
-  } catch {
-    dbAvailable = false;
+beforeAll(() => {
+  if (!dbAvailable) {
+    console.warn("[regression] base de datos no disponible: pruebas omitidas");
   }
 });
 
@@ -76,9 +79,8 @@ const revisionEnRango = {
   },
 };
 
-describe("regression against the existing reports", () => {
-  it.runIf(true)("estado de la red: postes, eventos and pending per tramo", async () => {
-    if (!dbAvailable) return;
+describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
+  it("estado de la red: postes, eventos and pending per tramo", async () => {
 
     const legacy = await callLegacy(putEstadoRed, {});
     const config: ReportConfig = {
@@ -115,7 +117,6 @@ describe("regression against the existing reports", () => {
   });
 
   it("observaciones frecuentes: count per observation", async () => {
-    if (!dbAvailable) return;
 
     const legacy = await callLegacy(putObsFrecuencia, { fechaInicial: FROM, fechaFinal: TO });
     const config: ReportConfig = {
@@ -155,7 +156,6 @@ describe("regression against the existing reports", () => {
   });
 
   it("tiempos de resolución: count, average, min and max per tramo", async () => {
-    if (!dbAvailable) return;
 
     const legacy = await callLegacy(putTiemposResumen, { fechaInicial: FROM, fechaFinal: TO });
     const config: ReportConfig = {

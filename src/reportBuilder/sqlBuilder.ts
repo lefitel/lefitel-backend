@@ -8,6 +8,13 @@
 
 import { catalog, MAX_DEPTH, MAX_ROWS } from "./catalog.js";
 import {
+  AGGS_BY_KIND,
+  AGG_LABEL,
+  KIND_LABEL,
+  OPERATORS_BY_KIND,
+  OPERATOR_LABEL,
+} from "./constraints.js";
+import {
   ReportConfigError,
   type AggFn,
   type BuiltQuery,
@@ -23,6 +30,15 @@ import {
 
 const AGG_FNS: AggFn[] = ["count", "sum", "avg", "min", "max"];
 
+/**
+ * Width limits. MAX_ROWS bounds how many rows come back; nothing bounded how
+ * WIDE a report could be. 1600 aggregate columns fit in a 74 KB request and
+ * produced 1600 correlated subqueries, 70 MB of JSON and 15 s of database CPU.
+ */
+const MAX_COLUMNS = 60;
+const MAX_SORTS = 10;
+const MAX_CONDITIONS = 100;
+
 const OPERATORS: Operator[] = [
   "eq", "neq", "gt", "gte", "lt", "lte", "between", "in", "like", "isnull", "notnull",
 ];
@@ -32,7 +48,9 @@ const NULLARY_OPERATORS: Operator[] = ["isnull", "notnull"];
 
 /** Identifiers only ever come from the catalog, but assert it rather than trust it. */
 const quote = (identifier: string): string => {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+  // typeof check first: /re/.test(undefined) stringifies to "undefined" and
+  // passes, which would let a prototype lookup emit a bogus identifier.
+  if (typeof identifier !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
     throw new ReportConfigError(`Identificador no válido en el catálogo: ${identifier}`);
   }
   return `"${identifier}"`;
@@ -48,6 +66,8 @@ interface ResolvedExpr {
   label: string;
   /** True when the expression already aggregates (a correlated subquery). */
   selfAggregating: boolean;
+  /** Which aggregate the subquery uses, when it is one. */
+  innerAgg?: AggFn;
   /** Expressions to GROUP BY when grouping by this value; defaults to [sql]. */
   groupKeys?: string[];
 }
@@ -93,8 +113,12 @@ class JoinPlan {
   }
 }
 
+/** Own-property lookup: plain member access would resolve `constructor`, `toString`… */
+const own = <T>(record: Record<string, T>, key: string): T | undefined =>
+  typeof key === "string" && Object.hasOwn(record, key) ? record[key] : undefined;
+
 const entityOrThrow = (key: string): EntityDef => {
-  const entity = catalog.entities[key];
+  const entity = own(catalog.entities, key);
   if (!entity) throw new ReportConfigError(`Entidad desconocida: ${key}`);
   return entity;
 };
@@ -119,7 +143,7 @@ function walkToOne(
   let prefix = "";
 
   segments.forEach((segment, index) => {
-    const relation = entity.relations[segment];
+    const relation = own(entity.relations, segment);
     if (!relation) {
       throw new ReportConfigError(`El campo "${fullPath}" no existe en el catálogo.`);
     }
@@ -148,11 +172,19 @@ function walkToOne(
         // value. LATERAL picks the most recent row without multiplying rows.
         const fk = quote(relation.foreignKey!);
         const order = quote(relation.latestBy!);
+        // Project only catalogued columns instead of SELECT *, and break ties
+        // by id: five events have two solutions with byte-identical dates, and
+        // without a tiebreaker which one shows depends on the query plan.
+        const projected = [...new Set([
+          "id",
+          ...Object.values(target.fields).map((f) => f.column),
+          relation.latestBy!,
+        ])].map((c) => `x.${quote(c)}`).join(", ");
         return (
-          `LEFT JOIN LATERAL (SELECT * FROM ${quote(target.table)} x` +
+          `LEFT JOIN LATERAL (SELECT ${projected} FROM ${quote(target.table)} x` +
           ` WHERE x.${fk} = ${parentAlias}.${quote("id")}` +
           `${notDeleted(target, "x")}` +
-          ` ORDER BY x.${order} DESC NULLS LAST LIMIT 1) ${newAlias} ON true`
+          ` ORDER BY x.${order} DESC NULLS LAST, x.${quote("id")} DESC LIMIT 1) ${newAlias} ON true`
         );
       }
       const localKey = quote(relation.localKey!);
@@ -179,7 +211,7 @@ function buildToManyAggregate(
   role: number,
   fullPath: string,
 ): ResolvedExpr {
-  const relation = parentEntity.relations[relationName];
+  const relation = own(parentEntity.relations, relationName);
   if (!relation || relation.kind !== "toMany") {
     throw new ReportConfigError(`"${fullPath}" no es una relación de varios registros.`);
   }
@@ -198,6 +230,7 @@ function buildToManyAggregate(
       kind: "number",
       label: `Nº de ${relation.label.toLowerCase()}`,
       selfAggregating: true,
+      innerAgg: "count",
     };
   }
 
@@ -207,7 +240,7 @@ function buildToManyAggregate(
     );
   }
 
-  const field = target.fields[fieldName];
+  const field = own(target.fields, fieldName);
   if (!field) {
     throw new ReportConfigError(`El campo "${fullPath}" no existe en el catálogo.`);
   }
@@ -221,6 +254,7 @@ function buildToManyAggregate(
     kind: agg === "count" ? "number" : field.kind,
     label: `${field.label} (${agg})`,
     selfAggregating: true,
+    innerAgg: agg,
   };
 }
 
@@ -256,7 +290,7 @@ function resolvePath(
   // Locate a to-many hop, if any. Everything before it must be to-one.
   let entity = rootEntity;
   for (let i = 0; i < segments.length; i++) {
-    const relation = entity.relations[segments[i]];
+    const relation = own(entity.relations, segments[i]);
     if (relation?.kind === "toMany") {
       const prefix = segments.slice(0, i);
       const rest = segments.slice(i + 1);
@@ -285,7 +319,7 @@ function resolvePath(
   const landing = walkToOne(rootEntity, segments.slice(0, -1), plan, role, path);
   const target = landing.entity;
 
-  const field = target.fields[leaf];
+  const field = own(target.fields, leaf);
   if (field) {
     if (!isVisible(field.roles, role)) {
       throw new ReportConfigError(`No tiene permiso para usar "${path}".`);
@@ -298,7 +332,7 @@ function resolvePath(
     };
   }
 
-  const calculated = target.calculated?.[leaf];
+  const calculated = target.calculated ? own(target.calculated, leaf) : undefined;
   if (calculated) {
     if (!isVisible(calculated.roles, role)) {
       throw new ReportConfigError(`No tiene permiso para usar "${path}".`);
@@ -319,7 +353,10 @@ function resolvePath(
       sql: calculated.sql(landing.alias, dep),
       kind: calculated.kind,
       label: calculated.label,
-      selfAggregating: false,
+      // A calculated field that is itself an aggregate subquery needs the same
+      // treatment as a to-many aggregate when it is summarised.
+      selfAggregating: calculated.innerAgg !== undefined,
+      innerAgg: calculated.innerAgg,
       groupKeys: calculated.groupKeys?.(landing.alias, dep),
     };
   }
@@ -363,7 +400,7 @@ function buildExists(
 
   const relationName = segments[segments.length - 1];
   const landing = walkToOne(rootEntity, segments.slice(0, -1), plan, role, node.exists);
-  const relation = landing.entity.relations[relationName];
+  const relation = own(landing.entity.relations, relationName);
 
   if (!relation || relation.kind !== "toMany") {
     throw new ReportConfigError(
@@ -396,6 +433,10 @@ function buildExists(
   return node.negate === true ? `NOT EXISTS (${sql})` : `EXISTS (${sql})`;
 }
 
+/** A bare calendar day, with no time component. */
+const isPlainDate = (v: unknown): v is string =>
+  typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+
 function buildCondition(
   condition: FilterCondition,
   rootEntity: EntityDef,
@@ -403,6 +444,9 @@ function buildCondition(
   role: number,
   binds: unknown[],
 ): string {
+  if (!condition || typeof condition !== "object") {
+    throw new ReportConfigError("Hay un filtro vacío o mal formado.");
+  }
   if (!OPERATORS.includes(condition.operator)) {
     throw new ReportConfigError(`Operador no permitido: ${String(condition.operator)}`);
   }
@@ -410,6 +454,15 @@ function buildCondition(
   const resolved = resolvePath(rootEntity, condition.path, plan, role);
   const expr = resolved.sql;
   const { operator, value } = condition;
+
+  // The catalog advertises which operators fit each type; enforce it here too,
+  // or an invalid filter reaches Postgres and returns a raw type error.
+  if (!OPERATORS_BY_KIND[resolved.kind]?.includes(operator)) {
+    throw new ReportConfigError(
+      `No se puede filtrar "${resolved.label}" con "${OPERATOR_LABEL[operator]}" ` +
+        `porque es un campo de tipo ${KIND_LABEL[resolved.kind]}.`,
+    );
+  }
 
   if (NULLARY_OPERATORS.includes(operator)) {
     return operator === "isnull" ? `${expr} IS NULL` : `${expr} IS NOT NULL`;
@@ -424,6 +477,14 @@ function buildCondition(
     return `$${binds.length}`;
   };
 
+  /**
+   * Exclusive upper bound for a calendar day: everything strictly before the
+   * next midnight. Every date column is `timestamp with time zone`, so
+   * comparing against a bare date dropped the whole final day of a range.
+   */
+  const dayAfter = (v: unknown) => `(${bind(v)}::date + interval '1 day')`;
+  const isDate = resolved.kind === "date";
+
   switch (operator) {
     case "between": {
       if (!Array.isArray(value) || value.length !== 2) {
@@ -431,12 +492,20 @@ function buildCondition(
           `El filtro "entre" sobre "${resolved.label}" necesita dos valores.`,
         );
       }
+      if (isDate && isPlainDate(value[1])) {
+        return `${expr} >= ${bind(value[0])} AND ${expr} < ${dayAfter(value[1])}`;
+      }
       return `${expr} BETWEEN ${bind(value[0])} AND ${bind(value[1])}`;
     }
     case "in": {
       if (!Array.isArray(value) || value.length === 0) {
         throw new ReportConfigError(
           `El filtro "en la lista" sobre "${resolved.label}" necesita al menos un valor.`,
+        );
+      }
+      if (value.some((v) => v !== null && typeof v === "object")) {
+        throw new ReportConfigError(
+          `El filtro "en la lista" sobre "${resolved.label}" tiene valores no válidos.`,
         );
       }
       return `${expr} = ANY(${bind(value)})`;
@@ -447,8 +516,25 @@ function buildCondition(
       }
       return `${expr} ILIKE ${bind(`%${value}%`)}`;
     }
+    // Whole-day semantics on timestamp columns: "on this day", "up to and
+    // including this day", "strictly after this day".
+    case "eq":
+      if (isDate && isPlainDate(value)) {
+        return `${expr} >= ${bind(value)} AND ${expr} < ${dayAfter(value)}`;
+      }
+      return `${expr} = ${bind(value)}`;
+    case "lte":
+      if (isDate && isPlainDate(value)) return `${expr} < ${dayAfter(value)}`;
+      return `${expr} <= ${bind(value)}`;
+    case "gt":
+      if (isDate && isPlainDate(value)) return `${expr} >= ${dayAfter(value)}`;
+      return `${expr} > ${bind(value)}`;
+    case "neq":
+      // NULL <> value is NULL, which silently turns a LEFT JOIN into an INNER
+      // JOIN and drops rows the user never asked to exclude.
+      return `${expr} IS DISTINCT FROM ${bind(value)}`;
     default: {
-      const sqlOp = { eq: "=", neq: "<>", gt: ">", gte: ">=", lt: "<", lte: "<=" }[operator];
+      const sqlOp = { gte: ">=", lt: "<" }[operator as "gte" | "lt"];
       return `${expr} ${sqlOp} ${bind(value)}`;
     }
   }
@@ -462,11 +548,26 @@ function buildFilters(
   binds: unknown[],
   depth = 0,
 ): string {
+  if (depth > MAX_DEPTH * 2) {
+    throw new ReportConfigError("Los filtros del reporte están demasiado anidados.");
+  }
   if (group.op !== "and" && group.op !== "or") {
     throw new ReportConfigError(`Combinación de filtros no válida: ${String(group.op)}`);
   }
-  const parts = (group.conditions ?? []).map((node) => {
-    if (isFilterGroup(node)) return buildFilters(node, rootEntity, plan, role, binds, depth);
+  const conditions = group.conditions ?? [];
+  if (!Array.isArray(conditions)) {
+    throw new ReportConfigError("Los filtros del reporte no son válidos.");
+  }
+  if (conditions.length > MAX_CONDITIONS) {
+    throw new ReportConfigError(`El reporte tiene demasiados filtros (máximo ${MAX_CONDITIONS}).`);
+  }
+  const parts = conditions.map((node) => {
+    if (!node || typeof node !== "object") {
+      throw new ReportConfigError("Hay un filtro vacío o mal formado.");
+    }
+    // depth + 1 for nested groups too: it used to bound only EXISTS, so deeply
+    // nested groups blew the call stack.
+    if (isFilterGroup(node)) return buildFilters(node, rootEntity, plan, role, binds, depth + 1);
     if (isExists(node)) return buildExists(node, rootEntity, plan, role, binds, depth);
     return buildCondition(node, rootEntity, plan, role, binds);
   });
@@ -476,6 +577,36 @@ function buildFilters(
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
+
+/**
+ * Wraps an expression in an aggregate for summary mode.
+ *
+ * A to-many aggregate is already a correlated scalar subquery, and such a
+ * subquery is never NULL. COUNT() over it therefore counts root rows rather
+ * than summing the inner counts, which silently reports the number of events
+ * where the user asked for the number of revisions. AVG() over it produces an
+ * unweighted average of averages, which is a different number from the average
+ * the user means, so it is rejected instead of quietly answering wrong.
+ */
+function applyAggregate(expr: string, agg: AggFn, resolved: ResolvedExpr): string {
+  if (!resolved.selfAggregating) return `${agg.toUpperCase()}(${expr})`;
+
+  // The inner aggregate decides what the outer one may mean.
+  if (agg === "count") {
+    // A COUNT subquery is never null, so COUNT() over it would just count the
+    // group's rows. Summing the per-row counts is what the user asked for.
+    return resolved.innerAgg === "count" ? `SUM(${expr})` : `COUNT(${expr})`;
+  }
+  if (agg === "avg" && resolved.innerAgg === "avg") {
+    // Averaging per-row averages weighs a row with one child the same as one
+    // with ten, which is a different number from the average being asked for.
+    throw new ReportConfigError(
+      `El promedio de "${resolved.label}" no se puede calcular por grupo ` +
+        `porque ya es un promedio por fila. Use la suma, el mínimo o el máximo.`,
+    );
+  }
+  return `${agg.toUpperCase()}(${expr})`;
+}
 
 /**
  * Builds the SQL for a report configuration.
@@ -494,6 +625,20 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
   }
   if (!Array.isArray(config.columns) || config.columns.length === 0) {
     throw new ReportConfigError("El reporte necesita al menos una columna.");
+  }
+  if (config.columns.length > MAX_COLUMNS) {
+    throw new ReportConfigError(
+      `El reporte tiene demasiadas columnas (máximo ${MAX_COLUMNS}).`,
+    );
+  }
+  if (config.groupBy !== undefined && !Array.isArray(config.groupBy)) {
+    throw new ReportConfigError("La agrupación del reporte no es válida.");
+  }
+  if (config.sort !== undefined && !Array.isArray(config.sort)) {
+    throw new ReportConfigError("El orden del reporte no es válido.");
+  }
+  if ((config.sort?.length ?? 0) > MAX_SORTS) {
+    throw new ReportConfigError(`El reporte tiene demasiados criterios de orden (máximo ${MAX_SORTS}).`);
   }
 
   const rootEntity = entityOrThrow(config.root);
@@ -519,26 +664,45 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
   const columns: BuiltQuery["columns"] = [];
 
   config.columns.forEach((spec: ColumnSpec, index) => {
+    if (!spec || typeof spec !== "object") {
+      throw new ReportConfigError("Hay una columna vacía o mal formada en el reporte.");
+    }
     if (spec.agg && !AGG_FNS.includes(spec.agg)) {
       throw new ReportConfigError(`Resumen no permitido: ${String(spec.agg)}`);
+    }
+    if (spec.label !== undefined && typeof spec.label !== "string") {
+      throw new ReportConfigError("El nombre de una columna no es válido.");
     }
 
     const resolved = resolvePath(rootEntity, spec.path, plan, role, spec.agg);
     let expr = resolved.sql;
     let kind = resolved.kind;
+    const isGrouped = groupedExprs.has(spec.path);
+
+    if (spec.agg && !resolved.selfAggregating && !AGGS_BY_KIND[resolved.kind]?.includes(spec.agg)) {
+      throw new ReportConfigError(
+        `No se puede calcular el ${AGG_LABEL[spec.agg]} de "${resolved.label}" ` +
+          `porque es un campo de tipo ${KIND_LABEL[resolved.kind]}.`,
+      );
+    }
 
     if (isSummary) {
-      const isGrouped = groupedExprs.has(spec.path);
       if (!isGrouped && !spec.agg) {
         throw new ReportConfigError(
           `Agrupó el reporte, así que la columna "${resolved.label}" necesita un resumen ` +
             `(conteo, promedio…) o hay que quitarla.`,
         );
       }
-      // A to-many aggregate is already a scalar subquery; wrapping it in the
-      // requested aggregate is what makes it collapse across the group.
+      // Silently ignoring the aggregate used to return the grouped value under
+      // a header that promised a total.
+      if (isGrouped && spec.agg) {
+        throw new ReportConfigError(
+          `"${resolved.label}" está agrupada, así que no puede llevar además un resumen. ` +
+            `Quite el resumen o añada la columna por separado.`,
+        );
+      }
       if (spec.agg && !isGrouped) {
-        expr = `${spec.agg.toUpperCase()}(${expr})`;
+        expr = applyAggregate(expr, spec.agg, resolved);
         kind = spec.agg === "count" ? "number" : kind;
       }
     } else if (spec.agg && !resolved.selfAggregating) {
@@ -562,6 +726,9 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
 
   const orderParts: string[] = [];
   for (const sort of config.sort ?? []) {
+    if (!sort || typeof sort !== "object") {
+      throw new ReportConfigError("Hay un criterio de orden vacío o mal formado.");
+    }
     if (sort.dir !== "asc" && sort.dir !== "desc") {
       throw new ReportConfigError(`Orden no válido: ${String(sort.dir)}`);
     }
@@ -576,14 +743,34 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
           `No se puede ordenar por "${resolved.label}" sin agruparlo ni resumirlo.`,
         );
       }
-      expr = `${sort.agg.toUpperCase()}(${expr})`;
+      expr = applyAggregate(expr, sort.agg, resolved);
     }
     orderParts.push(`${expr} ${sort.dir === "asc" ? "ASC" : "DESC"} NULLS LAST`);
   }
 
-  const requested = Number.isFinite(config.limit) ? Number(config.limit) : 500;
-  const limit = Math.max(1, Math.min(requested, MAX_ROWS));
-  const offset = Math.max(0, Number.isFinite(config.offset) ? Number(config.offset) : 0);
+  /**
+   * Deterministic tiebreaker. Without one, Postgres is free to order ties
+   * differently on each statement, so paging through a report duplicated some
+   * rows and dropped others: 366 of 1376 in a measured run. In detail mode the
+   * primary key is unique; in summary mode the group keys are.
+   */
+  if (isSummary) {
+    for (const keys of groupedExprs.values()) {
+      for (const expr of keys) orderParts.push(`${expr} ASC`);
+    }
+  } else {
+    orderParts.push(`t0.${quote("id")} ASC`);
+  }
+
+  // Coerce then truncate: Number.isFinite("100") is false, so a stringified
+  // offset silently became 0 and the user got page 1 while asking for page 2.
+  // A fractional value reached Postgres and failed as an invalid bigint.
+  const toCount = (value: unknown, fallback: number): number => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.trunc(n) : fallback;
+  };
+  const limit = Math.max(1, Math.min(toCount(config.limit, 500), MAX_ROWS));
+  const offset = Math.max(0, toCount(config.offset, 0));
 
   binds.push(limit);
   const limitBind = `$${binds.length}`;
@@ -610,6 +797,13 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
  * In summary mode it counts groups, not underlying rows.
  */
 export function buildCountQuery(config: ReportConfig, role: number): { sql: string; binds: unknown[] } {
+  // Same root check as buildQuery. Relying on the caller invoking buildQuery
+  // first would make this a row-count oracle over non-root entities.
+  if (!catalog.roots.includes(config.root)) {
+    throw new ReportConfigError(
+      `"${String(config.root)}" no es un nivel de detalle válido para un reporte.`,
+    );
+  }
   const rootEntity = entityOrThrow(config.root);
   const plan = new JoinPlan("t0");
   const binds: unknown[] = [];
@@ -627,7 +821,7 @@ export function buildCountQuery(config: ReportConfig, role: number): { sql: stri
   }
 
   const inner = [
-    groupedExprs.length ? `SELECT 1` : `SELECT 1`,
+    `SELECT 1`,
     `FROM ${quote(rootEntity.table)} t0`,
     plan.toSql(),
     `WHERE ${whereSql}`,

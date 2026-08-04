@@ -11,8 +11,15 @@ const dbLogger = (sql: string, timing?: number) => {
 
 let sequelize;
 
+/**
+ * Explicit pool. The default is 5 connections shared by the whole API, and a
+ * report can hold one for up to two statement timeouts. Five concurrent report
+ * requests were enough to starve every other endpoint, login included.
+ */
+const pool = { max: 15, min: 0, acquire: 30_000, idle: 10_000 };
+
 if (process.env.NODE_ENV === "production") {
-  sequelize = new Sequelize(process.env.DATABASE_URL, { logging: dbLogger, benchmark: true });
+  sequelize = new Sequelize(process.env.DATABASE_URL, { logging: dbLogger, benchmark: true, pool });
 } else {
   sequelize = new Sequelize(
     process.env.PG_DATABASE,
@@ -24,6 +31,7 @@ if (process.env.NODE_ENV === "production") {
       dialect: "postgres",
       logging: dbLogger,
       benchmark: true,
+      pool,
     }
   );
 }

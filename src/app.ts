@@ -63,8 +63,13 @@ function authenticateToken(req: Request, res: Response, next: NextFunction) {
     const u = user as { id: number; id_rol: number };
 
     try {
-      const exists = await UsuarioModel.findByPk(u.id, { attributes: ["id"] });
-      if (!exists) return res.sendStatus(401);
+      // Read the role from the database rather than trusting the token. The
+      // token is re-issued on every request, so a stale id_rol would survive
+      // indefinitely and a demoted user would keep their old permissions until
+      // the account was archived.
+      const current = await UsuarioModel.findByPk(u.id, { attributes: ["id", "id_rol"] });
+      if (!current) return res.sendStatus(401);
+      u.id_rol = current.dataValues.id_rol as number;
     } catch {
       return res.sendStatus(500);
     }

@@ -4,25 +4,8 @@
 // not allowed to use, so there is nothing for the client to hide.
 
 import { catalog, MAX_DEPTH } from "./catalog.js";
-import type { EntityDef, FieldKind, Operator } from "./types.js";
-
-/** Operators offered per field type. Filtering by image makes no sense beyond emptiness. */
-const OPERATORS_BY_KIND: Record<FieldKind, Operator[]> = {
-  string: ["eq", "neq", "like", "in", "isnull", "notnull"],
-  number: ["eq", "neq", "gt", "gte", "lt", "lte", "between", "in", "isnull", "notnull"],
-  date: ["eq", "neq", "gt", "gte", "lt", "lte", "between", "isnull", "notnull"],
-  boolean: ["eq", "isnull", "notnull"],
-  image: ["isnull", "notnull"],
-};
-
-/** Aggregates that make sense per field type, used in summary mode. */
-const AGGS_BY_KIND: Record<FieldKind, string[]> = {
-  string: ["count"],
-  number: ["count", "sum", "avg", "min", "max"],
-  date: ["count", "min", "max"],
-  boolean: ["count"],
-  image: ["count"],
-};
+import { AGGS_BY_KIND, OPERATORS_BY_KIND } from "./constraints.js";
+import type { AggFn, EntityDef, FieldKind, Operator } from "./types.js";
 
 export interface CatalogFieldView {
   /** Dotted path used in the report configuration. */
@@ -32,7 +15,7 @@ export interface CatalogFieldView {
   /** Human-readable grouping for the UI, e.g. "Poste › Ciudad A". */
   group: string;
   operators: Operator[];
-  aggregates: string[];
+  aggregates: AggFn[];
   /** True for values derived in SQL rather than stored columns. */
   calculated?: boolean;
 }
@@ -85,6 +68,10 @@ function collect(
 
   for (const [name, calc] of Object.entries(entity.calculated ?? {})) {
     if (!isVisible(calc.roles, role)) continue;
+    // A calculated field needs its own relation hops on top of the ones already
+    // spent. Advertising one the builder will reject puts a field in the picker
+    // that returns an error when clicked.
+    if ((calc.deps?.length ?? 0) > 0 && depth + 1 > MAX_DEPTH) continue;
     const path = withPrefix(name);
     if (seen.has(path)) continue;
     seen.add(path);

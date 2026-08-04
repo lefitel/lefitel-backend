@@ -59,7 +59,10 @@ describe("buildQuery — shape", () => {
   it("resolves toOneLatest with LATERAL instead of a plain join", () => {
     const { sql } = buildQuery(base({ columns: [{ path: "solucion.description" }] }), ADMIN);
     expect(sql).toContain("LEFT JOIN LATERAL");
-    expect(sql).toContain('ORDER BY x."date" DESC NULLS LAST LIMIT 1');
+    expect(sql).toContain('ORDER BY x."date" DESC NULLS LAST, x."id" DESC LIMIT 1');
+    // Explicit projection rather than SELECT *, so columns outside the catalog
+    // never enter the query.
+    expect(sql).not.toContain("SELECT * FROM");
   });
 });
 
@@ -137,7 +140,9 @@ describe("buildQuery — filters and binds", () => {
     expect(binds).toContain("%poste roto%");
   });
 
-  it("binds both ends of a between", () => {
+  it("covers the whole final day of a date range", () => {
+    // Columns are `timestamp with time zone`; a plain BETWEEN against a bare
+    // date silently dropped every row of the last day (74 of 1079 measured).
     const { sql, binds } = buildQuery(
       base({
         filters: {
@@ -147,9 +152,54 @@ describe("buildQuery — filters and binds", () => {
       }),
       ADMIN,
     );
-    expect(sql).toMatch(/BETWEEN \$\d+ AND \$\d+/);
+    expect(sql).toMatch(/>= \$\d+ AND .* < \(\$\d+::date \+ interval '1 day'\)/);
     expect(binds).toContain("2026-01-01");
     expect(binds).toContain("2026-06-30");
+  });
+
+  it("keeps plain BETWEEN when the bound carries a time", () => {
+    const { sql } = buildQuery(
+      base({
+        filters: {
+          op: "and",
+          conditions: [
+            { path: "date", operator: "between", value: ["2026-01-01", "2026-06-30T12:00:00Z"] },
+          ],
+        },
+      }),
+      ADMIN,
+    );
+    expect(sql).toMatch(/BETWEEN \$\d+ AND \$\d+/);
+  });
+
+  it("treats lte and gt on a bare date as whole days", () => {
+    const lte = buildQuery(
+      base({ filters: { op: "and", conditions: [{ path: "date", operator: "lte", value: "2026-06-30" }] } }),
+      ADMIN,
+    ).sql;
+    expect(lte).toMatch(/< \(\$\d+::date \+ interval '1 day'\)/);
+
+    const gt = buildQuery(
+      base({ filters: { op: "and", conditions: [{ path: "date", operator: "gt", value: "2026-06-30" }] } }),
+      ADMIN,
+    ).sql;
+    expect(gt).toMatch(/>= \(\$\d+::date \+ interval '1 day'\)/);
+  });
+
+  it("uses IS DISTINCT FROM for neq so nulls are not silently dropped", () => {
+    // NULL <> 'x' is NULL, which turns the LEFT JOIN into an INNER JOIN and
+    // removed 281 of 1376 events without any indication.
+    const { sql } = buildQuery(
+      base({
+        filters: {
+          op: "and",
+          conditions: [{ path: "poste.name", operator: "neq", value: "P-1" }],
+        },
+      }),
+      ADMIN,
+    );
+    expect(sql).toContain("IS DISTINCT FROM");
+    expect(sql).not.toMatch(/<>/);
   });
 
   it("nests and/or groups", () => {
@@ -403,6 +453,226 @@ describe("buildCountQuery", () => {
       ADMIN,
     );
     expect(sql).toContain("GROUP BY");
+  });
+});
+
+describe("buildQuery — deterministic paging", () => {
+  it("always appends the primary key as tiebreaker in detail mode", () => {
+    // Without it, Postgres reorders ties between statements and paging both
+    // duplicated and dropped rows: 366 of 1376 in a measured run.
+    const { sql } = buildQuery(base({ sort: [{ path: "state", dir: "asc" }] }), ADMIN);
+    expect(sql.trim().split("\n").find((l) => l.startsWith("ORDER BY")))
+      .toMatch(/t0\."id" ASC$/);
+  });
+
+  it("appends the tiebreaker even with no sort requested", () => {
+    const { sql } = buildQuery(base(), ADMIN);
+    expect(sql).toContain('ORDER BY t0."id" ASC');
+  });
+
+  it("orders summary mode by the group keys", () => {
+    const { sql } = buildQuery(
+      { root: "poste", columns: [{ path: "tramo" }], groupBy: ["tramo"] },
+      ADMIN,
+    );
+    expect(sql).toContain("ORDER BY");
+    expect(sql).toContain("LEAST(");
+  });
+});
+
+describe("buildQuery — aggregates over correlated subqueries", () => {
+  it("sums a to-many count instead of counting root rows", () => {
+    // COUNT() over a scalar subquery counts rows, because the subquery is never
+    // NULL. It reported 19 (events) where the truth was 76 (revisions).
+    const { sql } = buildQuery(
+      {
+        root: "evento",
+        columns: [{ path: "poste.tramo" }, { path: "revisiones", agg: "count" }],
+        groupBy: ["poste.tramo"],
+      },
+      ADMIN,
+    );
+    expect(sql).toContain("SUM((SELECT COUNT(*)");
+    expect(sql).not.toContain("COUNT((SELECT");
+  });
+
+  it("sums a calculated subquery field too", () => {
+    const { sql } = buildQuery(
+      {
+        root: "evento",
+        columns: [{ path: "poste.tramo" }, { path: "numRevisiones", agg: "count" }],
+        groupBy: ["poste.tramo"],
+      },
+      ADMIN,
+    );
+    expect(sql).toContain("SUM((SELECT COUNT(*)");
+  });
+
+  it("rejects avg over a to-many rather than averaging averages", () => {
+    expect(() =>
+      buildQuery(
+        {
+          root: "evento",
+          columns: [{ path: "poste.tramo" }, { path: "observaciones.id", agg: "avg" }],
+          groupBy: ["poste.tramo"],
+        },
+        ADMIN,
+      ),
+    ).toThrow(/ya es un promedio por fila/);
+  });
+
+  it("keeps min and max nesting, which are correct", () => {
+    const { sql } = buildQuery(
+      {
+        root: "evento",
+        columns: [{ path: "poste.tramo" }, { path: "revisiones.date", agg: "max" }],
+        groupBy: ["poste.tramo"],
+      },
+      ADMIN,
+    );
+    expect(sql).toContain("MAX((SELECT MAX(");
+  });
+
+  it("applies the same rule to the sort expression", () => {
+    const { sql } = buildQuery(
+      {
+        root: "evento",
+        columns: [{ path: "poste.tramo" }, { path: "id", agg: "count" }],
+        groupBy: ["poste.tramo"],
+        sort: [{ path: "revisiones", dir: "desc", agg: "count" }],
+      },
+      ADMIN,
+    );
+    expect(sql).toContain("ORDER BY SUM((SELECT COUNT(*)");
+  });
+
+  it("rejects an aggregate on a column that is also grouped", () => {
+    expect(() =>
+      buildQuery(
+        { root: "evento", columns: [{ path: "state" }, { path: "state", agg: "count" }], groupBy: ["state"] },
+        ADMIN,
+      ),
+    ).toThrow(/no puede llevar además un resumen/);
+  });
+});
+
+describe("buildQuery — type compatibility", () => {
+  it("rejects a text operator on a date field", () => {
+    expect(() =>
+      buildQuery(
+        base({ filters: { op: "and", conditions: [{ path: "date", operator: "like", value: "x" }] } }),
+        ADMIN,
+      ),
+    ).toThrow(/tipo fecha/);
+  });
+
+  it("rejects a numeric comparison on a boolean field", () => {
+    expect(() =>
+      buildQuery(
+        base({ filters: { op: "and", conditions: [{ path: "state", operator: "gt", value: 5 }] } }),
+        ADMIN,
+      ),
+    ).toThrow(/tipo sí\/no/);
+  });
+
+  it("rejects summing a text column", () => {
+    expect(() =>
+      buildQuery(
+        { root: "evento", columns: [{ path: "state" }, { path: "description", agg: "sum" }], groupBy: ["state"] },
+        ADMIN,
+      ),
+    ).toThrow(/tipo texto/);
+  });
+
+  it("rejects objects inside an in-list", () => {
+    expect(() =>
+      buildQuery(
+        base({
+          filters: { op: "and", conditions: [{ path: "id", operator: "in", value: [{ a: 1 }] }] },
+        }),
+        ADMIN,
+      ),
+    ).toThrow(ReportConfigError);
+  });
+});
+
+describe("buildQuery — resource limits", () => {
+  it("rejects a report with too many columns", () => {
+    const columns = Array.from({ length: 200 }, () => ({ path: "description" }));
+    expect(() => buildQuery(base({ columns }), ADMIN)).toThrow(/demasiadas columnas/);
+  });
+
+  it("rejects too many filter conditions", () => {
+    const conditions = Array.from({ length: 200 }, () => ({
+      path: "state", operator: "eq" as const, value: true,
+    }));
+    expect(() => buildQuery(base({ filters: { op: "and", conditions } }), ADMIN))
+      .toThrow(/demasiados filtros/);
+  });
+
+  it("rejects too many sort criteria", () => {
+    const sort = Array.from({ length: 40 }, () => ({ path: "date", dir: "asc" as const }));
+    expect(() => buildQuery(base({ sort }), ADMIN)).toThrow(/demasiados criterios/);
+  });
+
+  it("rejects deeply nested filter groups instead of blowing the stack", () => {
+    let nested: Record<string, unknown> = { op: "and", conditions: [] };
+    for (let i = 0; i < 200; i++) nested = { op: "and", conditions: [nested] };
+    expect(() => buildQuery(base({ filters: nested as never }), ADMIN)).toThrow(ReportConfigError);
+  });
+});
+
+describe("buildQuery — malformed input", () => {
+  it("rejects a null column with a readable message", () => {
+    expect(() => buildQuery(base({ columns: [null as never] }), ADMIN))
+      .toThrow(ReportConfigError);
+  });
+
+  it("rejects a null filter condition", () => {
+    expect(() =>
+      buildQuery(base({ filters: { op: "and", conditions: [null as never] } }), ADMIN),
+    ).toThrow(ReportConfigError);
+  });
+
+  it("rejects a non-array groupBy", () => {
+    expect(() => buildQuery(base({ groupBy: 5 as never }), ADMIN)).toThrow(ReportConfigError);
+  });
+
+  it("rejects a non-array sort", () => {
+    expect(() => buildQuery(base({ sort: 5 as never }), ADMIN)).toThrow(ReportConfigError);
+  });
+
+  it("rejects a non-string column label", () => {
+    expect(() => buildQuery(base({ columns: [{ path: "id", label: 5 as never }] }), ADMIN))
+      .toThrow(ReportConfigError);
+  });
+
+  it("rejects prototype properties as field names", () => {
+    // `revisiones.constructor` used to resolve to Object's constructor and emit
+    // "undefined" as a column name.
+    for (const path of ["revisiones.constructor", "constructor", "poste.toString"]) {
+      expect(() => buildQuery(base({ columns: [{ path, agg: "max" }] }), ADMIN))
+        .toThrow(ReportConfigError);
+    }
+  });
+
+  it("accepts stringified limit and offset", () => {
+    const { binds } = buildQuery(base({ limit: "10" as never, offset: "20" as never }), ADMIN);
+    expect(binds[binds.length - 2]).toBe(10);
+    expect(binds[binds.length - 1]).toBe(20);
+  });
+
+  it("truncates fractional limit and offset", () => {
+    const { binds } = buildQuery(base({ limit: 2.7, offset: 1.5 }), ADMIN);
+    expect(binds[binds.length - 2]).toBe(2);
+    expect(binds[binds.length - 1]).toBe(1);
+  });
+});
+
+describe("buildCountQuery — root validation", () => {
+  it("rejects a non-root entity even when called directly", () => {
+    expect(() => buildCountQuery({ root: "usuario", columns: [{ path: "name" }] }, ADMIN))
+      .toThrow(ReportConfigError);
   });
 });
 

@@ -30,6 +30,12 @@ export async function runReport(config: ReportConfig, role: number): Promise<Rep
     await sequelize.query(`SET LOCAL statement_timeout = ${Number(STATEMENT_TIMEOUT_MS)}`, {
       transaction,
     });
+    // READ COMMITTED gives each statement its own snapshot, so a concurrent
+    // insert between the rows query and the count query would report a total
+    // that does not match what came back.
+    await sequelize.query("SET LOCAL TRANSACTION ISOLATION LEVEL REPEATABLE READ", {
+      transaction,
+    });
 
     // `sequelize` is untyped in database/sequelize.ts, so the generic form of
     // .query() is unavailable here; the shape is asserted instead.

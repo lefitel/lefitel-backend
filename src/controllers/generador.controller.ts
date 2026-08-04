@@ -11,6 +11,9 @@ import { IReporteVista } from "../interfaces/index.js";
 
 const ADMIN_ROLE = 1;
 
+/** Roles allowed to see other users' personal data, mirroring the catalog. */
+const STAFF_ROLES = [1, 2];
+
 /** Postgres raises this when SET LOCAL statement_timeout fires. */
 const QUERY_CANCELED = "57014";
 
@@ -40,8 +43,13 @@ function handleError(error: unknown, res: Response) {
         "La consulta tardó demasiado. Acote el rango de fechas o reduzca las columnas del reporte.",
     });
   }
-  const message = error instanceof Error ? error.message : "Error desconocido";
-  return res.status(500).json({ message });
+  // Never echo the database error back. It leaks physical table and column
+  // names, types, and the server locale — an oracle for anyone probing the
+  // schema, and unreadable for the user anyway.
+  console.error("[generador]", error);
+  return res.status(500).json({
+    message: "No se pudo generar el reporte. Intente de nuevo o revise su configuración.",
+  });
 }
 
 // ─── Catalog ─────────────────────────────────────────────────────────────────
@@ -58,7 +66,29 @@ export async function getCatalogo(req: Request, res: Response) {
 
 export async function postConsulta(req: Request, res: Response) {
   try {
-    const result = await runReport(req.body as ReportConfig, roleOf(req));
+    const config = req.body as ReportConfig;
+    const result = await runReport(config, roleOf(req));
+
+    // Running a report is the operation that actually extracts data, and it was
+    // the only one with no audit trail: someone paging through the whole
+    // dataset was invisible while renaming a saved report was logged.
+    logAction({
+      id_usuario: req.user?.id,
+      action: "RUN_REPORTE",
+      entity: "ReporteVista",
+      entity_id: null,
+      detail: `Ejecutó un reporte sobre ${String(config?.root ?? "?")} (${result.rows.length} filas)`,
+      metadata: {
+        root: config?.root,
+        columnas: Array.isArray(config?.columns) ? config.columns.length : 0,
+        agrupado: (config?.groupBy?.length ?? 0) > 0,
+        limit: result.limit,
+        offset: result.offset,
+        filas: result.rows.length,
+      },
+      severity: "info",
+    });
+
     res.status(200).json(result);
   } catch (error) {
     handleError(error, res);
@@ -71,11 +101,17 @@ export async function postConsulta(req: Request, res: Response) {
 export async function getReportes(req: Request, res: Response) {
   try {
     const userId = req.user?.id;
+    // The catalog hides other users' names from role 3, so the listing must not
+    // hand them over through the author of every shared report.
+    const canSeeAuthors = STAFF_ROLES.includes(roleOf(req));
+
     const data = await ReporteVistaModel.findAll({
       where: {
         [Op.or]: [{ id_usuario: userId }, { visibility: "shared" }],
       },
-      include: [{ model: UsuarioModel, attributes: ["id", "name", "lastname"] }],
+      include: canSeeAuthors
+        ? [{ model: UsuarioModel, attributes: ["id", "name", "lastname"] }]
+        : [{ model: UsuarioModel, attributes: ["id"] }],
       order: [
         ["favorite", "DESC"],
         ["updatedAt", "DESC"],
@@ -102,28 +138,56 @@ export async function getReporte(req: Request, res: Response) {
   }
 }
 
-function readPayload(req: Request) {
-  const { name, description, config, visibility, favorite } = req.body ?? {};
+/**
+ * Reads a report payload. When `existing` is given, absent fields keep their
+ * current value, so a client can flip `favorite` without resending the whole
+ * report.
+ */
+function readPayload(req: Request, existing?: IReporteVista) {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const has = (key: string) => Object.hasOwn(body, key);
 
+  const name = has("name") ? body.name : existing?.name;
   if (typeof name !== "string" || name.trim() === "") {
     throw new ReportConfigError("El reporte necesita un nombre.");
   }
   if (name.trim().length > 120) {
     throw new ReportConfigError("El nombre del reporte es demasiado largo (máximo 120 caracteres).");
   }
+
+  const config = has("config") ? body.config : existing?.config;
   if (!config || typeof config !== "object") {
     throw new ReportConfigError("El reporte no tiene configuración.");
   }
-  if (visibility !== undefined && visibility !== "private" && visibility !== "shared") {
+
+  const rawVisibility = has("visibility") ? body.visibility : existing?.visibility ?? "private";
+  if (rawVisibility !== "private" && rawVisibility !== "shared") {
     throw new ReportConfigError("La visibilidad del reporte no es válida.");
   }
+  const visibility: "private" | "shared" = rawVisibility;
+
+  const rawDescription = has("description") ? body.description : existing?.description ?? null;
+  if (rawDescription !== null && rawDescription !== undefined && typeof rawDescription !== "string") {
+    throw new ReportConfigError("La descripción del reporte no es válida.");
+  }
+  const description: string | null =
+    typeof rawDescription === "string" ? rawDescription.trim() : null;
+  // The column is STRING(500) and Sequelize does not length-check it, so an
+  // over-long description would surface as an opaque database error.
+  if (description !== null && description.length > 500) {
+    throw new ReportConfigError(
+      "La descripción del reporte es demasiado larga (máximo 500 caracteres).",
+    );
+  }
+
+  const favorite = has("favorite") ? body.favorite === true : existing?.favorite ?? false;
 
   return {
     name: name.trim(),
-    description: typeof description === "string" ? description.trim() : null,
+    description,
     config: config as Record<string, unknown>,
-    visibility: (visibility ?? "private") as "private" | "shared",
-    favorite: favorite === true,
+    visibility,
+    favorite,
   };
 }
 
@@ -164,7 +228,7 @@ export async function putReporte(req: Request, res: Response) {
       return res.status(403).json({ message: "Solo el autor puede editar este reporte." });
     }
 
-    const payload = readPayload(req);
+    const payload = readPayload(req, row);
     buildQuery(payload.config as unknown as ReportConfig, roleOf(req));
 
     await found.update(payload);
@@ -221,6 +285,11 @@ export async function postDuplicar(req: Request, res: Response) {
     if (row.visibility !== "shared" && row.id_usuario !== req.user?.id) {
       return res.status(403).json({ message: "Este reporte es privado." });
     }
+
+    // Revalidate with the duplicating user's role. Without this, a copy that
+    // references fields their role cannot use becomes theirs, and every attempt
+    // to run it fails afterwards.
+    buildQuery(row.config as unknown as ReportConfig, roleOf(req));
 
     const created = await ReporteVistaModel.create({
       name: `${row.name} (copia)`.slice(0, 120),

@@ -79,6 +79,12 @@ export interface CalculatedDef {
    * Defaults to [sql] when absent.
    */
   groupKeys?: (alias: string, dep: (path: string) => string) => string[];
+  /**
+   * Set when the expression is itself an aggregate subquery, naming the inner
+   * function. `numRevisiones` is a COUNT and therefore never null, so wrapping
+   * it in COUNT() again would count rows instead of summing counts.
+   */
+  innerAgg?: AggFn;
   roles?: number[];
 }
 

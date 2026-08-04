@@ -188,24 +188,30 @@ const poste: EntityDef = {
     },
     numEventos: {
       kind: "number",
+      innerAgg: "count",
       label: "Total de eventos",
       sql: (a) =>
         `(SELECT COUNT(*) FROM "${TABLE.evento}" ev` +
         ` WHERE ev."id_poste" = ${a}."id" AND ev."deletedAt" IS NULL)`,
     },
+    // `state` is nullable with no default, and the app treats any non-true
+    // value as pending (reporte.controller.ts:244 uses !e.state). IS NOT TRUE
+    // keeps numEventos = numPendientes + numResueltos even with null states.
     numPendientes: {
       kind: "number",
+      innerAgg: "count",
       label: "Eventos pendientes",
       sql: (a) =>
         `(SELECT COUNT(*) FROM "${TABLE.evento}" ev` +
-        ` WHERE ev."id_poste" = ${a}."id" AND ev."deletedAt" IS NULL AND ev."state" = false)`,
+        ` WHERE ev."id_poste" = ${a}."id" AND ev."deletedAt" IS NULL AND ev."state" IS NOT TRUE)`,
     },
     numResueltos: {
       kind: "number",
+      innerAgg: "count",
       label: "Eventos resueltos",
       sql: (a) =>
         `(SELECT COUNT(*) FROM "${TABLE.evento}" ev` +
-        ` WHERE ev."id_poste" = ${a}."id" AND ev."deletedAt" IS NULL AND ev."state" = true)`,
+        ` WHERE ev."id_poste" = ${a}."id" AND ev."deletedAt" IS NULL AND ev."state" IS TRUE)`,
     },
   },
 };
@@ -244,26 +250,37 @@ const evento: EntityDef = {
         ` JOIN "${TABLE.obs}" o ON o."id" = eo."id_obs" AND o."deletedAt" IS NULL` +
         ` WHERE eo."id_evento" = ${a}."id" AND eo."deletedAt" IS NULL)`,
     },
+    // Measured from `date`, the date of the incident, which is what the event
+    // detail screen shows. Using createdAt diverged by 157 days on average
+    // (max 678) because events are often registered long after they happen,
+    // so every row would have contradicted the screen opened right after.
     diasAbierto: {
       kind: "number",
       label: "Días abierto",
       sql: (a) =>
-        `CASE WHEN ${a}."state" = false` +
-        ` THEN FLOOR(EXTRACT(EPOCH FROM (NOW() - ${a}."createdAt")) / 86400)::int END`,
+        `CASE WHEN ${a}."state" IS NOT TRUE` +
+        ` THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - ${a}."date")) / 86400))::int END`,
     },
     // Mirrors reporte.controller.ts:353 — resolution is measured against the
     // last revision date, never updatedAt, and never goes below zero.
+    // Resolution is measured against the last revision date, never updatedAt.
+    // The inner query is an aggregate, so it always yields a row: with no
+    // revisions MAX is NULL and GREATEST(0, NULL) is 0 in Postgres, which fed
+    // phantom zeros into every average. The legacy report skips such events, so
+    // this returns NULL and they drop out of AVG/MIN the same way.
     tiempoResolucion: {
       kind: "number",
       label: "Días de resolución",
       sql: (a) =>
-        `CASE WHEN ${a}."state" = true THEN (` +
-        `SELECT GREATEST(0, ROUND(EXTRACT(EPOCH FROM (MAX(r."date") - ${a}."createdAt")) / 86400))::int` +
+        `CASE WHEN ${a}."state" IS TRUE THEN (` +
+        `SELECT CASE WHEN MAX(r."date") IS NULL THEN NULL ELSE` +
+        ` GREATEST(0, ROUND(EXTRACT(EPOCH FROM (MAX(r."date") - ${a}."createdAt")) / 86400))::int END` +
         ` FROM "${TABLE.revision}" r` +
         ` WHERE r."id_evento" = ${a}."id" AND r."deletedAt" IS NULL) END`,
     },
     numRevisiones: {
       kind: "number",
+      innerAgg: "count",
       label: "Nº de revisiones",
       sql: (a) =>
         `(SELECT COUNT(*) FROM "${TABLE.revision}" r` +
@@ -271,6 +288,7 @@ const evento: EntityDef = {
     },
     numObservaciones: {
       kind: "number",
+      innerAgg: "count",
       label: "Nº de observaciones",
       sql: (a) =>
         `(SELECT COUNT(*) FROM "${TABLE.eventoObs}" eo` +
