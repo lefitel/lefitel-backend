@@ -680,8 +680,10 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
     const isGrouped = groupedExprs.has(spec.path);
 
     if (spec.agg && !resolved.selfAggregating && !AGGS_BY_KIND[resolved.kind]?.includes(spec.agg)) {
+      // No article before the aggregate name: "suma" and "promedio" differ in
+      // gender and "el suma" reads as broken Spanish.
       throw new ReportConfigError(
-        `No se puede calcular el ${AGG_LABEL[spec.agg]} de "${resolved.label}" ` +
+        `No se puede aplicar ${AGG_LABEL[spec.agg]} a "${resolved.label}" ` +
           `porque es un campo de tipo ${KIND_LABEL[resolved.kind]}.`,
       );
     }
