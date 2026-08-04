@@ -5,9 +5,13 @@ import { join, dirname } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// glob patterns need POSIX separators. On Windows join() yields backslashes and
+// umzug silently finds zero migrations, reporting "nothing pending".
+const migrationsGlob = join(__dirname, "../migrations/*.{ts,js}").replace(/\\/g, "/");
+
 export const migrator = new Umzug({
   migrations: {
-    glob: join(__dirname, "../migrations/*.{ts,js}"),
+    glob: migrationsGlob,
   },
   context: sequelize.getQueryInterface(),
   storage: new SequelizeStorage({ sequelize }),

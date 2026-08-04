@@ -133,3 +133,16 @@ export interface IAdssPoste {
   deletedAt?: Date | null;
 }
 
+/** A saved configuration of the dynamic report builder. */
+export interface IReporteVista {
+  id: number;
+  name: string;
+  description?: string | null;
+  /** ReportConfig from reportBuilder/types, stored as JSONB. */
+  config: Record<string, unknown>;
+  id_usuario: number;
+  visibility: "private" | "shared";
+  favorite: boolean;
+  deletedAt?: Date | null;
+}
+
