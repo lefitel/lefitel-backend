@@ -92,7 +92,7 @@ const obs: EntityDef = {
     id: { column: "id", kind: "number", label: "ID de la observación" },
     name: { column: "name", kind: "string", label: "Observación" },
     description: { column: "description", kind: "string", label: "Descripción de la observación" },
-    criticality: { column: "criticality", kind: "number", label: "Criticidad" },
+    criticality: { column: "criticality", kind: "number", label: "Criticidad", semantic: "criticality" },
   },
   relations: {
     tipoObs: { kind: "toOne", target: "tipoObs", label: "Tipo", localKey: "id_tipoObs" },
@@ -224,7 +224,7 @@ const evento: EntityDef = {
     id: { column: "id", kind: "number", label: "ID del evento" },
     description: { column: "description", kind: "string", label: "Descripción" },
     date: { column: "date", kind: "date", label: "Fecha del evento" },
-    state: { column: "state", kind: "boolean", label: "Resuelto" },
+    state: { column: "state", kind: "boolean", label: "Resuelto", semantic: "state" },
     priority: { column: "priority", kind: "boolean", label: "Prioritario" },
     image: { column: "image", kind: "image", label: "Foto del evento" },
     createdAt: { column: "createdAt", kind: "date", label: "Fecha de registro" },
@@ -245,6 +245,7 @@ const evento: EntityDef = {
     criticidad: {
       kind: "number",
       label: "Criticidad del evento",
+      semantic: "criticality",
       sql: (a) =>
         `(SELECT MIN(o."criticality") FROM "${TABLE.eventoObs}" eo` +
         ` JOIN "${TABLE.obs}" o ON o."id" = eo."id_obs" AND o."deletedAt" IS NULL` +

@@ -3,9 +3,10 @@
 // Filtering happens here, on the server: a role never receives the fields it is
 // not allowed to use, so there is nothing for the client to hide.
 
-import { catalog, MAX_DEPTH } from "./catalog.js";
+import { catalog, MAX_DEPTH, MAX_ROWS } from "./catalog.js";
 import { AGGS_BY_KIND, OPERATORS_BY_KIND } from "./constraints.js";
-import type { AggFn, EntityDef, FieldKind, Operator } from "./types.js";
+import { MAX_COLUMNS, MAX_CONDITIONS, MAX_SORTS } from "./sqlBuilder.js";
+import type { AggFn, EntityDef, FieldKind, FieldSemantic, Operator } from "./types.js";
 
 export interface CatalogFieldView {
   /** Dotted path used in the report configuration. */
@@ -18,6 +19,13 @@ export interface CatalogFieldView {
   aggregates: AggFn[];
   /** True for values derived in SQL rather than stored columns. */
   calculated?: boolean;
+  /** Domain meaning, so the client can colour rows without guessing. */
+  semantic?: FieldSemantic;
+  /**
+   * True when the value is already a summary of its own row, such as a count of
+   * revisions. Grouping by one is rejected, so the client should not offer it.
+   */
+  aggregate?: boolean;
 }
 
 export interface CatalogRootView {
@@ -63,6 +71,7 @@ function collect(
       group,
       operators: OPERATORS_BY_KIND[field.kind],
       aggregates: AGGS_BY_KIND[field.kind],
+      semantic: field.semantic,
     });
   }
 
@@ -83,6 +92,8 @@ function collect(
       operators: OPERATORS_BY_KIND[calc.kind],
       aggregates: AGGS_BY_KIND[calc.kind],
       calculated: true,
+      semantic: calc.semantic,
+      aggregate: calc.innerAgg !== undefined,
     });
   }
 
@@ -105,8 +116,17 @@ function collect(
   }
 }
 
+/** Caps the client should honour, so the two sides cannot drift apart. */
+export interface CatalogLimits {
+  maxColumns: number;
+  maxConditions: number;
+  maxSorts: number;
+  maxRows: number;
+  maxDepth: number;
+}
+
 /** Builds the full catalog view for a role, one entry per allowed root. */
-export function buildCatalogView(role: number): { roots: CatalogRootView[] } {
+export function buildCatalogView(role: number): { roots: CatalogRootView[]; limits: CatalogLimits } {
   const roots = catalog.roots.map((key) => {
     const entity = catalog.entities[key];
     const view: CatalogRootView = {
@@ -120,5 +140,16 @@ export function buildCatalogView(role: number): { roots: CatalogRootView[] } {
     return view;
   });
 
-  return { roots };
+  return {
+    roots,
+    // Published rather than duplicated by hand on the client, where they had
+    // already started to drift.
+    limits: {
+      maxColumns: MAX_COLUMNS,
+      maxConditions: MAX_CONDITIONS,
+      maxSorts: MAX_SORTS,
+      maxRows: MAX_ROWS,
+      maxDepth: MAX_DEPTH,
+    },
+  };
 }

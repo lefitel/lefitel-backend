@@ -6,6 +6,16 @@
 
 export type FieldKind = "string" | "number" | "boolean" | "date" | "image";
 
+/**
+ * What a value *means*, beyond its type.
+ *
+ * The exporters need this to colour rows. They used to guess by looking for
+ * "criticidad" inside the column label — a label the user can rename freely —
+ * so a column called "Criticidad (count)" holding a count of 1 painted the row
+ * catastrophic red.
+ */
+export type FieldSemantic = "criticality" | "state";
+
 /** Comparison operators allowed in filters. Closed set, validated before use. */
 export type Operator =
   | "eq" | "neq"
@@ -24,6 +34,8 @@ export interface FieldDef {
   kind: FieldKind;
   /** User-facing label, in Spanish. */
   label: string;
+  /** Domain meaning, for presentation decisions such as row colour. */
+  semantic?: FieldSemantic;
   /** Roles allowed to see this field. Undefined means every role. */
   roles?: number[];
 }
@@ -85,6 +97,8 @@ export interface CalculatedDef {
    * it in COUNT() again would count rows instead of summing counts.
    */
   innerAgg?: AggFn;
+  /** Domain meaning, for presentation decisions such as row colour. */
+  semantic?: FieldSemantic;
   roles?: number[];
 }
 
@@ -166,7 +180,7 @@ export interface BuiltQuery {
   sql: string;
   binds: unknown[];
   /** Output columns in order, for the client to render headers. */
-  columns: { key: string; label: string; kind: FieldKind }[];
+  columns: { key: string; label: string; kind: FieldKind; semantic?: FieldSemantic }[];
 }
 
 export class ReportConfigError extends Error {

@@ -23,6 +23,7 @@ import {
   type FieldKind,
   type ExistsCondition,
   type FilterCondition,
+  type FieldSemantic,
   type FilterGroup,
   type Operator,
   type ReportConfig,
@@ -35,15 +36,15 @@ const AGG_FNS: AggFn[] = ["count", "sum", "avg", "min", "max"];
  * WIDE a report could be. 1600 aggregate columns fit in a 74 KB request and
  * produced 1600 correlated subqueries, 70 MB of JSON and 15 s of database CPU.
  */
-const MAX_COLUMNS = 60;
+export const MAX_COLUMNS = 60;
 /**
  * Header length. Unbounded labels are not just untidy: 60 columns of 300
  * characters each make jspdf-autotable's pagination stop converging, so a
  * shared report can freeze the tab of everyone who exports it.
  */
 const MAX_LABEL = 120;
-const MAX_SORTS = 10;
-const MAX_CONDITIONS = 100;
+export const MAX_SORTS = 10;
+export const MAX_CONDITIONS = 100;
 
 const OPERATORS: Operator[] = [
   "eq", "neq", "gt", "gte", "lt", "lte", "between", "in", "like", "isnull", "notnull",
@@ -76,6 +77,8 @@ interface ResolvedExpr {
   innerAgg?: AggFn;
   /** Expressions to GROUP BY when grouping by this value; defaults to [sql]. */
   groupKeys?: string[];
+  /** Domain meaning, forwarded to the client for presentation. */
+  semantic?: FieldSemantic;
 }
 
 /**
@@ -335,6 +338,7 @@ function resolvePath(
       kind: field.kind,
       label: field.label,
       selfAggregating: false,
+      semantic: field.semantic,
     };
   }
 
@@ -363,6 +367,7 @@ function resolvePath(
       // treatment as a to-many aggregate when it is summarised.
       selfAggregating: calculated.innerAgg !== undefined,
       innerAgg: calculated.innerAgg,
+      semantic: calculated.semantic,
       groupKeys: calculated.groupKeys?.(landing.alias, dep),
     };
   }
@@ -726,7 +731,10 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
 
     const key = `c${index}`;
     selects.push(`${expr} AS ${quote(key)}`);
-    columns.push({ key, label: spec.label?.trim() || resolved.label, kind });
+    // An aggregated value no longer means what the raw field meant: the count
+    // of criticality values is not itself a criticality.
+    const semantic = spec.agg ? undefined : resolved.semantic;
+    columns.push({ key, label: spec.label?.trim() || resolved.label, kind, semantic });
   });
 
   // Filters are resolved after columns so they reuse the same joins.
