@@ -13,6 +13,7 @@ import cors from "cors";
 import jwt from "jsonwebtoken";
 import rateLimit from "express-rate-limit";
 import { UsuarioModel } from "./models/usuario.model.js";
+import { requireRole } from "./middleware/requireRole.js";
 
 // Import routes
 import uploadRoutes from "./routes/upload.routes.js";
@@ -46,20 +47,38 @@ const app = express();
 
 const secretKey = process.env.JWT_SECRET;
 
+// Render terminates TLS in front of the app, so without this every request
+// carries the proxy's address and the rate limiters below share a single bucket
+// across the whole user base.
+app.set("trust proxy", 1);
+
 // Middlewares
 app.use(morgan("dev"));
 app.use(express.json());
-app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN || "http://localhost:5173",
+    // x-new-token is not a CORS-safelisted response header, so without this the
+    // browser cannot read it and the sliding session never renews: the server
+    // was re-signing a JWT on every request and throwing it away.
+    exposedHeaders: ["x-new-token"],
+  }),
+);
 
 // Middleware para verificar el token en rutas protegidas (+ sliding expiry)
 // Además valida que el usuario siga existiendo (no archivado) para revocar acceso al instante.
 function authenticateToken(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
-  if (token == null) return res.sendStatus(401);
+  if (token == null) {
+    return res.status(401).json({ message: "Su sesión expiró. Vuelva a iniciar sesión." });
+  }
 
   jwt.verify(token, secretKey, async (err, user) => {
-    if (err) return res.sendStatus(403);
+    // 401, not 403: the token is missing or invalid, so the caller is not
+    // authenticated. The client uses this distinction to decide whether to log
+    // the user out — a 403 over an individual resource must not end a session.
+    if (err) return res.status(401).json({ message: "Su sesión expiró. Vuelva a iniciar sesión." });
     const u = user as { id: number; id_rol: number };
 
     try {
@@ -68,7 +87,9 @@ function authenticateToken(req: Request, res: Response, next: NextFunction) {
       // indefinitely and a demoted user would keep their old permissions until
       // the account was archived.
       const current = await UsuarioModel.findByPk(u.id, { attributes: ["id", "id_rol"] });
-      if (!current) return res.sendStatus(401);
+      if (!current) {
+        return res.status(401).json({ message: "Su cuenta ya no está activa." });
+      }
       u.id_rol = current.dataValues.id_rol as number;
     } catch {
       return res.sendStatus(500);
@@ -119,6 +140,29 @@ app.use("/api/solucion", authenticateToken, solucionRoutes);
 app.use("/api/tipoObs", authenticateToken, tipoObsRoutes);
 app.use("/api/rol", authenticateToken, rolRoutes);
 app.use("/api/usuario", authenticateToken, usuarioRoutes);
-app.use("/api/files", authenticateToken, filesRoutes);
+// File management is an administration screen (menuItems.ts lists Archivos
+// for role 1 only) and the API was open to every authenticated user.
+app.use("/api/files", authenticateToken, requireRole(1), filesRoutes);
+
+/**
+ * Terminal error handler.
+ *
+ * Anything thrown before a controller — the body-parser size limit, malformed
+ * JSON — used to reach Express's default handler, which serves HTML with
+ * absolute filesystem paths whenever NODE_ENV is not "production". It also
+ * broke the client, which expects `{message}` on every failure.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: Error & { status?: number; type?: string }, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("[api]", err);
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({ message: "La petición es demasiado grande." });
+  }
+  if (err?.type === "entity.parse.failed") {
+    return res.status(400).json({ message: "La petición no es válida." });
+  }
+  const status = typeof err?.status === "number" ? err.status : 500;
+  res.status(status).json({ message: "Ocurrió un error al procesar la petición." });
+});
 
 export default app;

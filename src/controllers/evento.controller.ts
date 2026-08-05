@@ -250,7 +250,12 @@ export async function updateEvento(req: Request, res: Response) {
     }
     const bvPoste = edv["id_poste"] as number | null | undefined;
     const avPoste = bodyWithoutObs["id_poste"] as number | null | undefined;
-    if (bvPoste !== undefined && bvPoste !== avPoste) {
+    // Only when the request actually carries id_poste. A partial update that
+    // omits it leaves the column untouched, but this used to record
+    // `after: {id_poste: null}` — a change that never happened, written into
+    // the audit log as if it had.
+    const postePresent = Object.hasOwn(bodyWithoutObs, "id_poste");
+    if (postePresent && bvPoste !== undefined && bvPoste !== avPoste) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fkRef = async (pkVal: number | null | undefined) => {
         if (pkVal == null) return null;

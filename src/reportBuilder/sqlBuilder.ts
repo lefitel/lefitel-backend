@@ -36,6 +36,12 @@ const AGG_FNS: AggFn[] = ["count", "sum", "avg", "min", "max"];
  * produced 1600 correlated subqueries, 70 MB of JSON and 15 s of database CPU.
  */
 const MAX_COLUMNS = 60;
+/**
+ * Header length. Unbounded labels are not just untidy: 60 columns of 300
+ * characters each make jspdf-autotable's pagination stop converging, so a
+ * shared report can freeze the tab of everyone who exports it.
+ */
+const MAX_LABEL = 120;
 const MAX_SORTS = 10;
 const MAX_CONDITIONS = 100;
 
@@ -672,6 +678,11 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
     }
     if (spec.label !== undefined && typeof spec.label !== "string") {
       throw new ReportConfigError("El nombre de una columna no es válido.");
+    }
+    if ((spec.label?.length ?? 0) > MAX_LABEL) {
+      throw new ReportConfigError(
+        `El nombre de una columna es demasiado largo (máximo ${MAX_LABEL} caracteres).`,
+      );
     }
 
     const resolved = resolvePath(rootEntity, spec.path, plan, role, spec.agg);

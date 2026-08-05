@@ -224,7 +224,11 @@ export async function putReporte(req: Request, res: Response) {
     if (!found) return res.status(404).json({ message: "El reporte no existe." });
 
     const row = found.toJSON() as IReporteVista;
-    if (row.id_usuario !== req.user?.id && roleOf(req) !== ADMIN_ROLE) {
+    // Editing content is the author's alone. Administration can archive a
+    // report (moderation) but not rewrite it: the previous bypass let an admin
+    // open a colleague's shared report, change it and save, replacing their
+    // work with no notice to anyone.
+    if (row.id_usuario !== req.user?.id) {
       return res.status(403).json({ message: "Solo el autor puede editar este reporte." });
     }
 

@@ -22,6 +22,11 @@ const router = Router();
 const consultaLimiter = rateLimit({
   windowMs: 60_000,
   limit: 30,
+  // Keyed on the user, not the IP. Behind a proxy — and Render is one — every
+  // request shares the proxy's address, so an IP-keyed budget of 30 would be 30
+  // for the entire installation, and one person paging through a long report
+  // would lock everyone else out.
+  keyGenerator: (req) => String(req.user?.id ?? req.ip),
   message: { message: "Demasiadas consultas seguidas. Espere un momento e intente de nuevo." },
   standardHeaders: true,
   legacyHeaders: false,
