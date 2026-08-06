@@ -45,6 +45,25 @@ const ROW_MEANING: Record<string, string> = {
   eventoObs: "Una fila por observación registrada en un evento",
 };
 
+/**
+ * Plural noun for a row of each root, for sentences like "1.376 eventos".
+ *
+ * Separate from ROW_MEANING because that one is a full sentence and cutting a
+ * noun out of it would be guesswork. A grouped report changes what a row is, and
+ * an indicator strip that says "eventos" over a list of tramos is a lie.
+ */
+const ROW_NOUN: Record<string, string> = {
+  evento: "eventos",
+  poste: "postes",
+  revision: "revisiones",
+  eventoObs: "observaciones",
+};
+
+/** Falls back to the entity label so a new root is never left unnamed. */
+export function rowNoun(root: string): string {
+  return ROW_NOUN[root] ?? (catalog.entities[root]?.label ?? root).toLowerCase();
+}
+
 const isVisible = (roles: number[] | undefined, role: number): boolean =>
   roles === undefined || roles.includes(role);
 

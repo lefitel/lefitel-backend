@@ -176,11 +176,19 @@ export interface ReportConfig {
 
 // ─── Builder output ──────────────────────────────────────────────────────────
 
+/** One output column of a report, as the client and the exporters see it. */
+export interface ResultColumn {
+  key: string;
+  label: string;
+  kind: FieldKind;
+  semantic?: FieldSemantic;
+}
+
 export interface BuiltQuery {
   sql: string;
   binds: unknown[];
   /** Output columns in order, for the client to render headers. */
-  columns: { key: string; label: string; kind: FieldKind; semantic?: FieldSemantic }[];
+  columns: ResultColumn[];
 }
 
 export class ReportConfigError extends Error {

@@ -6,7 +6,7 @@ import { EventoModel } from "../models/evento.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { SolucionModel } from "../models/solucion.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
-import { IMAGES_DIR } from "../utils/fileUtils.js";
+import { IMAGES_DIR, resolveImagePath } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
 
 interface FileInfo {
@@ -86,8 +86,14 @@ export async function getOrphanFiles(req: Request, res: Response) {
 
 export async function deleteFile(req: Request, res: Response) {
   const name = req.params.name as string;
+  // Express decodes %2F inside a route parameter, so the name arrived here able
+  // to climb out of the images directory and unlinkSync obeyed.
+  const fullPath = resolveImagePath(name);
+  if (fullPath === null) {
+    return res.status(400).json({ message: "Nombre de archivo inválido." });
+  }
   try {
-    fs.unlinkSync(path.join(IMAGES_DIR, name));
+    fs.unlinkSync(fullPath);
     logAction({ id_usuario: req.user?.id, action: "DELETE_FILE", entity: "File", entity_id: null, detail: `Eliminó archivo ${name}`, metadata: { filename: name }, severity: 'critical' });
     res.sendStatus(200);
   } catch (error) {

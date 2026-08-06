@@ -1,0 +1,13 @@
+// Everything the build config leaves out.
+//
+// tsconfig.json excludes the tests on purpose — they must not end up in dist —
+// but that also left them outside `tsc --noEmit` and outside ESLint, whose
+// parser needs a project that contains the file. Vitest only transpiles, so a
+// type error in a test went unnoticed by every tool at once.
+{
+  "extends": "./tsconfig.json",
+  // rootDir stays src, so nothing above it can be included. Checking the tests
+  // is the point; vitest.config.ts is a two-line file and not worth relaxing it.
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

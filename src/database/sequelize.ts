@@ -9,7 +9,9 @@ const dbLogger = (sql: string, timing?: number) => {
   console.log(`[DB] ${label}${timing !== undefined ? ` (${timing}ms)` : ""}`);
 };
 
-let sequelize;
+// Typed rather than inferred: left bare it widens to `any`, and every
+// sequelize.query in the codebase silently loses its return type with it.
+let sequelize: Sequelize;
 
 /**
  * Explicit pool. The default is 5 connections shared by the whole API, and a
@@ -18,9 +20,24 @@ let sequelize;
  */
 const pool = { max: 15, min: 0, acquire: 30_000, idle: 10_000 };
 
-if (process.env.NODE_ENV === "production") {
-  sequelize = new Sequelize(process.env.DATABASE_URL, { logging: dbLogger, benchmark: true, pool });
-} else {
+/**
+ * Which settings to use follows from which ones exist, not from NODE_ENV.
+ *
+ * Tying the connection to the environment name coupled two unrelated things: a
+ * production container configured with the discrete PG_* variables — the
+ * natural setup when Postgres runs beside the API — had to be left in
+ * development mode to connect at all, and development mode is what enabled
+ * `sync({ alter: true })`. Choosing by variable lets either deployment set
+ * NODE_ENV honestly.
+ *
+ * The discrete variables win when they are complete, and that order is
+ * deliberate. A .env carrying both a local PG_DATABASE and a leftover remote
+ * DATABASE_URL is common; the harm of pointing development at the remote
+ * database is far greater than the harm of the reverse. The chosen source is
+ * logged so a wrong one is visible on the first line of the log.
+ */
+if (process.env.PG_DATABASE && process.env.PG_USER) {
+  console.log(`[DB] Conectando a ${process.env.PG_DATABASE} en ${process.env.PG_IP}:${process.env.PG_PORT}`);
   sequelize = new Sequelize(
     process.env.PG_DATABASE,
     process.env.PG_USER,
@@ -34,6 +51,18 @@ if (process.env.NODE_ENV === "production") {
       pool,
     }
   );
+} else if (process.env.DATABASE_URL) {
+  console.log("[DB] Conectando por DATABASE_URL");
+  sequelize = new Sequelize(process.env.DATABASE_URL, { logging: dbLogger, benchmark: true, pool });
+} else {
+  // This module is imported before index.ts runs, so the guard belongs here.
+  // Without it, `new Sequelize(undefined)` throws about a missing dialect,
+  // which says nothing about the variable that is actually missing.
+  console.error(
+    "ERROR: falta la configuración de la base de datos. " +
+    "Define DATABASE_URL, o bien PG_DATABASE, PG_USER, PG_PASS, PG_IP y PG_PORT."
+  );
+  process.exit(1);
 }
 
 export { sequelize };

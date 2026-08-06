@@ -91,10 +91,9 @@ export async function updateUsuario(req: Request, res: Response) {
     const bvRol = udv["id_rol"] as number | null | undefined;
     const avRol = req.body["id_rol"] as number | null | undefined;
     if (bvRol !== undefined && bvRol !== avRol) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fkRef = async (pkVal: number | null | undefined) => {
         if (pkVal == null) return null;
-        const row = await (RolModel as any).findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
+        const row = await RolModel.findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
         return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
       };
       [beforeMeta["id_rol"], afterMeta["id_rol"]] = await Promise.all([fkRef(bvRol), fkRef(avRol)]);

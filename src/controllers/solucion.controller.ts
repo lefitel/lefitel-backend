@@ -32,8 +32,8 @@ export async function getSolucion_evento(req: Request, res: Response) {
 export async function createSolucion(req: Request, res: Response) {
   try {
     const TempSolucion = await SolucionModel.create(req.body);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const eventoRow = req.body.id_evento != null ? await (EventoModel as any).findByPk(req.body.id_evento, { attributes: ["id", "description"], paranoid: false }) : null;
+     
+    const eventoRow = req.body.id_evento != null ? await EventoModel.findByPk(req.body.id_evento, { attributes: ["id", "description"], paranoid: false }) : null;
     const eventoRef = eventoRow ? { id: eventoRow.dataValues.id, name: eventoRow.dataValues.description } : (req.body.id_evento ?? null);
     logAction({ id_usuario: req.user?.id, action: "CREATE_SOLUCION", entity: "Solución", entity_id: Number(req.body.id_evento), detail: `Registró solución para Evento #${req.body.id_evento}`, metadata: { after: { id_evento: eventoRef, description: req.body.description } }, severity: 'info' });
     res.status(200).json(TempSolucion);

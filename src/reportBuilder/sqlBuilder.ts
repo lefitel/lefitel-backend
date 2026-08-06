@@ -626,7 +626,7 @@ function applyAggregate(expr: string, agg: AggFn, resolved: ResolvedExpr): strin
  * which is what makes the engine testable without a database.
  */
 export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
-  if (!config || typeof config !== "object") {
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new ReportConfigError("La configuración del reporte no es válida.");
   }
   if (!catalog.roots.includes(config.root)) {
@@ -818,8 +818,14 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
  * In summary mode it counts groups, not underlying rows.
  */
 export function buildCountQuery(config: ReportConfig, role: number): { sql: string; binds: unknown[] } {
-  // Same root check as buildQuery. Relying on the caller invoking buildQuery
-  // first would make this a row-count oracle over non-root entities.
+  // Same checks as buildQuery, for the same reason: relying on the caller
+  // invoking buildQuery first would make this a row-count oracle over non-root
+  // entities. The shape check earns its place too — the export path counts
+  // before it reads, so this is the first function to touch the body, and a
+  // missing configuration used to reach it as a TypeError and leave as a 500.
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new ReportConfigError("La configuración del reporte no es válida.");
+  }
   if (!catalog.roots.includes(config.root)) {
     throw new ReportConfigError(
       `"${String(config.root)}" no es un nivel de detalle válido para un reporte.`,

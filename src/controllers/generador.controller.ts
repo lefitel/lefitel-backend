@@ -4,6 +4,10 @@ import { ReporteVistaModel } from "../models/reporteVista.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { buildCatalogView } from "../reportBuilder/catalogView.js";
 import { runReport } from "../reportBuilder/execute.js";
+import {
+  buildExport, ExportTooLargeError, type ExportFormat,
+} from "../reportBuilder/export/index.js";
+import { exportSlot, ExportBusyError } from "../reportBuilder/export/queue.js";
 import { buildQuery } from "../reportBuilder/sqlBuilder.js";
 import { ReportConfigError, type ReportConfig } from "../reportBuilder/types.js";
 import { logAction } from "../utils/logAction.js";
@@ -35,6 +39,13 @@ function parseId(req: Request): number {
 function handleError(error: unknown, res: Response) {
   if (error instanceof ReportConfigError) {
     return res.status(400).json({ message: error.message });
+  }
+  // Both carry a sentence written for the user, saying what to do about it.
+  if (error instanceof ExportTooLargeError) {
+    return res.status(413).json({ message: error.message });
+  }
+  if (error instanceof ExportBusyError) {
+    return res.status(429).json({ message: error.message });
   }
   const code = (error as { parent?: { code?: string } })?.parent?.code;
   if (code === QUERY_CANCELED) {
@@ -90,6 +101,75 @@ export async function postConsulta(req: Request, res: Response) {
     });
 
     res.status(200).json(result);
+  } catch (error) {
+    handleError(error, res);
+  }
+}
+
+// ─── Export ──────────────────────────────────────────────────────────────────
+
+const FORMATS: ExportFormat[] = ["excel", "pdf"];
+/** Same cap the saved report name uses. */
+const MAX_TITLE = 120;
+
+/**
+ * Builds the file on the server and streams it back.
+ *
+ * The body carries the configuration, not the rows. Doing it here removes the
+ * round trip that downloaded the whole result set as JSON, removes the one HTTP
+ * request per photograph the browser used to make, and keeps the photographs
+ * off the unauthenticated static root for the length of an export.
+ */
+export async function postExportar(req: Request, res: Response) {
+  try {
+    const body = req.body as {
+      config?: ReportConfig; format?: string; title?: string;
+      subtitle?: string | null; photos?: boolean;
+    };
+
+    const format = FORMATS.find((f) => f === body.format);
+    if (!format) {
+      throw new ReportConfigError("Formato de exportación no válido. Use 'excel' o 'pdf'.");
+    }
+    const title = typeof body.title === "string" ? body.title.slice(0, MAX_TITLE) : "Reporte";
+    const subtitle = typeof body.subtitle === "string" ? body.subtitle.slice(0, 500) : null;
+
+    const output = await exportSlot.run(() => buildExport({
+      config: body.config as ReportConfig,
+      role: roleOf(req),
+      format,
+      title,
+      subtitle,
+      photos: body.photos === true,
+    }));
+
+    logAction({
+      id_usuario: req.user?.id,
+      action: "EXPORT_REPORTE",
+      entity: "ReporteVista",
+      entity_id: null,
+      detail: `Exportó un reporte sobre ${String(body.config?.root ?? "?")} a ${format} (${output.rows} filas)`,
+      metadata: {
+        root: body.config?.root,
+        formato: format,
+        filas: output.rows,
+        bytes: output.buffer.length,
+        fotos: output.photos,
+      },
+      severity: "info",
+    });
+
+    res.setHeader("Content-Type", output.contentType);
+    res.setHeader("Content-Length", output.buffer.length);
+    // Both forms: the plain one for anything that ignores RFC 5987, the encoded
+    // one so accents survive. Exposed through CORS in app.ts, or the browser
+    // cannot read it and every download is called "download".
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${output.filename.replace(/[^\x20-\x7e]/g, "_")}"; ` +
+      `filename*=UTF-8''${encodeURIComponent(output.filename)}`,
+    );
+    res.status(200).send(output.buffer);
   } catch (error) {
     handleError(error, res);
   }

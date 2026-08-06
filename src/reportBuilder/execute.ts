@@ -18,6 +18,28 @@ export interface ReportResult {
 }
 
 /**
+ * How many rows the report would return, without materialising any of them.
+ *
+ * An export has to know the size before it starts: pulling fifty thousand rows
+ * into memory only to refuse them is the failure the cap exists to prevent.
+ */
+export async function countReport(config: ReportConfig, role: number): Promise<number> {
+  const counted = buildCountQuery(config, role);
+
+  return sequelize.transaction(async (transaction: Transaction) => {
+    await sequelize.query(`SET LOCAL statement_timeout = ${Number(STATEMENT_TIMEOUT_MS)}`, {
+      transaction,
+    });
+    const rows = await sequelize.query<{ total: number }>(counted.sql, {
+      bind: counted.binds,
+      type: QueryTypes.SELECT,
+      transaction,
+    });
+    return Number(rows[0]?.total ?? 0);
+  });
+}
+
+/**
  * Executes the report inside a transaction with a statement timeout, so a
  * badly shaped report degrades into an error instead of pinning the database.
  * The timeout is scoped with SET LOCAL, which reverts when the transaction ends.
@@ -37,19 +59,17 @@ export async function runReport(config: ReportConfig, role: number): Promise<Rep
       transaction,
     });
 
-    // `sequelize` is untyped in database/sequelize.ts, so the generic form of
-    // .query() is unavailable here; the shape is asserted instead.
-    const rows = (await sequelize.query(built.sql, {
+    const rows = await sequelize.query<Record<string, unknown>>(built.sql, {
       bind: built.binds,
       type: QueryTypes.SELECT,
       transaction,
-    })) as Record<string, unknown>[];
+    });
 
-    const totalRows = (await sequelize.query(counted.sql, {
+    const totalRows = await sequelize.query<{ total: number }>(counted.sql, {
       bind: counted.binds,
       type: QueryTypes.SELECT,
       transaction,
-    })) as { total: number }[];
+    });
 
     // The last two binds are always limit and offset.
     const limit = Number(built.binds[built.binds.length - 2]);

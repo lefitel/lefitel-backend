@@ -16,10 +16,17 @@ export async function getRevision(req: Request, res: Response) {
     return res.status(500).json({ message: error.message });
   }
 }
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+/**
+ * Resolves the event a revision belongs to, for the audit log.
+ *
+ * The value arrives from the request body, so it is narrowed here rather than
+ * cast away: an `as any` on the lookup silenced the compiler and would have let
+ * an object or an array reach findByPk untouched.
+ */
 const eventoRef = async (id_evento: unknown) => {
-  if (id_evento == null) return id_evento ?? null;
-  const row = await (EventoModel as any).findByPk(id_evento, { attributes: ["id", "description"], paranoid: false });
+  if (id_evento == null) return null;
+  if (typeof id_evento !== "number" && typeof id_evento !== "string") return id_evento;
+  const row = await EventoModel.findByPk(id_evento, { attributes: ["id", "description"], paranoid: false });
   return row ? { id: row.dataValues.id, name: row.dataValues.description } : id_evento;
 };
 

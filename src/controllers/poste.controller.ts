@@ -125,8 +125,8 @@ export async function createPoste(req: Request, res: Response) {
       if (Array.isArray(adss_ids) && adss_ids.length > 0) {
         await Promise.all(
           (adss_ids as number[]).map((id_adss) =>
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (AdssPosteModel as any).create({ id_adss, id_poste: posteId }, { transaction: t })
+             
+            AdssPosteModel.create({ id_adss, id_poste: posteId }, { transaction: t })
           )
         );
       }
@@ -136,8 +136,8 @@ export async function createPoste(req: Request, res: Response) {
 
     let adssLabel: string | null = null;
     if (Array.isArray(adss_ids) && adss_ids.length > 0) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const adssRows = await (AdssModel as any).findAll({
+       
+      const adssRows = await AdssModel.findAll({
         where: { id: adss_ids },
         attributes: ["name"],
         paranoid: false,
@@ -221,8 +221,8 @@ export async function updatePoste(req: Request, res: Response) {
       await TempPoste.save({ transaction: t });
 
       if (Array.isArray(adss_ids)) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const currentAdssPoste = await (AdssPosteModel as any).findAll({ where: { id_poste: id }, transaction: t });
+         
+        const currentAdssPoste = await AdssPosteModel.findAll({ where: { id_poste: id }, transaction: t });
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const currentIds = currentAdssPoste.map((a: any) => a.dataValues.id_adss as number);
         const toAdd = (adss_ids as number[]).filter((aid) => !currentIds.includes(aid));
@@ -231,16 +231,16 @@ export async function updatePoste(req: Request, res: Response) {
 
         if (toAdd.length > 0 || toRemove.length > 0) {
           const allIds = [...new Set([...currentIds, ...(adss_ids as number[])])];
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const allRows = await (AdssModel as any).findAll({ where: { id: allIds }, attributes: ["id", "name"], paranoid: false, transaction: t });
+           
+          const allRows = await AdssModel.findAll({ where: { id: allIds }, attributes: ["id", "name"], paranoid: false, transaction: t });
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const nameMap = new Map(allRows.map((r: any) => [r.dataValues.id as number, r.dataValues.name as string]));
           const beforeAdss = currentIds.map((aid: number) => nameMap.get(aid)).filter(Boolean).join(", ");
           const afterAdss = (adss_ids as number[]).map((aid) => nameMap.get(aid)).filter(Boolean).join(", ");
 
           await Promise.all([
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ...toAdd.map((id_adss: number) => (AdssPosteModel as any).create({ id_adss, id_poste: Number(id) }, { transaction: t })),
+             
+            ...toAdd.map((id_adss: number) => AdssPosteModel.create({ id_adss, id_poste: Number(id) }, { transaction: t })),
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             ...toRemove.map((a: any) => a.destroy({ transaction: t })),
           ]);

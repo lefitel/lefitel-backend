@@ -1,0 +1,235 @@
+import { describe, it, expect } from "vitest";
+import ExcelJS from "exceljs";
+import { sequelize } from "../../database/sequelize.js";
+import {
+  buildExport, exceedsExportLimits, ExportTooLargeError, MAX_EXPORT_ROWS,
+} from "./index.js";
+import type { ReportConfig } from "../types.js";
+
+/**
+ * Against the real database, which is where the pieces meet: the query engine,
+ * the semantics the catalog publishes, and the two builders. Skipped when no
+ * database answers, like the other regression tests.
+ */
+const dbAvailable = await sequelize
+  .authenticate()
+  .then(() => true)
+  .catch(() => false);
+
+const ADMIN = 1;
+
+/** The columns the fixed "General" report shows, expressed as a configuration. */
+const generalConfig: ReportConfig = {
+  root: "evento",
+  columns: [
+    { path: "poste.name", label: "Nº Poste" },
+    { path: "poste.propietario.name", label: "Propietario" },
+    { path: "description", label: "Descripción" },
+    // Severity is calculated from the event's observations, not stored on it.
+    { path: "criticidad", label: "Criticidad" },
+    { path: "state", label: "Resuelto" },
+    { path: "date", label: "Fecha" },
+  ],
+  limit: 200,
+};
+
+describe.skipIf(!dbAvailable)("buildExport against real data", () => {
+  it("produces a spreadsheet whose strip counts what the rows say", async () => {
+    const output = await buildExport({
+      config: generalConfig, role: ADMIN, format: "excel", title: "Reporte general",
+    });
+
+    expect(output.filename).toMatch(/^Reporte general_.+\.xlsx$/);
+    expect(output.contentType).toContain("spreadsheetml");
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(output.buffer as never);
+    const sheet = workbook.worksheets[0];
+
+    // The header block is fixed; the data begins on row 5.
+    expect(sheet.getCell(1, 1).value).toBe("Reporte general");
+    expect(sheet.rowCount).toBe(4 + output.rows);
+
+    const strip = (sheet.getCell(3, 1).value as ExcelJS.CellRichTextValue)
+      .richText.map((run) => run.text).join("");
+    expect(strip).toContain(`${output.rows.toLocaleString("es-BO")} eventos`);
+    expect(strip).toContain("resueltos");
+    expect(strip).toContain("críticos");
+  });
+
+  it("counts resolved and pending against the rows it actually wrote", async () => {
+    const output = await buildExport({
+      config: generalConfig, role: ADMIN, format: "excel", title: "Cuadre",
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(output.buffer as never);
+    const sheet = workbook.worksheets[0];
+
+    // Column 5 is "Resuelto"; recount it from the sheet itself.
+    let resolved = 0;
+    for (let row = 5; row < 5 + output.rows; row++) {
+      if (sheet.getCell(row, 5).value === "Sí") resolved += 1;
+    }
+    const strip = (sheet.getCell(3, 1).value as ExcelJS.CellRichTextValue)
+      .richText.map((run) => run.text).join("");
+
+    expect(strip).toContain(`${resolved.toLocaleString("es-BO")} resueltos`);
+    expect(strip).toContain(`${(output.rows - resolved).toLocaleString("es-BO")} pendientes`);
+  });
+
+  it("names the rows for what they are once the report is grouped", async () => {
+    // Grouped by tramo a row is a tramo, and the strip has to say so.
+    const output = await buildExport({
+      config: {
+        root: "evento",
+        columns: [
+          { path: "poste.tramo", label: "Tramo" },
+          { path: "id", agg: "count", label: "Eventos" },
+        ],
+        groupBy: ["poste.tramo"],
+        limit: 500,
+      },
+      role: ADMIN, format: "excel", title: "Por tramo",
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(output.buffer as never);
+    const strip = (workbook.worksheets[0].getCell(3, 1).value as ExcelJS.CellRichTextValue)
+      .richText.map((run) => run.text).join("");
+
+    expect(strip).toContain("eventos");
+    // An aggregate loses its meaning, so nothing pretends to be a state here.
+    expect(strip).not.toContain("resueltos");
+  });
+
+  it("produces a document from the same configuration", async () => {
+    const output = await buildExport({
+      config: generalConfig, role: ADMIN, format: "pdf", title: "Reporte general",
+    });
+
+    expect(output.filename).toMatch(/\.pdf$/);
+    expect(output.buffer.subarray(0, 5).toString()).toBe("%PDF-");
+    expect(output.photos).toBeNull();
+  });
+
+  it("refuses a report larger than one file can hold", async () => {
+    // The count runs first precisely so the rows are never read.
+    const everything: ReportConfig = {
+      root: "revision",
+      columns: [{ path: "id" }],
+      limit: MAX_EXPORT_ROWS,
+    };
+    const total = await buildExport({
+      config: everything, role: ADMIN, format: "pdf", title: "Todas",
+    }).then(() => null).catch((error: unknown) => error);
+
+    // 7.741 revisions is under the cap, so this must succeed rather than throw.
+    expect(total).toBeNull();
+
+    await expect(
+      buildExport({
+        config: everything, role: ADMIN, format: "pdf", title: "Todas",
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("survives asking for photographs that are not on this machine", async () => {
+    // Development has seventeen images; the database references production
+    // file names. Every miss must degrade to "Sí", not to an error.
+    const output = await buildExport({
+      config: {
+        root: "evento",
+        columns: [{ path: "poste.name" }, { path: "image", label: "Foto" }],
+        limit: 50,
+      },
+      role: ADMIN, format: "excel", title: "Con fotos", photos: true,
+    });
+
+    expect(output.photos).not.toBeNull();
+    expect(output.photos!.requested).toBeGreaterThan(0);
+    expect(output.buffer.length).toBeGreaterThan(1_000);
+  });
+
+  it("rejects a configuration the engine will not accept", async () => {
+    await expect(
+      buildExport({
+        config: { root: "no_existe", columns: [{ path: "id" }] },
+        role: ADMIN, format: "excel", title: "Malo",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("blames the bad column, not the size, when both are wrong", async () => {
+    // A count query never looks at the columns, so a large report naming a
+    // field that does not exist used to come back as "too many cells" and send
+    // the user to delete columns that were not the problem.
+    const paths = [
+      "id", "date", "description", "evento.description", "evento.state", "evento.date",
+      "evento.poste.name", "evento.poste.lat", "evento.poste.lng",
+      "evento.poste.propietario.name", "no_existe_1", "no_existe_2",
+    ];
+
+    await expect(
+      buildExport({
+        config: { root: "revision", columns: paths.map((path) => ({ path })), limit: 20000 },
+        role: ADMIN, format: "pdf", title: "Grande y mal",
+      }),
+    ).rejects.toThrow(/no existe en el catálogo/);
+  });
+});
+
+describe("export limits", () => {
+  it("lets through what actually fits", () => {
+    // Fisher's general report is about 1.376 rows and 11 columns.
+    expect(exceedsExportLimits(1_376, 11, "excel")).toBe(false);
+    expect(exceedsExportLimits(1_376, 11, "pdf")).toBe(false);
+    expect(exceedsExportLimits(20_000, 10, "excel")).toBe(false);
+  });
+
+  it("stops a report that is too tall whatever its width", () => {
+    expect(exceedsExportLimits(20_001, 1, "excel")).toBe(true);
+    expect(exceedsExportLimits(20_001, 1, "pdf")).toBe(true);
+  });
+
+  it("stops a report that is too wide even when it is short", () => {
+    // Measured: 5.000 × 40 costs the same 475 MB as 20.000 × 10. Cells, not rows.
+    expect(exceedsExportLimits(5_000, 41, "excel")).toBe(true);
+    expect(exceedsExportLimits(5_000, 40, "excel")).toBe(false);
+  });
+
+  it("holds the document to what a person can receive", () => {
+    // A PDF costs about 0,3 MB per thousand cells; 80.000 is roughly 25 MB,
+    // which is the largest attachment most mail servers accept.
+    expect(exceedsExportLimits(10_000, 10, "pdf")).toBe(true);
+    expect(exceedsExportLimits(8_000, 10, "pdf")).toBe(false);
+    // The same report fits comfortably as a spreadsheet.
+    expect(exceedsExportLimits(10_000, 10, "excel")).toBe(false);
+  });
+});
+
+describe("ExportTooLargeError", () => {
+  it("names the row limit when the report is simply too tall", () => {
+    const error = new ExportTooLargeError(50_000, 4, "excel");
+
+    expect(error.message).toContain("50.000");
+    expect(error.message).toContain("20.000");
+    expect(error.message).toContain("Filtre");
+  });
+
+  it("names both levers when it is the shape that does not fit", () => {
+    // Telling someone with sixty columns to "filter rows" sends them to fix
+    // the wrong thing.
+    const error = new ExportTooLargeError(5_000, 60, "excel");
+
+    expect(error.message).toContain("5.000 filas × 60 columnas");
+    expect(error.message).toContain("300.000 celdas");
+    expect(error.message).toContain("200.000");
+    expect(error.message).toMatch(/Quite columnas o filtre filas/);
+  });
+
+  it("says which format it could not fit into", () => {
+    expect(new ExportTooLargeError(10_000, 10, "pdf").message).toContain("documento");
+    expect(new ExportTooLargeError(10_000, 30, "excel").message).toContain("hoja de cálculo");
+  });
+});

@@ -11,7 +11,7 @@ export default [
             globals: globals.node,
             parser: parserTs,
             parserOptions: {
-                project: "./tsconfig.json",
+                project: "./tsconfig.check.json",
                 ecmaVersion: "latest",
                 sourceType: "module",
             },

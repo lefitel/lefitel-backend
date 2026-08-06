@@ -12,13 +12,22 @@ if (!process.env.JWT_SECRET) {
 
 const port = process.env.PORT || 3000;
 
-async function main() {
-  if (process.env.NODE_ENV !== "production") {
-    console.log(`--> Entorno: DEVELOPMENT <--`);
-  }
+/**
+ * Rewriting the schema to match the models is destructive: it drops and alters
+ * real columns. It used to run whenever NODE_ENV was not "production", which
+ * meant a container that merely forgot the variable reshaped the live database
+ * on every boot. Now it takes saying so, and the name says what it does.
+ *
+ * It also contradicts the migrations. Enable it only against a local database
+ * you are willing to lose.
+ */
+const shouldSyncSchema = process.env.DB_SYNC === "true";
 
-  const isDev = process.env.NODE_ENV !== "production";
-  if (isDev) {
+async function main() {
+  console.log(`--> Entorno: ${process.env.NODE_ENV ?? "sin definir"} <--`);
+
+  if (shouldSyncSchema) {
+    console.warn("--> DB_SYNC=true: sincronizando el esquema con los modelos <--");
     await sequelize.sync({ alter: true });
   } else {
     await sequelize.authenticate();

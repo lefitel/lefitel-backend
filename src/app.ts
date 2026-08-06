@@ -61,7 +61,7 @@ app.use(
     // x-new-token is not a CORS-safelisted response header, so without this the
     // browser cannot read it and the sliding session never renews: the server
     // was re-signing a JWT on every request and throwing it away.
-    exposedHeaders: ["x-new-token"],
+    exposedHeaders: ["x-new-token", "Content-Disposition"],
   }),
 );
 
@@ -152,7 +152,6 @@ app.use("/api/files", authenticateToken, requireRole(1), filesRoutes);
  * absolute filesystem paths whenever NODE_ENV is not "production". It also
  * broke the client, which expects `{message}` on every failure.
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: Error & { status?: number; type?: string }, _req: Request, res: Response, _next: NextFunction) => {
   console.error("[api]", err);
   if (err?.type === "entity.too.large") {

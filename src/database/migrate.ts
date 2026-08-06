@@ -1,6 +1,7 @@
 import { Umzug, SequelizeStorage } from "umzug";
+import { QueryTypes, type QueryInterface } from "sequelize";
 import { sequelize } from "./sequelize.js";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { join, dirname } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -9,17 +10,105 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // umzug silently finds zero migrations, reporting "nothing pending".
 const migrationsGlob = join(__dirname, "../migrations/*.{ts,js}").replace(/\\/g, "/");
 
+/** The same migration is a .ts source in development and a .js build artefact. */
+const withoutExtension = (name: string) => name.replace(/\.(ts|js)$/, "");
+
+interface MigrationModule {
+  up: (params: { context: QueryInterface }) => Promise<void>;
+  down: (params: { context: QueryInterface }) => Promise<void>;
+}
+
 export const migrator = new Umzug({
   migrations: {
     glob: migrationsGlob,
+    /**
+     * Records migrations without their extension.
+     *
+     * umzug keys its registry on the file name, extension included, so the very
+     * same migration was stored as "…-add-missing-fields.ts" after a local run
+     * and "…-add-missing-fields.js" after a deployed one. Each environment kept
+     * a separate history of identical work: this database holds both rows, which
+     * means that migration ran twice. Restoring a production dump locally would
+     * have replayed every migration in it.
+     */
+    resolve: ({ name, path, context }) => ({
+      name: withoutExtension(name),
+      up: async () => {
+        // pathToFileURL, not the bare path: Windows absolute paths are not valid
+        // import specifiers ("C:" reads as a protocol).
+        const migration: MigrationModule = await import(pathToFileURL(path!).href);
+        await migration.up({ context });
+      },
+      down: async () => {
+        const migration: MigrationModule = await import(pathToFileURL(path!).href);
+        await migration.down({ context });
+      },
+    }),
   },
   context: sequelize.getQueryInterface(),
   storage: new SequelizeStorage({ sequelize }),
   logger: console,
 });
 
+export interface NormalisationResult {
+  /** Rows removed because the same migration was recorded under both extensions. */
+  deduplicated: number;
+  /** Rows whose name lost its extension. */
+  renamed: number;
+}
+
+/**
+ * Rewrites registry rows written before names dropped their extension.
+ *
+ * Without this the new naming makes every past migration look pending and umzug
+ * replays it. Runs inside one transaction and is safe to repeat: after the first
+ * pass nothing matches. The table name is a parameter so it can be exercised
+ * against a scratch table instead of the real registry.
+ */
+export async function normaliseMigrationNames(
+  table = "SequelizeMeta",
+): Promise<NormalisationResult> {
+  const none: NormalisationResult = { deduplicated: 0, renamed: 0 };
+  const quoted = `"${table.replace(/"/g, '""')}"`;
+
+  const [present] = await sequelize.query<{ present: string | null }>(
+    `SELECT to_regclass('${quoted}')::text AS present`,
+    { type: QueryTypes.SELECT },
+  );
+  if (!present?.present) return none;
+
+  const result = await sequelize.transaction(async (transaction) => {
+    // Drop the duplicate first: the column is the primary key, so stripping the
+    // extension off both rows of a pair would collide. ".js" sorts before ".ts",
+    // and which one survives does not matter — they describe the same work.
+    const deduplicated = await sequelize.query(
+      `DELETE FROM ${quoted} a
+         USING ${quoted} b
+        WHERE regexp_replace(a.name, '\\.(ts|js)$', '') = regexp_replace(b.name, '\\.(ts|js)$', '')
+          AND a.name > b.name`,
+      { transaction, type: QueryTypes.BULKDELETE },
+    ) as unknown as number;
+    const renamed = await sequelize.query(
+      `UPDATE ${quoted}
+          SET name = regexp_replace(name, '\\.(ts|js)$', '')
+        WHERE name ~ '\\.(ts|js)$'`,
+      { transaction, type: QueryTypes.BULKUPDATE },
+    ) as unknown as number;
+    return { deduplicated, renamed };
+  });
+
+  if (result.deduplicated > 0 || result.renamed > 0) {
+    console.log(
+      `--> Registro de migraciones normalizado: ${result.deduplicated} duplicada(s), ` +
+      `${result.renamed} renombrada(s) <--`,
+    );
+  }
+  return result;
+}
+
 async function runMigrations() {
   await sequelize.authenticate();
+  await normaliseMigrationNames();
   const applied = await migrator.up();
   if (applied.length === 0) {
     console.log("--> No hay migraciones pendientes <--");
@@ -30,7 +119,14 @@ async function runMigrations() {
   await sequelize.close();
 }
 
-runMigrations().catch((err) => {
-  console.error("Migration failed:", err);
-  process.exit(1);
-});
+// Only when executed directly. Importing this module from a test must not run
+// migrations as a side effect.
+const executedDirectly = process.argv[1]
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (executedDirectly) {
+  runMigrations().catch((err) => {
+    console.error("Migration failed:", err);
+    process.exit(1);
+  });
+}

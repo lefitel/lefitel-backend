@@ -454,6 +454,16 @@ describe("buildCountQuery", () => {
     );
     expect(sql).toContain("GROUP BY");
   });
+
+  it("refuses a configuration that is not one, rather than throwing a TypeError", () => {
+    // The export path counts before it reads, so this is the first function to
+    // touch the request body. A missing configuration used to arrive here as a
+    // TypeError and leave the API as a 500 instead of a 400.
+    for (const bad of [undefined, null, "evento", 42, []]) {
+      expect(() => buildCountQuery(bad as never, ADMIN))
+        .toThrow(/configuración del reporte no es válida/i);
+    }
+  });
 });
 
 describe("buildQuery — deterministic paging", () => {

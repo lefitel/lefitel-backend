@@ -195,18 +195,15 @@ export async function createEvento(req: Request, res: Response) {
 
     let obsLabel: string | null = null;
     if (Array.isArray(obs_ids) && obs_ids.length > 0) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const obsRows = await (ObsModel as any).findAll({
+      const obsRows = await ObsModel.findAll({
         where: { id: obs_ids },
         attributes: ["name"],
         paranoid: false,
       });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      obsLabel = obsRows.map((r: any) => r.dataValues.name).join(", ") || null;
+      obsLabel = obsRows.map((r) => r.dataValues.name).join(", ") || null;
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const posteRow = eventoBody.id_poste != null ? await (PosteModel as any).findByPk(eventoBody.id_poste, { attributes: ["id", "name"], paranoid: false }) : null;
+    const posteRow = eventoBody.id_poste != null ? await PosteModel.findByPk(eventoBody.id_poste, { attributes: ["id", "name"], paranoid: false }) : null;
     const posteRef = posteRow ? { id: posteRow.dataValues.id, name: posteRow.dataValues.name } : (eventoBody.id_poste ?? null);
     logAction({
       id_usuario: req.user?.id,
@@ -256,10 +253,9 @@ export async function updateEvento(req: Request, res: Response) {
     // the audit log as if it had.
     const postePresent = Object.hasOwn(bodyWithoutObs, "id_poste");
     if (postePresent && bvPoste !== undefined && bvPoste !== avPoste) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fkRef = async (pkVal: number | null | undefined) => {
         if (pkVal == null) return null;
-        const row = await (PosteModel as any).findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
+        const row = await PosteModel.findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
         return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
       };
       [beforeMeta["id_poste"], afterMeta["id_poste"]] = await Promise.all([fkRef(bvPoste), fkRef(avPoste)]);
@@ -271,28 +267,21 @@ export async function updateEvento(req: Request, res: Response) {
       await TempEvento.save({ transaction: t });
 
       if (Array.isArray(obs_ids)) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const currentEventoObs = await (EventoObsModel as any).findAll({ where: { id_evento: id }, transaction: t });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const currentIds = currentEventoObs.map((eo: any) => eo.dataValues.id_obs as number);
+        const currentEventoObs = await EventoObsModel.findAll({ where: { id_evento: id }, transaction: t });
+        const currentIds = currentEventoObs.map((eo) => eo.dataValues.id_obs as number);
         const toAdd = (obs_ids as number[]).filter((oid) => !currentIds.includes(oid));
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toRemove = currentEventoObs.filter((eo: any) => !(obs_ids as number[]).includes(eo.dataValues.id_obs as number));
+        const toRemove = currentEventoObs.filter((eo) => !(obs_ids as number[]).includes(eo.dataValues.id_obs as number));
 
         if (toAdd.length > 0 || toRemove.length > 0) {
           const allIds = [...new Set([...currentIds, ...(obs_ids as number[])])];
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const allRows = await (ObsModel as any).findAll({ where: { id: allIds }, attributes: ["id", "name"], paranoid: false, transaction: t });
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const nameMap = new Map(allRows.map((r: any) => [r.dataValues.id as number, r.dataValues.name as string]));
+          const allRows = await ObsModel.findAll({ where: { id: allIds }, attributes: ["id", "name"], paranoid: false, transaction: t });
+          const nameMap = new Map(allRows.map((r) => [r.dataValues.id as number, r.dataValues.name as string]));
           const beforeObs = currentIds.map((oid: number) => nameMap.get(oid)).filter(Boolean).join(", ");
           const afterObs = (obs_ids as number[]).map((oid) => nameMap.get(oid)).filter(Boolean).join(", ");
 
           await Promise.all([
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ...toAdd.map((id_obs: number) => (EventoObsModel as any).create({ id_obs, id_evento: Number(id) }, { transaction: t })),
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ...toRemove.map((eo: any) => eo.destroy({ transaction: t })),
+            ...toAdd.map((id_obs: number) => EventoObsModel.create({ id_obs, id_evento: Number(id) }, { transaction: t })),
+            ...toRemove.map((eo) => eo.destroy({ transaction: t })),
           ]);
 
           obsLogData = { before: beforeObs || null, after: afterObs || null };
@@ -388,8 +377,7 @@ export async function resolverEvento(req: Request, res: Response) {
       await evento.save({ transaction: t });
     });
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const posteRow = evento.dataValues.id_poste != null ? await (PosteModel as any).findByPk(evento.dataValues.id_poste, { attributes: ["id", "name"], paranoid: false }) : null;
+    const posteRow = evento.dataValues.id_poste != null ? await PosteModel.findByPk(evento.dataValues.id_poste, { attributes: ["id", "name"], paranoid: false }) : null;
     const posteRef = posteRow ? { id: posteRow.dataValues.id, name: posteRow.dataValues.name } : (evento.dataValues.id_poste ?? null);
 
     logAction({
