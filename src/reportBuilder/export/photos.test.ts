@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { loadPhotos, compressLogo, PHOTO_MAX_PX } from "./photos.js";
 
 const require = createRequire(import.meta.url);
 const sharp = require("sharp") as typeof import("sharp");
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 let directory: string;
 
@@ -126,10 +128,14 @@ describe("compressLogo", () => {
   it("brings a logo down to the size it is drawn at", async () => {
     // logo.png is 512×512 and 196 KB, and jsPDF stores it uncompressed: every
     // report the system has produced carries about a megabyte of logo.
-    const source = path.resolve("../TSfrontend/src/assets/images/logo.png");
+    //
+    // Resolved from this file rather than the working directory, and from this
+    // repository's own copy of the asset: reaching into the sibling checkout
+    // made the assertion vanish silently whenever it was absent or renamed.
+    const source = path.resolve(here, "../../assets/images/logo.png");
     const buffer = await compressLogo(source, 200);
+    if (buffer === null) throw new Error(`no está el logo en ${source}`);
 
-    if (buffer === null) return; // the frontend is not checked out beside this one
     expect(buffer.length).toBeLessThan(30_000);
     const meta = await sharp(buffer).metadata();
     expect(meta.width).toBe(200);
