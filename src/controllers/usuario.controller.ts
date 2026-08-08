@@ -71,7 +71,7 @@ export async function updateUsuario(req: Request, res: Response) {
   const loggedUser = req.user;
 
   // Validación de Permisos (IDOR protection)
-  if (loggedUser && loggedUser.id !== Number(id) && loggedUser.id_rol !== 1) {
+  if (!loggedUser || (loggedUser.id !== Number(id) && loggedUser.id_rol !== 1)) {
     return res.status(403).json({ message: "No tienes permiso para modificar la información de este usuario." });
   }
 
@@ -115,7 +115,7 @@ export async function updateUserName(req: Request, res: Response) {
   const loggedUser = req.user;
 
   // Validación de Permisos (IDOR protection)
-  if (loggedUser && loggedUser.id !== Number(id) && loggedUser.id_rol !== 1) {
+  if (!loggedUser || (loggedUser.id !== Number(id) && loggedUser.id_rol !== 1)) {
     return res.status(403).json({ message: "No tienes permiso para editar este usuario." });
   }
 
@@ -146,7 +146,7 @@ export async function updateUserPass(req: Request, res: Response) {
   const loggedUser = req.user;
 
   // Validación de Permisos (IDOR protection)
-  if (loggedUser && loggedUser.id !== Number(id) && loggedUser.id_rol !== 1) {
+  if (!loggedUser || (loggedUser.id !== Number(id) && loggedUser.id_rol !== 1)) {
     return res.status(403).json({ message: "No tienes permiso para editar la contraseña de este usuario." });
   }
 

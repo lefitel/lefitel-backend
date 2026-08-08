@@ -13,6 +13,7 @@
     "migrate": "tsx src/database/migrate.ts",
     "migrate:deploy": "node dist/database/migrate.js",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "bench:export": "tsx --expose-gc scripts/bench-export.mjs",
     "bench:photos": "tsx --expose-gc scripts/bench-photos.mjs"
@@ -49,6 +50,7 @@
     "@types/node": "^25.4.0",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^10.0.3",
     "globals": "^17.4.0",
     "tsx": "^4.21.0",
