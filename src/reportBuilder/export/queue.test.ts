@@ -54,9 +54,10 @@ describe("SingleSlot", () => {
     const task = deferred();
     const running = slot.run(() => task.promise);
 
-    await slot.run(async () => "x").catch((error: ExportBusyError) => {
-      expect(error.message).toContain("exportación en curso");
-    });
+    // `rejects`, not `.catch(cb)`: with a callback, a `run` that resolved
+    // instead of rejecting would skip the assertion and the test would pass
+    // having checked nothing.
+    await expect(slot.run(async () => "x")).rejects.toThrow(/exportación en curso/);
 
     task.resolve("hecho");
     await running;

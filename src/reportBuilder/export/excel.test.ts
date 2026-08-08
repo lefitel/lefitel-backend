@@ -209,11 +209,50 @@ describe("buildExcel with photographs", () => {
     await workbook.xlsx.load(buffer as never);
     const sheet = workbook.worksheets[0];
 
-    // One drawing for the photograph, plus the two logos.
-    expect(sheet.getImages().length).toBeGreaterThanOrEqual(1);
+    // Exactly one drawing for the photograph plus one for the Osefi logo. Tigo
+    // is skipped because this fixture is two columns wide. The count has to be
+    // exact: `>= 1` is satisfied by the logo alone, so it passed with photo
+    // embedding removed entirely.
+    expect(sheet.getImages().length).toBe(2);
     // The row without an image says so; it never writes the stored path, which
     // would be a publicly fetchable URL.
     expect(sheet.getCell(6, 2).value).toBe("Sí");
+  });
+
+  it("stores one copy of a photograph however many rows show it", async () => {
+    // ExcelJS does not deduplicate: `addImage` pushes and returns a new id every
+    // call. Called once per row, a report where rows share a photograph carried
+    // one copy of the JPEG per row — 38,6 MB and 425 MB of RSS on the live data
+    // where 0,12 MB was enough.
+    const shared = Buffer.from("no-es-un-jpeg-real");
+    const manyRows = Array.from({ length: 20 }, (_, i) => ({ c0: `P-${i}`, foto: "/uno.webp" }));
+
+    const buffer = await buildExcel({
+      ...base,
+      columns: photoColumns,
+      rows: manyRows,
+      photos: { images: new Map([["/uno.webp", shared]]), requested: 20, loaded: 20, skipped: 0 },
+    });
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer as never);
+
+    // Twenty-one drawings on the sheet — one per row, plus the logo — but only
+    // two images in the workbook. That gap is the whole point: before, the
+    // media list grew with the rows.
+    expect(workbook.worksheets[0].getImages().length).toBe(21);
+    expect(workbook.model.media.length).toBe(2);
+  });
+
+  it("draws only the logo when no photographs were loaded", async () => {
+    // The control that gives the count above its meaning: the difference
+    // between these two numbers is the photograph.
+    const buffer = await buildExcel({
+      ...base, columns: photoColumns, rows: photoRows, photos: null,
+    });
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer as never);
+
+    expect(workbook.worksheets[0].getImages().length).toBe(1);
   });
 
   it("makes the row tall enough to see the photograph", async () => {

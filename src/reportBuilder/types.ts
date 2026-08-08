@@ -60,6 +60,17 @@ export interface RelationDef {
   label: string;
   /** For toOne: the FK column on the source entity. */
   localKey?: string;
+  /**
+   * The row has no meaning without this parent, so archiving the parent
+   * archives it too.
+   *
+   * A paranoid `LEFT JOIN` only blanks the parent's columns; the child row
+   * survives. That is right for an optional relation and wrong for a required
+   * one: rooted at `revision`, 404 revisions of 138 archived events kept being
+   * counted, and arrived in the listing with every event column empty, reading
+   * as a data-quality problem rather than as records that were deleted.
+   */
+  required?: boolean;
   /** For toMany / toOneLatest: the FK column on the target entity. */
   foreignKey?: string;
   /** For toOneLatest: column used to pick the most recent row. */

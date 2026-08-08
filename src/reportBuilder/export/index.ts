@@ -127,7 +127,12 @@ export async function buildExport(request: ExportRequest): Promise<ExportOutput>
   }
 
   const result = await runReport({ ...config, offset: 0, limit: MAX_EXPORT_ROWS }, role);
-  const noun = rowNoun(config.root);
+  // Grouping changes what a row is, so the root's noun stops being true: over a
+  // report grouped by tramo it said "89 eventos" about 89 tramos. `catalogView`
+  // states the rule and this call ignored it. "grupos" is less informative than
+  // naming the entity, and it has the advantage of never being a lie — the
+  // table underneath carries the detail.
+  const noun = (config.groupBy?.length ?? 0) > 0 ? "grupos" : rowNoun(config.root);
   const title = request.title.trim() || "Reporte";
   const subtitle = request.subtitle?.trim() || null;
 

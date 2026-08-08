@@ -5,9 +5,12 @@
 // are the ones already proven there.
 
 import type { FieldKind } from "../types.js";
+import { REPORT_TIME_ZONE } from "../catalog.js";
 
-/** Every date in a report is read in Bolivia, wherever the server happens to run. */
-export const REPORT_TIME_ZONE = "America/La_Paz";
+// The zone belongs to the engine, not to this module: the builder filters by it
+// and these formatters render by it, and the two drifting apart is what let a
+// filter and the cell it produced disagree about which day a row belongs to.
+export { REPORT_TIME_ZONE };
 
 const dateFormatter = new Intl.DateTimeFormat("es-BO", {
   day: "2-digit",
@@ -113,18 +116,58 @@ export function toWinAnsi(text: string): string {
   return out;
 }
 
+const stampFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: REPORT_TIME_ZONE,
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+/**
+ * The wall clock in the zone the report is read in.
+ *
+ * The stamp and the heading used to come from the server's own clock. The
+ * runtime image sets no `TZ`, so production runs in UTC and every export made
+ * after 20:00 in Bolivia was headed and named with the following day — while
+ * the rows, the log entry and the user's screen all said today.
+ */
+function zonedParts(now: Date): Record<string, string> {
+  const parts: Record<string, string> = {};
+  for (const part of stampFormatter.formatToParts(now)) parts[part.type] = part.value;
+  // ICU renders midnight as hour 24 under h23/h24 conventions.
+  if (parts.hour === "24") parts.hour = "00";
+  return parts;
+}
+
+/** "Generado el" line, in the zone the reader is in. */
+export function reportDateLabel(now = new Date()): string {
+  const { day, month, year } = zonedParts(now);
+  return `${day}/${month}/${year}`;
+}
+
 /**
  * File name for an exported report: title, then a timestamp down to the second
  * so two exports in the same minute do not collide.
  */
-export function reportFileName(title: string, extension: string): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const now = new Date();
-  const stamp = `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}` +
-    `_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+export function reportFileName(title: string, extension: string, now = new Date()): string {
+  const { day, month, year, hour, minute, second } = zonedParts(now);
+  const stamp = `${day}-${month}-${year}_${hour}-${minute}-${second}`;
   // Strip the forbidden characters, then check what is left: a title made only
   // of slashes used to become "---" rather than falling back.
   const cleaned = title.replace(/[/:*?"<>|\\]/g, " ").replace(/\s+/g, " ").trim();
-  const base = (cleaned || "Reporte").slice(0, 60);
-  return `${base}_${stamp}.${extension}`;
+  // Cutting is itself what splits a surrogate pair, so the half-character is
+  // removed after the cut and not before — and there are two cuts, the 120 the
+  // controller applies to the title and the 60 here. A lone surrogate is
+  // neither whitespace nor forbidden, so it survived to `encodeURIComponent`,
+  // which throws on it: a title ending in an emoji became a 500 raised after
+  // the entire file had already been built.
+  const base = cleaned
+    .slice(0, 60)
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+    .trim();
+  return `${base || "Reporte"}_${stamp}.${extension}`;
 }

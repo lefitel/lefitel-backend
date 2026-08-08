@@ -109,7 +109,11 @@ function collect(
       kind: calc.kind,
       group,
       operators: OPERATORS_BY_KIND[calc.kind],
-      aggregates: AGGS_BY_KIND[calc.kind],
+      // A total reached through a relation belongs to that entity's grain, not
+      // to the report's, so summarising it counts the same subquery once per
+      // row — a poste with n events contributed n². The builder refuses it, and
+      // by the rule just above, a picker that offers it is offering an error.
+      aggregates: calc.innerAgg !== undefined && prefix ? [] : AGGS_BY_KIND[calc.kind],
       calculated: true,
       semantic: calc.semantic,
       aggregate: calc.innerAgg !== undefined,

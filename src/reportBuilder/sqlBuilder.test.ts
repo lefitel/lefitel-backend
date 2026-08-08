@@ -152,12 +152,30 @@ describe("buildQuery — filters and binds", () => {
       }),
       ADMIN,
     );
-    expect(sql).toMatch(/>= \$\d+ AND .* < \(\$\d+::date \+ interval '1 day'\)/);
+    expect(sql).toMatch(
+      />= \(\$\d+::date AT TIME ZONE 'America\/La_Paz'\) AND .* < \(\(\$\d+::date \+ interval '1 day'\) AT TIME ZONE 'America\/La_Paz'\)/,
+    );
     expect(binds).toContain("2026-01-01");
     expect(binds).toContain("2026-06-30");
   });
 
-  it("keeps plain BETWEEN when the bound carries a time", () => {
+  it("reads a bare date in the zone the report is read in, not the session's", () => {
+    // The columns are `timestamp with time zone` and the session runs in UTC,
+    // so a bare date used to mean a UTC day while every rendered cell showed a
+    // Bolivian one. 362 of 1.376 events — 26% — fell on different days under
+    // the two readings.
+    const { sql } = buildQuery(
+      base({ filters: { op: "and", conditions: [{ path: "date", operator: "eq", value: "2024-05-23" }] } }),
+      ADMIN,
+    );
+
+    expect(sql).toContain("AT TIME ZONE 'America/La_Paz'");
+    // The column stays bare so an index on it still applies; only the bounds
+    // are converted.
+    expect(sql).not.toMatch(/t0\."date" AT TIME ZONE/);
+  });
+
+  it("compares a bound that carries a time as the instant it is", () => {
     const { sql } = buildQuery(
       base({
         filters: {
@@ -169,7 +187,11 @@ describe("buildQuery — filters and binds", () => {
       }),
       ADMIN,
     );
-    expect(sql).toMatch(/BETWEEN \$\d+ AND \$\d+/);
+
+    // Only the bare lower bound becomes a day boundary. Widening an instant the
+    // user wrote to the second would move the edge they asked for.
+    expect(sql).toMatch(/<= \$\d+/);
+    expect(sql).not.toContain("interval '1 day'");
   });
 
   it("treats lte and gt on a bare date as whole days", () => {
@@ -177,13 +199,97 @@ describe("buildQuery — filters and binds", () => {
       base({ filters: { op: "and", conditions: [{ path: "date", operator: "lte", value: "2026-06-30" }] } }),
       ADMIN,
     ).sql;
-    expect(lte).toMatch(/< \(\$\d+::date \+ interval '1 day'\)/);
+    expect(lte).toMatch(/< \(\(\$\d+::date \+ interval '1 day'\) AT TIME ZONE 'America\/La_Paz'\)/);
 
     const gt = buildQuery(
       base({ filters: { op: "and", conditions: [{ path: "date", operator: "gt", value: "2026-06-30" }] } }),
       ADMIN,
     ).sql;
-    expect(gt).toMatch(/>= \(\$\d+::date \+ interval '1 day'\)/);
+    expect(gt).toMatch(/>= \(\(\$\d+::date \+ interval '1 day'\) AT TIME ZONE 'America\/La_Paz'\)/);
+  });
+
+  it("makes neq on a bare date the exact complement of eq", () => {
+    // `eq` covered the whole day and `neq` compared a single instant, so the
+    // two did not partition the set: "distinta del 24 de mayo" returned all
+    // 1.376 events, the six of that day included.
+    const { sql } = buildQuery(
+      base({ filters: { op: "and", conditions: [{ path: "date", operator: "neq", value: "2024-05-24" }] } }),
+      ADMIN,
+    );
+
+    expect(sql).toMatch(/t0\."date" IS NULL OR .* < \(\$\d+::date AT TIME ZONE/);
+    expect(sql).toMatch(/OR .* >= \(\(\$\d+::date \+ interval '1 day'\) AT TIME ZONE/);
+  });
+
+  it("refuses to re-total a count that belongs to another entity", () => {
+    // `poste.numEventos` counts a poste's events. Read once per event row and
+    // summed, a poste with n events contributed n²: "Total de eventos" showed
+    // 75 beside a COUNT of 73 on the same line. Refused rather than computed —
+    // the honest number needs a grain the configuration cannot express, and a
+    // plausible-looking squared count is the worse of the two failures.
+    expect(() =>
+      buildQuery(
+        {
+          root: "evento",
+          columns: [{ path: "poste.name" }, { path: "poste.numEventos", agg: "count" }],
+          groupBy: ["poste.name"],
+        },
+        ADMIN,
+      ),
+    ).toThrow(/ya es un total de otra entidad/);
+  });
+
+  it("still totals a count that belongs to the root itself", () => {
+    // Rooted at poste there is one row per poste, so summing is exactly right.
+    expect(() =>
+      buildQuery(
+        {
+          root: "poste",
+          columns: [{ path: "material.name" }, { path: "numEventos", agg: "sum" }],
+          groupBy: ["material.name"],
+        },
+        ADMIN,
+      ),
+    ).not.toThrow();
+  });
+
+  it("excludes rows whose required parent was archived", () => {
+    // A revision belongs to an event, so archiving the event archives it. The
+    // paranoid LEFT JOIN could not say that — it blanked the event's columns
+    // and kept the row — and it only existed when the report mentioned the
+    // event at all, so the guard has to stand on its own.
+    const { sql } = buildQuery({ root: "revision", columns: [{ path: "id" }] }, ADMIN);
+
+    expect(sql).toContain('EXISTS (SELECT 1 FROM "eventos" p');
+    expect(sql).toContain('p."deletedAt" IS NULL');
+  });
+
+  it("counts and lists under the same guard", () => {
+    // The total sits above the rows it describes; if only one of the two
+    // builders carried the guard they would stop agreeing.
+    const config = { root: "revision", columns: [{ path: "id" }] };
+
+    expect(buildCountQuery(config, ADMIN).sql).toContain('EXISTS (SELECT 1 FROM "eventos" p');
+  });
+
+  it("leaves an optional parent alone", () => {
+    // An event has no required parent: a poste is optional, and losing one must
+    // not remove the event from its own report.
+    const { sql } = buildQuery({ root: "evento", columns: [{ path: "id" }] }, ADMIN);
+
+    expect(sql).not.toContain("EXISTS (SELECT 1 FROM");
+  });
+
+  it("escapes the wildcards a person types into a contains filter", () => {
+    // Unescaped, "contiene %" matched every row in the table and "contiene a_e"
+    // matched "abe". The wildcards belong to the operator, not to the text.
+    const { sql, binds } = buildQuery(
+      base({ filters: { op: "and", conditions: [{ path: "description", operator: "like", value: "100%_x" }] } }),
+      ADMIN,
+    );
+
+    expect(binds).toContain("%100\\%\\_x%");
+    expect(sql).toContain("ESCAPE '\\'");
   });
 
   it("uses IS DISTINCT FROM for neq so nulls are not silently dropped", () => {

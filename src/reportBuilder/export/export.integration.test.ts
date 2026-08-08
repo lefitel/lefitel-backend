@@ -98,9 +98,40 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
     const strip = (workbook.worksheets[0].getCell(3, 1).value as ExcelJS.CellRichTextValue)
       .richText.map((run) => run.text).join("");
 
-    expect(strip).toContain("eventos");
+    // Eighty-nine rows, and each one is a tramo. Saying "89 eventos" — which
+    // this test used to require — is false twice over: they are not events, and
+    // there are 1.376 of those. The count has to describe what is on the page.
+    expect(strip).toMatch(/^89 grupos$/);
+    expect(strip).not.toContain("eventos");
     // An aggregate loses its meaning, so nothing pretends to be a state here.
     expect(strip).not.toContain("resueltos");
+  });
+
+  it("does not read a group key as if it were a record's state", async () => {
+    // Grouped by state there are two rows, one per value. Reading the group key
+    // per row counted groups and printed "2 eventos · 1 resueltos · 1
+    // pendientes" over a report whose truth was 1.376, 938 and 438 — the
+    // headline of a management report, wrong by three orders of magnitude.
+    const output = await buildExport({
+      config: {
+        root: "evento",
+        columns: [
+          { path: "state", label: "Resuelto" },
+          { path: "id", agg: "count", label: "Eventos" },
+        ],
+        groupBy: ["state"],
+        limit: 500,
+      },
+      role: ADMIN, format: "excel", title: "Por estado",
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(output.buffer as never);
+    const strip = (workbook.worksheets[0].getCell(3, 1).value as ExcelJS.CellRichTextValue)
+      .richText.map((run) => run.text).join("");
+
+    expect(strip).not.toContain("resueltos");
+    expect(strip).not.toContain("pendientes");
   });
 
   it("produces a document from the same configuration", async () => {
@@ -114,23 +145,23 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
   });
 
   it("refuses a report larger than one file can hold", async () => {
-    // The count runs first precisely so the rows are never read.
-    const everything: ReportConfig = {
+    // The cap counts cells, so the same rows fit or do not depending on width.
+    // These two configurations differ only in that, which is what makes the
+    // pair worth having: the wide one must be refused and the narrow one must
+    // succeed. Asserting only that something succeeds would pass with the
+    // check deleted, which is what this test used to do.
+    const wide = (count: number): ReportConfig => ({
       root: "revision",
-      columns: [{ path: "id" }],
+      columns: Array.from({ length: count }, () => ({ path: "id" })),
       limit: MAX_EXPORT_ROWS,
-    };
-    const total = await buildExport({
-      config: everything, role: ADMIN, format: "pdf", title: "Todas",
-    }).then(() => null).catch((error: unknown) => error);
-
-    // 7.741 revisions is under the cap, so this must succeed rather than throw.
-    expect(total).toBeNull();
+    });
 
     await expect(
-      buildExport({
-        config: everything, role: ADMIN, format: "pdf", title: "Todas",
-      }),
+      buildExport({ config: wide(60), role: ADMIN, format: "pdf", title: "Todas" }),
+    ).rejects.toThrow(ExportTooLargeError);
+
+    await expect(
+      buildExport({ config: wide(5), role: ADMIN, format: "pdf", title: "Todas" }),
     ).resolves.toBeTruthy();
   });
 

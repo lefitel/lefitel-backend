@@ -6,7 +6,7 @@
 // closed set. Errors carry user-facing Spanish messages, because they surface
 // directly in the report builder UI.
 
-import { catalog, MAX_DEPTH, MAX_ROWS } from "./catalog.js";
+import { catalog, MAX_DEPTH, MAX_ROWS, REPORT_TIME_ZONE } from "./catalog.js";
 import {
   AGGS_BY_KIND,
   AGG_LABEL,
@@ -75,6 +75,15 @@ interface ResolvedExpr {
   selfAggregating: boolean;
   /** Which aggregate the subquery uses, when it is one. */
   innerAgg?: AggFn;
+  /**
+   * True when the expression is a total belonging to another entity, reached
+   * through a relation.
+   *
+   * Such a value repeats once per row of the root, so summarising it counts the
+   * same subquery over and over: a poste with *n* events contributed *n²*, and
+   * "Total de eventos" read 75 beside a `COUNT` of 73 on the very same line.
+   */
+  foreignGrain?: boolean;
   /** Expressions to GROUP BY when grouping by this value; defaults to [sql]. */
   groupKeys?: string[];
   /** Domain meaning, forwarded to the client for presentation. */
@@ -137,6 +146,34 @@ const notDeleted = (entity: EntityDef, alias: string): string =>
   entity.paranoid ? ` AND ${alias}.${quote("deletedAt")} IS NULL` : "";
 
 /**
+ * Excludes rows whose required parent has been archived.
+ *
+ * The root's own `deletedAt IS NULL` is not enough: a revision belongs to an
+ * event, and archiving the event archives the revision in every sense a report
+ * cares about. A paranoid `LEFT JOIN` cannot express that — it blanks the
+ * parent's columns and keeps the row — and the join only exists at all when the
+ * report happens to mention the parent, so the guard has to be unconditional.
+ *
+ * Rooted at `revision` this was 404 rows of 138 archived events, and at
+ * `eventoObs` 141 of 1.563: counted in every total, and shown in the listing
+ * with every event column empty, which reads as missing data rather than as
+ * records someone deleted on purpose.
+ */
+function requiredParentGuards(entity: EntityDef, alias: string): string {
+  let sql = "";
+  for (const relation of Object.values(entity.relations)) {
+    if (!relation.required || relation.kind !== "toOne" || !relation.localKey) continue;
+    const parent = entityOrThrow(relation.target);
+    if (!parent.paranoid) continue;
+    sql +=
+      ` AND EXISTS (SELECT 1 FROM ${quote(parent.table)} p` +
+      ` WHERE p.${quote("id")} = ${alias}.${quote(relation.localKey)}` +
+      `${notDeleted(parent, "p")})`;
+  }
+  return sql;
+}
+
+/**
  * Walks a chain of to-one relations, registering the JOINs it needs, and
  * returns where it landed. Stops before the final segment, which is the field.
  */
@@ -188,6 +225,15 @@ function walkToOne(
           "id",
           ...Object.values(target.fields).map((f) => f.column),
           relation.latestBy!,
+          // The keys the target's own to-one relations join on. Projecting only
+          // the catalogued fields left them out, so every path that hopped
+          // onward from here — `ultimaRevision.evento.*`, 62 of the 245 pairs
+          // the catalog advertises — joined against a column this subquery does
+          // not return. The picker offered them, saving validated them, and
+          // running one answered 500 for good.
+          ...Object.values(target.relations ?? {})
+            .map((r) => r.localKey)
+            .filter((key): key is string => typeof key === "string"),
         ])].map((c) => `x.${quote(c)}`).join(", ");
         return (
           `LEFT JOIN LATERAL (SELECT ${projected} FROM ${quote(target.table)} x` +
@@ -367,6 +413,9 @@ function resolvePath(
       // treatment as a to-many aggregate when it is summarised.
       selfAggregating: calculated.innerAgg !== undefined,
       innerAgg: calculated.innerAgg,
+      // A non-empty base path means the total was reached through a relation,
+      // so it counts at that entity's grain rather than the report's.
+      foreignGrain: calculated.innerAgg !== undefined && basePath !== "",
       semantic: calculated.semantic,
       groupKeys: calculated.groupKeys?.(landing.alias, dep),
     };
@@ -489,11 +538,19 @@ function buildCondition(
   };
 
   /**
-   * Exclusive upper bound for a calendar day: everything strictly before the
-   * next midnight. Every date column is `timestamp with time zone`, so
-   * comparing against a bare date dropped the whole final day of a range.
+   * The instant a calendar day begins, and the instant the next one does, in
+   * the zone every report is read in.
+   *
+   * Every date column is `timestamp with time zone`. `date AT TIME ZONE zone`
+   * reads a bare date as a wall clock there and yields the instant it stands
+   * for, so "el 23 de mayo" means the day the report prints rather than the day
+   * the database session happens to be in — those disagreed for 26% of the
+   * events. Converting the bounds and not the column is deliberate: it leaves
+   * the column bare, so an index on it still applies.
    */
-  const dayAfter = (v: unknown) => `(${bind(v)}::date + interval '1 day')`;
+  const dayStart = (v: unknown) => `(${bind(v)}::date AT TIME ZONE '${REPORT_TIME_ZONE}')`;
+  const dayEnd = (v: unknown) =>
+    `((${bind(v)}::date + interval '1 day') AT TIME ZONE '${REPORT_TIME_ZONE}')`;
   const isDate = resolved.kind === "date";
 
   switch (operator) {
@@ -503,8 +560,14 @@ function buildCondition(
           `El filtro "entre" sobre "${resolved.label}" necesita dos valores.`,
         );
       }
-      if (isDate && isPlainDate(value[1])) {
-        return `${expr} >= ${bind(value[0])} AND ${expr} < ${dayAfter(value[1])}`;
+      if (isDate) {
+        // Each end on its own: the client sends plain dates, but a stored
+        // configuration may carry a full instant on one side. A plain date
+        // closes on the next midnight, an instant closes on itself.
+        const from = isPlainDate(value[0]) ? dayStart(value[0]) : bind(value[0]);
+        const closes = isPlainDate(value[1]) ? "<" : "<=";
+        const to = isPlainDate(value[1]) ? dayEnd(value[1]) : bind(value[1]);
+        return `${expr} >= ${from} AND ${expr} ${closes} ${to}`;
       }
       return `${expr} BETWEEN ${bind(value[0])} AND ${bind(value[1])}`;
     }
@@ -525,24 +588,35 @@ function buildCondition(
       if (typeof value !== "string") {
         throw new ReportConfigError(`El filtro de texto sobre "${resolved.label}" no es válido.`);
       }
-      return `${expr} ILIKE ${bind(`%${value}%`)}`;
+      // The wildcards belong to the operator, not to what a person typed:
+      // unescaped, "contiene %" matched every row and "contiene a_e" matched
+      // "abe". The backslash has to be escaped first or it would escape the
+      // escapes.
+      const literal = value.replace(/[\\%_]/g, "\\$&");
+      return `${expr} ILIKE ${bind(`%${literal}%`)} ESCAPE '\\'`;
     }
     // Whole-day semantics on timestamp columns: "on this day", "up to and
     // including this day", "strictly after this day".
     case "eq":
       if (isDate && isPlainDate(value)) {
-        return `${expr} >= ${bind(value)} AND ${expr} < ${dayAfter(value)}`;
+        return `${expr} >= ${dayStart(value)} AND ${expr} < ${dayEnd(value)}`;
       }
       return `${expr} = ${bind(value)}`;
     case "lte":
-      if (isDate && isPlainDate(value)) return `${expr} < ${dayAfter(value)}`;
+      if (isDate && isPlainDate(value)) return `${expr} < ${dayEnd(value)}`;
       return `${expr} <= ${bind(value)}`;
     case "gt":
-      if (isDate && isPlainDate(value)) return `${expr} >= ${dayAfter(value)}`;
+      if (isDate && isPlainDate(value)) return `${expr} >= ${dayEnd(value)}`;
       return `${expr} > ${bind(value)}`;
     case "neq":
       // NULL <> value is NULL, which silently turns a LEFT JOIN into an INNER
       // JOIN and drops rows the user never asked to exclude.
+      if (isDate && isPlainDate(value)) {
+        // The exact complement of `eq`, or the two do not partition the set:
+        // "distinta del 24 de mayo" has to exclude that whole day, and it used
+        // to exclude a single instant of it and so excluded nothing at all.
+        return `(${expr} IS NULL OR ${expr} < ${dayStart(value)} OR ${expr} >= ${dayEnd(value)})`;
+      }
       return `${expr} IS DISTINCT FROM ${bind(value)}`;
     default: {
       const sqlOp = { gte: ">=", lt: "<" }[operator as "gte" | "lt"];
@@ -695,7 +769,24 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
     let kind = resolved.kind;
     const isGrouped = groupedExprs.has(spec.path);
 
-    if (spec.agg && !resolved.selfAggregating && !AGGS_BY_KIND[resolved.kind]?.includes(spec.agg)) {
+    // The type has to be checked whether or not the expression aggregates
+    // itself. It used to be skipped for every to-many aggregate, which is how
+    // `sum` over `revisiones.description` built `SUM(s."description")` and let
+    // Postgres refuse it with a 42883 — and, because saving validates through
+    // this same function, how such a report saved cleanly and then failed on
+    // every single run, for its author and for anyone it was shared with.
+    // Refused rather than computed. The honest number would need the total
+    // counted once per parent instead of once per row, which the configuration
+    // language cannot express today — and a squared count that looks plausible
+    // is worse than a message saying it cannot be done.
+    if (spec.agg && resolved.foreignGrain) {
+      throw new ReportConfigError(
+        `"${resolved.label}" ya es un total de otra entidad, y resumirlo aquí lo contaría ` +
+          `una vez por fila. Muéstrelo sin resumen, o cambie el nivel de detalle.`,
+      );
+    }
+
+    if (spec.agg && !AGGS_BY_KIND[resolved.kind]?.includes(spec.agg)) {
       // No article before the aggregate name: "suma" and "promedio" differ in
       // gender and "el suma" reads as broken Spanish.
       throw new ReportConfigError(
@@ -733,13 +824,20 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
     selects.push(`${expr} AS ${quote(key)}`);
     // An aggregated value no longer means what the raw field meant: the count
     // of criticality values is not itself a criticality.
-    const semantic = spec.agg ? undefined : resolved.semantic;
+    //
+    // Neither does a grouped one, and that was the wrong cut. A grouped column
+    // holds the key of a group, not a record's state, so anything reading it
+    // per row counts groups: the strip over a report grouped by state read
+    // "2 eventos · 1 resueltos · 1 pendientes" where the truth was 1.376, 938
+    // and 438.
+    const semantic = spec.agg || isGrouped ? undefined : resolved.semantic;
     columns.push({ key, label: spec.label?.trim() || resolved.label, kind, semantic });
   });
 
   // Filters are resolved after columns so they reuse the same joins.
   let whereSql = `t0.${quote("deletedAt")} IS NULL`;
   if (!rootEntity.paranoid) whereSql = "TRUE";
+  whereSql += requiredParentGuards(rootEntity, "t0");
   if (config.filters) {
     const filterSql = buildFilters(config.filters, rootEntity, plan, role, binds);
     if (filterSql) whereSql = `${whereSql} AND ${filterSql}`;
@@ -757,6 +855,16 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
       throw new ReportConfigError(`Resumen no permitido en el orden: ${String(sort.agg)}`);
     }
     const resolved = resolvePath(rootEntity, sort.path, plan, role, sort.agg);
+    // The same type check the columns get. Ordering never had one, so
+    // `ORDER BY SUM(t0."description")` reached Postgres and came back a 500 —
+    // and the identical mistake in a column is refused with a sentence that
+    // explains it.
+    if (sort.agg && !AGGS_BY_KIND[resolved.kind]?.includes(sort.agg)) {
+      throw new ReportConfigError(
+        `No se puede ordenar por ${AGG_LABEL[sort.agg]} de "${resolved.label}" ` +
+          `porque es un campo de tipo ${KIND_LABEL[resolved.kind]}.`,
+      );
+    }
     let expr = resolved.sql;
     if (isSummary && !groupedExprs.has(sort.path)) {
       if (!sort.agg) {
@@ -841,7 +949,10 @@ export function buildCountQuery(config: ReportConfig, role: number): { sql: stri
     return resolved.groupKeys ?? [resolved.sql];
   });
 
+  // Same guard as buildQuery, or the two disagree and the total stops matching
+  // the rows underneath it.
   let whereSql = rootEntity.paranoid ? `t0.${quote("deletedAt")} IS NULL` : "TRUE";
+  whereSql += requiredParentGuards(rootEntity, "t0");
   if (config.filters) {
     const filterSql = buildFilters(config.filters, rootEntity, plan, role, binds);
     if (filterSql) whereSql = `${whereSql} AND ${filterSql}`;

@@ -9,7 +9,7 @@ import { autoTable } from "jspdf-autotable";
 import type { ResultColumn } from "../types.js";
 import { buildIndicators } from "./indicators.js";
 import { rowStyleKeys, rowTint, tintRgb } from "./rowStyle.js";
-import { formatValue, toWinAnsi } from "./values.js";
+import { formatValue, reportDateLabel, toWinAnsi } from "./values.js";
 import { loadBranding } from "./branding.js";
 
 type Rgb = [number, number, number];
@@ -80,7 +80,7 @@ export async function buildPdf(input: PdfInput): Promise<Buffer> {
   const title = toWinAnsi(input.title);
   const subtitle = toWinAnsi([
     input.subtitle?.trim() || null,
-    `Generado el ${new Date().toLocaleDateString("es-BO")}`,
+    `Generado el ${reportDateLabel()}`,
   ].filter(Boolean).join("  ·  "));
 
   /** "parte 2 de 3", or nothing when the report fits on one width. */

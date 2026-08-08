@@ -107,7 +107,21 @@ describe("buildPdf", () => {
 
     expect(text).toContain("resueltos");
     expect(text).toContain("pendientes");
-    expect(text).toContain("cr");   // "críticos" is encoded, so only the stem is literal
+    // "críticos" carries an accent the built-in font re-encodes, so only the
+    // tail is literal. It used to assert on "cr", which also matches
+    // "Descripcion" in the table below and so passed with the indicator gone.
+    expect(text).toContain("ticos");
+  });
+
+  it("leaves the criticality indicator out when no column carries it", async () => {
+    // The control for the assertion above: without this, "ticos" could come
+    // from anywhere on the page and the strip would not be what is measured.
+    const withoutCriticality = {
+      ...base,
+      columns: base.columns.filter((c) => c.semantic !== "criticality"),
+    };
+
+    expect(asText(await buildPdf(withoutCriticality))).not.toContain("ticos");
   });
 
   it("names the rows with the noun it is given", async () => {
