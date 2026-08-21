@@ -610,3 +610,84 @@ los dos, pruebas incluidas.
 5. **`logger.test.ts` falla en arranque en frío** —cinco segundos— porque
    `import` de pino y pino-pretty lanza `chcp.com` de forma síncrona por worker.
    `npm test` no es determinista con la caché vacía.
+
+
+## Por dónde se sigue (21 de agosto, fin de sesión)
+
+Estado en git: `api` en `6a4c428`, `web` en `a0713b6`, los dos en la rama
+`isaias` y sin subir. **357 pruebas en `api`, 144 en `web`**, typecheck y lint
+limpios en ambos. Fuera del commit, sin tocar, quedan dos ficheros de Isaias:
+`docs/specs/2026-08-21-autenticacion-mfa-design.md` y la carpeta `docs/plans/`.
+
+**El generador no está listo.** Funciona y contesta bien donde antes contestaba
+mal, pero quedan dos cosas que sí bloquean, y falta que la pantalla se use de
+verdad — dos rondas de auditoría no son eso.
+
+### Bloqueante 1: un decimal en un filtro numérico da 500
+
+`api/src/reportBuilder/sqlBuilder.ts`, función `checkValue`. Decide con el
+número convertido (`Number(String(value).trim())`) y el `switch` de abajo liga
+**el valor original**, así que `2.5` pasa la validación y Postgres lo rechaza con
+`22P02` sobre una columna entera. Se llega tecleando, en «Criticidad ≤». Doce
+formas más viven ahí: `"1e5"`, `"7."`, `"3.0"` dentro de un `in`, y fechas que
+`new Date()` acepta rodando el calendario (`2026-02-30`, `"2026"`).
+
+Tres pasos, en este orden:
+
+1. **Ligar el número convertido, no el texto.** `checkValue` solo valida hoy; hay
+   que devolver el valor normalizado y usarlo en el bind. Eso arregla `1e5`,
+   `7.` y `3.0`.
+2. **Fecha con ida y vuelta**: exigir `/^\d{4}-\d{2}-\d{2}$/` y comprobar que
+   `new Date(v).toISOString().slice(0,10) === v`, que es lo que descarta el 30 de
+   febrero.
+3. **Red final en `handleError`** (`api/src/controllers/generador.controller.ts`):
+   mapear la clase `22` de SQLSTATE a un 400 con un texto legible. Hoy solo
+   reconoce `57014` y todo lo demás sale como 500 «no se pudo generar el
+   reporte», que se lee como servidor roto. Esto cubre las formas que no se
+   hayan pensado.
+
+`2.5` sobre una columna entera **no** se arregla con el paso 1 —el catálogo no
+distingue entero de decimal—, así que su salida honesta es el paso 3: un 400 que
+diga que el campo no admite decimales.
+
+### Bloqueante 2: el rol 2 lee el directorio de personal por el generador
+
+`api/src/reportBuilder/catalog.ts`, `const STAFF_ONLY = [1, 2]`, y el espejo
+`STAFF_ROLES` en `api/src/controllers/generador.controller.ts`. La matriz dice
+que el rol 2 no tiene `seguridad.ver` —comprobado en `osefi_local`— y
+`GET /usuario` le responde 403, mientras el generador le devuelve nombres,
+apellidos, **usuarios de login**, teléfonos y el nombre del rol.
+
+No es un parche de una línea: `buildQuery` es una función pura y recibe un
+`role: number`, y la respuesta a «¿puede ver datos personales?» ahora vive en una
+tabla y es asíncrona. La forma correcta:
+
+1. Un tipo `Viewer { role: number; staff: boolean }`. `staff` se resuelve una
+   sola vez por petición con `can(role, "seguridad", "ver")`.
+2. El catálogo deja de declarar `roles: STAFF_ONLY` en los campos y declara que
+   son de personal (`staffOnly: true`); `isVisible` pasa a mirar el `Viewer`.
+3. Los cinco puntos de entrada —`buildQuery`, `buildCountQuery`,
+   `buildCatalogView`, `runReport`/`countReport` y `buildExport`— reciben
+   `Viewer` en vez de un número. Aceptar `number | Viewer` en el constructor
+   ahorra tocar cientos de líneas de pruebas; lo que **no** debe existir es un
+   camino de producción que pase un número, porque el respaldo silencioso es la
+   fuga otra vez.
+4. `ADMIN_ROLE = 1` en el controlador (quién archiva reportes ajenos) es la misma
+   clase de literal y conviene resolverlo en el mismo viaje.
+
+Media jornada las dos cosas. Después de eso, **que Isaias use la pantalla** antes
+de considerarla lista para Fisher.
+
+### Lo que conviene probar a mano cuando se pruebe
+
+Un filtro de fecha de un día contra la pantalla de Eventos; agrupar por tramo con
+un conteo e intentar ordenar por «Nº de eventos del poste» (debe negarse con una
+frase); escribir `poste,cable` a mano en «está en la lista»; ordenar una columna
+en un reporte agrupado; abrir un reporte guardado y comprobar que no pierde
+filtros; y darle a Siguiente hasta que salte el límite de 30 por minuto — la
+tabla debe quedarse donde está.
+
+Aviso para esa prueba: `IMAGES_DIR` apunta a `C:/images`, que tiene 17 ficheros
+frente a las 1.514 fotos que referencia la base. Marcar «Fotos en el Excel» va a
+salir sin fotos —y ahora el subtítulo del fichero lo dice—; eso es la máquina, no
+el código.
