@@ -11,6 +11,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // umzug silently finds zero migrations, reporting "nothing pending".
 const migrationsGlob = join(__dirname, "../migrations/*.{ts,js}").replace(/\\/g, "/");
 
+// `*.{ts,js}` also matches `*.test.ts`. Migration tests live next to the
+// migration they test, same as everywhere else in this codebase, so without
+// this `ignore` umzug picks up e.g. `add-account-lockout.test.ts`, sorts it
+// before the real migration (".test.ts" < ".ts" alphabetically), imports it as
+// if it were a migration module, and calls `.up()` on a vitest spec that
+// exports no `up`. That throws before the real migration ever runs, and
+// `npm run migrate` dies on startup.
+//
+// `.test.js` is listed too, even though today's deploy is safe without it —
+// `tsconfig.json` excludes `src/**/*.test.ts` from `npm run build`, so
+// `dist/migrations` never gets one. That safety lives in a different file
+// from this one, though, and `tsconfig.check.json` (no `noEmit`) would happily
+// emit it if ever run by hand. Ignoring both extensions here makes the
+// invariant local instead of borrowed.
+const migrationsIgnore = ["**/*.test.ts", "**/*.test.js"];
+
 /** The same migration is a .ts source in development and a .js build artefact. */
 const withoutExtension = (name: string) => name.replace(/\.(ts|js)$/, "");
 
@@ -23,7 +39,7 @@ const migrateLog = log("migrate");
 
 export const migrator = new Umzug({
   migrations: {
-    glob: migrationsGlob,
+    glob: [migrationsGlob, { ignore: migrationsIgnore }],
     /**
      * Records migrations without their extension.
      *

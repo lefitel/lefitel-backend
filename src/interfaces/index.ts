@@ -15,6 +15,8 @@ export interface IUsuario {
   pass: string;
   id_rol: number;
   deletedAt?: Date | null;
+  failed_attempts?: number;
+  locked_until?: Date | null;
 }
 
 export interface ICiudad {

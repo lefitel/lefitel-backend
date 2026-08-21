@@ -34,6 +34,15 @@ export const UsuarioModel: ModelDefined<IUsuario, UsuarioCreation> = sequelize.d
     type: DataTypes.INTEGER,
     allowNull: false,
   },
+  failed_attempts: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0,
+  },
+  locked_until: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
 }, { paranoid: true });
 
 RolModel.hasMany(UsuarioModel, {

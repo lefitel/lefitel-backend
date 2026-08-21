@@ -1,11 +1,47 @@
 import { Request, Response } from "express";
-import { Op } from "sequelize";
+import { Op, fn, col, where as sequelizeWhere } from "sequelize";
 import { RolModel } from "../models/rol.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import bcryptjs from "bcryptjs";
 import { deleteImageFile } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
 import { can } from "../permissions/store.js";
+
+/** Shared text: whichever endpoint hit this, the fix is the same username. */
+const USERNAME_TAKEN_MESSAGE = "El nombre de usuario ya está tomado por otra persona.";
+
+/**
+ * Whether some other living account already holds this username.
+ *
+ * Case-insensitive and scoped to non-archived rows, matching
+ * `usuarios_user_uniq` exactly: `UsuarioModel` is paranoid, so a plain
+ * `findOne` already excludes soft-deleted rows the same way the partial
+ * index does. One function instead of three copies of the same query, so
+ * creating an account, restoring one, and renaming one can never drift out
+ * of sync with what the database actually enforces.
+ */
+async function nombreEnUso(user: string, exceptoId?: number): Promise<boolean> {
+  const existing = await UsuarioModel.findOne({
+    where: sequelizeWhere(fn("lower", col("user")), user.toLowerCase()),
+    attributes: ["id"],
+  });
+  if (!existing) return false;
+  return exceptoId === undefined || existing.dataValues.id !== exceptoId;
+}
+
+/**
+ * True for a Postgres unique-violation on `usuarios_user_uniq` specifically.
+ *
+ * `nombreEnUso` closes the collision for an ordinary request, but not the
+ * race between two requests that both read "free" a moment apart — the
+ * database is still the one honest answer for that. This only stops its
+ * answer from reaching the client as raw constraint text.
+ */
+function isUsernameUniqueViolation(error: unknown): boolean {
+  const err = error as { name?: string; parent?: { constraint?: string }; message?: string } | null;
+  if (!err || err.name !== "SequelizeUniqueConstraintError") return false;
+  return err.parent?.constraint === "usuarios_user_uniq" || /usuarios_user_uniq/i.test(err.message ?? "");
+}
 
 export async function getUsuario(req: Request, res: Response) {
   const archived = req.query.archived === "true";
@@ -64,12 +100,24 @@ export async function createUsuario(req: Request, res: Response) {
     // " Diego " can never be logged into: the person types "Diego" and the
     // lookup does not match, and nothing on screen explains why.
     if (typeof req.body?.user === "string") req.body.user = req.body.user.trim();
+
+    // Used to duplicate in silence — the vulnerability `usuarios_user_uniq`
+    // closes. Now it has to ask first, or the database answers with a 500
+    // full of its own constraint name.
+    if (await nombreEnUso(req.body.user)) {
+      return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
+    }
+
     req.body.pass = await bcryptjs.hash(req.body.pass, 8);
 
-    const TempUsuario = await UsuarioModel.create(req.body);
+    const payload = withoutControlFields(req.body);
+    const TempUsuario = await UsuarioModel.create(payload);
     logAction({ id_usuario: req.user?.id, action: "CREATE_USUARIO", entity: "Usuario", entity_id: TempUsuario.dataValues.id as number, detail: `Creó usuario @${req.body.user}`, metadata: { after: { user: req.body.user } }, severity: 'info' });
     res.status(200).json(withoutPass(TempUsuario));
   } catch (error) {
+    if (isUsernameUniqueViolation(error)) {
+      return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
+    }
     return res.status(500).json({ message: error.message });
   }
 }
@@ -87,6 +135,14 @@ const EDITABLE_FIELDS = ["name", "lastname", "birthday", "image", "phone"] as co
 /** Needs the Roles module, not merely the right to edit the account. */
 const ROLE_ASSIGNMENT_FIELDS = ["id_rol"] as const;
 
+/**
+ * Fields the server manages for account lockout, not something a creation
+ * request gets to set. Without this, anyone with permission to create
+ * accounts could seed `locked_until` far in the future on the very account
+ * they create — a lockout planted through the front door, at signup time.
+ */
+const CONTROL_FIELDS = ["failed_attempts", "locked_until"] as const;
+
 function editableFrom(body: unknown, mayAssignRoles: boolean): Record<string, unknown> {
   const source = (body ?? {}) as Record<string, unknown>;
   const allowed: readonly string[] = mayAssignRoles
@@ -100,7 +156,20 @@ function editableFrom(body: unknown, mayAssignRoles: boolean): Record<string, un
   return patch;
 }
 
-/** The record as it may leave the server: everything except the hash. */
+function withoutControlFields(body: unknown): Record<string, unknown> {
+  const patch = { ...((body ?? {}) as Record<string, unknown>) };
+  for (const field of CONTROL_FIELDS) delete patch[field];
+  return patch;
+}
+
+/**
+ * The record as it may leave the server: everything except the hash.
+ *
+ * `failed_attempts` and `locked_until` stay visible on purpose: whoever
+ * manages accounts needs to see that one is locked and why, the same way
+ * `deletedAt` already travels with every user record. Only the password
+ * hash is secret.
+ */
 function withoutPass(instance: { toJSON(): unknown }): Record<string, unknown> {
   const plain = { ...(instance.toJSON() as Record<string, unknown>) };
   delete plain.pass;
@@ -182,10 +251,11 @@ export async function updateUserName(req: Request, res: Response) {
   }
 
   try {
-    // Validación de Unicidad
-    const existingUser = await UsuarioModel.findOne({ where: { user } });
-    if (existingUser && existingUser.dataValues.id !== Number(id)) {
-      return res.status(409).json({ message: "El nombre de usuario ya está tomado por otra persona." });
+    // Case-insensitive, matching `usuarios_user_uniq`. The exact-match check
+    // this replaced let a rename to `Isaias` pass the application layer while
+    // `isaias` already existed, and it died on the database instead.
+    if (await nombreEnUso(user, Number(id))) {
+      return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
     }
 
     const TempUsuario = await UsuarioModel.findOne({
@@ -198,6 +268,9 @@ export async function updateUserName(req: Request, res: Response) {
     logAction({ id_usuario: req.user?.id, action: "CHANGE_USERNAME", entity: "Usuario", entity_id: Number(id), detail: `Cambió nombre de usuario a @${user}`, metadata: { before: { user: oldUser }, after: { user } }, severity: 'warning', ip_address: req.ip ?? null });
     res.status(200).json(withoutPass(TempUsuario));
   } catch (error) {
+    if (isUsernameUniqueViolation(error)) {
+      return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
+    }
     return res.status(500).json({ message: error.message });
   }
 }
@@ -259,10 +332,31 @@ export async function desarchivarUsuario(req: Request, res: Response) {
     return res.status(403).json({ message: "No tienes permiso para restaurar usuarios." });
   }
   try {
+    // paranoid: false — the row being restored is, by definition, currently
+    // soft-deleted, so the default paranoid findOne would never see it.
+    const archivado = await UsuarioModel.findOne({ where: { id }, paranoid: false });
+    if (!archivado) return res.status(404).json({ message: "Usuario no encontrado" });
+
+    const nombre = archivado.dataValues.user as string;
+
+    // The scenario this closes: the account was archived, its name handed to
+    // a new, living account, and only now — bringing the old one back — does
+    // anyone find out. `restore()` alone would hit `usuarios_user_uniq` and
+    // hand the client Postgres's raw constraint text, forever, since nothing
+    // about retrying the same restore would ever change the outcome.
+    if (await nombreEnUso(nombre, Number(id))) {
+      return res.status(409).json({
+        message: `El nombre de usuario "${nombre}" ya lo tiene otra cuenta activa. Cambia el nombre de una de las dos antes de desarchivar esta.`,
+      });
+    }
+
     await UsuarioModel.restore({ where: { id } });
     logAction({ id_usuario: req.user?.id, action: "RESTORE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Desarchivó usuario #${id}`, severity: 'info' });
     return res.sendStatus(200);
   } catch (error) {
+    if (isUsernameUniqueViolation(error)) {
+      return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
+    }
     return res.status(500).json({ message: error.message });
   }
 }

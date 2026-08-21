@@ -17,12 +17,14 @@ import type { Request, Response } from "express";
 const findOne = vi.fn();
 const create = vi.fn();
 const findAll = vi.fn();
+const restore = vi.fn();
 
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: {
     findOne: (...args: unknown[]) => findOne(...args),
     create: (...args: unknown[]) => create(...args),
     findAll: (...args: unknown[]) => findAll(...args),
+    restore: (...args: unknown[]) => restore(...args),
   },
 }));
 vi.mock("../models/rol.model.js", () => ({ RolModel: { findByPk: vi.fn() } }));
@@ -36,7 +38,7 @@ vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },
 }));
 
-const { createUsuario, updateUsuario, updateUserName, updateUserPass, deleteUsuario } =
+const { createUsuario, updateUsuario, updateUserName, updateUserPass, deleteUsuario, desarchivarUsuario } =
   await import("./usuario.controller.js");
 
 const ADMIN = 1;
@@ -57,6 +59,13 @@ function call(
     },
     json(payload: unknown) {
       this.body = payload;
+      return this;
+    },
+    // deleteUsuario and desarchivarUsuario answer success with `res.sendStatus`
+    // rather than `res.status().json()`. Nothing exercised that path until the
+    // restore tests below, which is why this was missing.
+    sendStatus(code: number) {
+      this.statusCode = code;
       return this;
     },
   };
@@ -389,5 +398,185 @@ describe("changing a password", () => {
 
     expect(bcryptjs.hash).toHaveBeenCalledWith("nueva", 8);
     expect(stored.set).toHaveBeenCalledWith(expect.objectContaining({ pass: "hashed" }));
+  });
+});
+
+/**
+ * `usuarios_user_uniq` closed a real vulnerability — createUsuario used to
+ * duplicate a username in silence — but opened a new failure path: three
+ * endpoints that used to succeed (or silently misbehave) now hit a database
+ * constraint instead. These tests exist so a 500 with raw Postgres text
+ * cannot come back unnoticed, and so the case-insensitive gap in
+ * updateUserName's own check cannot either.
+ */
+describe("username collisions", () => {
+  function shapedAsUniqueViolation(message: string) {
+    return { name: "SequelizeUniqueConstraintError", parent: { constraint: "usuarios_user_uniq" }, message };
+  }
+
+  describe("creating a user", () => {
+    it("refuses with 409 rather than letting a duplicate name reach the database", async () => {
+      findOne.mockResolvedValueOnce(storedUser({ id: 3, user: "isaias" }).model);
+
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "Isaias", pass: "x" } });
+      await createUsuario(c.req, c.res);
+
+      expect(c.status).toBe(409);
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it("creates the account when the name is free", async () => {
+      findOne.mockResolvedValueOnce(null);
+      create.mockResolvedValue({
+        dataValues: { id: 42 },
+        toJSON: () => ({ id: 42, user: "nuevo" }),
+      });
+
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "nuevo", pass: "x" } });
+      await createUsuario(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(create).toHaveBeenCalledOnce();
+    });
+
+    it("strips failed_attempts and locked_until from what a creation request may set", async () => {
+      // These are control fields the server manages, not profile data. Left
+      // open, anyone who may create accounts could seed a `locked_until` far
+      // in the future on the very account they create.
+      findOne.mockResolvedValueOnce(null);
+      create.mockResolvedValue({
+        dataValues: { id: 42 },
+        toJSON: () => ({ id: 42, user: "nuevo" }),
+      });
+
+      const c = call(
+        { id: ADMIN, id_rol: ADMIN },
+        { body: { user: "nuevo", pass: "x", failed_attempts: 99, locked_until: new Date("2100-01-01") } },
+      );
+      await createUsuario(c.req, c.res);
+
+      const payload = create.mock.calls[0][0] as Record<string, unknown>;
+      expect(payload).not.toHaveProperty("failed_attempts");
+      expect(payload).not.toHaveProperty("locked_until");
+    });
+
+    it("still answers 409, not raw Postgres text, when the race wins", async () => {
+      // The pre-check saw the name as free; the write lost a race with another
+      // request that took it a moment later. The constraint is the one honest
+      // answer here — it just must not reach the client verbatim.
+      findOne.mockResolvedValueOnce(null);
+      create.mockRejectedValueOnce(
+        shapedAsUniqueViolation('duplicate key value violates unique constraint "usuarios_user_uniq"'),
+      );
+
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "isaias", pass: "x" } });
+      await createUsuario(c.req, c.res);
+
+      expect(c.status).toBe(409);
+      expect(c.message).not.toMatch(/constraint|duplicate key/i);
+    });
+  });
+
+  describe("renaming a user", () => {
+    it("catches a case-insensitive collision the exact-match check used to miss", async () => {
+      // `isaias` exists; renaming another account to `Isaias` used to pass
+      // updateUserName's own check (case-sensitive) and die on the database
+      // (case-insensitive) with a 500 instead of the 409 this endpoint already
+      // knows how to give.
+      findOne.mockResolvedValueOnce(storedUser({ id: 3, user: "isaias" }).model);
+
+      const c = call(
+        { id: SELF, id_rol: TECNICO },
+        { params: { id: String(SELF) }, body: { user: "Isaias" } },
+      );
+      await updateUserName(c.req, c.res);
+
+      expect(c.status).toBe(409);
+    });
+
+    it("still answers 409, not raw Postgres text, when the race wins", async () => {
+      findOne.mockResolvedValueOnce(null);
+      const stored = storedUser();
+      findOne.mockResolvedValueOnce(stored.model);
+      stored.save.mockRejectedValueOnce(
+        shapedAsUniqueViolation('duplicate key value violates unique constraint "usuarios_user_uniq"'),
+      );
+
+      const c = call(
+        { id: SELF, id_rol: TECNICO },
+        { params: { id: String(SELF) }, body: { user: "otronombre" } },
+      );
+      await updateUserName(c.req, c.res);
+
+      expect(c.status).toBe(409);
+      expect(c.message).not.toMatch(/constraint|duplicate key/i);
+    });
+  });
+
+  describe("restoring an archived user", () => {
+    /** A soft-deleted row, as `findOne({ paranoid: false })` would return it. */
+    function archivedUser(overrides: Record<string, unknown> = {}) {
+      return storedUser({ deletedAt: new Date("2026-08-01"), ...overrides });
+    }
+
+    it("is refused to everyone but an administrator", async () => {
+      const c = call({ id: SELF, id_rol: TECNICO }, { params: { id: "7" } });
+      await desarchivarUsuario(c.req, c.res);
+
+      expect(c.status).toBe(403);
+      expect(findOne).not.toHaveBeenCalled();
+      expect(restore).not.toHaveBeenCalled();
+    });
+
+    it("restores the account when nobody else holds the name", async () => {
+      findOne.mockResolvedValueOnce(archivedUser({ id: 7, user: "isaias" }).model);
+      findOne.mockResolvedValueOnce(null);
+
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: "7" } });
+      await desarchivarUsuario(c.req, c.res);
+
+      expect(restore).toHaveBeenCalledWith({ where: { id: "7" } });
+      expect(c.status).toBe(200);
+    });
+
+    it("refuses with 409, and never restores, when the name was given away while archived", async () => {
+      // DELETE /usuario/7 archives "isaias" → POST /usuario creates a second
+      // "isaias" (createUsuario's own guard above is what actually stops this
+      // now, but this is the scenario the constraint alone could not survive)
+      // → PATCH /usuario/7/desarchivar must not 500 forever on the same retry.
+      findOne.mockResolvedValueOnce(archivedUser({ id: 7, user: "isaias" }).model);
+      findOne.mockResolvedValueOnce(storedUser({ id: 8, user: "isaias" }).model);
+
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: "7" } });
+      await desarchivarUsuario(c.req, c.res);
+
+      expect(c.status).toBe(409);
+      expect(c.message).not.toMatch(/constraint|duplicate key|postgres/i);
+      expect(restore).not.toHaveBeenCalled();
+    });
+
+    it("answers 404 rather than restoring nothing when the id does not exist", async () => {
+      findOne.mockResolvedValueOnce(null);
+
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: "999" } });
+      await desarchivarUsuario(c.req, c.res);
+
+      expect(c.status).toBe(404);
+      expect(restore).not.toHaveBeenCalled();
+    });
+
+    it("still answers 409, not raw Postgres text, when the race wins", async () => {
+      findOne.mockResolvedValueOnce(archivedUser({ id: 7, user: "isaias" }).model);
+      findOne.mockResolvedValueOnce(null);
+      restore.mockRejectedValueOnce(
+        shapedAsUniqueViolation('duplicate key value violates unique constraint "usuarios_user_uniq"'),
+      );
+
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: "7" } });
+      await desarchivarUsuario(c.req, c.res);
+
+      expect(c.status).toBe(409);
+      expect(c.message).not.toMatch(/constraint|duplicate key/i);
+    });
   });
 });
