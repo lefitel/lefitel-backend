@@ -3,7 +3,7 @@
 ## Stack
 - Node.js + Express + TypeScript
 - Sequelize ORM + PostgreSQL
-- Desplegado en Render
+- Desplegado en VPS propio, gestionado con Coolify (api.osefi.net)
 
 ---
 
