@@ -7,15 +7,16 @@ import {
   getPropietarioStats,
   updatePropietario,
 } from "../controllers/propietario.controller.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
 // Routes
-router.post("/", createPropietario);
-router.put("/:id", updatePropietario);
-router.patch("/:id/desarchivar", desarchivarPropietario);
+router.post("/", requirePermission("parametros", "crear"), createPropietario);
+router.put("/:id", requirePermission("parametros", "editar"), updatePropietario);
+router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarPropietario);
 router.get("/stats", getPropietarioStats);
 router.get("/", getPropietario);
-router.delete("/:id", deletePropietario);
+router.delete("/:id", requirePermission("parametros", "archivar"), deletePropietario);
 
 export default router;

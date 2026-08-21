@@ -40,6 +40,17 @@ export interface LoadedPhotos {
   loaded: number;
   /** How many were left out because the cap was reached. */
   skipped: number;
+  /**
+   * How many were asked for and could not be read.
+   *
+   * This number had nowhere to live, so it was lost: `skipped` counted only
+   * the cap, and a photograph whose file was missing or corrupt was neither
+   * loaded nor skipped — it simply evaporated. The workbook then printed "Sí"
+   * in every image cell, which is exactly what it prints when photographs were
+   * never requested, and said nothing anywhere. Asking for 1.376 photographs
+   * and receiving a 37 KB file with none of them looked like a working export.
+   */
+  failed: number;
 }
 
 async function compress(file: string): Promise<Buffer | null> {
@@ -84,15 +95,20 @@ export async function loadPhotos(
   const images = new Map<string, Buffer>();
 
   let next = 0;
+  let failed = 0;
   const worker = async () => {
     for (;;) {
       const index = next++;
       if (index >= wanted.length) return;
       const value = wanted[index];
       const file = resolveImagePath(value, directory);
-      if (file === null) continue;
+      if (file === null) {
+        failed += 1;
+        continue;
+      }
       const buffer = await compress(file);
-      if (buffer !== null) images.set(value, buffer);
+      if (buffer === null) failed += 1;
+      else images.set(value, buffer);
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, wanted.length) }, worker));
@@ -102,6 +118,7 @@ export async function loadPhotos(
     requested: distinct.length,
     loaded: images.size,
     skipped: distinct.length - wanted.length,
+    failed,
   };
 }
 

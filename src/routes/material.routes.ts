@@ -7,15 +7,16 @@ import {
   getMaterialStats,
   updateMaterial,
 } from "../controllers/material.controller.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
 // Routes
-router.post("/", createMaterial);
-router.put("/:id", updateMaterial);
-router.patch("/:id/desarchivar", desarchivarMaterial);
+router.post("/", requirePermission("parametros", "crear"), createMaterial);
+router.put("/:id", requirePermission("parametros", "editar"), updateMaterial);
+router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarMaterial);
 router.get("/stats", getMaterialStats);
 router.get("/", getMaterial);
-router.delete("/:id", deleteMaterial);
+router.delete("/:id", requirePermission("parametros", "archivar"), deleteMaterial);
 
 export default router;

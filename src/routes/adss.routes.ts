@@ -7,15 +7,16 @@ import {
   getAdssStats,
   updateAdss,
 } from "../controllers/adss.controller.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
 // Routes
-router.post("/", createAdss);
-router.put("/:id", updateAdss);
-router.patch("/:id/desarchivar", desarchivarAdss);
+router.post("/", requirePermission("parametros", "crear"), createAdss);
+router.put("/:id", requirePermission("parametros", "editar"), updateAdss);
+router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarAdss);
 router.get("/stats", getAdssStats);
 router.get("/", getAdss);
-router.delete("/:id", deleteAdss);
+router.delete("/:id", requirePermission("parametros", "archivar"), deleteAdss);
 
 export default router;

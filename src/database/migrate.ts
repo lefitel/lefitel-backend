@@ -1,6 +1,7 @@
 import { Umzug, SequelizeStorage } from "umzug";
 import { QueryTypes, type QueryInterface } from "sequelize";
 import { sequelize } from "./sequelize.js";
+import { log } from "../utils/logger.js";
 import { fileURLToPath, pathToFileURL } from "url";
 import { join, dirname } from "path";
 
@@ -17,6 +18,8 @@ interface MigrationModule {
   up: (params: { context: QueryInterface }) => Promise<void>;
   down: (params: { context: QueryInterface }) => Promise<void>;
 }
+
+const migrateLog = log("migrate");
 
 export const migrator = new Umzug({
   migrations: {
@@ -47,7 +50,7 @@ export const migrator = new Umzug({
   },
   context: sequelize.getQueryInterface(),
   storage: new SequelizeStorage({ sequelize }),
-  logger: console,
+  logger: migrateLog,
 });
 
 export interface NormalisationResult {
@@ -98,9 +101,10 @@ export async function normaliseMigrationNames(
   });
 
   if (result.deduplicated > 0 || result.renamed > 0) {
-    console.log(
-      `--> Registro de migraciones normalizado: ${result.deduplicated} duplicada(s), ` +
-      `${result.renamed} renombrada(s) <--`,
+    migrateLog.info(
+      { duplicadas: result.deduplicated, renombradas: result.renamed },
+      `registro de migraciones normalizado: ${result.deduplicated} duplicada(s), ` +
+      `${result.renamed} renombrada(s)`,
     );
   }
   return result;
@@ -111,10 +115,12 @@ async function runMigrations() {
   await normaliseMigrationNames();
   const applied = await migrator.up();
   if (applied.length === 0) {
-    console.log("--> No hay migraciones pendientes <--");
+    migrateLog.info("no hay migraciones pendientes");
   } else {
-    console.log(`--> ${applied.length} migración(es) aplicada(s) <--`);
-    applied.forEach((m) => console.log("   ✓", m.name));
+    migrateLog.info(
+      { migraciones: applied.map((m) => m.name) },
+      `${applied.length} migración(es) aplicada(s): ${applied.map((m) => m.name).join(", ")}`,
+    );
   }
   await sequelize.close();
 }
@@ -126,7 +132,7 @@ const executedDirectly = process.argv[1]
 
 if (executedDirectly) {
   runMigrations().catch((err) => {
-    console.error("Migration failed:", err);
+    migrateLog.fatal({ err }, "la migración falló");
     process.exit(1);
   });
 }

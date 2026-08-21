@@ -8,12 +8,11 @@ declare global {
     }
   }
 }
-import morgan from "morgan";
 import cors from "cors";
+import { httpLogger } from "./middleware/httpLogger.js";
 import jwt from "jsonwebtoken";
 import rateLimit from "express-rate-limit";
 import { UsuarioModel } from "./models/usuario.model.js";
-import { requireRole } from "./middleware/requireRole.js";
 
 // Import routes
 import uploadRoutes from "./routes/upload.routes.js";
@@ -42,18 +41,23 @@ import loginRoutes from "./routes/login.routes.js";
 import reporteRoutes from "./routes/reporte.routes.js";
 import generadorRoutes from "./routes/generador.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
+import permisoRoutes from "./routes/permiso.routes.js";
 
 const app = express();
 
 const secretKey = process.env.JWT_SECRET;
 
-// Render terminates TLS in front of the app, so without this every request
+// The Coolify proxy terminates TLS in front of the app, so without this every request
 // carries the proxy's address and the rate limiters below share a single bucket
 // across the whole user base.
 app.set("trust proxy", 1);
 
 // Middlewares
-app.use(morgan("dev"));
+//
+// First of all of them: a request that is rejected by the body parser or by CORS
+// still deserves a line, and anything mounted after this one can reach the
+// request's own logger through `req.log`.
+app.use(httpLogger);
 app.use(express.json());
 app.use(
   cors({
@@ -140,9 +144,10 @@ app.use("/api/solucion", authenticateToken, solucionRoutes);
 app.use("/api/tipoObs", authenticateToken, tipoObsRoutes);
 app.use("/api/rol", authenticateToken, rolRoutes);
 app.use("/api/usuario", authenticateToken, usuarioRoutes);
-// File management is an administration screen (menuItems.ts lists Archivos
-// for role 1 only) and the API was open to every authenticated user.
-app.use("/api/files", authenticateToken, requireRole(1), filesRoutes);
+app.use("/api/permisos", authenticateToken, permisoRoutes);
+// The gate is inside files.routes.ts now, one per action: listing the folder and
+// emptying it are not the same permission.
+app.use("/api/files", authenticateToken, filesRoutes);
 
 /**
  * Terminal error handler.
@@ -153,7 +158,10 @@ app.use("/api/files", authenticateToken, requireRole(1), filesRoutes);
  * broke the client, which expects `{message}` on every failure.
  */
 app.use((err: Error & { status?: number; type?: string }, _req: Request, res: Response, _next: NextFunction) => {
-  console.error("[api]", err);
+  // Deliberately does not log. `httpLogger` runs in front of everything and
+  // already writes one line for a failed request, with the request id attached;
+  // logging here as well printed every error twice, once with the id and once
+  // without, which reads like two separate failures.
   if (err?.type === "entity.too.large") {
     return res.status(413).json({ message: "La petición es demasiado grande." });
   }

@@ -7,15 +7,16 @@ import {
   getObsStats,
   updateObs,
 } from "../controllers/obs.controller.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
 // Routes
-router.post("/", createObs);
-router.put("/:id", updateObs);
-router.patch("/:id/desarchivar", desarchivarObs);
+router.post("/", requirePermission("parametros", "crear"), createObs);
+router.put("/:id", requirePermission("parametros", "editar"), updateObs);
+router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarObs);
 router.get("/stats", getObsStats);
 router.get("/", getObs);
-router.delete("/:id", deleteObs);
+router.delete("/:id", requirePermission("parametros", "archivar"), deleteObs);
 
 export default router;

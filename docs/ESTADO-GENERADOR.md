@@ -296,3 +296,209 @@ lea como decisiones.
   como `images/x` y las guardadas como `/x` apuntan al mismo archivo y siguen
   contando como dos entradas. El caso caro —muchas filas, una foto— está resuelto;
   el aliasing no.
+
+
+## Auditoría del 21 de agosto y lo que se arregló
+
+Cinco lentes adversariales sobre el flujo completo del generador: el estado del
+frontend, la autorización, el motor SQL, la exportación y las costuras entre
+navegador y servidor. **Las 331 pruebas de `api` y las 122 de `web` pasaban con
+todo lo de abajo roto**, que es el hallazgo de fondo: casi todo se comprobaba
+contra subcadenas del SQL generado o contra el nombre de una función, no contra
+filas ni contra el fichero producido.
+
+Ahora son **348 en `api` y 144 en `web`**, con typecheck y lint limpios en los
+dos. Cada arreglo lleva una prueba que falla sin él; las dos del frontend se
+verificaron desactivando el arreglo y viéndolas caer.
+
+### Números falsos — lo que contestaba mal sin fallar
+
+**El límite del día caía ocho horas antes.** `$1::date AT TIME ZONE 'zone'` no
+hace lo que parece: `AT TIME ZONE` tiene dos versiones y Postgres, ante un
+`date`, elige la que *convierte un instante a hora local* en vez de la que *lee
+una hora local como instante*. Con la sesión en UTC el límite inferior quedaba en
+las 20:00 del día anterior, así que «los eventos del 17/01/2026» devolvía **63
+donde ocurrieron 4**, y un filtro de un día abarcaba 32 horas desde las 16:00 del
+día anterior. Afectaba a `eq`, a `neq` y al extremo inferior de todo `between`.
+El arreglo es un `::timestamp` antes del operador. La prueba que llevaba el
+nombre exacto del fallo —*"reads a bare date in the zone the report is read in"*—
+comprobaba que la cadena `AT TIME ZONE 'America/La_Paz'` estuviera en el SQL, y
+estaba: pasaba encima del error. Ahora hay una prueba que ejecuta contra Postgres
+y compara con el calendario, y otra que fija el instante bajo tres zonas de
+sesión distintas.
+
+**`gte` y `lt` no trataban la fecha en absoluto.** Caían a un `default` que
+ignoraba el tipo del campo, cuatro horas de desfase, e incoherentes con sus
+propias parejas: `lte` cubría el día entero y `lt` no. «Desde el 17» devolvía 225
+donde son 195. El `default` ahora lanza en vez de construir SQL con un operador
+que nadie listó.
+
+**Contar hijos a través de un padre multiplicaba.** La guarda anterior solo
+miraba los campos calculados, así que `poste.numEventos` se rechazaba y
+`poste.eventos` con conteo se aceptaba: **1.390 eventos donde hay 1.376**, y
+agrupando revisiones por estado **91.195 donde hay 7.337**. La regla correcta no
+es rechazarlo siempre —un total del padre es cierto por fila— sino rechazarlo
+donde se aplica: al resumir por grupo. En modo detalle sigue disponible, que es
+lo que un usuario quiere ver.
+
+**Ordenar por uno de esos totales mentía solo en el orden.** El bucle de
+ordenación no tenía la guarda. En «los tramos con más revisiones» solo tres de
+los ocho primeros puestos eran correctos, con el número bueno en la columna de al
+lado. Es la peor forma del fallo porque nada en pantalla lo contradice.
+
+**Los valores de filtro no se comprobaban contra el tipo del campo.** Nueve
+formas —`{}`, `[1,2]`, texto en un número, «si» en un booleano— construían SQL
+válido y reventaban en Postgres. Como guardar un reporte valida construyendo ese
+mismo SQL, se guardaban limpias y fallaban en cada ejecución, para siempre, con
+un 500 que parece del servidor. Ahora se rechazan al construir, con el texto que
+explica qué necesita el campo.
+
+### Caídas y abusos
+
+**Un fallo de la consulta de permisos tumbaba el proceso.** Las puertas son
+`async` y Express 4 solo recoge lo que se lanza de forma síncrona: la promesa
+rechazada se perdía y Node termina el proceso por eso. Alcanzable desde cualquier
+cuenta con sesión, y como la matriz se cachea tras una sola promesa compartida,
+un fallo rechazaba todas las comprobaciones a la vez. Ahora responde 500 y falla
+cerrado, y hay una red de último recurso en `index.ts` que deja escrito qué mató
+al proceso en vez de un stack pelado.
+
+**`/consulta` no tenía tope de celdas ni cola**: 50.000 filas × 60 columnas son
+tres millones de celdas en un JSON, quince veces el tope que sí tiene el Excel.
+Ahora hay un tope de 300.000 celdas, comprobado antes de leer las filas.
+
+**El tope de filtros era por grupo y el mensaje decía «por reporte»**: cien
+grupos de cien condiciones pasaban limpios. Ahora se cuenta el árbol entero.
+
+**`offset` tenía suelo y no techo**: `1e21` se aceptaba, Postgres lo rechazaba
+como bigint inválido y el error volvía como 500 con línea en el log.
+
+### Lo que rompía en la cara del usuario
+
+**El filtro «está en la lista» se comía las comas.** El texto se derivaba de la
+lista, y la lista descarta el trozo vacío que crea la coma final —correctamente—,
+así que React reescribía el valor sin ella. `poste,cable` quedaba en
+`postecable`: cero filas y un aviso diciendo que nada coincide con un filtro que
+nadie construyó. Solo funcionaba pegando. Ahora el texto se guarda y la lista se
+deriva de él.
+
+**El botón de ordenar producía un 400 en todo reporte agrupado.** `toggleSort`
+aceptaba el resumen desde la primera versión y ningún llamador se lo pasaba
+nunca. Además el orden se identificaba solo por la ruta, así que el mínimo y el
+máximo de la misma fecha eran un solo criterio. Y `validateConfig` no miraba el
+orden en absoluto, así que no avisaba antes de pedirlo.
+
+**Una respuesta abandonada aterrizaba sobre el reporte que la reemplazó.** `run`
+retiraba sus propias peticiones y nada más lo hacía: abrir otro reporte guardado
+mientras uno se generaba dejaba entrar la respuesta vieja. Las filas de A bajo el
+nombre de B, y exportar entonces daba un fichero **titulado B con los datos de
+A** — justo lo que el comentario del subtítulo argumenta que no debe pasar.
+
+**Abrir un reporte guardado destruía sus filtros avanzados.** Pasaba por
+`changeRoot` aunque el nivel de detalle no cambiara, y `changeRoot` borraba todo
+`exists` y todo grupo anidado por principio. El reporte se ensanchaba en
+silencio, el aviso culpaba al perfil del lector, y pulsar «Actualizar» escribía
+la pérdida en la base para el autor y para todos los que lo tuvieran compartido.
+Ahora hay `pruneToCatalog`, que conserva lo disponible y descarta un filtro
+avanzado entero o nada —quitarle una cláusula a una frase no la estrecha, cambia
+lo que dice—.
+
+**Un fallo al paginar borraba la tabla** y dejaba muertos los botones de
+exportar. Limpiar es correcto al Generar y no al pasar de página: el fallo suele
+ser pasajero y la página que ya estaba sigue siendo verdad.
+
+**Los topes mentían**: a 60 columnas decía «ya está en el reporte»; a 100 filtros
+y a 10 criterios de orden no decía nada. Los tres avisan ahora, y dicen cuál es
+el tope.
+
+**Avisos disparados dentro de un `setConfig`**, que React invoca dos veces en
+desarrollo a propósito: salían por duplicado, y en render concurrente eso deja de
+ser una cortesía de desarrollo.
+
+**El `memo` de las filas era inerte** porque el padre creaba funciones nuevas en
+cada render: sesenta filas con sus `Select` se reconciliaban en cada tecla, que
+es exactamente el medio segundo por pulsación que el `memo` existía para quitar.
+
+**`sameQuery` comparaba con `JSON.stringify`**, sensible al orden de las claves,
+así que poner un resumen y devolverlo al anterior anunciaba «cambió la
+configuración» sobre una tabla idéntica. Un aviso que grita en falso es un aviso
+que nadie lee — y ese es el que avisa de que las filas ya no cuadran con la
+cabecera.
+
+**El Excel prometía fotos y no las llevaba, sin decirlo.** El contador de
+omitidas solo contaba las que pasan del tope: una foto que no se puede leer no la
+contaba nadie. Pedir 1.376 y recibir un fichero de 37 KB con ninguna parecía una
+exportación correcta. Ahora se cuentan aparte y el subtítulo del fichero lo dice.
+La prueba que debía cogerlo —*"survives asking for photographs that are not on
+this machine"*— nunca leía una celda; ahora abre el libro y lo comprueba.
+
+### Permisos: lo de la matriz quedó a medias y se completó en parte
+
+**Las rutas del frontend seguían con listas de roles a mano** mientras el menú ya
+decidía por la matriz, y discrepaban en las dos direcciones: quitar
+`generador.ver` a un rol escondía el menú y dejaba la URL viva —la pantalla
+montaba, el catálogo devolvía 403 y se ofrecía «Reintentar» para una negativa
+permanente—; y un rol nuevo creado desde Seguridad quedaba con la barra lateral
+dibujada y el contenido en blanco. `RoleRoute` es ahora `ModuleRoute` y pregunta
+a la matriz.
+
+**La pantalla del generador no consultaba la matriz**: Guardar, Actualizar,
+Duplicar, Estrella y Eliminar se dibujaban siempre y el servidor contestaba 403 a
+quien pulsara. Hoy coincidía porque los tres roles sembrados lo tienen todo; se
+rompía a la primera casilla que destildaras, que es para lo que existe esa
+pantalla.
+
+**Marcar un favorito revalidaba la configuración guardada entera.** Un `{favorite:
+true}` reconstruía el SQL, así que un reporte con una etiqueta escrita antes del
+tope de 120 caracteres, o de un autor al que le bajaron el rol, dejaba de poder
+renombrarse, compartirse ni desmarcarse. Solo se revalida cuando la petición trae
+configuración.
+
+## Lo que la auditoría dejó abierto
+
+Por orden de gravedad, y ninguno tocado todavía:
+
+1. **El rol 2 saca el directorio de personal por el generador.** `catalog.ts`
+   tiene `STAFF_ONLY = [1, 2]` escrito a mano, mientras la matriz dice que ese
+   rol no tiene `seguridad.ver`. `GET /usuario` le responde 403 y el generador le
+   devuelve nombres, **usuarios de login** y teléfonos. El arreglo honesto es que
+   la visibilidad de campo deje de ser una lista de roles y pase a resolverse
+   contra la matriz — el constructor es una función pura y recibe un número de
+   rol, así que hay que pasarle las capacidades ya resueltas.
+2. **Cancelar una exportación no cancela nada.** El servidor sigue construyendo y
+   reteniendo el único hueco del proceso; el siguiente lee «ya hay una
+   exportación en curso» sin saber que es la suya. No hay ni abort ni plazo.
+3. **`POST /reportes` no tiene limitador** —el comentario dice que comparte «el
+   global», que no existe— y `getReportes` no pagina.
+4. **Los 403 del generador no dejan rastro** en la bitácora, y ninguna de sus
+   entradas guarda IP, mientras el resto del sistema sí.
+5. **La configuración de un reporte compartido enseña rutas que el catálogo
+   esconde** a quien lo lista, literales de filtro incluidos.
+6. **Duplicar falla donde Abrir limpia**: 400 con una ruta interna a la vista,
+   sobre un reporte que la pantalla acaba de mostrar.
+7. **`ADMIN_ROLE = 1` a mano** para moderar reportes ajenos: no se puede conceder
+   ni revocar desde Seguridad.
+8. **El token que se renueva en cada respuesta no refresca rol ni permisos** en
+   el cliente, así que un cambio de rol a mitad de sesión es invisible hasta
+   recargar.
+9. **El tope del PDF cuenta celdas y promete megabytes**: 80.000 celdas con
+   columnas de texto largo dan 32,9 MB, un 32% por encima del límite de correo
+   que justifica el tope.
+10. **Cada exportación ejecuta la consulta de conteo dos veces**, en dos
+    transacciones, y la que decide si cabe no sale del mismo snapshot que las
+    filas.
+11. **`diasAbierto` convierte «no se sabe» en 0** —`GREATEST(0, NULL)` es 0—, el
+    mismo fallo que el campo de al lado corrige y documenta. Hoy no se observa:
+    haría falta un evento pendiente sin fecha.
+12. Menores: el título del PDF se solapa con el subtítulo pasados ~99 caracteres;
+    el PDF colorea filas y no tiene leyenda; `PreviewTable` puede mostrar tres
+    hechos que se contradicen si los datos cambian entre páginas; `catalog.limits`
+    se publica para que los topes no se dupliquen y se duplican igual a mano; las
+    fotos se deduplican por nombre y no por fichero; `buildCountQuery` no
+    deduplica `groupBy` y `buildQuery` sí.
+
+**Pruebas cuyo nombre promete más que su cuerpo:** quedan varias señaladas por la
+auditoría y sin tocar —el numerado de páginas del PDF, el peso del logo, la
+privacidad del listado de reportes, y el hecho de que `routeGuards.test.ts`
+compara nombres de función y no distingue `("generador","ver")` de
+`("generador","archivar")`—.

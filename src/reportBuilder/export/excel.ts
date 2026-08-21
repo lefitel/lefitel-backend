@@ -139,16 +139,27 @@ export async function buildExcel(input: ExcelInput): Promise<Buffer> {
   // ── Row 2: subtitle ────────────────────────────────────────────────────────
   sheet.mergeCells(ROW.SUBTITLE, 1, ROW.SUBTITLE, lastCol);
   const subtitleCell = sheet.getCell(ROW.SUBTITLE, 1);
-  subtitleCell.value = [
-    input.subtitle?.trim() || null,
+  // A file that quietly omits what was asked for is worse than one that refuses
+  // to make it. Both reasons for a missing photograph are named, and they are
+  // different problems: the cap is the report being too big, a failed read is
+  // the file not being on this server.
+  const warnings = [
     photos && photos.skipped > 0
       ? `SIN ${photos.skipped} FOTOGRAFÍA(S): se alcanzó el límite por archivo`
       : null,
+    photos && photos.failed > 0
+      ? `SIN ${photos.failed} FOTOGRAFÍA(S): no se encontraron en el servidor`
+      : null,
+  ].filter(Boolean);
+
+  subtitleCell.value = [
+    input.subtitle?.trim() || null,
+    ...warnings,
     `Generado el ${reportDateLabel()}`,
   ].filter(Boolean).join("  ·  ");
   subtitleCell.font = {
     name: "Segoe UI", size: 9, color: { argb: CLR.muted },
-    bold: Boolean(photos && photos.skipped > 0),
+    bold: warnings.length > 0,
   };
   subtitleCell.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
   sheet.getRow(ROW.SUBTITLE).height = HEIGHT.SUBTITLE;

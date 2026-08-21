@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { buildQuery, buildCountQuery } from "./sqlBuilder.js";
 import { catalog, MAX_ROWS } from "./catalog.js";
-import { ReportConfigError, type ReportConfig } from "./types.js";
+import { ReportConfigError, type Operator, type ReportConfig } from "./types.js";
 
 const ADMIN = 1;
 const OPERATIVO = 3;
@@ -153,7 +153,7 @@ describe("buildQuery — filters and binds", () => {
       ADMIN,
     );
     expect(sql).toMatch(
-      />= \(\$\d+::date AT TIME ZONE 'America\/La_Paz'\) AND .* < \(\(\$\d+::date \+ interval '1 day'\) AT TIME ZONE 'America\/La_Paz'\)/,
+      />= \(\(\$\d+::date\)::timestamp AT TIME ZONE 'America\/La_Paz'\) AND .* < \(\(\$\d+::date \+ interval '1 day'\)::timestamp AT TIME ZONE 'America\/La_Paz'\)/,
     );
     expect(binds).toContain("2026-01-01");
     expect(binds).toContain("2026-06-30");
@@ -169,7 +169,15 @@ describe("buildQuery — filters and binds", () => {
       ADMIN,
     );
 
-    expect(sql).toContain("AT TIME ZONE 'America/La_Paz'");
+    // The cast is the assertion. This test used to check only that the string
+    // "AT TIME ZONE 'America/La_Paz'" appeared — which it did, while the bound
+    // still resolved in the session's zone, because a bare `date` reaches the
+    // other overload of the operator. It passed for months over a filter that
+    // returned 63 events for a day that had 4. Naming the zone is not the same
+    // as reading it there.
+    expect(sql).toMatch(/\(\(\$\d+::date\)::timestamp AT TIME ZONE 'America\/La_Paz'\)/);
+    // No bound may reach `AT TIME ZONE` as a bare date, in any operator.
+    expect(sql).not.toMatch(/\$\d+::date AT TIME ZONE/);
     // The column stays bare so an index on it still applies; only the bounds
     // are converted.
     expect(sql).not.toMatch(/t0\."date" AT TIME ZONE/);
@@ -199,13 +207,17 @@ describe("buildQuery — filters and binds", () => {
       base({ filters: { op: "and", conditions: [{ path: "date", operator: "lte", value: "2026-06-30" }] } }),
       ADMIN,
     ).sql;
-    expect(lte).toMatch(/< \(\(\$\d+::date \+ interval '1 day'\) AT TIME ZONE 'America\/La_Paz'\)/);
+    expect(lte).toMatch(
+      /< \(\(\$\d+::date \+ interval '1 day'\)::timestamp AT TIME ZONE 'America\/La_Paz'\)/,
+    );
 
     const gt = buildQuery(
       base({ filters: { op: "and", conditions: [{ path: "date", operator: "gt", value: "2026-06-30" }] } }),
       ADMIN,
     ).sql;
-    expect(gt).toMatch(/>= \(\(\$\d+::date \+ interval '1 day'\) AT TIME ZONE 'America\/La_Paz'\)/);
+    expect(gt).toMatch(
+      />= \(\(\$\d+::date \+ interval '1 day'\)::timestamp AT TIME ZONE 'America\/La_Paz'\)/,
+    );
   });
 
   it("makes neq on a bare date the exact complement of eq", () => {
@@ -217,8 +229,241 @@ describe("buildQuery — filters and binds", () => {
       ADMIN,
     );
 
-    expect(sql).toMatch(/t0\."date" IS NULL OR .* < \(\$\d+::date AT TIME ZONE/);
-    expect(sql).toMatch(/OR .* >= \(\(\$\d+::date \+ interval '1 day'\) AT TIME ZONE/);
+    expect(sql).toMatch(/t0\."date" IS NULL OR .* < \(\(\$\d+::date\)::timestamp AT TIME ZONE/);
+    expect(sql).toMatch(/OR .* >= \(\(\$\d+::date \+ interval '1 day'\)::timestamp AT TIME ZONE/);
+  });
+
+  it("counts filters across the whole report, not one group at a time", () => {
+    // The cap said "el reporte tiene demasiados filtros" and was applied to
+    // each group separately, so a hundred groups of a hundred conditions passed
+    // cleanly: ten thousand conditions and four thousand correlated subqueries
+    // in a body small enough that nothing else objected.
+    const grupo = (n: number) => ({
+      op: "and" as const,
+      conditions: Array.from({ length: n }, () => ({
+        path: "description", operator: "like" as const, value: "x",
+      })),
+    });
+
+    expect(() =>
+      buildQuery(
+        base({ filters: { op: "and", conditions: [grupo(60), grupo(60)] } }),
+        ADMIN,
+      ),
+    ).toThrow(/demasiados filtros/);
+
+    // And a report inside the cap still builds, groups included.
+    expect(() =>
+      buildQuery(
+        base({ filters: { op: "and", conditions: [grupo(40), grupo(40)] } }),
+        ADMIN,
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses an offset no page could ever have", () => {
+    // 1e21 is finite, bound as 1e+21, and Postgres refuses it as an invalid
+    // bigint — which the error handler reads as a server fault, so a caller
+    // mistake came back as a 500 with a line in the error log.
+    const { binds } = buildQuery(base({ offset: 1e21 }), ADMIN);
+    expect(Number(binds[binds.length - 1])).toBeLessThanOrEqual(MAX_ROWS * 1000);
+  });
+
+  it("refuses a value the column cannot hold, instead of letting Postgres refuse it", () => {
+    // These are the nine shapes that used to build clean SQL and come back as
+    // 22P02 / 22007 / 22003 — a 500 that reads as "the server is broken".
+    // Worse than the error: saving a report validates by building this same
+    // SQL, so every one of them saved successfully and then failed on every
+    // run, for its author and for anyone it was shared with.
+    const rejected: [string, unknown][] = [
+      ["id", {}],
+      ["id", [1, 2]],
+      ["id", "no-soy-numero"],
+      ["id", ""],
+      ["id", Number.NaN],
+      ["id", Number.POSITIVE_INFINITY],
+      ["id", "99999999999999999999"],
+      ["date", "no-es-fecha"],
+      ["state", "si"],
+      ["description", 7],
+    ];
+
+    for (const [path, value] of rejected) {
+      expect(
+        () =>
+          buildQuery(
+            base({ filters: { op: "and", conditions: [{ path, operator: "eq", value }] } }),
+            ADMIN,
+          ),
+        `${path} = ${JSON.stringify(value)}`,
+      ).toThrow(ReportConfigError);
+    }
+  });
+
+  it("checks both ends of a range and every entry of a list", () => {
+    // The wrappers were shape-checked and their contents were not, so one bad
+    // entry among good ones still reached the database.
+    expect(() =>
+      buildQuery(
+        base({
+          filters: {
+            op: "and",
+            conditions: [{ path: "id", operator: "between", value: [1, "a"] }],
+          },
+        }),
+        ADMIN,
+      ),
+    ).toThrow(ReportConfigError);
+
+    expect(() =>
+      buildQuery(
+        base({
+          filters: { op: "and", conditions: [{ path: "id", operator: "in", value: [1, 2, "x"] }] },
+        }),
+        ADMIN,
+      ),
+    ).toThrow(ReportConfigError);
+  });
+
+  it("caps how long a single filter value may be", () => {
+    // Unbounded, a filter value was a free megabyte per condition inside a
+    // body the server otherwise accepts.
+    expect(() =>
+      buildQuery(
+        base({
+          filters: {
+            op: "and",
+            conditions: [{ path: "description", operator: "like", value: "x".repeat(201) }],
+          },
+        }),
+        ADMIN,
+      ),
+    ).toThrow(/demasiado largo/);
+  });
+
+  it("still accepts the shapes people actually send", () => {
+    // A validation that refuses honest input is its own defect: numbers arrive
+    // from an <input> as text, booleans as "true"/"false", dates as bare days.
+    const fine: [string, unknown][] = [
+      ["id", 7],
+      ["id", "7"],
+      ["id", " 7 "],
+      ["state", true],
+      ["state", "false"],
+      ["date", "2026-01-17"],
+      ["date", "2026-01-17T12:00:00Z"],
+      ["description", "poste roto"],
+    ];
+
+    for (const [path, value] of fine) {
+      expect(
+        () =>
+          buildQuery(
+            base({ filters: { op: "and", conditions: [{ path, operator: "eq", value }] } }),
+            ADMIN,
+          ),
+        `${path} = ${JSON.stringify(value)}`,
+      ).not.toThrow();
+    }
+  });
+
+  it("never hands a bare date to AT TIME ZONE, whichever operator asked", () => {
+    // The general net under the specific one. `date AT TIME ZONE zone` has two
+    // readings and Postgres picks the wrong one for a bare date, so the rule is
+    // not "some operators cast" but "no bound ever reaches that operator
+    // uncast". Written as a sweep because the two that were broken — gte and lt
+    // — were broken by falling through a `default` branch nobody listed.
+    const days: [Operator, unknown][] = [
+      ["eq", "2026-01-17"],
+      ["neq", "2026-01-17"],
+      ["lte", "2026-01-17"],
+      ["gt", "2026-01-17"],
+      ["gte", "2026-01-17"],
+      ["lt", "2026-01-17"],
+      ["between", ["2026-01-01", "2026-06-30"]],
+    ];
+
+    for (const [operator, value] of days) {
+      const { sql } = buildQuery(
+        base({ filters: { op: "and", conditions: [{ path: "date", operator, value }] } }),
+        ADMIN,
+      );
+      expect(sql, operator).toContain("AT TIME ZONE 'America/La_Paz'");
+      expect(sql, operator).not.toMatch(/\$\d+::date AT TIME ZONE/);
+    }
+  });
+
+  it("treats gte and lt on a bare date as whole days", () => {
+    // Both fell through to a default that ignored the field's kind, so the
+    // date was compared as an instant in the session's zone: "desde el 17"
+    // started at 20:00 of the 16th and returned 225 events where 195 occurred.
+    // They were also inconsistent with their own partners — `lte` covered the
+    // whole day and `lt` did not, `gt` covered it and `gte` did not.
+    const gte = buildQuery(
+      base({ filters: { op: "and", conditions: [{ path: "date", operator: "gte", value: "2026-06-30" }] } }),
+      ADMIN,
+    ).sql;
+    expect(gte).toMatch(/>= \(\(\$\d+::date\)::timestamp AT TIME ZONE 'America\/La_Paz'\)/);
+
+    const lt = buildQuery(
+      base({ filters: { op: "and", conditions: [{ path: "date", operator: "lt", value: "2026-06-30" }] } }),
+      ADMIN,
+    ).sql;
+    expect(lt).toMatch(/< \(\(\$\d+::date\)::timestamp AT TIME ZONE 'America\/La_Paz'\)/);
+
+    // The pair partitions the set: what `lt` excludes is exactly what `gte`
+    // keeps, so the same instant appears in both.
+    expect(gte.replace(">=", "<")).toContain(lt.slice(lt.indexOf("<")));
+  });
+
+  it("refuses to re-total a relation's count reached through another relation", () => {
+    // The same defect as the calculated-field spelling below, by the other
+    // road: `poste.eventos` counted with a report of events asks each poste for
+    // its own total and reads it once per event of that poste. Summed, a poste
+    // with n events contributes n². Measured on real data: 1.390 reported where
+    // 1.376 exist, and — grouping revisions by state — 91.195 where 7.337 exist.
+    expect(() =>
+      buildQuery(
+        {
+          root: "evento",
+          columns: [{ path: "poste.tramo" }, { path: "poste.eventos", agg: "count" }],
+          groupBy: ["poste.tramo"],
+        },
+        ADMIN,
+      ),
+    ).toThrow(/ya es un total de otra entidad/);
+  });
+
+  it("still shows a parent's total once per row when the report is not grouped", () => {
+    // The other half of the rule, and the reason the guard cannot live where
+    // the path is resolved: read once per row the number is simply true —
+    // "el poste de este evento tiene 73 eventos". It is only summing it across
+    // rows that squares it. Rejecting both would have deleted a legitimate
+    // column to fix a different one.
+    const { sql } = buildQuery(
+      { root: "evento", columns: [{ path: "id" }, { path: "poste.eventos", agg: "count" }] },
+      ADMIN,
+    );
+    expect(sql).toContain("SELECT COUNT(*)");
+    expect(sql).not.toMatch(/SUM\(\(SELECT COUNT/);
+  });
+
+  it("refuses to order a summary by a total that belongs to another entity", () => {
+    // The worst shape of the three, because nothing on screen contradicts it:
+    // the column shows the right number and only the ranking is wrong. Ordering
+    // tramos by the sum of a foreign total put three of the top eight in their
+    // real places.
+    expect(() =>
+      buildQuery(
+        {
+          root: "revision",
+          columns: [{ path: "evento.poste.tramo" }, { path: "id", agg: "count" }],
+          groupBy: ["evento.poste.tramo"],
+          sort: [{ path: "evento.numRevisiones", dir: "desc", agg: "sum" }],
+        },
+        ADMIN,
+      ),
+    ).toThrow(/ya es un total de otra entidad/);
   });
 
   it("refuses to re-total a count that belongs to another entity", () => {

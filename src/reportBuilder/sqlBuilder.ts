@@ -361,9 +361,17 @@ function resolvePath(
         );
       }
       const landing = walkToOne(rootEntity, prefix, plan, role, path);
-      return buildToManyAggregate(
+      const resolved = buildToManyAggregate(
         landing.entity, landing.alias, segments[i], rest[0], agg, role, path,
       );
+      // A to-many total reached *through* a relation counts at that relation's
+      // grain, not the report's. `poste.eventos` on a report of events asks the
+      // poste how many events it has, and reads that same answer once per event
+      // of that poste — summing it squares the number. The guard existed only
+      // for the calculated-field spelling of the same total (`poste.numEventos`)
+      // and this path walked straight past it: 1.390 events reported where 1.376
+      // exist, and 91.195 revisions where 7.337 exist.
+      return { ...resolved, foreignGrain: prefix.length > 0 };
     }
     if (!relation) break;
     entity = entityOrThrow(relation.target);
@@ -497,6 +505,96 @@ function buildExists(
 const isPlainDate = (v: unknown): v is string =>
   typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
+/** How long a single filter value may be. Longer than any real search term. */
+const MAX_FILTER_VALUE = 200;
+
+/**
+ * Refuses a value the column cannot hold, before it becomes a bind.
+ *
+ * The operator was checked against the field's kind and the value was not, so
+ * `{"path":"id","operator":"eq","value":"abc"}` built valid SQL and Postgres
+ * answered 22P02. That matters more than it sounds: saving a report validates
+ * by building this same SQL, so such a report saved *cleanly* and then failed
+ * on every run afterwards — for its author and for everyone it was shared
+ * with — as a 500 that reads like the server is broken. Nine shapes did it,
+ * including `{}` and `[1,2]` on a number, "si" on a boolean and any text on a
+ * date.
+ *
+ * Objects are refused outright: nothing legitimate sends one, and a value that
+ * is not a scalar is the shape an injection attempt takes.
+ */
+function checkValue(value: unknown, kind: FieldKind, label: string): void {
+  if (value === null || value === undefined) return;
+  if (typeof value === "object") {
+    throw new ReportConfigError(`El filtro sobre "${label}" tiene un valor no válido.`);
+  }
+  if (typeof value === "string" && value.length > MAX_FILTER_VALUE) {
+    throw new ReportConfigError(
+      `El valor del filtro sobre "${label}" es demasiado largo ` +
+        `(máximo ${MAX_FILTER_VALUE} caracteres).`,
+    );
+  }
+
+  switch (kind) {
+    case "number": {
+      const n = typeof value === "number" ? value : Number(String(value).trim());
+      if (!Number.isFinite(n) || String(value).trim() === "") {
+        throw new ReportConfigError(`El filtro sobre "${label}" necesita un número.`);
+      }
+      // Beyond this Postgres refuses the bind as out of range for bigint, and
+      // JavaScript has already stopped counting exactly.
+      if (!Number.isSafeInteger(n) && Math.abs(n) > Number.MAX_SAFE_INTEGER) {
+        throw new ReportConfigError(`El número del filtro sobre "${label}" está fuera de rango.`);
+      }
+      return;
+    }
+    case "date": {
+      if (value instanceof Date) return;
+      if (typeof value !== "string" || Number.isNaN(new Date(value).getTime())) {
+        throw new ReportConfigError(`El filtro sobre "${label}" necesita una fecha.`);
+      }
+      return;
+    }
+    case "boolean": {
+      if (typeof value === "boolean") return;
+      if (value === "true" || value === "false") return;
+      throw new ReportConfigError(`El filtro sobre "${label}" sólo admite sí o no.`);
+    }
+    default: {
+      if (typeof value !== "string") {
+        throw new ReportConfigError(`El filtro sobre "${label}" necesita un texto.`);
+      }
+    }
+  }
+}
+
+/**
+ * Refuses a filter tree carrying more conditions than a report may have.
+ *
+ * The cap was applied to each group on its own while the message it threw said
+ * "el reporte tiene demasiados filtros" — so a hundred groups of a hundred
+ * conditions each passed cleanly: ten thousand conditions and four thousand
+ * correlated subqueries, in a request body small enough that nothing else
+ * objected. The number the message promises is the number now enforced.
+ */
+function checkTotalConditions(node: FilterNode, seen = { total: 0 }): void {
+  // `isFilterGroup` reads a property, so it needs an object; the malformed
+  // nodes are counted and left for the builder to reject with a sentence.
+  const shaped = Boolean(node) && typeof node === "object";
+  if (shaped && isFilterGroup(node)) {
+    for (const child of node.conditions ?? []) checkTotalConditions(child, seen);
+  } else {
+    seen.total += 1;
+    if (shaped && isExists(node)) {
+      const where = (node as ExistsCondition).where;
+      if (where) checkTotalConditions(where, seen);
+    }
+  }
+  if (seen.total > MAX_CONDITIONS) {
+    throw new ReportConfigError(`El reporte tiene demasiados filtros (máximo ${MAX_CONDITIONS}).`);
+  }
+}
+
 function buildCondition(
   condition: FilterCondition,
   rootEntity: EntityDef,
@@ -532,6 +630,21 @@ function buildCondition(
     throw new ReportConfigError(`El filtro sobre "${resolved.label}" no tiene valor.`);
   }
 
+  // A list belongs to the two operators that take one. Anywhere else an array
+  // binds as a Postgres array literal against a scalar column — `{"1","2"}`
+  // against an integer — which is a 500 the caller cannot read.
+  if (Array.isArray(value) && operator !== "between" && operator !== "in") {
+    throw new ReportConfigError(
+      `El filtro "${OPERATOR_LABEL[operator]}" sobre "${resolved.label}" necesita un solo valor.`,
+    );
+  }
+
+  // Every value, including each end of a range and each entry of a list. The
+  // array wrappers themselves are shape-checked by their own operators below.
+  for (const single of Array.isArray(value) ? value : [value]) {
+    checkValue(single, resolved.kind, resolved.label);
+  }
+
   const bind = (v: unknown): string => {
     binds.push(v);
     return `$${binds.length}`;
@@ -541,16 +654,33 @@ function buildCondition(
    * The instant a calendar day begins, and the instant the next one does, in
    * the zone every report is read in.
    *
-   * Every date column is `timestamp with time zone`. `date AT TIME ZONE zone`
-   * reads a bare date as a wall clock there and yields the instant it stands
-   * for, so "el 23 de mayo" means the day the report prints rather than the day
-   * the database session happens to be in — those disagreed for 26% of the
-   * events. Converting the bounds and not the column is deliberate: it leaves
-   * the column bare, so an index on it still applies.
+   * Every date column is `timestamp with time zone`. `timestamp AT TIME ZONE
+   * zone` reads a wall clock in that zone and yields the instant it stands for,
+   * so "el 23 de mayo" means the day the report prints rather than the day the
+   * database session happens to be in — those disagreed for 26% of the events.
+   * Converting the bounds and not the column is deliberate: it leaves the
+   * column bare, so an index on it still applies.
+   *
+   * The `::timestamp` cast is the whole point and must not be tidied away.
+   * `AT TIME ZONE` has two overloads, and a bare `date` can reach either one.
+   * Postgres prefers `timestamptz` inside the datetime category, so
+   * `$1::date AT TIME ZONE 'America/La_Paz'` resolves to the *rendering*
+   * overload: it reads the date as an instant in the session's zone and
+   * converts it to a wall clock in La Paz. Under a UTC session that lands on
+   * 20:00 of the previous day — the lower bound of every range fell 8 hours
+   * early, and a one-day filter spanned 32 hours starting at 16:00 the day
+   * before. Asking for events of 17/01/2026 returned 63 where 4 occurred.
+   * Casting to `timestamp` first pins the intended overload, and then the
+   * bound is identical under any session zone.
+   *
+   * `dayEnd` was already correct by accident: `date + interval` is already a
+   * `timestamp`, so it never reached the other overload. The cast is written
+   * out anyway, so the two read as the pair they are.
    */
-  const dayStart = (v: unknown) => `(${bind(v)}::date AT TIME ZONE '${REPORT_TIME_ZONE}')`;
+  const dayStart = (v: unknown) =>
+    `((${bind(v)}::date)::timestamp AT TIME ZONE '${REPORT_TIME_ZONE}')`;
   const dayEnd = (v: unknown) =>
-    `((${bind(v)}::date + interval '1 day') AT TIME ZONE '${REPORT_TIME_ZONE}')`;
+    `((${bind(v)}::date + interval '1 day')::timestamp AT TIME ZONE '${REPORT_TIME_ZONE}')`;
   const isDate = resolved.kind === "date";
 
   switch (operator) {
@@ -618,10 +748,24 @@ function buildCondition(
         return `(${expr} IS NULL OR ${expr} < ${dayStart(value)} OR ${expr} >= ${dayEnd(value)})`;
       }
       return `${expr} IS DISTINCT FROM ${bind(value)}`;
-    default: {
-      const sqlOp = { gte: ">=", lt: "<" }[operator as "gte" | "lt"];
-      return `${expr} ${sqlOp} ${bind(value)}`;
-    }
+    // "From this day on" and "before this day". Both were falling through to a
+    // default that ignored `isDate` entirely, so the bare date was compared as
+    // an instant in the session's zone: four hours off, and inconsistent with
+    // their own partners — `lte` covered the whole day while `lt` did not, and
+    // `gt` covered it while `gte` did not.
+    case "gte":
+      if (isDate && isPlainDate(value)) return `${expr} >= ${dayStart(value)}`;
+      return `${expr} >= ${bind(value)}`;
+    case "lt":
+      if (isDate && isPlainDate(value)) return `${expr} < ${dayStart(value)}`;
+      return `${expr} < ${bind(value)}`;
+    default:
+      // The operator set is closed and checked against the field's kind above,
+      // so this is unreachable — and an unreachable branch that builds SQL out
+      // of an unknown operator is how a silent `undefined` reaches Postgres.
+      throw new ReportConfigError(
+        `El operador "${String(operator)}" no está permitido sobre "${resolved.label}".`,
+      );
   }
 }
 
@@ -643,9 +787,9 @@ function buildFilters(
   if (!Array.isArray(conditions)) {
     throw new ReportConfigError("Los filtros del reporte no son válidos.");
   }
-  if (conditions.length > MAX_CONDITIONS) {
-    throw new ReportConfigError(`El reporte tiene demasiados filtros (máximo ${MAX_CONDITIONS}).`);
-  }
+  // Once, over the whole tree, from the outermost call: counting again inside
+  // every nested group would walk the same subtrees over and over.
+  if (depth === 0) checkTotalConditions(group);
   const parts = conditions.map((node) => {
     if (!node || typeof node !== "object") {
       throw new ReportConfigError("Hay un filtro vacío o mal formado.");
@@ -775,17 +919,6 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
     // Postgres refuse it with a 42883 — and, because saving validates through
     // this same function, how such a report saved cleanly and then failed on
     // every single run, for its author and for anyone it was shared with.
-    // Refused rather than computed. The honest number would need the total
-    // counted once per parent instead of once per row, which the configuration
-    // language cannot express today — and a squared count that looks plausible
-    // is worse than a message saying it cannot be done.
-    if (spec.agg && resolved.foreignGrain) {
-      throw new ReportConfigError(
-        `"${resolved.label}" ya es un total de otra entidad, y resumirlo aquí lo contaría ` +
-          `una vez por fila. Muéstrelo sin resumen, o cambie el nivel de detalle.`,
-      );
-    }
-
     if (spec.agg && !AGGS_BY_KIND[resolved.kind]?.includes(spec.agg)) {
       // No article before the aggregate name: "suma" and "promedio" differ in
       // gender and "el suma" reads as broken Spanish.
@@ -811,13 +944,38 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
         );
       }
       if (spec.agg && !isGrouped) {
+        // Refused rather than computed, and refused *here* rather than at
+        // resolution: a foreign-grain total is right once per row and wrong
+        // once per group, so the mode decides. The honest group number would
+        // have to count once per parent instead of once per row, which the
+        // configuration language cannot express today — and a squared count
+        // that looks plausible is worse than a sentence saying it cannot be
+        // done.
+        if (resolved.foreignGrain) {
+          throw new ReportConfigError(
+            `"${resolved.label}" ya es un total de otra entidad, y resumirlo aquí lo contaría ` +
+              `una vez por fila. Muéstrelo sin agrupar, o cambie el nivel de detalle.`,
+          );
+        }
         expr = applyAggregate(expr, spec.agg, resolved);
         kind = spec.agg === "count" ? "number" : kind;
       }
-    } else if (spec.agg && !resolved.selfAggregating) {
-      throw new ReportConfigError(
-        `La columna "${resolved.label}" usa un resumen, pero el reporte no está agrupado.`,
-      );
+    } else if (spec.agg) {
+      if (!resolved.selfAggregating) {
+        throw new ReportConfigError(
+          `La columna "${resolved.label}" usa un resumen, pero el reporte no está agrupado.`,
+        );
+      }
+      // The aggregate of a self-aggregating expression is the one already
+      // inside its subquery. Asking for a different one outside a summary does
+      // nothing at all, and returning the inner number under a header that
+      // promises the outer one is the quiet kind of lie.
+      if (resolved.innerAgg !== spec.agg) {
+        throw new ReportConfigError(
+          `"${resolved.label}" ya es un total de otra entidad y no admite ${AGG_LABEL[spec.agg]} ` +
+            `encima. Muéstrelo tal cual, o cambie el nivel de detalle.`,
+        );
+      }
     }
 
     const key = `c${index}`;
@@ -872,6 +1030,16 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
           `No se puede ordenar por "${resolved.label}" sin agruparlo ni resumirlo.`,
         );
       }
+      // The same grain guard the columns get, and for a worse reason: an
+      // inflated column is visibly wrong, an inflated ORDER BY is not. Ordering
+      // tramos by SUM of a foreign total put only three of the top eight in
+      // their real places, with the correct count displayed right beside it.
+      if (resolved.foreignGrain) {
+        throw new ReportConfigError(
+          `No se puede ordenar por "${resolved.label}": ya es un total de otra entidad, ` +
+            `y resumirlo aquí lo contaría una vez por fila.`,
+        );
+      }
       expr = applyAggregate(expr, sort.agg, resolved);
     }
     orderParts.push(`${expr} ${sort.dir === "asc" ? "ASC" : "DESC"} NULLS LAST`);
@@ -899,7 +1067,12 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
     return Number.isFinite(n) ? Math.trunc(n) : fallback;
   };
   const limit = Math.max(1, Math.min(toCount(config.limit, 500), MAX_ROWS));
-  const offset = Math.max(0, toCount(config.offset, 0));
+  // A ceiling as well as a floor. `1e21` is finite, so it passed the check and
+  // bound as the number 1e+21, which Postgres refuses as an invalid bigint —
+  // and `handleError` reads an unrecognised database code as a server fault, so
+  // a caller mistake came back as a 500 and a line in the error log. No report
+  // has a millionth page; past the last one the answer is simply no rows.
+  const offset = Math.max(0, Math.min(toCount(config.offset, 0), MAX_ROWS * 1000));
 
   binds.push(limit);
   const limitBind = `$${binds.length}`;

@@ -163,11 +163,20 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
     await expect(
       buildExport({ config: wide(5), role: ADMIN, format: "pdf", title: "Todas" }),
     ).resolves.toBeTruthy();
-  });
+    // Vitest's five seconds are for unit tests. The narrow case has to actually
+    // render every revision in the database to a PDF — measured at ~11s, of
+    // which the query is 98ms and the rest is the PDF writer. Left at the
+    // default this fails on a slow afternoon and says nothing about the code.
+  }, 40_000);
 
-  it("survives asking for photographs that are not on this machine", async () => {
-    // Development has seventeen images; the database references production
-    // file names. Every miss must degrade to "Sí", not to an error.
+  it("says so when the photographs it was asked for are not on this machine", async () => {
+    // Development has seventeen images; the database references production file
+    // names. Every miss degrades to "Sí" rather than to an error — that part
+    // was right, and this test used to assert only that the call resolved and
+    // the file was over a kilobyte. It never read a cell, so it passed just as
+    // happily over a workbook that promised 1.376 photographs and contained
+    // none, with nothing anywhere saying they were missing. A file that
+    // silently omits what was asked for is worse than one that refuses.
     const output = await buildExport({
       config: {
         root: "evento",
@@ -179,7 +188,19 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
 
     expect(output.photos).not.toBeNull();
     expect(output.photos!.requested).toBeGreaterThan(0);
-    expect(output.buffer.length).toBeGreaterThan(1_000);
+
+    // Nothing evaporates: every photograph asked for is either in the file,
+    // over the cap, or counted as unreadable.
+    const { requested, loaded, skipped, failed } = output.photos!;
+    expect(loaded + skipped + failed).toBe(requested);
+
+    // And when any are missing, the workbook itself says so.
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.load(output.buffer as unknown as ArrayBuffer);
+    const subtitle = String(book.worksheets[0].getCell(2, 1).text);
+
+    if (failed > 0) expect(subtitle).toContain(`SIN ${failed} FOTOGRAFÍA(S)`);
+    else expect(subtitle).not.toContain("no se encontraron");
   });
 
   it("rejects a configuration the engine will not accept", async () => {

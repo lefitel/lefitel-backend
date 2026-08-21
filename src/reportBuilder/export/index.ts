@@ -162,6 +162,13 @@ export async function buildExport(request: ExportRequest): Promise<ExportOutput>
       columns: result.columns, rows: result.rows, title, subtitle, noun, photos,
     }),
     rows: result.rows.length,
-    photos: photos && { requested: photos.requested, loaded: photos.loaded, skipped: photos.skipped },
+    // `failed` travels with the rest: the bitácora is where anyone asks later
+    // why an export came back without its photographs.
+    photos: photos && {
+      requested: photos.requested,
+      loaded: photos.loaded,
+      skipped: photos.skipped,
+      failed: photos.failed,
+    },
   };
 }

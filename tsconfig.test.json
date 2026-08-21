@@ -1,0 +1,16 @@
+{
+  // The build config excludes tests so `npm run build` does not emit them into
+  // dist/ — which also meant `tsc --noEmit` never looked at a single test file.
+  // A test that does not compile is a test that will not run, and finding that
+  // out from vitest is finding it out late.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // rootDir only matters for emitting, and this config emits nothing. Cleared
+    // so vitest.config.ts, which lives beside package.json, can be included.
+    "rootDir": ".",
+    "types": ["vitest/globals", "node"]
+  },
+  "include": ["src/**/*", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

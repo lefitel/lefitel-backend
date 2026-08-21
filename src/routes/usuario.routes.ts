@@ -10,7 +10,7 @@ import {
   updateUserPass,
   updateUsuario,
 } from "../controllers/usuario.controller.js";
-import { requireRole, requireSelfOrRole } from "../middleware/requireRole.js";
+import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
@@ -19,24 +19,24 @@ const router = Router();
 // select `usuario.phone` in a report, but could read the whole staff directory
 // — names, phones, birthdays — straight from `GET /usuario`.
 //
-// Roles: 1 administration, 2 supervision, 3 operations/client.
-const ADMIN = 1;
-const STAFF = [1, 2];
+// Everything here belongs to the Seguridad module, and which action a route
+// needs is the point: creating an account and reading one are not the same
+// permission even though they live behind the same screen.
+router.post("/", requirePermission("seguridad", "crear"), createUsuario);
+router.delete("/:id", requirePermission("seguridad", "archivar"), deleteUsuario);
+router.patch("/:id/desarchivar", requirePermission("seguridad", "archivar"), desarchivarUsuario);
+router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);
 
-// Administration only: creating, archiving, and looking users up by username.
-router.post("/", requireRole(ADMIN), createUsuario);
-router.delete("/:id", requireRole(ADMIN), deleteUsuario);
-router.patch("/:id/desarchivar", requireRole(ADMIN), desarchivarUsuario);
-router.get("/user/:user", requireRole(ADMIN), searchUsuario_user);
+// The full directory backs the security and bitácora screens.
+router.get("/", requirePermission("seguridad", "ver"), getUsuario);
 
-// The full directory backs the security and bitácora screens, both staff-only.
-router.get("/", requireRole(...STAFF), getUsuario);
-
-// Own record or administration: the profile page reads and edits the current
-// user through these same endpoints, so locking them to admins would break it.
-router.get("/:id", requireSelfOrRole(ADMIN), searchUsuario);
-router.put("/:id", requireSelfOrRole(ADMIN), updateUsuario);
-router.put("/username/:id", requireSelfOrRole(ADMIN), updateUserName);
-router.put("/userpass/:id", requireSelfOrRole(ADMIN), updateUserPass);
+// Own record, or the permission. The profile page reads and edits whoever is
+// logged in through these same endpoints, so requiring the module here would
+// stop people changing their own password. Ownership is not a role permission
+// and has no checkbox — see requirePermission.ts.
+router.get("/:id", requireSelfOrPermission("seguridad", "ver"), searchUsuario);
+router.put("/:id", requireSelfOrPermission("seguridad", "editar"), updateUsuario);
+router.put("/username/:id", requireSelfOrPermission("seguridad", "editar"), updateUserName);
+router.put("/userpass/:id", requireSelfOrPermission("seguridad", "editar"), updateUserPass);
 
 export default router;

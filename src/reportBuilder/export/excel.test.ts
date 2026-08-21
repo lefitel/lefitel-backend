@@ -197,7 +197,7 @@ describe("buildExcel with photographs", () => {
 
   const loaded = (over: Partial<LoadedPhotos> = {}): LoadedPhotos => ({
     images: new Map([["/uno.webp", Buffer.from("no-es-un-jpeg-real")]]),
-    requested: 2, loaded: 1, skipped: 0,
+    requested: 2, loaded: 1, skipped: 0, failed: 0,
     ...over,
   });
 
@@ -231,7 +231,7 @@ describe("buildExcel with photographs", () => {
       ...base,
       columns: photoColumns,
       rows: manyRows,
-      photos: { images: new Map([["/uno.webp", shared]]), requested: 20, loaded: 20, skipped: 0 },
+      photos: { images: new Map([["/uno.webp", shared]]), requested: 20, loaded: 20, skipped: 0, failed: 0 },
     });
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as never);

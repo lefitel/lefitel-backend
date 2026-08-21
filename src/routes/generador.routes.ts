@@ -11,7 +11,7 @@ import {
   deleteReporte,
   postDuplicar,
 } from "../controllers/generador.controller.js";
-import { requireRole } from "../middleware/requireRole.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
@@ -54,20 +54,22 @@ const exportLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Every role that can reach the module; the catalog itself is trimmed per role.
-router.use(requireRole(1, 2, 3));
-
-router.get("/catalogo", getCatalogo);
-router.post("/consulta", consultaLimiter, postConsulta);
+// The module used to gate itself in one line for all three roles. Now each
+// route asks for what it actually does, so an administrator can hand out
+// running reports without handing out saving them. The catalog is still
+// trimmed per role on top of this, and a saved report is still only reachable
+// by its owner — that is ownership, not a permission.
+router.get("/catalogo", requirePermission("generador", "ver"), getCatalogo);
+router.post("/consulta", requirePermission("generador", "ver"), consultaLimiter, postConsulta);
 // Building a file costs far more than answering a query, and only one runs at a
 // time, so its budget is a fraction of the query one.
-router.post("/exportar", exportLimiter, postExportar);
+router.post("/exportar", requirePermission("generador", "ver"), exportLimiter, postExportar);
 
-router.get("/reportes", getReportes);
-router.get("/reportes/:id", getReporte);
-router.post("/reportes", postReporte);
-router.put("/reportes/:id", putReporte);
-router.delete("/reportes/:id", deleteReporte);
-router.post("/reportes/:id/duplicar", postDuplicar);
+router.get("/reportes", requirePermission("generador", "ver"), getReportes);
+router.get("/reportes/:id", requirePermission("generador", "ver"), getReporte);
+router.post("/reportes", requirePermission("generador", "crear"), postReporte);
+router.put("/reportes/:id", requirePermission("generador", "editar"), putReporte);
+router.delete("/reportes/:id", requirePermission("generador", "archivar"), deleteReporte);
+router.post("/reportes/:id/duplicar", requirePermission("generador", "crear"), postDuplicar);
 
 export default router;

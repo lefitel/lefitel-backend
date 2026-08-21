@@ -7,15 +7,16 @@ import {
   getTipoObsStats,
   updateTipoObs,
 } from "../controllers/tipoObs.controller.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
 // Routes
-router.post("/", createTipoObs);
-router.put("/:id", updateTipoObs);
-router.patch("/:id/desarchivar", desarchivarTipoObs);
+router.post("/", requirePermission("parametros", "crear"), createTipoObs);
+router.put("/:id", requirePermission("parametros", "editar"), updateTipoObs);
+router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarTipoObs);
 router.get("/stats", getTipoObsStats);
 router.get("/", getTipoObs);
-router.delete("/:id", deleteTipoObs);
+router.delete("/:id", requirePermission("parametros", "archivar"), deleteTipoObs);
 
 export default router;

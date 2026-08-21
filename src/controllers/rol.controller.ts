@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { RolModel } from "../models/rol.model.js";
 import { logAction } from "../utils/logAction.js";
+import { seedRolePermissions } from "../permissions/store.js";
 
 export async function getRol(req: Request, res: Response) {
   try {
@@ -16,6 +17,11 @@ export async function getRol(req: Request, res: Response) {
 export async function createRol(req: Request, res: Response) {
   try {
     const TempRol = await RolModel.create(req.body);
+    // A role with no rows in `permisos` has no checkboxes on the Seguridad
+    // screen: the administrator would be looking at an empty form with no way
+    // to grant anything, and the account would be able to do nothing for ever.
+    // Every cell starts denied, which is both safe and editable.
+    await seedRolePermissions(TempRol.dataValues.id as number);
     logAction({ id_usuario: req.user?.id, action: "CREATE_ROL", entity: "Rol", entity_id: TempRol.dataValues.id as number, detail: `Creó rol "${req.body.name}"`, metadata: { after: { name: req.body.name } }, severity: 'info' });
     res.status(200).json(TempRol);
   } catch (error) {

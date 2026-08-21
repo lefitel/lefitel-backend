@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAllBitacora, getBitacora } from "../controllers/bitacora.controller.js";
-import { requireRole, requireSelfOrRole } from "../middleware/requireRole.js";
+import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
@@ -9,10 +9,13 @@ const router = Router();
 // the obvious, it leaks the report builder's own private state: the names of
 // other people's private reports, their authors, and the shape of every
 // execution.
-const ADMIN = 1;
-
-router.get("/", requireRole(ADMIN), getAllBitacora);
-// A user may review their own activity; anything else is administration.
-router.get("/:id_usuario", requireSelfOrRole(ADMIN), getBitacora);
+router.get("/", requirePermission("bitacora", "ver"), getAllBitacora);
+// A user may review their own activity; anything else needs the module.
+//
+// The parameter is named explicitly because it is `:id_usuario` here, not `:id`.
+// The previous middleware read "id" unconditionally, so this comparison was
+// always against undefined and this route was administration-only in practice,
+// whatever the line above it claimed.
+router.get("/:id_usuario", requireSelfOrPermission("bitacora", "ver", "id_usuario"), getBitacora);
 
 export default router;

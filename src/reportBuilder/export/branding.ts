@@ -7,6 +7,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { compressLogo } from "./photos.js";
+import { log } from "../../utils/logger.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // src/reportBuilder/export → src/assets, and dist/reportBuilder/export →
@@ -40,7 +41,7 @@ export function loadBranding(): Promise<Branding> {
     compressLogo(path.join(ASSETS, "logo.png"), LOGO_WIDTH_PX),
     compressLogo(path.join(ASSETS, "logo_tigo.png"), LOGO_WIDTH_PX),
   ]).then(([osefi, tigo]) => {
-    if (osefi === null) console.warn(`[export] No se encontró el logo en ${ASSETS}`);
+    if (osefi === null) log("export").warn({ ruta: ASSETS }, `no se encontró el logo en ${ASSETS}`);
     return { osefi, tigo };
   });
   return cached;

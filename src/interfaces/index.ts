@@ -146,3 +146,12 @@ export interface IReporteVista {
   deletedAt?: Date | null;
 }
 
+
+/** One cell of the permission matrix: what a role may do in a module. */
+export interface IPermiso {
+  id: number;
+  id_rol: number;
+  modulo: string;
+  accion: string;
+  permitido: boolean;
+}

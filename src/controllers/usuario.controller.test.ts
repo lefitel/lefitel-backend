@@ -26,6 +26,11 @@ vi.mock("../models/usuario.model.js", () => ({
   },
 }));
 vi.mock("../models/rol.model.js", () => ({ RolModel: { findByPk: vi.fn() } }));
+// The permission matrix is mocked rather than read: what is under test is what
+// this controller does with an answer, not which answer the database gives.
+// requirePermission.test.ts and permissions/store.test.ts cover the rest.
+const can = vi.fn();
+vi.mock("../permissions/store.js", () => ({ can: (...args: unknown[]) => can(...args) }));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },
@@ -64,30 +69,52 @@ function call(
     get message() {
       return (res.body as { message?: string } | undefined)?.message ?? "";
     },
-  };
-}
-
-/** A stored user whose writes are observable. */
-function storedUser() {
-  const save = vi.fn();
-  const set = vi.fn();
-  const destroy = vi.fn();
-  return {
-    save,
-    set,
-    destroy,
-    model: {
-      dataValues: { id: SELF, user: "ana", pass: "hash-viejo", image: null, id_rol: TECNICO },
-      set,
-      save,
-      destroy,
-      update: vi.fn(),
+    get payload() {
+      return res.body;
     },
   };
 }
 
+/** A stored user whose writes are observable. */
+function storedUser(overrides: Record<string, unknown> = {}) {
+  const save = vi.fn();
+  const set = vi.fn();
+  const destroy = vi.fn();
+  const dataValues = {
+    id: SELF,
+    user: "ana",
+    pass: "hash-viejo",
+    image: null,
+    id_rol: TECNICO,
+    ...overrides,
+  };
+  return {
+    save,
+    set,
+    destroy,
+    dataValues,
+    model: {
+      dataValues,
+      set,
+      save,
+      destroy,
+      update: vi.fn(),
+      toJSON: () => ({ ...dataValues }),
+    },
+  };
+}
+
+/** The single object handed to `set()` on a successful write. */
+function written(set: ReturnType<typeof vi.fn>): Record<string, unknown> {
+  expect(set).toHaveBeenCalledTimes(1);
+  return set.mock.calls[0][0] as Record<string, unknown>;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  // The matrix as the migration seeds it: administration holds everything, and
+  // the other roles hold nothing in these two modules.
+  can.mockImplementation(async (rol: number) => rol === ADMIN);
 });
 
 describe("creating and archiving users", () => {
@@ -170,6 +197,135 @@ describe("editing a user record", () => {
 
       expect(c.status, what).not.toBe(403);
     }
+  });
+});
+
+describe("what a request may actually change", () => {
+  // `PUT /usuario/:id` used to pass the request body whole to `set()`, and the
+  // route lets a person edit their own record. Those two together meant any
+  // authenticated account could send `{ id_rol: 1 }` at its own id and come
+  // back an administrator — one request, no tooling beyond the browser console.
+
+  it("writes only the profile fields, whatever else was sent", async () => {
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      {
+        params: { id: String(SELF) },
+        body: {
+          name: "Ana",
+          phone: "700",
+          id: 1,
+          user: "root",
+          pass: "no-por-aquí",
+          deletedAt: null,
+        },
+      },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(written(stored.set)).toEqual({ name: "Ana", phone: "700" });
+  });
+
+  it("refuses somebody without the Roles permission asking for a different role", async () => {
+    const { logAction } = await import("../utils/logAction.js");
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { name: "Ana", id_rol: ADMIN } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(stored.set).not.toHaveBeenCalled();
+    expect(stored.save).not.toHaveBeenCalled();
+    // Somebody reaching for administrator is exactly what the audit log is for.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "ROLE_CHANGE_DENIED", severity: "critical" }),
+    );
+  });
+
+  it("lets the profile page echo the current role back untouched", async () => {
+    // PerfilPage spreads the whole user object into its payload, id_rol
+    // included. Refusing that would break saving your own name.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { name: "Ana", id_rol: TECNICO } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(written(stored.set)).toEqual({ name: "Ana" });
+  });
+
+  it("lets the Roles permission move somebody between roles", async () => {
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(SELF) }, body: { name: "Ana", id_rol: ADMIN } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(written(stored.set)).toEqual({ name: "Ana", id_rol: ADMIN });
+  });
+
+  it("stops even administration rewriting a username or password through this route", async () => {
+    // Both have their own endpoint: one checks the name is free, the other
+    // hashes. Letting them through here would skip both.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(SELF) }, body: { user: "root", pass: "texto-plano" } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(written(stored.set)).toEqual({});
+  });
+
+  it("stops a user editor promoting themselves", async () => {
+    // The reason `roles` is its own module. Someone granted seguridad.editar —
+    // enough to fix a colleague's telephone number — must not thereby be able
+    // to hand out administrator.
+    can.mockImplementation(async (_rol: number, modulo: string) => modulo === "seguridad");
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: 2 },
+      { params: { id: String(SELF) }, body: { name: "Ana", id_rol: ADMIN } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(stored.set).not.toHaveBeenCalled();
+  });
+
+  it("never sends the password hash back", async () => {
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { name: "Ana" } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.payload).not.toHaveProperty("pass");
+    expect(JSON.stringify(c.payload)).not.toContain("hash-viejo");
   });
 });
 

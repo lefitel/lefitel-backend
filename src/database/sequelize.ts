@@ -1,17 +1,39 @@
 import { Sequelize } from "sequelize";
 import dotenv from "dotenv";
+import { log } from "../utils/logger.js";
 
 dotenv.config();
 
+const dbLog = log("db");
+
+/**
+ * Every statement Sequelize runs, at `debug`.
+ *
+ * It used to print unconditionally, which meant one page load scrolled the
+ * terminal past anything worth reading. The short label stays as the message so
+ * a query is recognisable at a glance; the whole statement is a field, there for
+ * when you need it and out of the way when you do not.
+ */
 const dbLogger = (sql: string, timing?: number) => {
+  if (!dbLog.isLevelEnabled("debug")) return;
   const match = sql.match(/(\w+).*?(?:FROM|INTO|UPDATE) "(\w+)"/i);
   const label = match ? `${match[1]} ${match[2]}` : sql.substring(0, 60);
-  console.log(`[DB] ${label}${timing !== undefined ? ` (${timing}ms)` : ""}`);
+  dbLog.debug({ sql, ms: timing }, `${label}${timing !== undefined ? ` (${timing}ms)` : ""}`);
 };
 
 // Typed rather than inferred: left bare it widens to `any`, and every
 // sequelize.query in the codebase silently loses its return type with it.
 let sequelize: Sequelize;
+
+/**
+ * Where the connection settings came from.
+ *
+ * Exported because `index.ts` needs it to decide whether rewriting the schema is
+ * survivable. A deployment configured with a single `DATABASE_URL` is the shape
+ * a hosted database takes; the discrete variables are the shape a local one
+ * takes. That is the only signal available at boot that tells the two apart.
+ */
+let connectionSource: "discrete" | "url" = "url";
 
 /**
  * Explicit pool. The default is 5 connections shared by the whole API, and a
@@ -37,7 +59,11 @@ const pool = { max: 15, min: 0, acquire: 30_000, idle: 10_000 };
  * logged so a wrong one is visible on the first line of the log.
  */
 if (process.env.PG_DATABASE && process.env.PG_USER) {
-  console.log(`[DB] Conectando a ${process.env.PG_DATABASE} en ${process.env.PG_IP}:${process.env.PG_PORT}`);
+  connectionSource = "discrete";
+  dbLog.info(
+    { base: process.env.PG_DATABASE, host: process.env.PG_IP, puerto: process.env.PG_PORT },
+    `conectando a ${process.env.PG_DATABASE} en ${process.env.PG_IP}:${process.env.PG_PORT}`,
+  );
   sequelize = new Sequelize(
     process.env.PG_DATABASE,
     process.env.PG_USER,
@@ -52,17 +78,18 @@ if (process.env.PG_DATABASE && process.env.PG_USER) {
     }
   );
 } else if (process.env.DATABASE_URL) {
-  console.log("[DB] Conectando por DATABASE_URL");
+  connectionSource = "url";
+  dbLog.info("conectando por DATABASE_URL");
   sequelize = new Sequelize(process.env.DATABASE_URL, { logging: dbLogger, benchmark: true, pool });
 } else {
   // This module is imported before index.ts runs, so the guard belongs here.
   // Without it, `new Sequelize(undefined)` throws about a missing dialect,
   // which says nothing about the variable that is actually missing.
-  console.error(
-    "ERROR: falta la configuración de la base de datos. " +
-    "Define DATABASE_URL, o bien PG_DATABASE, PG_USER, PG_PASS, PG_IP y PG_PORT."
+  dbLog.fatal(
+    "falta la configuración de la base de datos. " +
+    "Define DATABASE_URL, o bien PG_DATABASE, PG_USER, PG_PASS, PG_IP y PG_PORT.",
   );
   process.exit(1);
 }
 
-export { sequelize };
+export { sequelize, connectionSource };

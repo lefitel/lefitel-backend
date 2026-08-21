@@ -13,6 +13,7 @@
 // database on a path that does not depend on the data being there.
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { QueryTypes } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { buildQuery } from "./sqlBuilder.js";
 import { buildCatalogView } from "./catalogView.js";
@@ -148,5 +149,116 @@ describe.skipIf(!dbAvailable)("archived records stay out of every root", () => {
 
     expect(result.rows).toHaveLength(89);
     expect(result.rows.some((row) => row.c0 === null)).toBe(false);
+  });
+});
+
+describe.skipIf(!dbAvailable)("a calendar day means the same day to Postgres", () => {
+  // The only test in the suite that compares the engine's answer to the truth
+  // rather than to another string. Everything about the date boundary was
+  // asserted on substrings, and the substring was right while the bound was
+  // eight hours early: "los eventos del 17/01/2026" returned 63 where 4
+  // occurred, and every report with a date range carried the same error in its
+  // lower half. A filter is a claim about which rows belong; only rows can
+  // check it.
+
+  /** What the calendar says, read straight from the column in the report's zone. */
+  async function trueCount(day: string): Promise<number> {
+    const [row] = await sequelize.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM "eventos"
+        WHERE "deletedAt" IS NULL AND ("date" AT TIME ZONE 'America/La_Paz')::date = $1::date`,
+      { bind: [day], type: QueryTypes.SELECT, logging: false },
+    );
+    return Number(row.n);
+  }
+
+  it("counts a single day as that day, not as a window straddling two", async () => {
+    // The days chosen are the ones that actually catch it: each has events in
+    // the hours the broken bound swept in from the day before. On a quiet day
+    // the two readings agree and the test would pass over the bug.
+    const [busiest] = await sequelize.query<{ dia: string }>(
+      `SELECT to_char(("date" AT TIME ZONE 'America/La_Paz')::date, 'YYYY-MM-DD') AS dia
+         FROM "eventos" WHERE "deletedAt" IS NULL
+        GROUP BY 1 ORDER BY count(*) DESC LIMIT 1`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+
+    for (const day of [busiest.dia, "2026-01-17", "2025-11-15"]) {
+      const engine = await countReport(
+        {
+          root: "evento",
+          columns: [{ path: "id" }],
+          filters: { op: "and", conditions: [{ path: "date", operator: "eq", value: day }] },
+          limit: 1,
+        },
+        ADMIN,
+      );
+      expect(engine, day).toBe(await trueCount(day));
+    }
+  });
+
+  /** Events on one side of `day`, read from the column in the report's zone. */
+  async function trueCountBeside(day: string, side: ">=" | "<"): Promise<number> {
+    const [row] = await sequelize.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM "eventos"
+        WHERE "deletedAt" IS NULL AND ("date" AT TIME ZONE 'America/La_Paz')::date ${side} $1::date`,
+      { bind: [day], type: QueryTypes.SELECT, logging: false },
+    );
+    return Number(row.n);
+  }
+
+  it("splits the set the same way from either side", async () => {
+    // `gte` and `lt` over the same day have to partition the events exactly.
+    // `lt` was four hours off, so thirty of them fell on both sides or on
+    // neither. What sits outside the partition is the one event with no date at
+    // all: a comparison against NULL is NULL, so it belongs to no side — which
+    // is right, and is asserted here rather than left as an off-by-one nobody
+    // can explain later.
+    const day = "2026-01-17";
+    const ask = (operator: "gte" | "lt") =>
+      countReport(
+        {
+          root: "evento",
+          columns: [{ path: "id" }],
+          filters: { op: "and", conditions: [{ path: "date", operator, value: day }] },
+          limit: 1,
+        },
+        ADMIN,
+      );
+
+    const [desde, antes, total] = await Promise.all([
+      ask("gte"),
+      ask("lt"),
+      countReport({ root: "evento", columns: [{ path: "id" }], limit: 1 }, ADMIN),
+    ]);
+    const [sinFecha] = await sequelize.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM "eventos" WHERE "deletedAt" IS NULL AND "date" IS NULL`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+
+    expect(desde).toBe(await trueCountBeside(day, ">="));
+    expect(antes).toBe(await trueCountBeside(day, "<"));
+    expect(desde + antes + Number(sinFecha.n)).toBe(total);
+  });
+
+  it("puts the boundary on the same instant whatever zone the session runs in", async () => {
+    // The bug in one line. `$1::date AT TIME ZONE zone` resolves to the
+    // overload that reads the date in the *session's* zone, so the same report
+    // meant three different days on three different servers. The cast to
+    // `timestamp` pins the other overload, and then the session cannot reach it.
+    const instants = await sequelize.transaction(async (transaction) => {
+      const seen: string[] = [];
+      for (const zone of ["UTC", "America/La_Paz", "Asia/Tokyo"]) {
+        await sequelize.query(`SET LOCAL TIME ZONE '${zone}'`, { transaction, logging: false });
+        const [row] = await sequelize.query<{ t: Date }>(
+          `SELECT (($1::date)::timestamp AT TIME ZONE 'America/La_Paz') AS t`,
+          { bind: ["2026-01-17"], type: QueryTypes.SELECT, transaction, logging: false },
+        );
+        seen.push(new Date(row.t).toISOString());
+      }
+      return seen;
+    });
+
+    expect(new Set(instants).size).toBe(1);
+    expect(instants[0]).toBe("2026-01-17T04:00:00.000Z");
   });
 });

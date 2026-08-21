@@ -12,6 +12,7 @@ import { buildQuery } from "../reportBuilder/sqlBuilder.js";
 import { ReportConfigError, type ReportConfig } from "../reportBuilder/types.js";
 import { logAction } from "../utils/logAction.js";
 import { IReporteVista } from "../interfaces/index.js";
+import { log } from "../utils/logger.js";
 
 const ADMIN_ROLE = 1;
 
@@ -20,6 +21,8 @@ const STAFF_ROLES = [1, 2];
 
 /** Postgres raises this when SET LOCAL statement_timeout fires. */
 const QUERY_CANCELED = "57014";
+
+const generadorLog = log("generador");
 
 const roleOf = (req: Request): number => req.user?.id_rol ?? -1;
 
@@ -57,7 +60,7 @@ function handleError(error: unknown, res: Response) {
   // Never echo the database error back. It leaks physical table and column
   // names, types, and the server locale — an oracle for anyone probing the
   // schema, and unreadable for the user anyway.
-  console.error("[generador]", error);
+  generadorLog.error({ err: error }, "fallo al atender una petición del generador");
   return res.status(500).json({
     message: "No se pudo generar el reporte. Intente de nuevo o revise su configuración.",
   });
@@ -75,9 +78,46 @@ export async function getCatalogo(req: Request, res: Response) {
 
 // ─── Query execution ─────────────────────────────────────────────────────────
 
+/**
+ * What a single answer may weigh.
+ *
+ * `/exportar` refuses more than 200.000 cells and `/consulta` — the endpoint
+ * the screen actually uses — refused nothing: 50.000 rows × 60 columns is three
+ * million cells, fifteen times the export cap, serialised by `res.json` into
+ * one string that is held in memory twice while it is written. The limiter caps
+ * how *often* it can be asked, not how big each answer is, and there is no
+ * queue on this path at all.
+ *
+ * Well above any page a person reads — the screen asks for a hundred rows — and
+ * below what puts the process in trouble.
+ */
+export const MAX_CONSULTA_CELLS = 300_000;
+
+/** What the builder falls back to when the caller names no page size. */
+const DEFAULT_CONSULTA_ROWS = 500;
+
+const es = (n: number) => n.toLocaleString("es-BO");
+
 export async function postConsulta(req: Request, res: Response) {
   try {
     const config = req.body as ReportConfig;
+
+    // Refused before the rows are read, not after: materialising three million
+    // cells only to decide they were too many is precisely the memory the cap
+    // exists to protect. The number of columns is known from the configuration
+    // and `buildQuery` — which `runReport` calls next — is what guarantees the
+    // list is a valid one.
+    const width = Array.isArray(config?.columns) ? config.columns.length : 0;
+    const asked = Number(config?.limit);
+    const rows = Number.isFinite(asked) ? Math.max(1, Math.trunc(asked)) : DEFAULT_CONSULTA_ROWS;
+    if (width > 0 && rows * width > MAX_CONSULTA_CELLS) {
+      return res.status(413).json({
+        message:
+          `La consulta pide demasiados datos de una vez (${es(rows * width)} celdas, ` +
+          `máximo ${es(MAX_CONSULTA_CELLS)}). Pida menos filas por página o quite columnas.`,
+      });
+    }
+
     const result = await runReport(config, roleOf(req));
 
     // Running a report is the operation that actually extracts data, and it was
@@ -313,7 +353,19 @@ export async function putReporte(req: Request, res: Response) {
     }
 
     const payload = readPayload(req, row);
-    buildQuery(payload.config as unknown as ReportConfig, roleOf(req));
+    // Only when the configuration is the thing being written.
+    //
+    // It used to be rebuilt on every update, including a body that says nothing
+    // but `{favorite: true}` — which is exactly what the star sends. So a
+    // configuration that no longer builds under today's rules made its own
+    // report uneditable forever: a label written before the 120-character cap
+    // existed, or a field its author lost access to when their role changed.
+    // The star answered 400 with a message about a column, and renaming,
+    // sharing and unfavouriting were shut too. The row could be deleted and
+    // nothing else.
+    if (Object.hasOwn((req.body ?? {}) as Record<string, unknown>, "config")) {
+      buildQuery(payload.config as unknown as ReportConfig, roleOf(req));
+    }
 
     await found.update(payload);
 
