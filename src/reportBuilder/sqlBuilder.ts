@@ -392,6 +392,11 @@ function resolvePath(
       kind: field.kind,
       label: field.label,
       selfAggregating: false,
+      // A plain column of a parent has the same grain problem its calculated
+      // siblings do: read once per row of this report, so adding the readings
+      // up counts a poste's number once for every event of that poste. Only
+      // `sum` is affected — see `inflatesAcrossRows`.
+      foreignGrain: segments.length > 1,
       semantic: field.semantic,
     };
   }
@@ -421,9 +426,15 @@ function resolvePath(
       // treatment as a to-many aggregate when it is summarised.
       selfAggregating: calculated.innerAgg !== undefined,
       innerAgg: calculated.innerAgg,
-      // A non-empty base path means the total was reached through a relation,
-      // so it counts at that entity's grain rather than the report's.
-      foreignGrain: calculated.innerAgg !== undefined && basePath !== "",
+      // A non-empty base path means the value was reached through a relation,
+      // so it belongs to that entity's grain rather than the report's.
+      //
+      // This used to require `innerAgg`, which meant only the counts were
+      // caught. Every calculated field that is a per-parent scalar walked past
+      // it: over a report of revisions grouped by state, `SUM(evento.diasAbierto)`
+      // returned 1.026.699 where the honest number — each event counted once —
+      // is 103.323. Ten times, under a header that names no grain at all.
+      foreignGrain: basePath !== "",
       semantic: calculated.semantic,
       groupKeys: calculated.groupKeys?.(landing.alias, dep),
     };
@@ -817,6 +828,33 @@ function buildFilters(
  * unweighted average of averages, which is a different number from the average
  * the user means, so it is rejected instead of quietly answering wrong.
  */
+/**
+ * Does this summary multiply a value that belongs to another entity?
+ *
+ * A parent value is read once per child row, and what that costs depends on the
+ * summary asked for:
+ *
+ * - `sum` always multiplies. A poste with ten events contributes its number ten
+ *   times: `SUM(evento.diasAbierto)` over revisions returned 1.026.699 where the
+ *   honest figure is 103.323.
+ * - `count` only multiplies when the expression is already a counting
+ *   subquery, because `applyAggregate` turns that pair into `SUM` — which is the
+ *   n² case. Counting a plain parent attribute counts the report's own rows and
+ *   is not inflated at all; refusing it took away `COUNT(poste.tramo)`, which
+ *   was answering correctly.
+ * - `min` and `max` do not care: the largest of a value repeated ten times is
+ *   that value. Refusing them deleted reports that were right.
+ * - `avg` never gets here for a subquery — `applyAggregate` refuses an average
+ *   of averages on its own. Over a plain parent attribute it is an average
+ *   weighted by how many children each parent has, which is a different number
+ *   from the one most people mean and is left alone for now.
+ */
+function inflatesAcrossRows(resolved: ResolvedExpr, agg: AggFn): boolean {
+  if (!resolved.foreignGrain) return false;
+  if (agg === "sum") return true;
+  return agg === "count" && resolved.selfAggregating;
+}
+
 function applyAggregate(expr: string, agg: AggFn, resolved: ResolvedExpr): string {
   if (!resolved.selfAggregating) return `${agg.toUpperCase()}(${expr})`;
 
@@ -951,10 +989,10 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
         // configuration language cannot express today — and a squared count
         // that looks plausible is worse than a sentence saying it cannot be
         // done.
-        if (resolved.foreignGrain) {
+        if (inflatesAcrossRows(resolved, spec.agg)) {
           throw new ReportConfigError(
-            `"${resolved.label}" ya es un total de otra entidad, y resumirlo aquí lo contaría ` +
-              `una vez por fila. Muéstrelo sin agrupar, o cambie el nivel de detalle.`,
+            `"${resolved.label}" ya es un total de otra entidad, y ${AGG_LABEL[spec.agg]} aquí ` +
+              `lo contaría una vez por fila. Muéstrelo sin agrupar, o cambie el nivel de detalle.`,
           );
         }
         expr = applyAggregate(expr, spec.agg, resolved);
@@ -1034,13 +1072,23 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
       // inflated column is visibly wrong, an inflated ORDER BY is not. Ordering
       // tramos by SUM of a foreign total put only three of the top eight in
       // their real places, with the correct count displayed right beside it.
-      if (resolved.foreignGrain) {
+      if (inflatesAcrossRows(resolved, sort.agg)) {
         throw new ReportConfigError(
           `No se puede ordenar por "${resolved.label}": ya es un total de otra entidad, ` +
-            `y resumirlo aquí lo contaría una vez por fila.`,
+            `y ${AGG_LABEL[sort.agg]} aquí lo contaría una vez por fila.`,
         );
       }
       expr = applyAggregate(expr, sort.agg, resolved);
+    } else if (sort.agg) {
+      // Nothing here will apply it — the expression is grouped, or the report
+      // is not a summary — so the ranking would be by a different number from
+      // the one asked for, and no header shows the ordering formula. The
+      // columns refuse this; the ordering used to accept it and drop the
+      // aggregate on the floor.
+      throw new ReportConfigError(
+        `No se puede ordenar por ${AGG_LABEL[sort.agg]} de "${resolved.label}" ` +
+          `en un reporte que no lo resume así.`,
+      );
     }
     orderParts.push(`${expr} ${sort.dir === "asc" ? "ASC" : "DESC"} NULLS LAST`);
   }

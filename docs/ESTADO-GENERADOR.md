@@ -502,3 +502,111 @@ auditoría y sin tocar —el numerado de páginas del PDF, el peso del logo, la
 privacidad del listado de reportes, y el hecho de que `routeGuards.test.ts`
 compara nombres de función y no distingue `("generador","ver")` de
 `("generador","archivar")`—.
+
+
+## Segunda auditoría: sobre los arreglos de la primera
+
+Tres lentes más, esta vez con el encargo explícito de **romper lo que se acababa
+de cambiar**. Encontraron nueve defectos nuevos, cinco de ellos introducidos por
+los propios arreglos. Vale la pena decirlo así de claro: la primera tanda cerró
+quince fallos y abrió cinco.
+
+### Regresiones que había metido yo
+
+**«Generar» se quedaba muerto para el resto de la sesión.** `run` solo baja el
+indicador de «cargando» cuando la petición que vuelve sigue siendo la vigente —
+lo cual era seguro mientras `run` era el único que tocaba el contador. El
+`retireInFlight` nuevo lo subía sin lanzar ninguna petición, así que la respuesta
+abandonada volvía, se descartaba, y nadie bajaba el indicador. Abrir otro reporte
+o cambiar el nivel de detalle mientras algo se generaba dejaba el botón
+deshabilitado sin vuelta atrás.
+
+**Refusé consultas que estaban bien.** Marcar como «grano ajeno» toda ruta
+to-many alcanzada a través de una relación es correcto para `suma` y `conteo`, y
+falso para `mínimo` y `máximo`: el máximo de un valor repetido diez veces es ese
+valor. Reportes que devolvían el número correcto pasaron a ser imposibles. La
+regla ahora distingue qué agregados corrompe de verdad un grano ajeno.
+
+**`die()` dejaba la API sirviendo dos segundos con la base ya cerrada.** Los
+manejadores nuevos de `unhandledRejection` cierran Sequelize y arman una salida
+diferida, pero no paraban el listener: durante ese margen toda petición entrante
+se aceptaba y se contestaba con un 500, y a las que ya estaban en vuelo se les
+arrancaba la transacción por debajo. Antes de esto Node mataba el proceso al
+instante — feo, y al menos honesto. Ahora se deja de aceptar antes de cerrar.
+
+**El tope de celdas medía el límite pedido, no el que se iba a usar.** Pedir un
+millón de filas de una columna se rechazaba citando un millón de celdas, cuando
+el constructor habría recortado a 50.000. Y el tamaño se comprobaba antes de
+validar, así que un campo inexistente salía como «demasiadas celdas, quite
+columnas» — exactamente la inversión que la exportación ya tenía corregida.
+
+**Borrar un carácter fundía dos valores del filtro de lista.** El texto se
+readoptaba desde la configuración cuando ambos diferían, y `"uno, d"` menos una
+letra difiere de `"uno"`: la caja se reescribía desde la lista y se llevaba el
+separador. La misma forma del fallo original, alcanzada editando en vez de
+escribiendo.
+
+### Lo que estaba mal desde antes y ahora también se arregló
+
+**Escritura de ficheros arbitraria por `POST /api/upload`.** El nombre subido
+entraba en la ruta de destino por concatenación, sin sanear: subir con el nombre
+`../../../tmp/pwn.png` escribía fuera del directorio de imágenes. La ruta lleva
+autenticación y nada más, así que cualquier cuenta con sesión podía hacerlo. La
+lectura se había endurecido hace meses —`%2F` en un parámetro dejaba borrar
+cualquier fichero del servidor— y al escritor no lo tocó nadie. Ahora el nombre
+lo pone el servidor y `resolveImagePath` tiene la última palabra.
+
+**El `SUM` de un valor del padre multiplicaba.** La guarda solo miraba los
+campos calculados que ya eran un conteo, así que `SUM(evento.diasAbierto)` sobre
+revisiones devolvía **1.026.699 donde el número honesto es 103.323**. Diez veces,
+bajo una cabecera que no nombra ningún grano. Ahora el catálogo deja de ofrecer
+`suma` en cualquier campo alcanzado a través de una relación, y el constructor la
+rechaza si llega igual.
+
+**El orden aceptaba en silencio un resumen que luego tiraba.** Una columna con
+`suma` en modo detalle se rechaza; el mismo `suma` en el orden se aceptaba y se
+descartaba, así que el ranking salía por un número distinto del pedido y sin
+ninguna cabecera que enseñe la fórmula.
+
+**Un nodo de filtro mal formado tumbaba el abrir.** El podador nuevo leía `.path`
+de cualquier cosa, así que un `null` en la lista lanzaba dentro del manejador del
+clic: el reporte no se abría, no salía aviso, y la fila parecía muerta.
+
+**Agrupar dejaba el orden desincronizado**, `setColumnAgg` con «sin resumen» se
+quedaba con el agregado viejo en el criterio, y la validación del orden rechazaba
+rutas que sí son columnas válidas — las tres, formas de que la flecha diga una
+cosa y la configuración diga otra.
+
+**Quien tuviera `crear` pero no `editar` se quedaba sin ningún botón de guardar**
+en cuanto abría un reporte propio.
+
+**Y varias pruebas mías eran decorativas**, dicho por el auditor y con razón: la
+que elegía «el día con más eventos» escogía uno donde las dos lecturas coinciden,
+la que comprobaba la partición pasaba igual con el fallo puesto —ambos operadores
+compartían el límite roto—, y la de las zonas horarias no llamaba al constructor:
+comprobaba una propiedad de Postgres y habría seguido verde con el código
+revertido. Reescritas para que muerdan.
+
+### Verificación
+
+**357 pruebas en `api`, 22 ficheros. 144 en `web`.** Typecheck y lint limpios en
+los dos, pruebas incluidas.
+
+### Lo que sigue abierto de esta segunda ronda
+
+1. **`checkValue` decide con el número convertido y liga el texto original**, así
+   que `2.5` sobre una columna entera —escribible desde la propia pantalla, en
+   «Criticidad ≤»— sigue dando 500. Doce formas más viven ahí, fechas
+   imposibles incluidas (`2026-02-30`). Lo honesto es ligar el número convertido,
+   exigir el formato de fecha con ida y vuelta, y mapear la clase 22 de Postgres
+   a un 400 en vez de un 500.
+2. **`null` dentro de una lista `in` o de un `between`** construye SQL válido y
+   devuelve cero filas sin decir nada.
+3. **El tope de filtros del cliente cuenta solo el primer nivel** mientras el
+   servidor cuenta el árbol, así que el aviso local no salta antes del rechazo.
+4. **`postConsulta` y `putReporte` siguen sin pruebas propias**, y `src/index.ts`
+   está excluido de la cobertura: los tres arreglos de esta ronda que viven ahí
+   se pueden borrar sin que la suite se entere.
+5. **`logger.test.ts` falla en arranque en frío** —cinco segundos— porque
+   `import` de pino y pino-pretty lanza `chcp.com` de forma síncrona por worker.
+   `npm test` no es determinista con la caché vacía.

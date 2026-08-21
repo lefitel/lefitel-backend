@@ -89,7 +89,15 @@ function collect(
       kind: field.kind,
       group,
       operators: OPERATORS_BY_KIND[field.kind],
-      aggregates: AGGS_BY_KIND[field.kind],
+      // `sum` is dropped for anything reached through a relation: the value
+      // belongs to the parent and is read once per row of this report, so
+      // adding those readings up multiplies. `count` counts the report's own
+      // rows and `min`/`max` do not care how often a value repeats, so both
+      // stay. The builder refuses the same combination — a picker that offers
+      // it is offering an error.
+      aggregates: prefix
+        ? AGGS_BY_KIND[field.kind].filter((agg) => agg !== "sum")
+        : AGGS_BY_KIND[field.kind],
       semantic: field.semantic,
     });
   }
@@ -113,7 +121,11 @@ function collect(
       // to the report's, so summarising it counts the same subquery once per
       // row — a poste with n events contributed n². The builder refuses it, and
       // by the rule just above, a picker that offers it is offering an error.
-      aggregates: calc.innerAgg !== undefined && prefix ? [] : AGGS_BY_KIND[calc.kind],
+      aggregates: prefix
+        ? calc.innerAgg !== undefined
+          ? []
+          : AGGS_BY_KIND[calc.kind].filter((agg) => agg !== "sum")
+        : AGGS_BY_KIND[calc.kind],
       calculated: true,
       semantic: calc.semantic,
       aggregate: calc.innerAgg !== undefined,

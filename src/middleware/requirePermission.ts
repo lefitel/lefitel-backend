@@ -22,14 +22,19 @@ const gateLog = log("permisos");
 function fromPromise(
   gate: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
 ) {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return (req: Request, res: Response, next: NextFunction) =>
     gate(req, res, next).catch((error: unknown) => {
-      gateLog.error({ err: error, url: req.originalUrl }, "no se pudo comprobar el permiso");
+      // Through the request's own logger when there is one, so the cause and
+      // the request line carry the same id and can be read as one event.
+      const to = (req as Request & { log?: typeof gateLog }).log ?? gateLog;
+      to.error({ err: error, url: req.originalUrl }, "no se pudo comprobar el permiso");
       if (!res.headersSent) {
         res.status(500).json({ message: "No se pudo comprobar su permiso. Intente de nuevo." });
       }
+      // Express ignores what a handler returns, but the tests await this — and
+      // a promise that settles when the gate is done beats one that settles a
+      // microtask earlier and happens to work.
     });
-  };
 }
 
 /**

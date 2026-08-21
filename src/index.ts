@@ -20,8 +20,18 @@ const bootLog = log("boot");
  * backstop for something refusing to let go; it is unref'd, so it never keeps
  * the process alive on its own account.
  */
+/** Set once the server is listening, so `die()` can stop it accepting. */
+let listener: import("node:http").Server | null = null;
+
 function die(): void {
   process.exitCode = 1;
+  // Stop accepting *first*. Closing the pool while the listener is still up
+  // left a two-second window in which every arriving request was accepted and
+  // then answered 500, because the connection manager had already been
+  // replaced by a thrower — and requests already in flight had their
+  // transaction pulled out from under them. Before the exit handlers existed
+  // Node killed the process on the spot, which was ugly and at least honest.
+  listener?.close();
   void sequelize.close().catch(() => undefined);
   setTimeout(() => process.exit(1), 2000).unref();
 }
@@ -107,6 +117,7 @@ async function main() {
   const server = app.listen(port, () => {
     bootLog.info({ puerto: port }, `escuchando en el puerto ${port}`);
   });
+  listener = server;
 
   /**
    * `listen` reports its failures as an event, not as a rejected promise, so the

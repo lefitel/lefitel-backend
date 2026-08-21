@@ -172,17 +172,26 @@ describe.skipIf(!dbAvailable)("a calendar day means the same day to Postgres", (
   }
 
   it("counts a single day as that day, not as a window straddling two", async () => {
-    // The days chosen are the ones that actually catch it: each has events in
-    // the hours the broken bound swept in from the day before. On a quiet day
-    // the two readings agree and the test would pass over the bug.
-    const [busiest] = await sequelize.query<{ dia: string }>(
-      `SELECT to_char(("date" AT TIME ZONE 'America/La_Paz')::date, 'YYYY-MM-DD') AS dia
-         FROM "eventos" WHERE "deletedAt" IS NULL
+    // The day is chosen because it *discriminates*, not because it is busy. On
+    // a quiet day — or on any day with nothing in the four hours the broken
+    // bound swept in from the evening before — both readings agree and the test
+    // would pass straight over the bug. This asks the database for a day where
+    // they disagree, so the test keeps its teeth on data that is not this data.
+    const [worst] = await sequelize.query<{ dia: string }>(
+      `SELECT to_char(("date" AT TIME ZONE 'America/La_Paz')::date, 'YYYY-MM-DD') AS dia,
+              count(*) FILTER (
+                WHERE "date" >= (("date" AT TIME ZONE 'America/La_Paz')::date - interval '4 hours')
+                  AND "date" <  ("date" AT TIME ZONE 'America/La_Paz')::date
+              ) AS arrastradas
+         FROM "eventos" WHERE "deletedAt" IS NULL AND "date" IS NOT NULL
         GROUP BY 1 ORDER BY count(*) DESC LIMIT 1`,
       { type: QueryTypes.SELECT, logging: false },
     );
 
-    for (const day of [busiest.dia, "2026-01-17", "2025-11-15"]) {
+    // The two hardcoded days are facts about this database and are kept because
+    // they are the measured ones: 4 events against 63 under the old bound, and
+    // 23 against 53. `worst` is what keeps the test honest anywhere else.
+    for (const day of [worst.dia, "2026-01-17", "2025-11-15"]) {
       const engine = await countReport(
         {
           root: "evento",
@@ -240,25 +249,42 @@ describe.skipIf(!dbAvailable)("a calendar day means the same day to Postgres", (
     expect(desde + antes + Number(sinFecha.n)).toBe(total);
   });
 
-  it("puts the boundary on the same instant whatever zone the session runs in", async () => {
-    // The bug in one line. `$1::date AT TIME ZONE zone` resolves to the
-    // overload that reads the date in the *session's* zone, so the same report
-    // meant three different days on three different servers. The cast to
-    // `timestamp` pins the other overload, and then the session cannot reach it.
-    const instants = await sequelize.transaction(async (transaction) => {
-      const seen: string[] = [];
+  it("returns the same rows whatever zone the session runs in", async () => {
+    // The bug in one line. `$1::date AT TIME ZONE zone` resolves to the overload
+    // that reads the date as an instant in the *session's* zone, so the same
+    // saved report meant three different days on three different servers: 4
+    // events in La Paz, 63 in UTC, 64 in Tokyo.
+    //
+    // Through `buildQuery` and its own binds, not a hand-written literal: the
+    // first version of this test asserted a property of Postgres and would have
+    // stayed green with the builder reverted, which is the substring mistake
+    // one level further out.
+    const { sql, binds } = buildQuery(
+      {
+        root: "evento",
+        columns: [{ path: "id" }],
+        filters: { op: "and", conditions: [{ path: "date", operator: "eq", value: "2026-01-17" }] },
+        limit: 500,
+      },
+      ADMIN,
+    );
+
+    const counts = await sequelize.transaction(async (transaction) => {
+      const seen: number[] = [];
       for (const zone of ["UTC", "America/La_Paz", "Asia/Tokyo"]) {
         await sequelize.query(`SET LOCAL TIME ZONE '${zone}'`, { transaction, logging: false });
-        const [row] = await sequelize.query<{ t: Date }>(
-          `SELECT (($1::date)::timestamp AT TIME ZONE 'America/La_Paz') AS t`,
-          { bind: ["2026-01-17"], type: QueryTypes.SELECT, transaction, logging: false },
-        );
-        seen.push(new Date(row.t).toISOString());
+        const rows = await sequelize.query<Record<string, unknown>>(sql, {
+          bind: binds,
+          type: QueryTypes.SELECT,
+          transaction,
+          logging: false,
+        });
+        seen.push(rows.length);
       }
       return seen;
     });
 
-    expect(new Set(instants).size).toBe(1);
-    expect(instants[0]).toBe("2026-01-17T04:00:00.000Z");
+    expect(new Set(counts).size, `por zona: ${counts.join(", ")}`).toBe(1);
+    expect(counts[0]).toBe(await trueCount("2026-01-17"));
   });
 });

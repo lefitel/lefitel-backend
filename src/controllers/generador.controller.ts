@@ -3,6 +3,7 @@ import { Op } from "sequelize";
 import { ReporteVistaModel } from "../models/reporteVista.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { buildCatalogView } from "../reportBuilder/catalogView.js";
+import { MAX_ROWS } from "../reportBuilder/catalog.js";
 import { runReport } from "../reportBuilder/execute.js";
 import {
   buildExport, ExportTooLargeError, type ExportFormat,
@@ -102,14 +103,25 @@ export async function postConsulta(req: Request, res: Response) {
   try {
     const config = req.body as ReportConfig;
 
-    // Refused before the rows are read, not after: materialising three million
-    // cells only to decide they were too many is precisely the memory the cap
-    // exists to protect. The number of columns is known from the configuration
-    // and `buildQuery` — which `runReport` calls next — is what guarantees the
-    // list is a valid one.
+    // Validate first, then size. A configuration naming a field that does not
+    // exist used to come back as "too many cells", which sends someone to
+    // delete columns that were not the problem — the same inversion the export
+    // path was fixed for, reintroduced here.
+    buildQuery(config, roleOf(req));
+
+    // Refused before the rows are read: materialising three million cells only
+    // to decide they were too many is precisely the memory the cap protects.
+    //
+    // Measured against the limit the builder will actually use, not the one the
+    // caller asked for. `limit` is clamped to MAX_ROWS downstream, so asking
+    // for a million rows of one column was refused for a size the answer could
+    // never have reached, quoting a cell count that was arithmetically
+    // impossible.
     const width = Array.isArray(config?.columns) ? config.columns.length : 0;
     const asked = Number(config?.limit);
-    const rows = Number.isFinite(asked) ? Math.max(1, Math.trunc(asked)) : DEFAULT_CONSULTA_ROWS;
+    const rows = Number.isFinite(asked)
+      ? Math.min(Math.max(1, Math.trunc(asked)), MAX_ROWS)
+      : DEFAULT_CONSULTA_ROWS;
     if (width > 0 && rows * width > MAX_CONSULTA_CELLS) {
       return res.status(413).json({
         message:

@@ -107,6 +107,44 @@ describe("loadPhotos", () => {
     expect(result.skipped).toBe(1);
   });
 
+  it("accounts for every photograph it was asked for", async () => {
+    // The identity that makes the count trustworthy: loaded + over the cap +
+    // unreadable is everything asked for. Before, a file that could not be read
+    // was neither loaded nor skipped — it evaporated, and the workbook printed
+    // "Si" in its cell exactly as it does when photographs were never
+    // requested. 1.376 asked for, none delivered, and nothing anywhere saying
+    // so.
+    const asked = [
+      "/uno.webp",            // reads
+      "/dos.webp",            // reads
+      "/no-existe.webp",      // missing
+      "/no-es-imagen.webp",   // present, not an image
+      "../fuera.webp",        // refused before it reaches the disk
+    ];
+    const result = await loadPhotos(asked, { directory });
+
+    expect(result.requested).toBe(5);
+    expect(result.loaded).toBe(2);
+    expect(result.skipped).toBe(0);
+    expect(result.failed).toBe(3);
+    expect(result.loaded + result.skipped + result.failed).toBe(result.requested);
+  });
+
+  it("counts the ones over the cap apart from the ones it could not read", async () => {
+    // Two different problems that need two different sentences in the file: the
+    // report being too big for one spreadsheet, and the photograph not being on
+    // this server.
+    const result = await loadPhotos(
+      ["/uno.webp", "/dos.webp", "/no-existe.webp"],
+      { directory, cap: 2 },
+    );
+
+    expect(result.requested).toBe(3);
+    expect(result.skipped).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(result.loaded + result.skipped + result.failed).toBe(result.requested);
+  });
+
   it("returns nothing for a report with no photographs", async () => {
     const result = await loadPhotos([null, undefined, "", "   ", 42], { directory });
 

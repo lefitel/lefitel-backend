@@ -59,6 +59,22 @@ function mountedRoutes(): MountedRoute[] {
 
   for (const layer of stack) {
     const key = layer.regexp.source;
+    // A route declared straight on the app — `app.post("/api/x", handler)` —
+    // has no `handle.stack`, so it used to fall through to the else and be
+    // filed away as the name of a middleware: invisible to both assertions
+    // below. Nothing in this codebase is written that way today, and that is
+    // exactly the shape someone in a hurry reaches for, which is the shape this
+    // file exists to catch.
+    if (layer.route) {
+      const chain = [
+        ...(beforeRouter.get(key) ?? []),
+        ...layer.route.stack.map((s: { handle: { name: string } }) => s.handle.name),
+      ];
+      for (const method of Object.keys(layer.route.methods)) {
+        routes.push({ method: method.toUpperCase(), path: layer.route.path, chain });
+      }
+      continue;
+    }
     if (layer.handle.stack) {
       const prefix = mountPath(layer);
       // A router can also gate itself with `router.use(requireRole(...))` — the

@@ -1,7 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { buildQuery, buildCountQuery } from "./sqlBuilder.js";
 import { catalog, MAX_ROWS } from "./catalog.js";
-import { ReportConfigError, type Operator, type ReportConfig } from "./types.js";
+import { buildCatalogView } from "./catalogView.js";
+import {
+  ReportConfigError,
+  type AggFn,
+  type Operator,
+  type ReportConfig,
+} from "./types.js";
 
 const ADMIN = 1;
 const OPERATIVO = 3;
@@ -414,6 +420,45 @@ describe("buildQuery — filters and binds", () => {
     // The pair partitions the set: what `lt` excludes is exactly what `gte`
     // keeps, so the same instant appears in both.
     expect(gte.replace(">=", "<")).toContain(lt.slice(lt.indexOf("<")));
+  });
+
+  it("only refuses the summaries that a foreign grain actually corrupts", () => {
+    // The first version of this guard refused every summary over anything
+    // reached through a relation, which deleted reports that were answering
+    // correctly. What multiplies is adding a parent's value up once per child
+    // row -- and counting, when the expression is already a counting subquery,
+    // because that pair becomes a SUM. The rest do not care how often a value
+    // repeats.
+    const grouped = (path: string, agg: AggFn) => () =>
+      buildQuery(
+        {
+          root: "revision",
+          columns: [{ path: "evento.state" }, { path, agg }],
+          groupBy: ["evento.state"],
+        },
+        ADMIN,
+      );
+
+    // `SUM(evento.diasAbierto)` over revisions returned 1.026.699 where each
+    // event counted once gives 103.323.
+    expect(grouped("evento.diasAbierto", "sum")).toThrow(/total de otra entidad/);
+    // The maximum of a value repeated ten times is that value.
+    expect(grouped("evento.diasAbierto", "max")).not.toThrow();
+    expect(grouped("evento.diasAbierto", "min")).not.toThrow();
+    // And counting a parent's plain column counts this report's own rows.
+    expect(grouped("evento.description", "count")).not.toThrow();
+  });
+
+  it("does not offer a summary it is going to refuse", () => {
+    // The picker and the builder have to agree, or a click in the interface can
+    // only ever end in a 400. `sqlExecution.test.ts` sweeps this across the
+    // whole catalog; this pins the specific rule.
+    const view = buildCatalogView(ADMIN);
+    const revision = view.roots.find((r) => r.key === "revision");
+    const throughRelation = revision?.fields.find((f) => f.path === "evento.diasAbierto");
+
+    expect(throughRelation?.aggregates).not.toContain("sum");
+    expect(throughRelation?.aggregates).toContain("max");
   });
 
   it("refuses to re-total a relation's count reached through another relation", () => {
