@@ -3,6 +3,7 @@ import app from "./app.js";
 import dotenv from "dotenv";
 import { connectionSource, sequelize } from "./database/sequelize.js";
 import { log } from "./utils/logger.js";
+import { requiredEnv } from "./config/security.js";
 
 dotenv.config();
 
@@ -37,15 +38,21 @@ function die(): void {
 }
 
 /**
- * Without it nothing can be signed or verified, so there is no point continuing.
+ * Without JWT_SECRET nothing can be signed or verified; without CORS_ORIGIN in
+ * production the origin check would fall back to a value nobody chose. Either
+ * way there is no point continuing.
  *
  * `process.exit()` right here, rather than `die()`: this runs at the top of the
  * module, so merely setting the exit code would let everything below it —
  * connecting, migrating, listening — run to completion first. And there is
  * nothing queued ahead of this line for the exit to cut off.
  */
-if (!process.env.JWT_SECRET) {
-  bootLog.fatal("JWT_SECRET no está definido. El servidor no puede arrancar.");
+const missing = requiredEnv(process.env.NODE_ENV).filter((v) => !process.env[v]);
+if (missing.length > 0) {
+  bootLog.fatal(
+    { faltan: missing },
+    `faltan variables obligatorias: ${missing.join(", ")}. El servidor no puede arrancar.`,
+  );
   process.exit(1);
 }
 

@@ -90,7 +90,11 @@ app.use(
 app.use(express.json());
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN || "http://localhost:5173",
+    // No fallback in production: `index.ts` refuses to start without the
+    // variable, so reaching here without one means development. Leaving the
+    // Vite port as a silent default would, once credentials are enabled in the
+    // next plan, authorise whatever is listening on the visitor's own machine.
+    origin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
     // x-new-token is not a CORS-safelisted response header, so without this the
     // browser cannot read it and the sliding session never renews: the server
     // was re-signing a JWT on every request and throwing it away.
