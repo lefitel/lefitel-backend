@@ -9,6 +9,7 @@ declare global {
   }
 }
 import cors from "cors";
+import helmet from "helmet";
 import { httpLogger } from "./middleware/httpLogger.js";
 import jwt from "jsonwebtoken";
 import rateLimit from "express-rate-limit";
@@ -45,6 +46,10 @@ import permisoRoutes from "./routes/permiso.routes.js";
 
 const app = express();
 
+// Express announces itself in every response. It costs nothing to remove and
+// it is free reconnaissance for anyone deciding which exploits to try.
+app.disable("x-powered-by");
+
 const secretKey = process.env.JWT_SECRET;
 
 // The Coolify proxy terminates TLS in front of the app, so without this every request
@@ -58,6 +63,30 @@ app.set("trust proxy", 1);
 // still deserves a line, and anything mounted after this one can reach the
 // request's own logger through `req.log`.
 app.use(httpLogger);
+
+/**
+ * Two of helmet's defaults are wrong for this server, and one of them fails in
+ * a way nothing would report.
+ *
+ * `crossOriginResourcePolicy` defaults to `same-origin`. The photographs are
+ * served from here by `express.static` and displayed by a page hosted on
+ * Vercel, so with the default every `<img>` in the application would come back
+ * blocked — in the browser only, with the server logging a clean 200.
+ *
+ * `contentSecurityPolicy` is off because this process serves JSON and files,
+ * never HTML. A policy on a JSON response governs nothing; the page's own
+ * policy is Vercel's business.
+ *
+ * HSTS is set here as well as at the proxy. Whichever answers, the browser gets
+ * told once.
+ */
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    hsts: { maxAge: 63072000, includeSubDomains: true },
+  }),
+);
 app.use(express.json());
 app.use(
   cors({
