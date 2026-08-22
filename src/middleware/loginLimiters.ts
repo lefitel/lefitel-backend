@@ -16,7 +16,17 @@ import {
   LOCKOUT_MAX_MINUTES,
 } from "../config/security.js";
 
-/** The username a login attempt is about, normalised the way the lookup does. */
+/**
+ * The username a login attempt is about, folded to one case-insensitive
+ * identity.
+ *
+ * This lower-cases on top of trimming, which is *more* normalisation than
+ * `login.controller.ts`'s own lookup does — that one only trims. The extra
+ * step is deliberate here: usernames are unique case-insensitively (there is
+ * a unique index on `lower("user")`), so "Isaias" and "isaias" are the same
+ * account and must share one budget, not two. Without it, capitalising a
+ * guess would buy a second, fresh bucket for the same target.
+ */
 function usuarioDe(req: Request): string {
   const u = (req.body as { user?: unknown } | undefined)?.user;
   return typeof u === "string" ? u.trim().toLowerCase() : "";

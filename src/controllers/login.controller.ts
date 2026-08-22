@@ -62,7 +62,57 @@ export async function loginUsuario(req: Request, res: Response) {
 
     const confirmPass = await bcryptjs.compare(pass, data.pass);
     if (!confirmPass) {
-      await UsuarioModel.update(siguienteBloqueo(data.failed_attempts ?? 0), { where: { id: data.id } });
+      // The count is incremented in the database, not read into Node,
+      // added to, and written back. That three-step version loses updates
+      // under concurrency: ten wrong guesses arriving together all read
+      // failed_attempts=0 before any of them writes, and all ten write
+      // back 1 — the counter is pinned at 1 forever and the account never
+      // locks. This per-account bucket is the only defense credential
+      // stuffing spread across many addresses runs into (each address
+      // alone stays under LOGIN_ACCOUNT_IP_LIMIT), so losing it here loses
+      // the one place that catches that attack.
+      //
+      // `UsuarioModel.increment` compiles to a single
+      // `SET failed_attempts = failed_attempts + 1` — the database does
+      // the read-and-add, so no concurrent increment can be lost. Its own
+      // resolved value is not used: traced through this project's
+      // Sequelize version (6.36.0) — `Model.increment` ->
+      // `queryInterface.increment` -> the Postgres dialect's
+      // `Query.formatResults`, which for an UPDATE with no
+      // `options.instance` set resolves to `[rows, rowCount]` — the static
+      // call then wraps that again, so what actually comes back is not
+      // the `M[]` the type declaration promises. Rather than rely on it,
+      // the fresh count is read back explicitly below.
+      //
+      // Known and accepted timing asymmetry: this branch awaits a database
+      // round trip (this increment, and sometimes the update below) before
+      // answering, while the locked-account and unknown-user branches above
+      // answer as soon as their filler-hash compare resolves, with no write
+      // at all. A round trip here is on the order of a millisecond against
+      // bcrypt's ~250ms — under half a percent — and measuring that over a
+      // real network, with tens of milliseconds of jitter, is not
+      // realistic. Not awaiting the write would trade the counter's
+      // atomicity (the whole point of this change) for a gain nobody could
+      // observe, so this is left as is on purpose rather than closed.
+      await UsuarioModel.increment("failed_attempts", { where: { id: data.id } });
+      const actualizado = await UsuarioModel.findOne({
+        where: { id: data.id },
+        attributes: ["failed_attempts"],
+      });
+      if (actualizado) {
+        // siguienteBloqueo expects the count *before* this failure and adds
+        // one itself; the database already added it, so passing the fresh
+        // count minus one gets the same arithmetic without adding it twice.
+        const { locked_until } = siguienteBloqueo((actualizado.dataValues.failed_attempts ?? 0) - 1);
+        // Only locked_until is written here — failed_attempts is left alone
+        // because it is already correct in the database. Writing it again
+        // from a value read a moment ago would reopen the exact race this
+        // comment starts with, just narrowed to the gap between the read
+        // above and this write.
+        if (locked_until) {
+          await UsuarioModel.update({ locked_until }, { where: { id: data.id } });
+        }
+      }
       logAction({ id_usuario: data.id, action: "LOGIN_FAILED", entity: "Usuario", entity_id: data.id, detail: `Login fallido para @${user}`, metadata: { user }, severity: 'warning', ip_address: req.ip ?? null });
       return res.status(400).json({ message: CREDENCIALES_INVALIDAS });
     }

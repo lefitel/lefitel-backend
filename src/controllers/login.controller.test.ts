@@ -14,10 +14,17 @@ const findOne = vi.fn();
 // a failure, escalating the wait, clearing the slate on success — can be
 // asserted on directly instead of only inferred from the response.
 const update = vi.fn();
+// `increment` is the atomic write a wrong password now makes: `UPDATE ... SET
+// failed_attempts = failed_attempts + 1` done by the database, not a
+// read-in-Node-then-write-back that a race can lose a count to. Exposed as
+// its own spy so tests can assert the atomic path was actually taken, not
+// just infer it from the response.
+const increment = vi.fn().mockResolvedValue(undefined);
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: {
     findOne: (...args: unknown[]) => findOne(...args),
     update: (...args: unknown[]) => update(...args),
+    increment: (...args: unknown[]) => increment(...args),
   },
 }));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
@@ -265,36 +272,74 @@ describe("account lockout", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  it("records a failure and escalates the wait on a wrong password", async () => {
+  it("records a failure through an atomic increment, not a computed update", async () => {
+    // The lookup's own `findOne` returns the account as it was before this
+    // request; the second `findOne` below stands in for the re-read that
+    // follows the atomic increment in `login.controller.ts`, returning the
+    // count the database actually holds afterwards.
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
     const user = storedUser();
     user.dataValues.failed_attempts = 2;
-    findOne.mockResolvedValue(user);
+    findOne.mockResolvedValueOnce(user).mockResolvedValueOnce({ dataValues: { failed_attempts: 3 } });
 
     const c = call({ user: "isaias", pass: "x" });
     await loginUsuario(c.req, c.res);
 
-    expect(update).toHaveBeenCalledWith({ failed_attempts: 3, locked_until: null }, { where: { id: 1 } });
+    expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: 1 } });
+    // Below the threshold, there is nothing to lock, so no `update` call at
+    // all — the count already lives correctly in the database via the
+    // increment above.
+    expect(update).not.toHaveBeenCalled();
   });
 
-  it("locks the account once the failure threshold is reached", async () => {
+  it("locks the account once the failure threshold is reached, writing only locked_until", async () => {
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
     const user = storedUser();
     user.dataValues.failed_attempts = LOCKOUT_AFTER_FAILURES - 1;
-    findOne.mockResolvedValue(user);
+    findOne
+      .mockResolvedValueOnce(user)
+      .mockResolvedValueOnce({ dataValues: { failed_attempts: LOCKOUT_AFTER_FAILURES } });
 
     const c = call({ user: "isaias", pass: "x" });
     await loginUsuario(c.req, c.res);
 
-    const [update_args, where] = update.mock.calls[0] as [
-      { failed_attempts: number; locked_until: Date | null },
-      { where: { id: number } },
-    ];
-    expect(update_args.failed_attempts).toBe(LOCKOUT_AFTER_FAILURES);
-    expect(update_args.locked_until).toBeInstanceOf(Date);
+    expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: 1 } });
+    expect(update).toHaveBeenCalledTimes(1);
+    const [values, where] = update.mock.calls[0] as [{ locked_until: Date | null }, { where: { id: number } }];
+    expect(values.locked_until).toBeInstanceOf(Date);
+    // failed_attempts must never be in this call: it is already correct in
+    // the database from the increment, and writing a value read a moment
+    // earlier would reopen the same race under a narrower window.
+    expect(values).not.toHaveProperty("failed_attempts");
     expect(where.where.id).toBe(1);
+  });
+
+  it("still counts each wrong guess when two arrive at the same time", async () => {
+    // The regression this guards against: `UsuarioModel.update({
+    // failed_attempts: (data.failed_attempts ?? 0) + 1, ... })` reads the
+    // count, adds one in Node, and writes it back. Two requests racing
+    // through that pattern both read the same starting count and both
+    // write back the same +1 — one of the two failures is lost. This test
+    // cannot observe database row state directly, but it can and does
+    // assert that *each* request independently reaches the atomic
+    // increment; if the code reverted to computing the count itself,
+    // `increment` would never be called at all, and this fails.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    // Every read, in both requests, sees the account before either has
+    // written anything back — the exact interleaving that loses a count
+    // under the old pattern.
+    findOne.mockResolvedValue(storedUser());
+
+    const a = call({ user: "isaias", pass: "x" });
+    const b = call({ user: "isaias", pass: "y" });
+    await Promise.all([loginUsuario(a.req, a.res), loginUsuario(b.req, b.res)]);
+
+    expect(increment).toHaveBeenCalledTimes(2);
+    expect(increment).toHaveBeenNthCalledWith(1, "failed_attempts", { where: { id: 1 } });
+    expect(increment).toHaveBeenNthCalledWith(2, "failed_attempts", { where: { id: 1 } });
   });
 
   it("clears the failure count on a correct password", async () => {
