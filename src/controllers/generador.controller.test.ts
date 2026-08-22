@@ -37,9 +37,10 @@ vi.mock("../utils/logAction.js", () => ({ logAction: (...args: unknown[]) => log
  * notice when a rule starts asking for a different one.
  */
 const runReport = vi.fn();
+const countReport = vi.fn();
 vi.mock("../reportBuilder/execute.js", () => ({
   runReport: (...args: unknown[]) => runReport(...args),
-  countReport: vi.fn(),
+  countReport: (...args: unknown[]) => countReport(...args),
 }));
 
 const granted = new Set<string>();
@@ -52,8 +53,8 @@ const grant = (role: number, ...capabilities: string[]) => {
 };
 
 const {
-  getCatalogo, getReporte, getReportes, postConsulta, postReporte, putReporte, deleteReporte,
-  postDuplicar,
+  getCatalogo, getReporte, getReportes, postConsulta, postConteo, postReporte, putReporte,
+  deleteReporte, postDuplicar,
 } = await import("./generador.controller.js");
 
 const ADMIN = 1;
@@ -122,6 +123,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   granted.clear();
   runReport.mockResolvedValue({ columns: [], rows: [], total: 0, limit: 100, offset: 0 });
+  countReport.mockResolvedValue(0);
 });
 
 describe("reading a saved report", () => {
@@ -638,5 +640,49 @@ describe("running a report", () => {
 
     expect(withoutStaff).not.toContain("usuario.user");
     expect(withStaff).toContain("usuario.user");
+  });
+});
+
+describe("counting without reading anything", () => {
+  const config = { root: "evento", columns: [{ path: "id" }] };
+
+  it("answers with the total and reads no rows", async () => {
+    // The point of a separate endpoint: it is asked while somebody is still
+    // typing a filter value, so it must not pay for the rows. Asking the full
+    // query at that rate would spend the 30-per-minute budget that exists to
+    // stop one person holding the database for everyone.
+    countReport.mockResolvedValue(118);
+
+    const c = call({ id: AUTHOR, id_rol: ADMIN }, { body: config });
+    await postConteo(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.payload).toEqual({ total: 118 });
+    expect(runReport).not.toHaveBeenCalled();
+  });
+
+  it("refuses a broken configuration with the same sentence as the table does", async () => {
+    const c = call({ id: AUTHOR, id_rol: ADMIN }, {
+      body: { root: "evento", columns: [{ path: "no_existe" }] },
+    });
+    await postConteo(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(c.message).toMatch(/no existe/i);
+    expect(countReport).not.toHaveBeenCalled();
+  });
+
+  it("counts for the caller, not for whoever asks the most", async () => {
+    // Same viewer resolution as everything else: a field this account may not
+    // see cannot be counted through here either, which would otherwise be a way
+    // to measure a filter over data you are not allowed to read.
+    const c = call({ id: AUTHOR, id_rol: TECNICO }, {
+      body: { root: "evento", columns: [{ path: "usuario.user" }] },
+    });
+    await postConteo(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(c.message).toMatch(/permiso/i);
+    expect(countReport).not.toHaveBeenCalled();
   });
 });

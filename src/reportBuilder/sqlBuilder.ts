@@ -1123,7 +1123,14 @@ export function buildQuery(config: ReportConfig, viewer: Viewer): BuiltQuery {
     // "2 eventos · 1 resueltos · 1 pendientes" where the truth was 1.376, 938
     // and 438.
     const semantic = spec.agg || isGrouped ? undefined : resolved.semantic;
-    columns.push({ key, label: spec.label?.trim() || resolved.label, kind, semantic });
+    columns.push({
+      key,
+      label: spec.label?.trim() || resolved.label,
+      kind,
+      semantic,
+      path: spec.path,
+      ...(spec.agg ? { agg: spec.agg } : {}),
+    });
   });
 
   // Filters are resolved after columns so they reuse the same joins.

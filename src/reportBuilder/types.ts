@@ -231,6 +231,17 @@ export interface ResultColumn {
   label: string;
   kind: FieldKind;
   semantic?: FieldSemantic;
+  /**
+   * The catalog path and summary this column came from.
+   *
+   * Sent so the table can act on its own headers — sorting a column is done by
+   * clicking it, which needs to know what to tell the server to sort by. The
+   * client could have matched result columns against its configuration by
+   * position, and they do line up, but a header that silently sorts the wrong
+   * column the day that stops being true is not a trade worth making.
+   */
+  path: string;
+  agg?: AggFn;
 }
 
 export interface BuiltQuery {

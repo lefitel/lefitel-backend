@@ -2,6 +2,7 @@ import { Router } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import {
   getCatalogo,
+  postConteo,
   postConsulta,
   postExportar,
   getReportes,
@@ -37,6 +38,20 @@ const consultaLimiter = rateLimit({
   // Namespaced so a user id can never collide with an address.
   keyGenerator: perUser,
   message: { message: "Demasiadas consultas seguidas. Espere un momento e intente de nuevo." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * Counting is asked while somebody types a filter value, so it needs a budget an
+ * order of magnitude larger than running the report — and it can afford one: it
+ * reads no rows, only an aggregate over the filtered set.
+ */
+const conteoLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 120,
+  keyGenerator: perUser,
+  message: { message: "Demasiadas comprobaciones seguidas. Espere un momento." },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -83,6 +98,7 @@ const writeLimiter = rateLimit({
 // by its owner — that is ownership, not a permission.
 router.get("/catalogo", requirePermission("generador", "ver"), getCatalogo);
 router.post("/consulta", requirePermission("generador", "ver"), consultaLimiter, postConsulta);
+router.post("/conteo", requirePermission("generador", "ver"), conteoLimiter, postConteo);
 // Building a file costs far more than answering a query, and only one runs at a
 // time, so its budget is a fraction of the query one.
 router.post("/exportar", requirePermission("generador", "ver"), exportLimiter, postExportar);

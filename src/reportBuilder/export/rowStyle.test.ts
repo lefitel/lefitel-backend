@@ -8,6 +8,7 @@ import type { ResultColumn } from "../types.js";
 const column = (over: Partial<ResultColumn> & { key: string }): ResultColumn => ({
   label: over.key,
   kind: "string",
+  path: over.key,
   ...over,
 });
 

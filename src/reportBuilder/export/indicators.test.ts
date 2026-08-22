@@ -5,6 +5,9 @@ import type { ResultColumn } from "../types.js";
 const column = (over: Partial<ResultColumn> & { key: string }): ResultColumn => ({
   label: over.key,
   kind: "string",
+  // A result column now says which field it came from, so the table can sort by
+  // its own headers. These fixtures do not care which, only that it is there.
+  path: over.key,
   ...over,
 });
 

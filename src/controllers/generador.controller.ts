@@ -4,7 +4,7 @@ import { ReporteVistaModel } from "../models/reporteVista.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { buildCatalogView } from "../reportBuilder/catalogView.js";
 import { MAX_ROWS } from "../reportBuilder/catalog.js";
-import { runReport } from "../reportBuilder/execute.js";
+import { countReport, runReport } from "../reportBuilder/execute.js";
 import {
   buildExport, ExportCanceledError, ExportTooHeavyError, ExportTooLargeError,
   type ExportFormat,
@@ -257,6 +257,34 @@ export async function postConsulta(req: Request, res: Response) {
     });
 
     res.status(200).json(result);
+  } catch (error) {
+    handleError(error, res);
+  }
+}
+
+/**
+ * How many rows the report would return, and nothing else.
+ *
+ * Split from `/consulta` because the two are asked at completely different
+ * rates. A person wants to know that a filter leaves 118 rows and not 40.000
+ * *while they are still typing it*, which is many times a minute — and asking
+ * the full query that often would burn the 30-per-minute budget that exists to
+ * stop one person locking the database for everyone.
+ *
+ * This reads no rows: `buildCountQuery` never looks at the columns, so it costs
+ * one aggregate over the filtered set. Its own limiter is four times the other
+ * one, which is what a keystroke-rate question needs and what this can afford.
+ */
+export async function postConteo(req: Request, res: Response) {
+  try {
+    const config = req.body as ReportConfig;
+    const viewer = await viewerOf(req);
+    // Validated the same way, so a broken configuration answers with the same
+    // sentence here as it does on the way to a table.
+    buildQuery(config, viewer);
+
+    const total = await countReport(config, viewer);
+    res.status(200).json({ total });
   } catch (error) {
     handleError(error, res);
   }

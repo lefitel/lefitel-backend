@@ -198,6 +198,7 @@ describe("who may change data", () => {
 const GENERADOR_GATES: Record<string, string> = {
   "GET /api/generador/catalogo": "generador.ver",
   "POST /api/generador/consulta": "generador.ver",
+  "POST /api/generador/conteo": "generador.ver",
   "POST /api/generador/exportar": "generador.ver",
   "GET /api/generador/reportes": "generador.ver",
   "GET /api/generador/reportes/:id": "generador.ver",
