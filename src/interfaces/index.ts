@@ -163,10 +163,13 @@ export interface ISesion {
   id: string;
   id_usuario: number;
   token_hash: string;
-  user_agent?: string | null;
-  ip_address?: string | null;
+  // Required rather than `?:`: a row read back from the database always has
+  // these three fields, just sometimes with a null value. `?:` would let a
+  // consumer skip checking them instead of handling the null.
+  user_agent: string | null;
+  ip_address: string | null;
   created_at: Date;
   last_used_at: Date;
   expires_at: Date;
-  revoked_at?: Date | null;
+  revoked_at: Date | null;
 }

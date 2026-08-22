@@ -3,6 +3,10 @@ import { sequelize } from "../database/sequelize.js";
 import { UsuarioModel } from "./usuario.model.js";
 import { ISesion } from "../interfaces/index.js";
 
+// `revoked_at`, `user_agent` and `ip_address` are optional here even though
+// `ISesion` requires them, so that `createSession` (a later task) can create a
+// row without naming all three — they still resolve to `null` on both sides,
+// since the columns below allow it.
 type SesionCreation = Optional<ISesion, "revoked_at" | "user_agent" | "ip_address">;
 
 /**
@@ -16,7 +20,11 @@ type SesionCreation = Optional<ISesion, "revoked_at" | "user_agent" | "ip_addres
 export const SesionModel: ModelDefined<ISesion, SesionCreation> = sequelize.define(
   "sesion",
   {
-    id: { type: DataTypes.UUID, primaryKey: true, allowNull: false },
+    // A default here, not only in application code, so a bulkInsert, a seed
+    // script or a rescue script that skips `id` fails on nothing — the column
+    // itself is NOT NULL with no default in the migration, since a migration
+    // should not need to know how the application generates its keys.
+    id: { type: DataTypes.UUID, primaryKey: true, allowNull: false, defaultValue: DataTypes.UUIDV4 },
     id_usuario: { type: DataTypes.INTEGER, allowNull: false },
     token_hash: { type: DataTypes.CHAR(64), allowNull: false, unique: true },
     user_agent: { type: DataTypes.STRING(255), allowNull: true },

@@ -47,7 +47,10 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
         },
         user_agent: {
           // So a person recognises their own session in the list before ending
-          // it. Truncated on write; browsers send absurdly long strings.
+          // it. Postgres does not truncate an oversized value — it rejects the
+          // insert with error 22001 — so whatever writes this column (the
+          // session store, a later task) is the one responsible for cutting a
+          // browser's absurdly long string down to size first.
           type: DataTypes.STRING(255),
           allowNull: true,
         },
