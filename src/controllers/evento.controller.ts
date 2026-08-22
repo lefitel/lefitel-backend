@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { literal, Op, Order } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { deleteImageFile } from "../utils/fileUtils.js";
+import { authoredBy, withoutAuthor } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
 import { CiudadModel } from "../models/ciudad.model.js";
 import { EventoModel } from "../models/evento.model.js";
@@ -9,9 +10,9 @@ import { EventoObsModel } from "../models/eventoObs.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
-import { RevisionModel } from "../models/revision.model.js";
+import { RevisionModel, REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.model.js";
 import { SolucionModel } from "../models/solucion.model.js";
-import { UsuarioModel } from "../models/usuario.model.js";
+import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 
 export async function getEvento(req: Request, res: Response) {
   const { archived, page, limit, filterColumn, filterValue, export: isExport, sortBy, sortOrder } = req.query;
@@ -150,7 +151,7 @@ export async function searchEvento(req: Request, res: Response) {
     const TempEvento = await EventoModel.findOne({
       where: { id },
       include: [
-        { model: RevisionModel },
+        { model: RevisionModel, attributes: [...REVISION_PUBLIC_ATTRIBUTES] },
         {
           model: PosteModel,
           include: [
@@ -159,7 +160,8 @@ export async function searchEvento(req: Request, res: Response) {
             { model: PropietarioModel },
           ],
         },
-        { model: UsuarioModel },
+        // Never the bare model: it would send `pass`. See USUARIO_AS_AUTHOR.
+        { model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] },
         { model: EventoObsModel, include: [{ model: ObsModel, paranoid: false }] },
       ],
     });
@@ -173,13 +175,22 @@ export async function createEvento(req: Request, res: Response) {
   try {
     const { revision, obs_ids, ...eventoBody } = req.body;
     const TempEvento = await sequelize.transaction(async (t) => {
-      const evento = await EventoModel.create(eventoBody, { transaction: t });
+      // `eventoBody` is the request body minus two keys, so without this an
+      // account could register an event in somebody else's name — and two of
+      // the four counts in the per-person report (catalog.ts, the `usuario`
+      // root) would be client-controlled. The frontend only ever sends the
+      // logged-in user's own id, so nothing legitimate changes.
+      const evento = await EventoModel.create(authoredBy(eventoBody, req), { transaction: t });
       const eventoId = evento.dataValues.id as number;
       if (revision?.description) {
         await RevisionModel.create({
           description: revision.description,
           date: revision.date ?? eventoBody.date ?? new Date(),
           id_evento: eventoId,
+          // Built field by field rather than spread from the body, so the
+          // author is the session by construction. The event's own
+          // `id_usuario` travels in `eventoBody` and is a separate question.
+          id_usuario: req.user?.id ?? null,
         }, { transaction: t });
       }
       if (Array.isArray(obs_ids) && obs_ids.length > 0) {
@@ -235,7 +246,20 @@ export async function updateEvento(req: Request, res: Response) {
     const oldImage = TempEvento.dataValues.image;
     const edv = TempEvento.dataValues as unknown as Record<string, unknown>;
 
-    const { obs_ids, ...bodyWithoutObs } = req.body;
+    // `state` is dropped before anything reads the body, not overwritten after.
+    //
+    // Whether an event is resolved is kept in step with its `solucions` row by
+    // `/resolver` and `/reabrir`, and by nothing else. Letting a PUT move it
+    // broke that pairing in both directions: the priority toggle in the events
+    // table sends the whole row it had loaded (`{ ...evento, priority }`), so a
+    // stale `state: false` reopened an event somebody had just resolved and
+    // left the solution alive underneath it. Two people working at once was
+    // enough; no bad actor required.
+    //
+    // Dropping it here rather than at the write also keeps it out of the diff
+    // below, which otherwise recorded a state change in the bitácora that the
+    // request never applied.
+    const { obs_ids, state: _stateIsNotEditable, ...bodyWithoutObs } = req.body;
 
     const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
     const beforeMeta: Record<string, unknown> = {};
@@ -263,7 +287,10 @@ export async function updateEvento(req: Request, res: Response) {
     let obsLogData: { before: string | null; after: string | null } | null = null;
 
     await sequelize.transaction(async (t) => {
-      TempEvento.set(bodyWithoutObs);
+      // Not reassignable through the edit form either: this used to let a PUT
+      // change the author of an event that already existed, and CREATE_EVENTO's
+      // bitácora metadata does not carry `id_usuario`, so nothing recorded it.
+      TempEvento.set(withoutAuthor(bodyWithoutObs));
       await TempEvento.save({ transaction: t });
 
       if (Array.isArray(obs_ids)) {
@@ -370,7 +397,10 @@ export async function resolverEvento(req: Request, res: Response) {
 
     await sequelize.transaction(async (t) => {
       await SolucionModel.create(
-        { description, date: date ?? new Date(), image: image || null, id_evento: Number(id) },
+        {
+          description, date: date ?? new Date(), image: image || null,
+          id_evento: Number(id), id_usuario: req.user?.id ?? null,
+        },
         { transaction: t }
       );
       evento.set({ state: true });

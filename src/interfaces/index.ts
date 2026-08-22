@@ -98,6 +98,14 @@ export interface ISolucion {
   image: string;
   date: Date;
   id_evento: number;
+  /**
+   * Who carried the repair out, when that is known.
+   *
+   * Nullable and staying that way: 558 of 1.071 repairs predate the bitácora
+   * the authorship migration recovered them from, and no default could name
+   * their author without inventing one.
+   */
+  id_usuario?: number | null;
   deletedAt?: Date | null;
 }
 
@@ -106,6 +114,8 @@ export interface IRevision {
   description: string;
   date: Date;
   id_evento: number;
+  /** Who carried the inspection out, when that is known. See ISolucion. */
+  id_usuario?: number | null;
   deletedAt?: Date | null;
 }
 

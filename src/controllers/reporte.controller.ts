@@ -2,9 +2,9 @@ import { Request, Response } from "express";
 import { EventoModel } from "../models/evento.model.js";
 import { Op } from "sequelize";
 import { EventoObsModel } from "../models/eventoObs.model.js";
-import { RevisionModel } from "../models/revision.model.js";
+import { RevisionModel, REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.model.js";
 import { PosteModel } from "../models/poste.model.js";
-import { SolucionModel } from "../models/solucion.model.js";
+import { SolucionModel, SOLUCION_PUBLIC_ATTRIBUTES } from "../models/solucion.model.js";
 import { CiudadModel } from "../models/ciudad.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { MaterialModel } from "../models/material.model.js";
@@ -70,8 +70,8 @@ export async function putReporteGeneral(req: Request, res: Response) {
             { model: CiudadModel, as: "ciudadB" },
           ],
         },
-        { model: SolucionModel },
-        { model: RevisionModel },
+        { model: SolucionModel, attributes: [...SOLUCION_PUBLIC_ATTRIBUTES] },
+        { model: RevisionModel, attributes: [...REVISION_PUBLIC_ATTRIBUTES] },
         {
           model: EventoObsModel,
           attributes: ["id", "id_obs"],
@@ -124,8 +124,8 @@ export async function putReporteTramo(req: Request, res: Response) {
             { model: CiudadModel, as: "ciudadB" },
           ],
         },
-        { model: SolucionModel },
-        { model: RevisionModel },
+        { model: SolucionModel, attributes: [...SOLUCION_PUBLIC_ATTRIBUTES] },
+        { model: RevisionModel, attributes: [...REVISION_PUBLIC_ATTRIBUTES] },
       ],
     });
     res.status(200).json(data);
@@ -169,8 +169,8 @@ export async function putReporteRecorrido(req: Request, res: Response) {
             { model: CiudadModel, as: "ciudadB" },
           ],
         },
-        { model: SolucionModel },
-        { model: RevisionModel },
+        { model: SolucionModel, attributes: [...SOLUCION_PUBLIC_ATTRIBUTES] },
+        { model: RevisionModel, attributes: [...REVISION_PUBLIC_ATTRIBUTES] },
         {
           model: EventoObsModel,
           attributes: ["id", "id_obs"],

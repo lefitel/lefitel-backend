@@ -16,6 +16,8 @@
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "bench:export": "tsx --expose-gc scripts/bench-export.mjs",
+    "check:authorship": "tsx scripts/check-authorship.mjs",
+    "show:catalog": "tsx scripts/show-catalog.mjs",
     "bench:photos": "tsx --expose-gc scripts/bench-photos.mjs"
   },
   "keywords": [],

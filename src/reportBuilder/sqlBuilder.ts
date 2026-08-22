@@ -1273,6 +1273,25 @@ export function buildCountQuery(config: ReportConfig, viewer: Viewer): { sql: st
   }
   const groupedExprs = [...grouped.values()].flat();
 
+  // The columns are resolved and thrown away, and that is the point.
+  //
+  // The comment above used to claim "same checks as buildQuery" while this
+  // function never looked at `config.columns` at all: a count of a report
+  // selecting a field this viewer may not see built cleanly, where buildQuery
+  // refuses it. Not reachable today — `postConteo`, `runReport` and
+  // `buildExport` all call buildQuery first — so nothing leaked. But the guard
+  // the comment promised was not here, and the next caller that skips the
+  // pre-flight would have inherited a silent gap in a function whose whole
+  // reason for existing is being cheap enough to call on every keystroke.
+  //
+  // Resolving against a throwaway plan rather than `plan`, so a column that
+  // needs a join cannot add one to the counting query and change the total
+  // through a to-many LEFT JOIN.
+  for (const column of config.columns ?? []) {
+    if (!column || typeof column.path !== "string") continue;
+    resolvePath(rootEntity, column.path, new JoinPlan("t0"), viewer);
+  }
+
   // Same guard as buildQuery, or the two disagree and the total stops matching
   // the rows underneath it.
   let whereSql = rootEntity.paranoid ? `t0.${quote("deletedAt")} IS NULL` : "TRUE";

@@ -1341,3 +1341,44 @@ describe("catalog safety", () => {
     for (const root of catalog.roots) expect(catalog.entities[root]).toBeDefined();
   });
 });
+
+describe("buildCountQuery checks what its comment says it checks", () => {
+  // It claimed "same checks as buildQuery" and never looked at the columns, so
+  // counting a report that selects a hidden field succeeded where running it is
+  // refused. Nothing exploited it — every caller builds the full query first —
+  // but a count is the cheap call, the one made on every keystroke, and it is
+  // the one somebody will reach for without the pre-flight.
+  const CLIENTE: Viewer = { role: 3, staff: false };
+
+  it("refuses a column this viewer may not see", () => {
+    const config = {
+      root: "revision",
+      columns: [{ path: "usuario.name" }],
+    } as unknown as ReportConfig;
+
+    expect(() => buildQuery(config, CLIENTE)).toThrow();
+    expect(() => buildCountQuery(config, CLIENTE)).toThrow();
+  });
+
+  it("refuses a column that does not exist", () => {
+    const config = {
+      root: "revision",
+      columns: [{ path: "no.existe" }],
+    } as unknown as ReportConfig;
+    expect(() => buildCountQuery(config, CLIENTE)).toThrow();
+  });
+
+  it("still counts rows, not columns: a valid column adds no join", () => {
+    // Resolving a column must not leave a join behind, or a to-many path would
+    // multiply the rows and the count would stop matching the table under it.
+    const bare = buildCountQuery(
+      { root: "revision", columns: [] } as unknown as ReportConfig,
+      CLIENTE,
+    );
+    const withColumn = buildCountQuery(
+      { root: "revision", columns: [{ path: "evento.description" }] } as unknown as ReportConfig,
+      CLIENTE,
+    );
+    expect(withColumn.sql).toBe(bare.sql);
+  });
+});

@@ -51,3 +51,19 @@ RolModel.hasMany(UsuarioModel, {
 UsuarioModel.belongsTo(RolModel, {
   foreignKey: "id_rol",
 });
+
+/**
+ * The author of something, as a REST response may name them.
+ *
+ * `include: [{ model: UsuarioModel }]` with no `attributes` sends every column
+ * of this table, and one of them is `pass`. `GET /evento/:id` and
+ * `GET /poste/:id` did exactly that on routes gated only by "be logged in", so
+ * any account — the Cliente role included — could read the bcrypt hash of
+ * whoever registered an event, plus their phone, their login name and their
+ * failed-attempt counter. The catalog states one file away that `pass` never
+ * appears in a report; this made that true of reports only.
+ *
+ * Three names is what an author needs to be shown as an author. Anything more
+ * belongs to the screen that administers accounts, behind `seguridad.ver`.
+ */
+export const USUARIO_AS_AUTHOR = ["id", "name", "lastname"] as const;

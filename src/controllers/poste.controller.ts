@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { literal, Op } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { deleteImageFile } from "../utils/fileUtils.js";
+import { authoredBy, withoutAuthor } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
 import { AdssModel } from "../models/adss.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
@@ -9,7 +10,7 @@ import { CiudadModel } from "../models/ciudad.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
-import { UsuarioModel } from "../models/usuario.model.js";
+import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 
 export async function getPoste(req: Request, res: Response) {
   const { ciudadA, ciudadB, ciudadId, archived, page, limit, filterColumn, filterValue, export: isExport, sortBy, sortOrder } = req.query;
@@ -120,7 +121,8 @@ export async function createPoste(req: Request, res: Response) {
   try {
     const { adss_ids, ...posteBody } = req.body;
     const TempPoste = await sequelize.transaction(async (t) => {
-      const poste = await PosteModel.create(posteBody, { transaction: t });
+      // Same as evento: the author is the session, not a field of the body.
+      const poste = await PosteModel.create(authoredBy(posteBody, req), { transaction: t });
       const posteId = poste.dataValues.id as number;
       if (Array.isArray(adss_ids) && adss_ids.length > 0) {
         await Promise.all(
@@ -170,7 +172,8 @@ export async function searchPoste(req: Request, res: Response) {
         { model: PropietarioModel, paranoid: false },
         { model: CiudadModel, as: "ciudadA", paranoid: false },
         { model: CiudadModel, as: "ciudadB", paranoid: false },
-        { model: UsuarioModel },
+        // Never the bare model: it would send `pass`. See USUARIO_AS_AUTHOR.
+        { model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] },
       ],
     });
     res.status(200).json(TempPoste);
@@ -217,7 +220,7 @@ export async function updatePoste(req: Request, res: Response) {
     let adssLogData: { before: string | null; after: string | null } | null = null;
 
     await sequelize.transaction(async (t) => {
-      TempPoste.set(bodyWithoutAdss);
+      TempPoste.set(withoutAuthor(bodyWithoutAdss));
       await TempPoste.save({ transaction: t });
 
       if (Array.isArray(adss_ids)) {

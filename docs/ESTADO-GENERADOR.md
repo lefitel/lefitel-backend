@@ -1004,18 +1004,9 @@ quede casi nada dentro.
 
 ### Pendiente
 
-1. 🔴 **La migración de autoría.** Aprobada y sin hacer, a propósito: cambia el
-   esquema y merece su propio arco, solo, para poder revisarla sin nada más de
-   por medio. Contra `osefi_local`.
-   - `id_usuario` en `revicions` (7.741 filas) y en `solucions` (1.024).
-   - Relleno hacia atrás desde la bitácora: hay **1.319 entradas
-     `ADD_REVISION`** que nombran a su usuario. Emparejar por `entity_id` y
-     `createdAt`.
-   - Sin esto, «quién inspecciona más» no se puede contestar nunca. Y la raíz
-     Usuario solo cuenta eventos y postes.
-   - Datos medidos que hay que respetar al hacerlo: de 1.376 eventos, **211 no
-     tienen autor** y **70 más lo tienen archivado**; un informe por persona
-     rinde cuentas de 1.095. Está asertado en `sqlExecution.test.ts`.
+1. 🔴 **Aplicar la migración de autoría.** El código está escrito y probado; lo
+   que falta es ejecutarla contra `osefi_local` (`npm run migrate`), que es un
+   permiso que hay que dar a mano. Ver la sección siguiente.
 2. **Pregunta sin contestar:** hoy cualquiera ve todos los reportes marcados
    «compartido», venga de quien venga. Si un coordinador comparte un análisis
    interno, el rol Cliente lo ve en su lista. ¿«Compartido» debería significar
@@ -1027,3 +1018,221 @@ quede casi nada dentro.
    entre pasos y no dentro de uno; el tope de peso se mide después de construir;
    nadie mira el aviso de la clase 22; `IMAGES_DIR` apunta a `C:/images` con 17
    ficheros frente a 1.514 fotos referenciadas.
+
+
+## La autoría de revisiones y soluciones (22 de agosto)
+
+`revicions` y `solucions` eran las dos únicas tablas de trabajo sin autor. Un
+evento sabe quién lo registró y un poste quién lo dio de alta, pero las **7.741
+revisiones y 1.071 soluciones** —que son el volumen real del trabajo de campo,
+frente a 1.376 eventos— solo sabían su fecha. «Quién inspecciona más» no era una
+consulta difícil: era imposible.
+
+### Lo que la bitácora podía devolver, y lo que no
+
+Medido contra `osefi_local`, no estimado.
+
+La bitácora guarda el autor de cada acción, pero su `entity_id` apunta **al
+evento, no a la fila creada**. No hay ninguna clave por la que unir las dos
+tablas. Lo que identifica una fila es la pareja (evento, momento): una entrada de
+bitácora del mismo evento escrita a segundos de la fila.
+
+**Y hay dos acciones que crean cada tipo de fila, no una.** Esto es lo que
+cambió el resultado:
+
+| Fila | Acción evidente | La que se me pasaba | Sola / las dos |
+|---|---|---|---|
+| Revisión | `ADD_REVISION` | `CREATE_EVENTO` — `createEvento` escribe la primera revisión ahí mismo | 1.319 → **1.345** |
+| Solución | `CREATE_SOLUCION` | `RESOLVE_EVENTO` — `resolverEvento` escribe la reparación ahí mismo | 171 → **513** |
+
+Ojo con leer la fila de las soluciones al revés: la dependencia va en el otro
+sentido. **`RESOLVE_EVENTO` sola recupera 512 de las 513**, y `CREATE_SOLUCION`
+aporta exactamente 1 — porque el flujo antiguo era registrar la solución *y luego*
+cerrar el evento, así que casi todas tienen las dos entradas. Lo que habría sido
+un desastre es mirar solo la evidente: 171 de 1.071.
+
+**La ventana es de 2 segundos, y aquí la primera versión estaba mal.** Usaba 30,
+justificados midiendo 30s, 1min y 5min: todos recuperan lo mismo, así que
+ensanchar era claramente inútil. Lo que no medí fue **hacia abajo**, y era lo
+único que importaba. Medido de verdad:
+
+| ventana | atribuidas (rev/sol) | ambiguas | filas con una **acción ajena** dentro |
+|---|---|---|---|
+| 0,5 s – 5 s | 1.345 / 513 | 0 | **0** |
+| 30 s | 1.345 / 513 | 0 | **123 / 59** |
+
+Treinta segundos no recupera ni una fila más y es el único ancho que pone una
+acción que no tiene nada que ver —`UPDATE_EVENTO`, `REABRIR_EVENTO`— al alcance
+de una fila. Dos segundos está dentro de la banda segura con un segundo de
+holgura, que el suelo de 0,5 s no tiene: la fila y su entrada de bitácora son dos
+sentencias de una misma petición, y una petición lenta puede separarlas un
+segundo.
+
+Y hay que ser honesto con lo que la regla dice, porque no es exactamente la
+pregunta: dice **«quién tocó este evento en ese momento»**, no «quién escribió
+esta fila». Dos de las cuatro acciones las apunta también código que no escribe
+nada — cerrar un evento apunta `RESOLVE_EVENTO` aunque no cree ninguna solución.
+Medido, esa exposición es **una entrada**: de 513, 512 tienen una solución de
+verdad a menos de dos segundos. El mecanismo existe; en estos datos no. La
+ventana estrecha es lo que lo mantiene así.
+
+Donde la prueba no es unánime la columna se queda en nulo, que es la respuesta
+verdadera.
+
+### El resultado, dicho sin adornar
+
+Son **dos cifras por tabla, no una**, y confundirlas es como se acaba diciendo un
+número equivocado en una reunión. Una es cuántas filas se rellenan; la otra,
+cuántas de esas se pueden llegar a ver en un reporte —porque 404 revisiones y 81
+soluciones cuelgan de eventos archivados, y un reporte con esa raíz las descarta.
+
+| | Se rellenan | Se ven en un reporte |
+|---|---|---|
+| Revisiones | 1.345 de 7.741 | **1.289 de 7.337** (17,6%) |
+| Soluciones | 513 de 1.071 | **422 de 943** (44,8%) |
+
+- Dentro de la era de la bitácora (desde el 18 de marzo de 2026) la cobertura es
+  **del 100%**: no se pierde ni una fila de las que se podían recuperar.
+- Fuera de ella no hay nada que recuperar, y nunca lo habrá.
+- Y esto describe **una base de datos un día concreto**, no una propiedad de la
+  migración: contra producción saldrán otros números. `npm run check:authorship`
+  los saca de la base a la que apunte el `.env`.
+
+Y el dato que hay que tener en la cabeza al leer cualquier reporte por persona:
+**aparecen tres personas de quince cuentas** (nueve sin archivar, que son las
+únicas que la raíz Usuario puede mostrar). Y aquí también son dos cifras, no una:
+
+| | se rellenan (rev/sol) | se ven en un reporte |
+|---|---|---|
+| Fisher | 846 / 459 | **831 / 380** |
+| Omar | 439 / 50 | **433 / 41** |
+| Miguel | 60 / 4 | **25 / 1** |
+
+Las de la derecha son las que salen por pantalla, y suman 1.289 y 422. Que los
+otros doce no aparezcan no significa que no trabajaran: significa que su trabajo
+cae fuera de lo que la bitácora puede atribuir.
+
+**Por eso el nulo no es un hueco que se limpie más adelante: es el 83% de las
+revisiones y tiene que seguir viéndose.** Una tabla que dice «Fisher: 831
+revisiones» se lee como el total del trabajo cuando es la décima parte. El
+comentario del catálogo lo dice y una prueba lo asegura.
+
+### La trampa que casi me como
+
+Marcar `revision.usuario` como `required` en el catálogo parece un ordenar y no
+lo es. `required` emite un `EXISTS` **incondicional** sobre la clave ajena —ver
+`requiredParentGuards`— así que con `id_usuario` nulo no empareja con nada y la
+fila **sale del reporte**, mencione el reporte al autor o no. Seis mil
+revisiones desaparecerían de todos los totales, en silencio, y la tabla que
+quedara tendría una pinta perfectamente razonable.
+
+Dos pruebas de `sqlExecution.test.ts` lo sujetan: un reporte de revisiones con la
+columna de autor tiene que devolver **todas** las filas vivas, y la mayoría de
+ellas sin autor.
+
+### La otra: firmar en nombre de otro
+
+Cuatro de los cinco sitios que crean estas filas lo hacían con
+`Model.create(req.body)`. En el momento en que existe una columna `id_usuario`,
+el cuerpo de la petición pasa a ser un sitio donde escribirla: un `POST` con
+`"id_usuario": 2` se habría guardado tal cual, y el reporte de arriba nombraría a
+un compañero como autor del trabajo de otro. **Un nombre equivocado es peor que
+un nulo:** el nulo se lee como «no se sabe», el nombre se lee como un hecho.
+
+`src/utils/authorship.ts` tiene la regla por sus dos caras: al crear se escribe
+la sesión encima de lo que llegara, y al editar el campo se descarta —corregir
+una falta en una descripción no es reclamar haber hecho la inspección. Las cinco
+puertas están cubiertas y cada una tiene su prueba, incluidas las dos de dentro
+de `evento.controller` que son las fáciles de olvidar.
+
+### Lo que se decidió y por qué
+
+- **La clave ajena borra a nulo, no en cascada.** `eventos.id_usuario` y
+  `bitacoras.id_usuario` son `ON DELETE CASCADE`, y eso no es una convención que
+  merezca copiarse: significa que borrar una cuenta se lleva sus eventos y su
+  rastro de auditoría. Las cuentas se archivan en vez de borrarse, así que nunca
+  ha saltado — pero el trabajo de quien se va tiene que sobrevivir a su ficha. La
+  inspección ocurrió. `SET NULL` pierde la atribución y conserva el registro, que
+  es el orden correcto de prioridades. **Queda apuntado como defecto pendiente el
+  `CASCADE` de `eventos.id_usuario`.**
+- **Los dos contadores nuevos de la raíz Usuario excluyen las filas que cuelgan
+  de un evento archivado** (404 revisiones y 81 soluciones). No es un detalle: un
+  reporte con raíz Revisión ya las descarta, así que sin el mismo filtro aquí las
+  revisiones de la misma persona darían 831 en un reporte y 846 en otro, las dos
+  con pinta de ser la verdad.
+- **Al rol Cliente no le cambia nada** — pero eso hubo que arreglarlo, no salió
+  gratis. En el generador es cierto de entrada: todo lo de autoría es
+  `staffOnly`, la raíz Revisión pasa de 51 a 62 campos para un administrador y se
+  queda en 40 para un cliente. En la API **no lo era**: ver la sección siguiente.
+
+### Lo que salió de auditarlo, que es la mitad del trabajo
+
+Tres agentes adversariales, cada uno atacando una cosa distinta. La atribución en
+sí salió limpia —cero ambigüedad, y de las 342 soluciones cuya descripción guarda
+la bitácora, las 342 coinciden con la fila atribuida— pero salieron tres agujeros
+y un puñado de cifras mal.
+
+1. 🔴 **`GET /evento/:id` y `GET /poste/:id` devolvían el hash bcrypt del autor.**
+   `include: [{ model: UsuarioModel }]` sin `attributes` manda todas las columnas
+   de `usuarios`, y una es `pass`; las dos rutas solo piden estar autenticado.
+   Cualquier cuenta, rol Cliente incluido, se llevaba también el teléfono, el
+   usuario de login y el contador de intentos fallidos. **Anterior a este
+   trabajo**, y de la misma familia que las 25 lecturas abiertas que salieron en
+   la auditoría de la pantalla de inicio. Cerrado.
+2. 🔴 **La columna nueva se escapaba por la API normal.** Añadir `id_usuario` al
+   modelo bastó: tres rutas que no limitan columnas empezaron a mandarlo, y
+   `GET /evento` ya devuelve `usuario {id, name, lastname}` con el que cruzarlo.
+   Once includes pasan a nombrar sus columnas, con la lista al lado de la
+   definición del modelo para que la vea quien añada la siguiente — y
+   `responseShape.test.ts` recorre el código y las obliga, porque el defecto no
+   es un valor mal puesto sino **una línea que falta**, y eso no lo caza una
+   prueba por endpoint.
+3. 🔴 **`pruneConfig` daba un pase libre cuando la raíz no era visible.** Buscaba
+   la raíz en la vista ya filtrada, así que «no existe» y «no puedes verla» eran
+   indistinguibles y las dos se iban de rositas. Un reporte con raíz Usuario,
+   filtrado por un teléfono y marcado compartido, llegaba **intacto** a cualquier
+   cuenta que pueda listar compartidos: los caminos ocultos y **los valores
+   filtrados contra ellos**, que son el dato personal. Ejecutarlo sí se negaba;
+   el valor ya había llegado. Y decía `omitted: 0`. Lo abrí yo al hacer la raíz
+   Usuario `staffOnly`.
+4. **`buildCountQuery` prometía en su comentario comprobaciones que no hacía** —
+   nunca miraba las columnas. No explotable, porque todos los que la llaman
+   construyen la consulta completa primero, pero es la llamada barata, la de cada
+   tecleo, y la que alguien usará sin el paso previo.
+5. **Al `UPDATE` del relleno le faltaba `WHERE id_usuario IS NULL`.** Umzug apunta
+   la migración *después* de cerrar la transacción, así que hay una ventana en la
+   que el trabajo está hecho y sin registrar; el arreglo natural de quien lo sufra
+   es deshacer y volver a aplicar, y deshacer se lleva **los autores que la
+   aplicación ya escribió sola**, que un segundo relleno sustituiría por
+   adivinanzas.
+6. **Y las cifras de mis propios comentarios estaban mal:** Fisher eran 846 y no
+   845, «cinco meses» eran menos de dos, «16 inspecciones» eran 26, y había
+   cifras de la tabla entera puestas al lado de cifras de reporte — que es
+   exactamente el pecado del que avisa este documento unos párrafos antes.
+
+### Los dos scripts que quedaron
+
+Están en `scripts/`, con su entrada en `package.json`, porque los dos contestan
+preguntas que se van a volver a hacer. Los ocho de medición que usé para llegar
+hasta aquí eran de usar y tirar y no están en el repo: habrían envejecido mal.
+
+- **`npm run check:authorship`** — qué recuperó el relleno y qué dejó sin saber,
+  contra la base a la que apunte el `.env`. Funciona **antes** de la migración
+  (dice lo que recuperaría) y **después** (lo que recuperó, más una comprobación
+  de que las dos cosas coinciden). Solo lee. Importa la regla de emparejamiento
+  **de la propia migración**, no una copia: una verificación que puede
+  contradecir a lo que verifica no sirve de nada. Esto es lo que hay que correr
+  contra producción antes y después de desplegar la migración.
+- **`npm run show:catalog`** — qué ve cada rol de verdad en el generador. La
+  visibilidad es dos cosas multiplicadas: el catálogo dice que un campo es dato
+  de personal, y la matriz de permisos dice si ese rol tiene `seguridad.ver`. Las
+  dos mitades viven en sitios distintos y la segunda se edita desde la pantalla
+  de Seguridad, así que la pregunta «¿el Cliente ve teléfonos?» no se contesta
+  leyendo ningún fichero. Y ese hueco no es teórico: el rol 2 tenía prohibido
+  `GET /usuario` mientras el generador le daba nombres, usuarios y teléfonos.
+  `npm run show:catalog -- 3 telefono` lo contesta en diez segundos.
+
+Estado hoy, migración ya aplicada contra `osefi_local`: rol 1 ve 300 campos en 7
+niveles de detalle; los roles 2 y 3 ven 195 en 6, sin un solo dato de personal.
+`check:authorship` dice «la regla dice otra cosa: 0» en las dos tablas, o sea que
+lo escrito coincide exactamente con lo que la regla predecía.

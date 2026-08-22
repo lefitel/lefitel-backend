@@ -100,3 +100,63 @@ describe("pruneConfig", () => {
     expect(pruned.omitted).toBe(0);
   });
 });
+
+describe("a root this viewer may not use", () => {
+  // The gap that made this whole module skippable. `viewFor` returns the
+  // *filtered* view, so "root does not exist" and "root is hidden from you"
+  // both came back undefined and both got the free pass — which meant a saved
+  // report rooted at `usuario` was handed to a non-staff reader intact, filter
+  // values and all. Running it was refused; the values had already arrived.
+  const CLIENTE: Viewer = { role: 3, staff: false };
+  const ADMIN: Viewer = { role: 1, staff: true };
+
+  /** The report this feature exists to enable, narrowed by personal data. */
+  const perPerson: ReportConfig = {
+    root: "usuario",
+    columns: [{ path: "name" }, { path: "phone" }, { path: "numRevisiones" }],
+    filters: {
+      op: "and",
+      conditions: [
+        { path: "phone", operator: "like", value: "71234567" },
+        { path: "user", operator: "eq", value: "jperez" },
+      ],
+    },
+    sort: [{ path: "numRevisiones", direction: "desc" }],
+    groupBy: [],
+  } as unknown as ReportConfig;
+
+  it("hands a non-staff reader nothing at all, and says how much", () => {
+    const { config, omitted } = pruneConfig(perPerson, CLIENTE);
+
+    expect(config.columns).toEqual([]);
+    expect(config.filters?.conditions).toEqual([]);
+    expect(config.sort).toEqual([]);
+    // The root itself is the thing being withheld, so it cannot survive.
+    expect(config.root).toBe("");
+    // 3 columns + 2 filters + 1 sort.
+    expect(omitted).toBe(6);
+  });
+
+  it("does not leak the filter value, which is the personal data", () => {
+    const { config } = pruneConfig(perPerson, CLIENTE);
+    expect(JSON.stringify(config)).not.toContain("71234567");
+    expect(JSON.stringify(config)).not.toContain("jperez");
+  });
+
+  it("leaves it untouched for somebody who may use it", () => {
+    const { config, omitted } = pruneConfig(perPerson, ADMIN);
+    expect(omitted).toBe(0);
+    expect(config.columns).toHaveLength(3);
+    expect(config.root).toBe("usuario");
+  });
+
+  it("still leaves a genuinely unknown root alone, for the builder to name", () => {
+    // Unchanged behaviour, and the reason the two cases had to be told apart
+    // rather than both closed: an empty configuration says nothing, while the
+    // builder's refusal names the level of detail that does not exist.
+    const bogus = { root: "no_existe", columns: [{ path: "x" }] } as unknown as ReportConfig;
+    const { config, omitted } = pruneConfig(bogus, ADMIN);
+    expect(omitted).toBe(0);
+    expect(config).toBe(bogus);
+  });
+});

@@ -19,6 +19,7 @@
 // able to open a report without a round trip, and a field can also disappear
 // from the catalog between saving and opening.
 
+import { catalog } from "./catalog.js";
 import { buildCatalogView } from "./catalogView.js";
 import { isExists, isFilterGroup, type FilterNode } from "./sqlBuilder.js";
 import type { FilterCondition, FilterGroup, ReportConfig } from "./types.js";
@@ -41,12 +42,38 @@ function nodeSurvives(node: FilterNode, keeps: (path: string) => boolean): boole
   return typeof path === "string" && keeps(path);
 }
 
-/** How many pieces a configuration is made of, for saying what a prune cost. */
+/**
+ * How many pieces a configuration is made of, for saying what a prune cost.
+ *
+ * Filter conditions are counted at the top level only. A dropped group counts
+ * as one however many conditions it held, so `omitted` under-reports rather
+ * than over-reports — the client's message says "at least this much", which is
+ * the safe direction for a number whose job is to stop a report opening
+ * quietly narrower than it was saved.
+ */
 const elementCount = (config: ReportConfig): number =>
   (Array.isArray(config.columns) ? config.columns.length : 0) +
   (config.filters?.conditions?.length ?? 0) +
   (config.sort?.length ?? 0) +
   (config.groupBy?.length ?? 0);
+
+/**
+ * Everything gone, and the level of detail with it.
+ *
+ * The root is what the viewer may not have, so keeping it would leak the one
+ * thing being withheld — and would let the client render a level of detail its
+ * own catalog does not list. `label` and `description` are the author's words
+ * and stay: they are what the listing shows, and blanking them would turn a
+ * shared report into an unnameable row.
+ */
+const emptied = (config: ReportConfig): ReportConfig => ({
+  ...config,
+  root: "",
+  columns: [],
+  groupBy: [],
+  sort: [],
+  filters: { op: "and", conditions: [] },
+});
 
 /**
  * The catalog view, kept for each of the two answers `staff` can give.
@@ -78,14 +105,34 @@ export interface PrunedConfig {
 /**
  * Keeps only what this viewer's catalog offers.
  *
- * An unknown root is left alone: the builder refuses it with a sentence naming
- * the level of detail, which is more use than an empty configuration.
+ * A root that does not exist at all is left alone: the builder refuses it with a
+ * sentence naming the level of detail, which is more use than an empty
+ * configuration.
+ *
+ * A root that exists and is *hidden from this viewer* is the opposite case and
+ * used to be indistinguishable from it, because the lookup below reads the
+ * already-filtered view: both came out as `undefined` and both got the free
+ * pass. That mattered the moment `usuario` became a `staffOnly` root, which is
+ * to say the moment this module's whole purpose applied. An administrator saves
+ * the per-person report this feature exists to enable, narrows it with a filter
+ * on a phone number or a login name, marks it shared — and every account that
+ * can list shared reports received the configuration verbatim: the hidden paths
+ * *and the values filtered against them*, which is the personal data itself.
+ * Running it was still refused, so the row never came back; the filter value did.
+ * And `omitted: 0` told the client nothing had been withheld.
+ *
+ * So the two cases are separated: hidden means everything goes, and the count
+ * says how much.
  */
 export function pruneConfig(config: ReportConfig, viewer: Viewer): PrunedConfig {
   if (!config || typeof config !== "object") return { config, omitted: 0 };
 
   const root = viewFor(viewer).roots.find((r) => r.key === config.root);
-  if (!root) return { config, omitted: 0 };
+  if (!root) {
+    const real = typeof config.root === "string" && catalog.roots.includes(config.root);
+    if (!real) return { config, omitted: 0 };
+    return { config: emptied(config), omitted: elementCount(config) };
+  }
 
   const valid = new Set(root.fields.map((f) => f.path));
   const aggregable = new Set(root.aggregateOnly.map((a) => a.path));

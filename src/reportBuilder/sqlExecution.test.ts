@@ -15,7 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { QueryTypes } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
-import { buildQuery } from "./sqlBuilder.js";
+import { buildQuery, buildCountQuery } from "./sqlBuilder.js";
 import { buildCatalogView } from "./catalogView.js";
 import { catalog } from "./catalog.js";
 import { runReport, countReport } from "./execute.js";
@@ -334,11 +334,99 @@ describe.skipIf(!dbAvailable)("the three roots that were missing", () => {
     expect(Number(truth.vivos)).toBeLessThan(Number(truth.total));
     expect(Number(truth.huerfanos)).toBeGreaterThan(0);
 
-    // And there is no way to ask for inspections here, because there is no
-    // column to ask about.
-    expect(() =>
-      buildQuery({ root: "usuario", columns: [{ path: "numRevisiones" }] }, ADMIN),
-    ).toThrow(/no existe/);
+    // Inspections can be asked about here now, and the same warning applies
+    // twice over. `numRevisiones` sums to the rows the authorship backfill
+    // could name — everything since the bitácora began and nothing before it —
+    // so it ranks people over five months of a two-year history. The three
+    // numbers are asserted together because the middle one is the one that
+    // makes the first one readable.
+    const insp = buildQuery(
+      { root: "usuario", columns: [{ path: "name" }, { path: "numRevisiones" }] },
+      ADMIN,
+    );
+    const inspRows = await sequelize.query<Record<string, unknown>>(insp.sql, {
+      bind: insp.binds, type: QueryTypes.SELECT, logging: false,
+    });
+    const [inspCol] = insp.columns.slice(1).map((c) => c.key);
+    const sumaInsp = inspRows.reduce((t, row) => t + Number(row[inspCol] ?? 0), 0);
+
+    const [rev] = await sequelize.query<{ atribuidas: number; en_reporte: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM "revicions" r
+            JOIN "usuarios" u ON u."id" = r."id_usuario" AND u."deletedAt" IS NULL
+           WHERE r."deletedAt" IS NULL
+             AND EXISTS (SELECT 1 FROM "eventos" e
+                          WHERE e."id" = r."id_evento" AND e."deletedAt" IS NULL)) AS atribuidas,
+         (SELECT count(*)::int FROM "revicions" r
+           WHERE r."deletedAt" IS NULL
+             AND EXISTS (SELECT 1 FROM "eventos" e
+                          WHERE e."id" = r."id_evento" AND e."deletedAt" IS NULL)) AS en_reporte`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+    expect(sumaInsp).toBe(Number(rev.atribuidas));
+    // The column is a fraction of the work, not the work. If this ever stops
+    // being true it means somebody found a way to attribute the rest, and this
+    // assertion is where they should come and say so.
+    expect(Number(rev.atribuidas)).toBeLessThan(Number(rev.en_reporte));
+  });
+});
+
+describe.skipIf(!dbAvailable)("an unknown author hides no work", () => {
+  it("keeps every inspection in the report, authored or not", async () => {
+    // The trap this test exists for: marking `revision.usuario` as `required`
+    // in the catalog reads like a tidy-up and is not. `required` emits an
+    // unconditional EXISTS on the FK — see requiredParentGuards — so a null
+    // `id_usuario` matches nothing and the row leaves the report, whether or
+    // not the report ever mentions the author. Six thousand inspections would
+    // disappear from every total, quietly, and the remaining table would look
+    // completely reasonable.
+    // Counted with buildCountQuery rather than by wrapping buildQuery: the
+    // latter carries the MAX_ROWS limit, so wrapping it counts the cap and this
+    // test passed at 500 whatever the truth was. The count path is the one that
+    // has to agree with the table anyway.
+    const built = buildCountQuery(
+      { root: "revision", columns: [{ path: "id" }, { path: "usuario.name" }] },
+      ADMIN,
+    );
+    const [{ total: filas }] = await sequelize.query<{ total: number }>(built.sql, {
+      bind: built.binds, type: QueryTypes.SELECT, logging: false,
+    });
+
+    const [truth] = await sequelize.query<{ total: number; sin_autor: number }>(
+      `SELECT count(*)::int AS total,
+              count(*) FILTER (WHERE r."id_usuario" IS NULL)::int AS sin_autor
+         FROM "revicions" r
+        WHERE r."deletedAt" IS NULL
+          AND EXISTS (SELECT 1 FROM "eventos" e
+                       WHERE e."id" = r."id_evento" AND e."deletedAt" IS NULL)`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+
+    expect(filas).toBe(Number(truth.total));
+    // And the rows without an author are the majority, so this is not a
+    // hypothetical being guarded against.
+    expect(Number(truth.sin_autor)).toBeGreaterThan(Number(truth.total) / 2);
+  });
+
+  it("keeps every repair too", async () => {
+    const built = buildCountQuery(
+      { root: "solucion", columns: [{ path: "id" }, { path: "usuario.name" }] },
+      ADMIN,
+    );
+    const [{ total: filas }] = await sequelize.query<{ total: number }>(built.sql, {
+      bind: built.binds, type: QueryTypes.SELECT, logging: false,
+    });
+    const [truth] = await sequelize.query<{ total: number; sin_autor: number }>(
+      `SELECT count(*)::int AS total,
+              count(*) FILTER (WHERE s."id_usuario" IS NULL)::int AS sin_autor
+         FROM "solucions" s
+        WHERE s."deletedAt" IS NULL
+          AND EXISTS (SELECT 1 FROM "eventos" e
+                       WHERE e."id" = s."id_evento" AND e."deletedAt" IS NULL)`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+    expect(filas).toBe(Number(truth.total));
+    expect(Number(truth.sin_autor)).toBeGreaterThan(0);
   });
 });
 

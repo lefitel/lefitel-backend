@@ -159,11 +159,21 @@ const obs: EntityDef = {
  * that offers nothing, which is worse than not offering it. Reached through
  * `evento.usuario` the per-field flags still do the work.
  *
- * As a root it answers "who has been registering what" — and answers it only
- * halfway, because `revicions` and `solucions` carry no `id_usuario` at all.
- * An inspection and a repair have no recorded author in this schema; the
- * bitácora knows (1.319 ADD_REVISION entries do name their user) and the
- * business tables do not. So no report here can say who inspects the most.
+ * As a root it answers "who has been registering what", and since the
+ * authorship migration that includes inspections and repairs, which are the
+ * volume of the field work: 7.741 and 1.071 rows against 1.376 events.
+ *
+ * Read the four counts knowing what they are counting. Events and poles have
+ * had an author since the beginning. Inspections and repairs only have one
+ * where the bitácora could name it, and these two counts apply the same
+ * archived-event guard a revision-rooted report does, so what they sum to is
+ * **1.289 + 422 = 1.711** — not the 1.345 + 513 the backfill wrote, and
+ * nowhere near the 8.812 rows the two tables hold. Under two months of a
+ * two-year history, three accounts out of fifteen.
+ *
+ * So they are honest per person and useless as a share of the whole, and a
+ * report that ranks people by them is ranking the last two months. What is
+ * missing is missing for good; the null author is the record saying so.
  */
 const usuario: EntityDef = {
   // `pass` is deliberately absent. A test asserts no credential field ever
@@ -182,9 +192,6 @@ const usuario: EntityDef = {
   relations: {
     rol: { kind: "toOne", target: "rol", label: "Rol", localKey: "id_rol", staffOnly: true },
   },
-  // Only what the schema actually records. There is no `id_usuario` on
-  // `revicions` or `solucions`, so "revisiones hechas" cannot be counted here
-  // at all — see the note above the entity.
   calculated: {
     numEventos: {
       kind: "number",
@@ -205,6 +212,35 @@ const usuario: EntityDef = {
       sql: (a) =>
         `(SELECT COUNT(*) FROM "${TABLE.poste}" p` +
         ` WHERE p."id_usuario" = ${a}."id" AND p."deletedAt" IS NULL)`,
+    },
+    // Both counts exclude rows hanging off an archived event — 404 inspections
+    // and 81 repairs. Not a detail: a report rooted at `revision` already drops
+    // them (see requiredParentGuards), so without the same guard here the same
+    // person's inspections would come to 831 in one report and 846 in another,
+    // both looking authoritative and neither explaining itself.
+    numRevisiones: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Revisiones hechas",
+      rootOnly: true,
+      staffOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.revision}" r` +
+        ` WHERE r."id_usuario" = ${a}."id" AND r."deletedAt" IS NULL` +
+        ` AND EXISTS (SELECT 1 FROM "${TABLE.evento}" e` +
+        ` WHERE e."id" = r."id_evento" AND e."deletedAt" IS NULL))`,
+    },
+    numSoluciones: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Soluciones registradas",
+      rootOnly: true,
+      staffOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.solucion}" s` +
+        ` WHERE s."id_usuario" = ${a}."id" AND s."deletedAt" IS NULL` +
+        ` AND EXISTS (SELECT 1 FROM "${TABLE.evento}" e` +
+        ` WHERE e."id" = s."id_evento" AND e."deletedAt" IS NULL))`,
     },
   },
 };
@@ -235,6 +271,15 @@ const solucion: EntityDef = {
   relations: {
     evento: {
       kind: "toOne", target: "evento", label: "Evento", localKey: "id_evento", required: true,
+    },
+    // Deliberately NOT `required`, unlike the event above, and the difference
+    // is 558 rows. `required` is an unconditional EXISTS on the FK, so with a
+    // null `id_usuario` it matches nothing and the row leaves the report —
+    // whether or not the report ever mentions the author. Every repair from
+    // before the bitácora would vanish from every count, silently.
+    usuario: {
+      kind: "toOne", target: "usuario", label: "Resuelto por", localKey: "id_usuario",
+      staffOnly: true,
     },
   },
 };
@@ -428,6 +473,13 @@ const revision: EntityDef = {
   relations: {
     evento: {
       kind: "toOne", target: "evento", label: "Evento", localKey: "id_evento", required: true,
+    },
+    // Optional, for the same reason as solucion.usuario and at eleven times the
+    // cost: 6.396 of 7.741 inspections have no recorded author, against 558 of
+    // 1.071 repairs.
+    usuario: {
+      kind: "toOne", target: "usuario", label: "Revisado por", localKey: "id_usuario",
+      staffOnly: true,
     },
   },
 };
