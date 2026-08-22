@@ -24,9 +24,6 @@ const TABLE = {
   rol: "rols",
 } as const;
 
-/** Roles allowed to see personal data of other users. */
-const STAFF_ONLY = [1, 2];
-
 // ─── Leaf entities (no outgoing relations worth exposing) ─────────────────────
 
 const ciudad: EntityDef = {
@@ -35,8 +32,8 @@ const ciudad: EntityDef = {
   paranoid: true,
   fields: {
     name: { column: "name", kind: "string", label: "Nombre" },
-    lat: { column: "lat", kind: "number", label: "Latitud" },
-    lng: { column: "lng", kind: "number", label: "Longitud" },
+    lat: { column: "lat", kind: "number", label: "Latitud", decimals: true },
+    lng: { column: "lng", kind: "number", label: "Longitud", decimals: true },
   },
   relations: {},
 };
@@ -106,13 +103,13 @@ const usuario: EntityDef = {
   label: "Usuario",
   paranoid: true,
   fields: {
-    name: { column: "name", kind: "string", label: "Nombre del usuario", roles: STAFF_ONLY },
-    lastname: { column: "lastname", kind: "string", label: "Apellido del usuario", roles: STAFF_ONLY },
-    user: { column: "user", kind: "string", label: "Usuario", roles: STAFF_ONLY },
-    phone: { column: "phone", kind: "string", label: "Teléfono", roles: STAFF_ONLY },
+    name: { column: "name", kind: "string", label: "Nombre del usuario", staffOnly: true },
+    lastname: { column: "lastname", kind: "string", label: "Apellido del usuario", staffOnly: true },
+    user: { column: "user", kind: "string", label: "Usuario", staffOnly: true },
+    phone: { column: "phone", kind: "string", label: "Teléfono", staffOnly: true },
   },
   relations: {
-    rol: { kind: "toOne", target: "rol", label: "Rol", localKey: "id_rol", roles: STAFF_ONLY },
+    rol: { kind: "toOne", target: "rol", label: "Rol", localKey: "id_rol", staffOnly: true },
   },
 };
 
@@ -156,15 +153,15 @@ const poste: EntityDef = {
     name: { column: "name", kind: "string", label: "Nº de poste" },
     image: { column: "image", kind: "image", label: "Foto del poste" },
     date: { column: "date", kind: "date", label: "Fecha de instalación" },
-    lat: { column: "lat", kind: "number", label: "Latitud" },
-    lng: { column: "lng", kind: "number", label: "Longitud" },
+    lat: { column: "lat", kind: "number", label: "Latitud", decimals: true },
+    lng: { column: "lng", kind: "number", label: "Longitud", decimals: true },
   },
   relations: {
     propietario: { kind: "toOne", target: "propietario", label: "Propietario", localKey: "id_propietario" },
     material: { kind: "toOne", target: "material", label: "Material", localKey: "id_material" },
     ciudadA: { kind: "toOne", target: "ciudad", label: "Ciudad A", localKey: "id_ciudadA" },
     ciudadB: { kind: "toOne", target: "ciudad", label: "Ciudad B", localKey: "id_ciudadB" },
-    usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario", roles: STAFF_ONLY },
+    usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario", staffOnly: true },
     eventos: { kind: "toMany", target: "evento", label: "Eventos", foreignKey: "id_poste" },
   },
   calculated: {
@@ -231,7 +228,7 @@ const evento: EntityDef = {
   },
   relations: {
     poste: { kind: "toOne", target: "poste", label: "Poste", localKey: "id_poste" },
-    usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario", roles: STAFF_ONLY },
+    usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario", staffOnly: true },
     // Modelled as hasMany in Sequelize, but every existing report renders a
     // single solution. Resolved with LATERAL so it behaves as a plain column.
     solucion: { kind: "toOneLatest", target: "solucion", label: "Solución", foreignKey: "id_evento", latestBy: "date" },
@@ -255,11 +252,18 @@ const evento: EntityDef = {
     // detail screen shows. Using createdAt diverged by 157 days on average
     // (max 678) because events are often registered long after they happen,
     // so every row would have contradicted the screen opened right after.
+    // `date` is nullable, and `GREATEST` in Postgres ignores nulls rather than
+    // propagating them: `GREATEST(0, NULL)` is 0, so an event with no date read
+    // as "abierto hace 0 días" — a fact, printed with the same confidence as
+    // the real ones, about something nobody knows. The sibling below documents
+    // the same trap and guards against it; this one did not. Today only one
+    // event has no date and it is resolved, so the CASE hides it: the day
+    // somebody registers a pending event without a date, the column lies.
     diasAbierto: {
       kind: "number",
       label: "Días abierto",
       sql: (a) =>
-        `CASE WHEN ${a}."state" IS NOT TRUE` +
+        `CASE WHEN ${a}."state" IS NOT TRUE AND ${a}."date" IS NOT NULL` +
         ` THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - ${a}."date")) / 86400))::int END`,
     },
     // Mirrors reporte.controller.ts:353 — resolution is measured against the

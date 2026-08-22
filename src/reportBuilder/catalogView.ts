@@ -1,12 +1,13 @@
 // Flattens the catalog graph into the field list the UI consumes.
 //
-// Filtering happens here, on the server: a role never receives the fields it is
-// not allowed to use, so there is nothing for the client to hide.
+// Filtering happens here, on the server: a caller never receives the fields they
+// are not allowed to use, so there is nothing for the client to hide.
 
 import { catalog, MAX_DEPTH, MAX_ROWS } from "./catalog.js";
 import { AGGS_BY_KIND, OPERATORS_BY_KIND } from "./constraints.js";
 import { MAX_COLUMNS, MAX_CONDITIONS, MAX_SORTS } from "./sqlBuilder.js";
 import type { AggFn, EntityDef, FieldKind, FieldSemantic, Operator } from "./types.js";
+import { isVisible, type Viewer } from "./viewer.js";
 
 export interface CatalogFieldView {
   /** Dotted path used in the report configuration. */
@@ -64,12 +65,9 @@ export function rowNoun(root: string): string {
   return ROW_NOUN[root] ?? (catalog.entities[root]?.label ?? root).toLowerCase();
 }
 
-const isVisible = (roles: number[] | undefined, role: number): boolean =>
-  roles === undefined || roles.includes(role);
-
 function collect(
   entity: EntityDef,
-  role: number,
+  viewer: Viewer,
   prefix: string,
   group: string,
   depth: number,
@@ -79,7 +77,7 @@ function collect(
   const withPrefix = (name: string) => (prefix ? `${prefix}.${name}` : name);
 
   for (const [name, field] of Object.entries(entity.fields)) {
-    if (!isVisible(field.roles, role)) continue;
+    if (!isVisible(field.staffOnly, viewer)) continue;
     const path = withPrefix(name);
     if (seen.has(path)) continue;
     seen.add(path);
@@ -103,7 +101,7 @@ function collect(
   }
 
   for (const [name, calc] of Object.entries(entity.calculated ?? {})) {
-    if (!isVisible(calc.roles, role)) continue;
+    if (!isVisible(calc.staffOnly, viewer)) continue;
     // A calculated field needs its own relation hops on top of the ones already
     // spent. Advertising one the builder will reject puts a field in the picker
     // that returns an error when clicked.
@@ -133,7 +131,7 @@ function collect(
   }
 
   for (const [name, relation] of Object.entries(entity.relations)) {
-    if (!isVisible(relation.roles, role)) continue;
+    if (!isVisible(relation.staffOnly, viewer)) continue;
     const path = withPrefix(name);
 
     if (relation.kind === "toMany") {
@@ -147,7 +145,7 @@ function collect(
 
     const target = catalog.entities[relation.target];
     if (!target) continue;
-    collect(target, role, path, `${group} › ${relation.label}`, depth + 1, out, seen);
+    collect(target, viewer, path, `${group} › ${relation.label}`, depth + 1, out, seen);
   }
 }
 
@@ -160,8 +158,8 @@ export interface CatalogLimits {
   maxDepth: number;
 }
 
-/** Builds the full catalog view for a role, one entry per allowed root. */
-export function buildCatalogView(role: number): { roots: CatalogRootView[]; limits: CatalogLimits } {
+/** Builds the full catalog view for a viewer, one entry per allowed root. */
+export function buildCatalogView(viewer: Viewer): { roots: CatalogRootView[]; limits: CatalogLimits } {
   const roots = catalog.roots.map((key) => {
     const entity = catalog.entities[key];
     const view: CatalogRootView = {
@@ -171,7 +169,7 @@ export function buildCatalogView(role: number): { roots: CatalogRootView[]; limi
       fields: [],
       aggregateOnly: [],
     };
-    collect(entity, role, "", entity.label, 0, view, new Set());
+    collect(entity, viewer, "", entity.label, 0, view, new Set());
     return view;
   });
 

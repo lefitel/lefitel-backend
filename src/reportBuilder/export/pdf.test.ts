@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { loadBranding } from "./branding.js";
 import { buildPdf, chunkColumns, type PdfInput } from "./pdf.js";
 import type { ResultColumn } from "../types.js";
 
@@ -58,8 +59,21 @@ describe("buildPdf", () => {
   it("costs kilobytes, not megabytes, for a small report", async () => {
     // logo.png is 512×512 and jsPDF stores a PNG uncompressed: embedded as it
     // comes, a two-row report weighed a megabyte, nearly all of it logo.
+    //
+    // The size on its own proved nothing. A missing logo file is not an error —
+    // the band simply comes out without it — so this test passed at its
+    // cheapest exactly when the thing it measures was not there at all. It has
+    // to establish that a logo *is* embedded first, and only then that it is
+    // small: otherwise a broken asset path reads as a passing optimisation.
+    const branding = await loadBranding();
+    expect(branding.osefi, "el logo no se cargó: esta prueba no mediría nada").not.toBeNull();
+    expect(branding.osefi!.length).toBeLessThan(60_000);
+
     const buffer = await buildPdf(base);
 
+    // An image object exists in the document, and it is the compressed one.
+    expect(buffer.includes(Buffer.from("/XObject"))).toBe(true);
+    expect(buffer.length).toBeGreaterThan(branding.osefi!.length);
     expect(buffer.length).toBeLessThan(300_000);
   });
 
@@ -90,12 +104,56 @@ describe("buildPdf", () => {
   });
 
   it("numbers every page with the total", async () => {
+    // "Pagina 1 de" was the whole assertion, which a one-page document also
+    // satisfies — and it says nothing about whether the total is the real total
+    // or whether pages 2 and 3 are numbered at all. Two hundred rows is several
+    // pages; each one has to name itself and they all have to agree on how many
+    // there are.
     const rows = Array.from({ length: 200 }, (_, i) => ({ c0: `fila ${i}`, c1: null, c2: 3, c3: false }));
 
     const text = asText(await buildPdf({ ...base, rows }));
 
-    expect(text).toContain("Pagina 1 de");
+    const stamps = [...text.matchAll(/Pagina (\d+) de (\d+)/g)];
+    expect(stamps.length).toBeGreaterThan(1);
+
+    const total = Number(stamps[0][2]);
+    expect(total).toBe(stamps.length);
+    expect(stamps.map((m) => Number(m[1]))).toEqual(
+      Array.from({ length: total }, (_, i) => i + 1),
+    );
+    // Every stamp quotes the same total, so the last page cannot say "de 2"
+    // while the first says "de 3".
+    expect(new Set(stamps.map((m) => m[2])).size).toBe(1);
     expect(text).toContain("Osefi srl");
+  });
+
+  it("fits a long title on its line instead of printing it over the subtitle", async () => {
+    // `maxWidth` makes jsPDF wrap, and wrapping grows the text downwards into
+    // the subtitle at y=19: past about 99 characters the two printed on top of
+    // each other, in a band of fixed height. The title is what somebody typed —
+    // the field allows 120 characters — so this is reachable by typing.
+    const long = "Reporte mensual consolidado de eventos, revisiones y soluciones por tramo, ciudad, propietario y material";
+    expect(long.length).toBeGreaterThan(99);
+
+    const text = asText(await buildPdf({ ...base, title: long, subtitle: "Marzo de 2026" }));
+
+    // The subtitle survives intact, which is what the overlap destroyed, and
+    // the title is there — cut with an ellipsis if it had to be.
+    expect(text).toContain("Marzo de 2026");
+    expect(text).toMatch(/Reporte mensual consolidado/);
+  });
+
+  it("says what the row colours mean", async () => {
+    // The document tinted rows by criticality and by resolution and never said
+    // so anywhere, so the colour was either decoration or a code the reader had
+    // to guess. The spreadsheet, built from the same rule, has carried this
+    // legend all along.
+    const text = asText(await buildPdf(base));
+
+    expect(text).toContain("Resuelto");
+    // Latin-1 out of the container, which is what WinAnsi renders to.
+    expect(text).toContain("Crítico");
+    expect(text).toContain("Leve");
   });
 
   it("writes the title where the reader sees it", async () => {

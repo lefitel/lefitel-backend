@@ -19,6 +19,18 @@ import { execFileSync } from "node:child_process";
 const isProduction = process.env.NODE_ENV === "production";
 
 /**
+ * Silent under vitest unless asked otherwise.
+ *
+ * A test suite that prints the server's log prints it for the passing tests too,
+ * and the failure you are looking for ends up between forty lines of "conectando
+ * a osefi_local". `LOG_LEVEL=debug npm test` still shows everything when you are
+ * chasing something specific.
+ *
+ * Declared up here because the console fix below needs it too.
+ */
+const underTest = process.env.VITEST !== undefined || process.env.NODE_ENV === "test";
+
+/**
  * Make the Windows console read UTF-8.
  *
  * Node writes UTF-8 and cannot change how a terminal decodes it. A Spanish
@@ -32,8 +44,15 @@ const isProduction = process.env.NODE_ENV === "production";
  * attach to and the output is JSON going to a log collector. It failing is not
  * worth stopping for: the worst case is the accents look wrong, which is where
  * we already were.
+ *
+ * Skipped under test as well, and that one is not cosmetic: `execFileSync`
+ * blocks, vitest runs one worker per test file, and every worker that imported
+ * this module paid for its own `chcp.com`. On a cold run it added five seconds
+ * and made `logger.test.ts` fail its own timeout — a test suite that is
+ * nondeterministic on a clean checkout. There is no console here worth fixing:
+ * vitest captures the output.
  */
-if (process.platform === "win32" && !isProduction) {
+if (process.platform === "win32" && !isProduction && !underTest) {
   try {
     execFileSync("chcp.com", ["65001"], { stdio: "ignore" });
   } catch {
@@ -49,15 +68,7 @@ if (process.platform === "win32" && !isProduction) {
  * per page load — the interesting one goes past before you can read it. Set
  * `LOG_LEVEL=debug` when you actually want to watch the queries.
  */
-/**
- * Silent under vitest unless asked otherwise.
- *
- * A test suite that prints the server's log prints it for the passing tests too,
- * and the failure you are looking for ends up between forty lines of "conectando
- * a osefi_local". `LOG_LEVEL=debug npm test` still shows everything when you are
- * chasing something specific.
- */
-const underTest = process.env.VITEST !== undefined || process.env.NODE_ENV === "test";
+
 const level = process.env.LOG_LEVEL ?? (underTest ? "silent" : "info");
 
 /**

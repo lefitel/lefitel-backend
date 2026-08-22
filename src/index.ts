@@ -4,38 +4,24 @@ import dotenv from "dotenv";
 import { connectionSource, sequelize } from "./database/sequelize.js";
 import { log } from "./utils/logger.js";
 import { requiredEnv } from "./config/security.js";
+import { createShutdown } from "./lifecycle.js";
 
 dotenv.config();
 
 const bootLog = log("boot");
 
-/**
- * Stop, having said why, without jumping the queue.
- *
- * `process.exit()` cuts the process off where it stands, and anything still
- * sitting in the output stream can land out of order or not at all — the boot
- * failure printed *above* the "connected to PostgreSQL" line that came before
- * it, which reads as though the failure happened first.
- *
- * Setting the code and letting the loop drain fixes the order. The timer is the
- * backstop for something refusing to let go; it is unref'd, so it never keeps
- * the process alive on its own account.
- */
 /** Set once the server is listening, so `die()` can stop it accepting. */
 let listener: import("node:http").Server | null = null;
 
-function die(): void {
-  process.exitCode = 1;
-  // Stop accepting *first*. Closing the pool while the listener is still up
-  // left a two-second window in which every arriving request was accepted and
-  // then answered 500, because the connection manager had already been
-  // replaced by a thrower — and requests already in flight had their
-  // transaction pulled out from under them. Before the exit handlers existed
-  // Node killed the process on the spot, which was ugly and at least honest.
-  listener?.close();
-  void sequelize.close().catch(() => undefined);
-  setTimeout(() => process.exit(1), 2000).unref();
-}
+/**
+ * How this process stops. The reasoning, and the order the two closes have to
+ * happen in, live in `lifecycle.ts` — where they can be tested.
+ */
+const die = createShutdown({
+  closeListener: () => listener?.close(),
+  closeDatabase: () => sequelize.close(),
+  forceExit: (code) => process.exit(code),
+});
 
 /**
  * Without JWT_SECRET nothing can be signed or verified; without CORS_ORIGIN in

@@ -17,9 +17,11 @@ import { QueryTypes } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { buildQuery } from "./sqlBuilder.js";
 import { buildCatalogView } from "./catalogView.js";
+import { catalog } from "./catalog.js";
 import { runReport, countReport } from "./execute.js";
+import type { Viewer } from "./viewer.js";
 
-const ADMIN = 1;
+const ADMIN: Viewer = { role: 1, staff: true };
 
 const dbAvailable = await sequelize
   .authenticate()
@@ -149,6 +151,109 @@ describe.skipIf(!dbAvailable)("archived records stay out of every root", () => {
 
     expect(result.rows).toHaveLength(89);
     expect(result.rows.some((row) => row.c0 === null)).toBe(false);
+  });
+});
+
+describe.skipIf(!dbAvailable)("a value nobody knows stays unknown", () => {
+  it("does not report zero days open for an event with no date", async () => {
+    // `GREATEST` ignores nulls instead of propagating them, so `GREATEST(0,
+    // NULL)` is 0: an event with no date read as "abierto hace 0 días", stated
+    // as confidently as the real figures. The data has one dateless event and
+    // it is resolved, so the CASE hides the defect — the assertion is made
+    // against a row built for the purpose instead of against luck.
+    const [row] = await sequelize.query<{ dias: number | null }>(
+      `SELECT CASE WHEN e."state" IS NOT TRUE AND e."date" IS NOT NULL
+                   THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - e."date")) / 86400))::int END
+                 AS dias
+         FROM (SELECT false AS "state", NULL::timestamptz AS "date") e`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+    expect(row.dias).toBeNull();
+
+    // The shape it replaces, kept so the reason is visible: this is what the
+    // column used to answer for that same row.
+    const [before] = await sequelize.query<{ dias: number | null }>(
+      `SELECT CASE WHEN e."state" IS NOT TRUE
+                   THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - e."date")) / 86400))::int END
+                 AS dias
+         FROM (SELECT false AS "state", NULL::timestamptz AS "date") e`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+    expect(before.dias).toBe(0);
+  });
+
+  it("keeps the catalog's expression and this test in step", async () => {
+    // The assertion above is written against a hand-made row, so it would keep
+    // passing if the catalog changed underneath it. This runs the real column
+    // over the real table and only asks that no pending event without a date
+    // reports a number — which is the property, whatever the SQL becomes.
+    const rows = await sequelize.query<{ dias: number | null }>(
+      `SELECT ${catalog.entities.evento.calculated!.diasAbierto.sql("e", () => "e")} AS dias
+         FROM "eventos" e
+        WHERE e."deletedAt" IS NULL AND e."date" IS NULL AND e."state" IS NOT TRUE`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+    for (const row of rows) expect(row.dias).toBeNull();
+  });
+});
+
+describe.skipIf(!dbAvailable)("what the builder binds is what Postgres can read", () => {
+  it("executes the shapes an <input> produces, instead of answering 22P02", async () => {
+    // The only test that proves the point end to end: the builder approved
+    // "1e5" by coercing it and then bound the text, so the database — not the
+    // validation — had the last word, and its word was a 500. Each of these
+    // used to reach Postgres as text against an integer column.
+    const shapes: [string, unknown][] = [
+      ["id", "1e5"],
+      ["id", "7."],
+      ["id", " 42 "],
+      ["criticidad", "3.0"],
+      ["state", "false"],
+      ["poste.lat", "-17.78"],
+      ["date", "2026-01-17"],
+      ["date", "2026-01-17T05:00:00Z"],
+    ];
+
+    const broken: string[] = [];
+    for (const [path, value] of shapes) {
+      try {
+        await countReport(
+          {
+            root: "evento",
+            columns: [{ path: "id" }],
+            filters: { op: "and", conditions: [{ path, operator: "eq", value }] },
+            limit: 1,
+          },
+          ADMIN,
+        );
+      } catch (error) {
+        const parent = (error as { parent?: { code?: string; message?: string } }).parent;
+        broken.push(`${path} = ${JSON.stringify(value)} → ${parent?.code ?? ""} ${parent?.message ?? (error as Error).message}`);
+      }
+    }
+
+    expect(broken).toEqual([]);
+  });
+
+  it("lists every value of a list as a value, not as one text blob", async () => {
+    // `= ANY($1)` with a mixed list used to bind ["1","2"] against an integer
+    // column. The count is asserted against the same question asked by hand,
+    // so a list that binds but matches nothing still fails here.
+    const total = await countReport(
+      {
+        root: "evento",
+        columns: [{ path: "id" }],
+        filters: { op: "and", conditions: [{ path: "id", operator: "in", value: ["1", 2, " 3 "] }] },
+        limit: 1,
+      },
+      ADMIN,
+    );
+    const [row] = await sequelize.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM "eventos" WHERE "deletedAt" IS NULL AND "id" IN (1,2,3)`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+
+    expect(total).toBe(Number(row.n));
   });
 });
 

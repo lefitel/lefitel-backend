@@ -107,6 +107,35 @@ describe("loadPhotos", () => {
     expect(result.skipped).toBe(1);
   });
 
+  it("reads a file once however many names point at it", async () => {
+    // The two spellings are the two the data actually holds — 3.090 rows store
+    // "/foto.jpg" and 424 store "images/foto.jpg", the same file under an older
+    // upload path. Deduplicated by name they were two photographs: one file
+    // opened, resized and encoded twice, and embedded twice in one workbook.
+    // Every name still resolves to an image, because the cells referencing them
+    // are different cells — but one read happened and they share its buffer.
+    const result = await loadPhotos(["/uno.webp", "uno.webp", "images/uno.webp"], { directory });
+
+    expect(result.requested).toBe(3);
+    expect(result.loaded).toBe(3);
+    expect(result.failed).toBe(0);
+    expect(new Set(result.images.values()).size).toBe(1);
+  });
+
+  it("counts the cap in files, not in names", async () => {
+    // The cap bounds reading and weight, and both are per file. Counting names
+    // meant three spellings of one photograph spent three places in a budget of
+    // three thousand — and left a real second photograph outside it.
+    const result = await loadPhotos(["/uno.webp", "images/uno.webp", "/dos.webp"], {
+      directory,
+      cap: 2,
+    });
+
+    expect(result.loaded).toBe(3);
+    expect(result.skipped).toBe(0);
+    expect(new Set(result.images.values()).size).toBe(2);
+  });
+
   it("accounts for every photograph it was asked for", async () => {
     // The identity that makes the count trustworthy: loaded + over the cap +
     // unreadable is everything asked for. Before, a file that could not be read

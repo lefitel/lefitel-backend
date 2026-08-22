@@ -6,6 +6,28 @@ import { log } from "../utils/logger.js";
 const gateLog = log("permisos");
 
 /**
+ * The permission a mounted gate is asking for, readable from outside.
+ *
+ * `routeGuards.test.ts` walks the assembled Express app to prove every write
+ * route is gated, and all it could read was the function's *name* — so
+ * `requirePermission("generador", "ver")` and `requirePermission("generador",
+ * "archivar")` were the same string to it. A route gated by the wrong pair
+ * passed that test exactly like a route gated by the right one, which is the
+ * mistake most likely to be made and the one it could not see. Stamping the
+ * pair on the function is what lets the test assert the pair.
+ */
+export interface GatedHandler {
+  permission?: `${Module}.${Action}`;
+}
+
+/** Stamps the name the walker matches on and the pair it asserts. */
+function label<T extends object>(handler: T, name: string, permission: string): T {
+  Object.defineProperty(handler, "name", { value: name });
+  Object.defineProperty(handler, "permission", { value: permission, enumerable: true });
+  return handler;
+}
+
+/**
  * Answers 500 instead of letting the process die.
  *
  * These gates are `async`, and Express 4 only catches what a handler throws
@@ -63,9 +85,7 @@ export function requirePermission(modulo: Module, accion: Action) {
     if (await can(role, modulo, accion)) return next();
     return res.status(403).json({ message: "No tiene permiso para realizar esta acción." });
   };
-  return Object.defineProperty(fromPromise(requirePermissionGate), "name", {
-    value: "requirePermissionGate",
-  });
+  return label(fromPromise(requirePermissionGate), "requirePermissionGate", `${modulo}.${accion}`);
 }
 
 /**
@@ -103,7 +123,9 @@ export function requireSelfOrPermission(modulo: Module, accion: Action, param = 
 
     return res.status(403).json({ message: "Solo puede consultar o modificar su propio usuario." });
   };
-  return Object.defineProperty(fromPromise(requireSelfOrPermissionGate), "name", {
-    value: "requireSelfOrPermissionGate",
-  });
+  return label(
+    fromPromise(requireSelfOrPermissionGate),
+    "requireSelfOrPermissionGate",
+    `${modulo}.${accion}`,
+  );
 }

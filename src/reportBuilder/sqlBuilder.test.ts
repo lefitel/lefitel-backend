@@ -8,9 +8,12 @@ import {
   type Operator,
   type ReportConfig,
 } from "./types.js";
+import type { Viewer } from "./viewer.js";
 
-const ADMIN = 1;
-const OPERATIVO = 3;
+// The viewer, not a role number: field visibility is now a capability the
+// request resolves once, and these are the two answers it can give.
+const ADMIN: Viewer = { role: 1, staff: true };
+const OPERATIVO: Viewer = { role: 3, staff: false };
 
 const base = (over: Partial<ReportConfig> = {}): ReportConfig => ({
   root: "evento",
@@ -371,6 +374,102 @@ describe("buildQuery — filters and binds", () => {
         `${path} = ${JSON.stringify(value)}`,
       ).not.toThrow();
     }
+  });
+
+  it("binds the value it validated, not the text it was handed", () => {
+    // The defect this closes: the check coerced the text to a number to judge
+    // it and then bound the text. So "1e5" was approved *as a number* and sent
+    // *as text*, and Postgres answered 22P02 on an integer column — the exact
+    // 500 the check exists to prevent, produced by the check passing.
+    const cases: [unknown, number][] = [
+      ["1e5", 100_000],
+      ["7.", 7],
+      [" 42 ", 42],
+      ["3.0", 3],
+      ["-8", -8],
+    ];
+
+    for (const [sent, bound] of cases) {
+      const { binds } = buildQuery(
+        base({ filters: { op: "and", conditions: [{ path: "id", operator: "eq", value: sent }] } }),
+        ADMIN,
+      );
+      expect(binds, `${JSON.stringify(sent)} debe ligarse como número`).toContain(bound);
+      expect(binds).not.toContain(sent);
+    }
+  });
+
+  it("normalises a boolean typed as text into a boolean", () => {
+    const { binds } = buildQuery(
+      base({ filters: { op: "and", conditions: [{ path: "state", operator: "eq", value: "false" }] } }),
+      ADMIN,
+    );
+    expect(binds).toContain(false);
+    expect(binds).not.toContain("false");
+  });
+
+  it("refuses a decimal on an integer column, and allows one where the column has decimals", () => {
+    // Reachable by typing: "Criticidad ≤ 2,5" in the filter box. The catalog is
+    // what knows the difference — every number in it is an integer column
+    // except the coordinates — so this is the only place the question can be
+    // answered before Postgres answers it with a 500.
+    expect(() =>
+      buildQuery(
+        base({
+          filters: { op: "and", conditions: [{ path: "criticidad", operator: "lte", value: 2.5 }] },
+        }),
+        ADMIN,
+      ),
+    ).toThrow(/enteros/);
+
+    expect(() =>
+      buildQuery(
+        base({
+          filters: { op: "and", conditions: [{ path: "poste.lat", operator: "gte", value: -17.78 }] },
+        }),
+        ADMIN,
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses a day that does not exist instead of rolling it into the next month", () => {
+    // `new Date("2026-02-30")` is the 2nd of March. Nothing failed: the report
+    // answered about a day nobody asked about, under a header naming the day
+    // they did ask about. The other three are shapes JavaScript accepts by
+    // guessing — a bare year means the 1st of January, and 01/17/2026 is read
+    // in US order.
+    for (const value of ["2026-02-30", "2026", "01/17/2026", "2026-13-01", "17/01/2026"]) {
+      expect(
+        () =>
+          buildQuery(
+            base({ filters: { op: "and", conditions: [{ path: "date", operator: "eq", value }] } }),
+            ADMIN,
+          ),
+        `fecha ${value}`,
+      ).toThrow(ReportConfigError);
+    }
+  });
+
+  it("refuses an empty value inside a list or a range", () => {
+    // `= ANY` and `BETWEEN` both propagate null, so one empty box among five
+    // values built valid SQL, returned zero rows, and said nothing about why.
+    expect(() =>
+      buildQuery(
+        base({
+          filters: { op: "and", conditions: [{ path: "id", operator: "in", value: [1, null, 3] }] },
+        }),
+        ADMIN,
+      ),
+    ).toThrow(/vacío/);
+
+    expect(() =>
+      buildQuery(
+        base({
+          filters: { op: "and", conditions: [{ path: "id", operator: "between", value: [1, null] }] },
+        }),
+        ADMIN,
+      ),
+    ).toThrow(/vacío/);
   });
 
   it("never hands a bare date to AT TIME ZONE, whichever operator asked", () => {
@@ -788,6 +887,24 @@ describe("buildQuery — injection attempts", () => {
 });
 
 describe("buildQuery — role isolation", () => {
+  it("decides by the capability and never by the role number", () => {
+    // The defect in one assertion. Visibility was a list of role numbers in the
+    // catalog — `roles: [1, 2]` — while the permission matrix grants role 2 no
+    // `seguridad.ver` at all: `GET /usuario` answered a coordinator 403 and the
+    // generator handed them the login username of every user in the system.
+    //
+    // So the number must not decide anything. A role 1 without the capability
+    // is refused, and a role 3 with it is allowed — which is impossible to get
+    // right by reading the number, whichever numbers are in the list.
+    const adminSinPermiso: Viewer = { role: 1, staff: false };
+    const tecnicoConPermiso: Viewer = { role: 3, staff: true };
+
+    expect(() => buildQuery(base({ columns: [{ path: "usuario.user" }] }), adminSinPermiso))
+      .toThrow(/permiso/);
+    expect(() => buildQuery(base({ columns: [{ path: "usuario.user" }] }), tecnicoConPermiso))
+      .not.toThrow();
+  });
+
   it("lets an administrator read user fields", () => {
     expect(() => buildQuery(base({ columns: [{ path: "usuario.name" }] }), ADMIN)).not.toThrow();
   });
@@ -812,6 +929,35 @@ describe("buildQuery — role isolation", () => {
     expect(() =>
       buildQuery(base({ sort: [{ path: "usuario.name", dir: "asc" }] }), OPERATIVO),
     ).toThrow(/permiso/);
+  });
+
+  it("hides every field of the staff directory, not the four somebody remembered", () => {
+    // Written as a sweep because the leak was not one forgotten field: it was a
+    // hand-written list of role numbers that disagreed with the permission
+    // matrix, so *everything* it protected was handed to role 2 — names,
+    // surnames, login usernames, telephones and the name of their role. Asking
+    // one path would keep passing the day a fifth column is added.
+    const forbidden = buildCatalogView(ADMIN).roots.flatMap((root) =>
+      root.fields.map((f) => ({ root: root.key, path: f.path })),
+    ).filter(({ path }) => /(^|\.)usuario(\.|$)|(^|\.)rol(\.|$)/.test(path));
+
+    // If this is zero the sweep is testing nothing, which is how a green test
+    // ends up proving the opposite of what it claims.
+    expect(forbidden.length).toBeGreaterThan(4);
+
+    for (const { root, path } of forbidden) {
+      expect(
+        () => buildQuery({ root, columns: [{ path }] }, OPERATIVO),
+        `${root}.${path} no debe ser legible sin seguridad.ver`,
+      ).toThrow(/permiso/);
+    }
+
+    // And the picker never offers what the builder would refuse: a field the
+    // client cannot see is a field it cannot ask for by accident.
+    const offered = buildCatalogView(OPERATIVO).roots.flatMap((root) =>
+      root.fields.map((f) => f.path),
+    );
+    expect(offered.filter((path) => /(^|\.)usuario(\.|$)|(^|\.)rol(\.|$)/.test(path))).toEqual([]);
   });
 });
 

@@ -6,24 +6,110 @@ import { buildCatalogView } from "../reportBuilder/catalogView.js";
 import { MAX_ROWS } from "../reportBuilder/catalog.js";
 import { runReport } from "../reportBuilder/execute.js";
 import {
-  buildExport, ExportTooLargeError, type ExportFormat,
+  buildExport, ExportCanceledError, ExportTooHeavyError, ExportTooLargeError,
+  type ExportFormat,
 } from "../reportBuilder/export/index.js";
 import { exportSlot, ExportBusyError } from "../reportBuilder/export/queue.js";
 import { buildQuery } from "../reportBuilder/sqlBuilder.js";
+import { pruneConfig } from "../reportBuilder/prune.js";
+import type { Viewer } from "../reportBuilder/viewer.js";
+import { can } from "../permissions/store.js";
 import { ReportConfigError, type ReportConfig } from "../reportBuilder/types.js";
 import { logAction } from "../utils/logAction.js";
 import { IReporteVista } from "../interfaces/index.js";
 import { log } from "../utils/logger.js";
 
-const ADMIN_ROLE = 1;
+/**
+ * Who is asking, resolved once per request.
+ *
+ * Two hand-written role lists used to answer this — `STAFF_ROLES = [1, 2]` here
+ * and `STAFF_ONLY = [1, 2]` in the catalog — and both disagreed with the
+ * permission matrix, which grants role 2 no `seguridad.ver` at all. So
+ * `GET /usuario` answered a coordinator 403 while the generator handed the same
+ * person names, login usernames and phone numbers of every user in the system.
+ * Now the matrix is asked, which also means an administrator can grant or
+ * revoke it from the Seguridad screen instead of asking for a deployment.
+ *
+ * The matrix lives in memory behind a one-minute cache, so this costs nothing
+ * per request.
+ */
+async function viewerOf(req: Request): Promise<Viewer> {
+  const role = roleOf(req);
+  return { role, staff: await can(role, "seguridad", "ver") };
+}
 
-/** Roles allowed to see other users' personal data, mirroring the catalog. */
-const STAFF_ROLES = [1, 2];
+/**
+ * May this caller act on a report that is not theirs?
+ *
+ * This was `roleOf(req) !== ADMIN_ROLE`, a literal 1: not grantable, not
+ * revocable, and invisible on the screen that exists to show who can do what.
+ * Archiving somebody else's saved report is the same kind of authority as
+ * editing somebody else's account, so it asks the same permission — which role
+ * 1 holds today, so nothing changes hands, and now it can be moved.
+ */
+const mayModerate = (req: Request): Promise<boolean> => can(roleOf(req), "seguridad", "editar");
 
 /** Postgres raises this when SET LOCAL statement_timeout fires. */
 const QUERY_CANCELED = "57014";
 
+/**
+ * SQLSTATE class 22 is "data exception": every way a value can be wrong for the
+ * column it is compared against — unreadable as a number, out of range, a
+ * division by zero, a bad cast.
+ *
+ * The builder validates each filter value before it binds, so reaching here
+ * means a shape nobody thought of got through. What the caller must not get is
+ * the 500 they used to get: "no se pudo generar el reporte" for one character in
+ * one box reads as a broken server, and the honest answer is that the request
+ * cannot be answered as written. The message stays generic on purpose — naming
+ * the column would echo the physical schema back.
+ */
+const isDataException = (code: unknown): boolean =>
+  typeof code === "string" && code.startsWith("22");
+
 const generadorLog = log("generador");
+
+/**
+ * How many saved reports one page of the listing holds.
+ *
+ * It had no limit at all: the endpoint returned every report the caller can
+ * see, each carrying its whole configuration, in one response that grows for as
+ * long as the product is used. A hundred is more than any sidebar shows at once
+ * and the total comes back beside it, so nothing is hidden by the cap.
+ */
+const REPORTES_PAGE = 100;
+const REPORTES_PAGE_MAX = 200;
+
+/**
+ * Refuses, and leaves a trace.
+ *
+ * Every 403 in this file was silent. Someone walking identifiers looking for
+ * other people's private reports produced exactly the same bitácora as someone
+ * who never tried — while renaming your own report was logged. The rest of the
+ * system records its denials (`ROLE_CHANGE_DENIED` has since the permission
+ * migration), and this is the module whose whole purpose is reading data, so it
+ * is the one where a refused attempt is worth seeing.
+ */
+function deny(
+  req: Request,
+  res: Response,
+  action: string,
+  detail: string,
+  message: string,
+) {
+  logAction({
+    id_usuario: req.user?.id,
+    action,
+    entity: "ReporteVista",
+    // Not `parseId`: this runs on a path that already parsed, and a log that
+    // throws while refusing a request would turn a 403 into a 500.
+    entity_id: Number(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id) || null,
+    detail,
+    severity: "warning",
+    ip_address: req.ip ?? null,
+  });
+  return res.status(403).json({ message });
+}
 
 const roleOf = (req: Request): number => req.user?.id_rol ?? -1;
 
@@ -45,8 +131,14 @@ function handleError(error: unknown, res: Response) {
     return res.status(400).json({ message: error.message });
   }
   // Both carry a sentence written for the user, saying what to do about it.
-  if (error instanceof ExportTooLargeError) {
+  if (error instanceof ExportTooLargeError || error instanceof ExportTooHeavyError) {
     return res.status(413).json({ message: error.message });
+  }
+  // Nobody is listening: the socket closed, which is why the build stopped.
+  // Answering would throw on a finished response, so this only leaves a trace.
+  if (error instanceof ExportCanceledError) {
+    generadorLog.info("exportación cancelada por el cliente");
+    return;
   }
   if (error instanceof ExportBusyError) {
     return res.status(429).json({ message: error.message });
@@ -56,6 +148,16 @@ function handleError(error: unknown, res: Response) {
     return res.status(400).json({
       message:
         "La consulta tardó demasiado. Acote el rango de fechas o reduzca las columnas del reporte.",
+    });
+  }
+  if (isDataException(code)) {
+    // Logged as a warning, not swallowed: every one of these is a hole in the
+    // validation upstream, and the only way to find the next one is to see it.
+    generadorLog.warn({ code }, "un valor de filtro llegó a Postgres y fue rechazado");
+    return res.status(400).json({
+      message:
+        "Alguno de los valores de los filtros no es válido para el campo que filtra. " +
+        "Revise los filtros del reporte.",
     });
   }
   // Never echo the database error back. It leaks physical table and column
@@ -71,7 +173,7 @@ function handleError(error: unknown, res: Response) {
 
 export async function getCatalogo(req: Request, res: Response) {
   try {
-    res.status(200).json(buildCatalogView(roleOf(req)));
+    res.status(200).json(buildCatalogView(await viewerOf(req)));
   } catch (error) {
     handleError(error, res);
   }
@@ -107,7 +209,8 @@ export async function postConsulta(req: Request, res: Response) {
     // exist used to come back as "too many cells", which sends someone to
     // delete columns that were not the problem — the same inversion the export
     // path was fixed for, reintroduced here.
-    buildQuery(config, roleOf(req));
+    const viewer = await viewerOf(req);
+    buildQuery(config, viewer);
 
     // Refused before the rows are read: materialising three million cells only
     // to decide they were too many is precisely the memory the cap protects.
@@ -130,7 +233,7 @@ export async function postConsulta(req: Request, res: Response) {
       });
     }
 
-    const result = await runReport(config, roleOf(req));
+    const result = await runReport(config, viewer);
 
     // Running a report is the operation that actually extracts data, and it was
     // the only one with no audit trail: someone paging through the whole
@@ -150,6 +253,7 @@ export async function postConsulta(req: Request, res: Response) {
         filas: result.rows.length,
       },
       severity: "info",
+      ip_address: req.ip ?? null,
     });
 
     res.status(200).json(result);
@@ -186,13 +290,32 @@ export async function postExportar(req: Request, res: Response) {
     const title = typeof body.title === "string" ? body.title.slice(0, MAX_TITLE) : "Reporte";
     const subtitle = typeof body.subtitle === "string" ? body.subtitle.slice(0, 500) : null;
 
+    // Resolved before the slot is taken: the export slot is the only one in the
+    // process, and holding it while asking anything else is holding it for
+    // everybody.
+    const viewer = await viewerOf(req);
+
+    // Cancelling used to cancel nothing. The browser drops the request — the
+    // page has an AbortController on the button — and the server carried on
+    // building a file for nobody while holding the only export slot in the
+    // process, so the next person read "ya hay una exportación en curso" about
+    // their own abandoned one, with no way to tell.
+    //
+    // `close` also fires on a response that finished normally, so the guard is
+    // on whether anything was written yet.
+    const abort = new AbortController();
+    req.on("close", () => {
+      if (!res.writableEnded) abort.abort();
+    });
+
     const output = await exportSlot.run(() => buildExport({
       config: body.config as ReportConfig,
-      role: roleOf(req),
+      viewer,
       format,
       title,
       subtitle,
       photos: body.photos === true,
+      signal: abort.signal,
     }));
 
     logAction({
@@ -209,6 +332,7 @@ export async function postExportar(req: Request, res: Response) {
         fotos: output.photos,
       },
       severity: "info",
+      ip_address: req.ip ?? null,
     });
 
     res.setHeader("Content-Type", output.contentType);
@@ -229,15 +353,29 @@ export async function postExportar(req: Request, res: Response) {
 
 // ─── Saved reports ───────────────────────────────────────────────────────────
 
-/** Own reports plus everything shared by others. */
+/**
+ * Own reports plus everything shared by others, one page at a time.
+ *
+ * The page is capped and the total travels with it, so the client can say how
+ * many it is not showing instead of quietly showing fewer.
+ */
 export async function getReportes(req: Request, res: Response) {
   try {
     const userId = req.user?.id;
-    // The catalog hides other users' names from role 3, so the listing must not
-    // hand them over through the author of every shared report.
-    const canSeeAuthors = STAFF_ROLES.includes(roleOf(req));
+    const viewer = await viewerOf(req);
+    // The catalog hides other people's personal data from whoever lacks
+    // `seguridad.ver`, so the listing must not hand it back through the author
+    // of every shared report.
+    const canSeeAuthors = viewer.staff;
 
-    const data = await ReporteVistaModel.findAll({
+    const asked = Number(req.query.limit);
+    const limit = Number.isFinite(asked)
+      ? Math.min(Math.max(1, Math.trunc(asked)), REPORTES_PAGE_MAX)
+      : REPORTES_PAGE;
+    const askedOffset = Number(req.query.offset);
+    const offset = Number.isFinite(askedOffset) ? Math.max(0, Math.trunc(askedOffset)) : 0;
+
+    const { rows, count } = await ReporteVistaModel.findAndCountAll({
       where: {
         [Op.or]: [{ id_usuario: userId }, { visibility: "shared" }],
       },
@@ -248,8 +386,27 @@ export async function getReportes(req: Request, res: Response) {
         ["favorite", "DESC"],
         ["updatedAt", "DESC"],
       ],
+      limit,
+      offset,
+      // The include makes Sequelize count joined rows unless told otherwise.
+      distinct: true,
     });
-    res.status(200).json(data);
+
+    res.status(200).json({
+      // Pruned one by one: a shared report names the fields it was built from,
+      // and some of those are fields this caller may not see. Handing the
+      // configuration over verbatim published the paths and the values filtered
+      // against them — the listing was the widest door to that, since it
+      // carries every report at once.
+      rows: rows.map((model) => {
+        const row = model.toJSON() as IReporteVista;
+        const pruned = pruneConfig(row.config as unknown as ReportConfig, viewer);
+        return { ...row, config: pruned.config, omitted: pruned.omitted };
+      }),
+      total: count,
+      limit,
+      offset,
+    });
   } catch (error) {
     handleError(error, res);
   }
@@ -262,9 +419,15 @@ export async function getReporte(req: Request, res: Response) {
 
     const row = found.toJSON() as IReporteVista;
     if (row.visibility !== "shared" && row.id_usuario !== req.user?.id) {
-      return res.status(403).json({ message: "Este reporte es privado." });
+      return deny(
+        req, res, "READ_REPORTE_DENIED",
+        `Intentó abrir el reporte privado #${row.id} de otra persona`,
+        "Este reporte es privado.",
+      );
     }
-    res.status(200).json(row);
+
+    const pruned = pruneConfig(row.config as unknown as ReportConfig, await viewerOf(req));
+    res.status(200).json({ ...row, config: pruned.config, omitted: pruned.omitted });
   } catch (error) {
     handleError(error, res);
   }
@@ -328,7 +491,7 @@ export async function postReporte(req: Request, res: Response) {
     const payload = readPayload(req);
     // Validating by building the query catches a broken configuration at save
     // time instead of the first time somebody opens the report.
-    buildQuery(payload.config as unknown as ReportConfig, roleOf(req));
+    buildQuery(payload.config as unknown as ReportConfig, await viewerOf(req));
 
     const created = await ReporteVistaModel.create({
       ...payload,
@@ -342,6 +505,7 @@ export async function postReporte(req: Request, res: Response) {
       entity_id: created.dataValues.id as number,
       detail: `Creó el reporte "${payload.name}"`,
       severity: "info",
+      ip_address: req.ip ?? null,
     });
 
     res.status(201).json(created);
@@ -361,7 +525,11 @@ export async function putReporte(req: Request, res: Response) {
     // open a colleague's shared report, change it and save, replacing their
     // work with no notice to anyone.
     if (row.id_usuario !== req.user?.id) {
-      return res.status(403).json({ message: "Solo el autor puede editar este reporte." });
+      return deny(
+        req, res, "EDIT_REPORTE_DENIED",
+        `Intentó modificar el reporte #${row.id} de otra persona`,
+        "Solo el autor puede editar este reporte.",
+      );
     }
 
     const payload = readPayload(req, row);
@@ -376,7 +544,7 @@ export async function putReporte(req: Request, res: Response) {
     // sharing and unfavouriting were shut too. The row could be deleted and
     // nothing else.
     if (Object.hasOwn((req.body ?? {}) as Record<string, unknown>, "config")) {
-      buildQuery(payload.config as unknown as ReportConfig, roleOf(req));
+      buildQuery(payload.config as unknown as ReportConfig, await viewerOf(req));
     }
 
     await found.update(payload);
@@ -388,6 +556,7 @@ export async function putReporte(req: Request, res: Response) {
       entity_id: parseId(req),
       detail: `Editó el reporte "${payload.name}"`,
       severity: "warning",
+      ip_address: req.ip ?? null,
     });
 
     res.status(200).json(found);
@@ -402,8 +571,12 @@ export async function deleteReporte(req: Request, res: Response) {
     if (!found) return res.status(404).json({ message: "El reporte no existe." });
 
     const row = found.toJSON() as IReporteVista;
-    if (row.id_usuario !== req.user?.id && roleOf(req) !== ADMIN_ROLE) {
-      return res.status(403).json({ message: "Solo el autor puede eliminar este reporte." });
+    if (row.id_usuario !== req.user?.id && !(await mayModerate(req))) {
+      return deny(
+        req, res, "DELETE_REPORTE_DENIED",
+        `Intentó archivar el reporte #${row.id} de otra persona`,
+        "Solo el autor puede eliminar este reporte.",
+      );
     }
 
     await found.destroy();
@@ -415,6 +588,7 @@ export async function deleteReporte(req: Request, res: Response) {
       entity_id: parseId(req),
       detail: `Archivó el reporte "${row.name}"`,
       severity: "critical",
+      ip_address: req.ip ?? null,
     });
 
     res.status(200).json({ message: "Reporte archivado." });
@@ -431,18 +605,33 @@ export async function postDuplicar(req: Request, res: Response) {
 
     const row = found.toJSON() as IReporteVista;
     if (row.visibility !== "shared" && row.id_usuario !== req.user?.id) {
-      return res.status(403).json({ message: "Este reporte es privado." });
+      return deny(
+        req, res, "DUPLICATE_REPORTE_DENIED",
+        `Intentó duplicar el reporte privado #${row.id} de otra persona`,
+        "Este reporte es privado.",
+      );
     }
 
-    // Revalidate with the duplicating user's role. Without this, a copy that
-    // references fields their role cannot use becomes theirs, and every attempt
-    // to run it fails afterwards.
-    buildQuery(row.config as unknown as ReportConfig, roleOf(req));
+    // Pruned to what the copier may use, then validated. It used to be validated
+    // as it stood, so a shared report naming a field their account cannot see —
+    // one the screen had just listed with a Duplicar button on it — answered 400
+    // quoting an internal path like "usuario.user", which is both unreadable and
+    // the very name the catalog was hiding. Copying what they can use, and
+    // telling them how much was left out, is the answer that makes sense to
+    // somebody who did not build the original.
+    const viewer = await viewerOf(req);
+    const pruned = pruneConfig(row.config as unknown as ReportConfig, viewer);
+    if (!pruned.config.columns?.length) {
+      throw new ReportConfigError(
+        "No se puede duplicar este reporte: ninguna de sus columnas está disponible para su cuenta.",
+      );
+    }
+    buildQuery(pruned.config, viewer);
 
     const created = await ReporteVistaModel.create({
       name: `${row.name} (copia)`.slice(0, 120),
       description: row.description ?? null,
-      config: row.config,
+      config: pruned.config as unknown as Record<string, unknown>,
       id_usuario: req.user!.id,
       visibility: "private",
       favorite: false,
@@ -453,8 +642,11 @@ export async function postDuplicar(req: Request, res: Response) {
       action: "DUPLICATE_REPORTE_VISTA",
       entity: "ReporteVista",
       entity_id: created.dataValues.id as number,
-      detail: `Duplicó el reporte "${row.name}"`,
+      detail:
+        `Duplicó el reporte "${row.name}"` +
+        (pruned.omitted > 0 ? ` (sin ${pruned.omitted} elemento(s) no disponibles)` : ""),
       severity: "info",
+      ip_address: req.ip ?? null,
     });
 
     res.status(201).json(created);

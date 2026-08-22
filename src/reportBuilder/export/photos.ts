@@ -76,7 +76,18 @@ async function compress(file: string): Promise<Buffer | null> {
  */
 export async function loadPhotos(
   values: readonly unknown[],
-  options: { directory?: string; cap?: number; concurrency?: number } = {},
+  options: {
+    directory?: string;
+    cap?: number;
+    concurrency?: number;
+    /**
+     * Aborted when the caller hangs up. Reading two thousand photographs is the
+     * longest part of an export, so the workers check between files: an
+     * abandoned export stops here rather than finishing a file for nobody while
+     * holding the only export slot in the process.
+     */
+    signal?: AbortSignal;
+  } = {},
 ): Promise<LoadedPhotos> {
   const directory = options.directory ?? IMAGES_DIR;
   const cap = options.cap ?? MAX_EXPORT_PHOTOS;
@@ -91,33 +102,61 @@ export async function loadPhotos(
     distinct.push(value);
   }
 
-  const wanted = distinct.slice(0, cap);
+  // Grouped by the file each value resolves to, not by the value itself. The
+  // data stores two spellings of the same location — 3.090 rows as "/foto.jpg"
+  // and 424 as "images/foto.jpg", an older upload path that survived — so
+  // deduplicating by name made one photograph two: opened, resized and encoded
+  // twice, and embedded twice in the same workbook. The cap counts files for
+  // the same reason: it bounds reading and weight, and both are per file.
+  // (Case is not folded, so on Windows two spellings that differ only in case
+  // are still two files here. Nothing in the data does that today.)
+  const byFile = new Map<string, string[]>();
+  let failed = 0;
+  for (const value of distinct) {
+    const file = resolveImagePath(value, directory);
+    // Refused before the disk: outside the images directory, or not a name.
+    if (file === null) {
+      failed += 1;
+      continue;
+    }
+    const sharing = byFile.get(file);
+    if (sharing) sharing.push(value);
+    else byFile.set(file, [value]);
+  }
+
+  const files = [...byFile.keys()];
+  const wanted = files.slice(0, cap);
   const images = new Map<string, Buffer>();
 
   let next = 0;
-  let failed = 0;
   const worker = async () => {
     for (;;) {
       const index = next++;
       if (index >= wanted.length) return;
-      const value = wanted[index];
-      const file = resolveImagePath(value, directory);
-      if (file === null) {
-        failed += 1;
+      // Between files, not mid-file: a partial read is not worth saving, and
+      // stopping here is enough to give the slot back in the same second.
+      if (options.signal?.aborted) return;
+      const file = wanted[index];
+      const buffer = await compress(file);
+      if (buffer === null) {
+        failed += byFile.get(file)!.length;
         continue;
       }
-      const buffer = await compress(file);
-      if (buffer === null) failed += 1;
-      else images.set(value, buffer);
+      // Every value that named this file gets the one buffer that was read.
+      for (const value of byFile.get(file)!) images.set(value, buffer);
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, wanted.length) }, worker));
 
+  // loaded + skipped + failed = requested, always. Whatever is left over —
+  // files beyond the cap, and files the workers never reached because the
+  // caller hung up — is counted as skipped, so the sentence printed in the file
+  // still accounts for every photograph the report asked for.
   return {
     images,
     requested: distinct.length,
     loaded: images.size,
-    skipped: distinct.length - wanted.length,
+    skipped: Math.max(0, distinct.length - images.size - failed),
     failed,
   };
 }

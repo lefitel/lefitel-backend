@@ -36,8 +36,21 @@ export interface FieldDef {
   label: string;
   /** Domain meaning, for presentation decisions such as row colour. */
   semantic?: FieldSemantic;
-  /** Roles allowed to see this field. Undefined means every role. */
-  roles?: number[];
+  /**
+   * Set on the few columns that hold decimals — the coordinates, and nothing
+   * else. Every other number in this catalog is an integer column, so a filter
+   * carrying `2.5` is a value Postgres cannot read and the default has to be
+   * the strict one: declaring the exception is the safe direction, because a
+   * column that gains decimals and forgets this flag refuses a filter, while
+   * the reverse leaks a 22P02 back to the user as "server broken".
+   */
+  decimals?: boolean;
+  /**
+   * Set on a field that holds another person's personal data. Only a viewer
+   * with `seguridad.ver` sees it — the same permission that guards the screen
+   * where that data lives. Absent means everybody who can open the generator.
+   */
+  staffOnly?: boolean;
 }
 
 /**
@@ -75,7 +88,8 @@ export interface RelationDef {
   foreignKey?: string;
   /** For toOneLatest: column used to pick the most recent row. */
   latestBy?: string;
-  roles?: number[];
+  /** Set when the whole relation leads to personal data. See FieldDef. */
+  staffOnly?: boolean;
 }
 
 /**
@@ -110,7 +124,8 @@ export interface CalculatedDef {
   innerAgg?: AggFn;
   /** Domain meaning, for presentation decisions such as row colour. */
   semantic?: FieldSemantic;
-  roles?: number[];
+  /** Set when the expression exposes personal data. See FieldDef. */
+  staffOnly?: boolean;
 }
 
 export interface EntityDef {

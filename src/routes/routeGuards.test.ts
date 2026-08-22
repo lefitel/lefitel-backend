@@ -22,7 +22,7 @@ interface Layer {
   route?: {
     path: string;
     methods: Record<string, boolean>;
-    stack: { handle: { name: string } }[];
+    stack: { handle: { name: string; permission?: string } }[];
   };
 }
 
@@ -31,6 +31,15 @@ interface MountedRoute {
   path: string;
   /** Every middleware name in the chain, mount-level first. */
   chain: string[];
+  /**
+   * The permissions the gates on this route ask for, as "modulo.accion".
+   *
+   * The chain of names says a gate is *there*. It cannot say it is the right
+   * one: `requirePermission("generador", "ver")` and `("generador",
+   * "archivar")` are both called `requirePermissionGate`, so a route gated by
+   * the wrong pair — the likeliest mistake of all — passed unnoticed.
+   */
+  permissions: string[];
 }
 
 /**
@@ -68,10 +77,15 @@ function mountedRoutes(): MountedRoute[] {
     if (layer.route) {
       const chain = [
         ...(beforeRouter.get(key) ?? []),
-        ...layer.route.stack.map((s: { handle: { name: string } }) => s.handle.name),
+        ...layer.route.stack.map((s) => s.handle.name),
       ];
+      const permissions = layer.route.stack
+        .map((s) => s.handle.permission)
+        .filter((p): p is string => typeof p === "string");
       for (const method of Object.keys(layer.route.methods)) {
-        routes.push({ method: method.toUpperCase(), path: layer.route.path, chain });
+        routes.push({
+          method: method.toUpperCase(), path: layer.route.path, chain, permissions,
+        });
       }
       continue;
     }
@@ -91,8 +105,13 @@ function mountedRoutes(): MountedRoute[] {
           ...routerWide,
           ...inner.route.stack.map((s) => s.handle.name),
         ];
+        const permissions = inner.route.stack
+          .map((s) => s.handle.permission)
+          .filter((p): p is string => typeof p === "string");
         for (const method of Object.keys(inner.route.methods)) {
-          routes.push({ method: method.toUpperCase(), path: prefix + inner.route.path, chain });
+          routes.push({
+            method: method.toUpperCase(), path: prefix + inner.route.path, chain, permissions,
+          });
         }
       }
     } else {
@@ -164,5 +183,55 @@ describe("who may change data", () => {
 
     expect(stale, `ya están protegidas; bórralas de GATE_NOT_APPLICABLE:\n  ${stale.join("\n  ")}`)
       .toEqual([]);
+  });
+});
+
+/**
+ * What each route of the report builder must ask for, exactly.
+ *
+ * Written out rather than derived, because deriving it from the same source the
+ * code uses would assert that the code agrees with itself. The pairs here are
+ * the intent: running a report is `ver`, saving a new one is `crear`, editing
+ * one is `editar`, archiving is `archivar` — and a copy is a new report, so
+ * duplicating is `crear` and not `editar`.
+ */
+const GENERADOR_GATES: Record<string, string> = {
+  "GET /api/generador/catalogo": "generador.ver",
+  "POST /api/generador/consulta": "generador.ver",
+  "POST /api/generador/exportar": "generador.ver",
+  "GET /api/generador/reportes": "generador.ver",
+  "GET /api/generador/reportes/:id": "generador.ver",
+  "POST /api/generador/reportes": "generador.crear",
+  "PUT /api/generador/reportes/:id": "generador.editar",
+  "DELETE /api/generador/reportes/:id": "generador.archivar",
+  "POST /api/generador/reportes/:id/duplicar": "generador.crear",
+};
+
+describe("which permission each gate asks for", () => {
+  it("asks for the one the route is about, not merely for one", () => {
+    const wrong: string[] = [];
+    for (const [route, expected] of Object.entries(GENERADOR_GATES)) {
+      const [method, path] = route.split(" ");
+      const found = routes.find((r) => r.method === method && r.path === path);
+      if (!found) {
+        wrong.push(`${route} → no está montada`);
+        continue;
+      }
+      if (!found.permissions.includes(expected)) {
+        wrong.push(`${route} → pide ${JSON.stringify(found.permissions)}, esperaba ${expected}`);
+      }
+    }
+    expect(wrong, `puertas que piden otra cosa: ${wrong.join(" | ")}`).toEqual([]);
+  });
+
+  it("reads a permission off every gate it finds", () => {
+    // The assertion above is only as good as the stamp: if the metadata ever
+    // stops arriving, every `includes` turns into a comparison against an empty
+    // list and this file would go quiet about the whole question.
+    const gated = routes.filter((r) => r.chain.some((name) => GATES.includes(name)));
+    const mute = gated.filter((r) => r.permissions.length === 0);
+
+    expect(gated.length).toBeGreaterThan(20);
+    expect(mute.map((r) => `${r.method} ${r.path}`), "puertas sin permiso legible").toEqual([]);
   });
 });

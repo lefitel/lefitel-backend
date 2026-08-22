@@ -28,6 +28,7 @@ import {
   type Operator,
   type ReportConfig,
 } from "./types.js";
+import { isVisible, type Viewer } from "./viewer.js";
 
 const AGG_FNS: AggFn[] = ["count", "sum", "avg", "min", "max"];
 
@@ -63,9 +64,6 @@ const quote = (identifier: string): string => {
   return `"${identifier}"`;
 };
 
-const isVisible = (roles: number[] | undefined, role: number): boolean =>
-  roles === undefined || roles.includes(role);
-
 interface ResolvedExpr {
   /** SQL expression producing the value. */
   sql: string;
@@ -88,6 +86,8 @@ interface ResolvedExpr {
   groupKeys?: string[];
   /** Domain meaning, forwarded to the client for presentation. */
   semantic?: FieldSemantic;
+  /** True when the value may carry decimals. Every other number is integer. */
+  decimals?: boolean;
 }
 
 /**
@@ -181,7 +181,7 @@ function walkToOne(
   rootEntity: EntityDef,
   segments: string[],
   plan: JoinPlan,
-  role: number,
+  viewer: Viewer,
   fullPath: string,
 ): { entity: EntityDef; alias: string } {
   let entity = rootEntity;
@@ -193,7 +193,7 @@ function walkToOne(
     if (!relation) {
       throw new ReportConfigError(`El campo "${fullPath}" no existe en el catálogo.`);
     }
-    if (!isVisible(relation.roles, role)) {
+    if (!isVisible(relation.staffOnly, viewer)) {
       throw new ReportConfigError(`No tiene permiso para usar "${fullPath}".`);
     }
     if (relation.kind === "toMany") {
@@ -263,14 +263,14 @@ function buildToManyAggregate(
   relationName: string,
   fieldName: string | undefined,
   agg: AggFn,
-  role: number,
+  viewer: Viewer,
   fullPath: string,
 ): ResolvedExpr {
   const relation = own(parentEntity.relations, relationName);
   if (!relation || relation.kind !== "toMany") {
     throw new ReportConfigError(`"${fullPath}" no es una relación de varios registros.`);
   }
-  if (!isVisible(relation.roles, role)) {
+  if (!isVisible(relation.staffOnly, viewer)) {
     throw new ReportConfigError(`No tiene permiso para usar "${fullPath}".`);
   }
 
@@ -299,7 +299,7 @@ function buildToManyAggregate(
   if (!field) {
     throw new ReportConfigError(`El campo "${fullPath}" no existe en el catálogo.`);
   }
-  if (!isVisible(field.roles, role)) {
+  if (!isVisible(field.staffOnly, viewer)) {
     throw new ReportConfigError(`No tiene permiso para usar "${fullPath}".`);
   }
 
@@ -310,6 +310,10 @@ function buildToManyAggregate(
     label: `${field.label} (${agg})`,
     selfAggregating: true,
     innerAgg: agg,
+    // An average of integers is not an integer. Nothing filters on an aggregate
+    // today, so this only matters the day something does — and on that day the
+    // wrong answer here would be a rejection of a legitimate 2,5.
+    decimals: agg === "avg" ? true : field.decimals,
   };
 }
 
@@ -325,7 +329,7 @@ function resolvePath(
   rootEntity: EntityDef,
   path: string,
   plan: JoinPlan,
-  role: number,
+  viewer: Viewer,
   agg?: AggFn,
 ): ResolvedExpr {
   if (typeof path !== "string" || path.trim() === "") {
@@ -360,9 +364,9 @@ function resolvePath(
             `Elija un resumen (conteo, promedio…) o cambie el nivel de detalle.`,
         );
       }
-      const landing = walkToOne(rootEntity, prefix, plan, role, path);
+      const landing = walkToOne(rootEntity, prefix, plan, viewer, path);
       const resolved = buildToManyAggregate(
-        landing.entity, landing.alias, segments[i], rest[0], agg, role, path,
+        landing.entity, landing.alias, segments[i], rest[0], agg, viewer, path,
       );
       // A to-many total reached *through* a relation counts at that relation's
       // grain, not the report's. `poste.eventos` on a report of events asks the
@@ -379,12 +383,12 @@ function resolvePath(
 
   // Plain chain: walk the relations, resolve the last segment as a field.
   const leaf = segments[segments.length - 1];
-  const landing = walkToOne(rootEntity, segments.slice(0, -1), plan, role, path);
+  const landing = walkToOne(rootEntity, segments.slice(0, -1), plan, viewer, path);
   const target = landing.entity;
 
   const field = own(target.fields, leaf);
   if (field) {
-    if (!isVisible(field.roles, role)) {
+    if (!isVisible(field.staffOnly, viewer)) {
       throw new ReportConfigError(`No tiene permiso para usar "${path}".`);
     }
     return {
@@ -398,12 +402,13 @@ function resolvePath(
       // `sum` is affected — see `inflatesAcrossRows`.
       foreignGrain: segments.length > 1,
       semantic: field.semantic,
+      decimals: field.decimals,
     };
   }
 
   const calculated = target.calculated ? own(target.calculated, leaf) : undefined;
   if (calculated) {
-    if (!isVisible(calculated.roles, role)) {
+    if (!isVisible(calculated.staffOnly, viewer)) {
       throw new ReportConfigError(`No tiene permiso para usar "${path}".`);
     }
     // Calculated fields may need extra joins; register them relative to the
@@ -412,7 +417,7 @@ function resolvePath(
     const dep = (depPath: string): string => {
       const absolute = basePath ? `${basePath}.${depPath}` : depPath;
       if (!plan.has(absolute)) {
-        walkToOne(rootEntity, absolute.split("."), plan, role, path);
+        walkToOne(rootEntity, absolute.split("."), plan, viewer, path);
       }
       return plan.get(absolute);
     };
@@ -445,13 +450,13 @@ function resolvePath(
 
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
-type FilterNode = FilterCondition | ExistsCondition | FilterGroup;
+export type FilterNode = FilterCondition | ExistsCondition | FilterGroup;
 
-const isFilterGroup = (node: FilterNode): node is FilterGroup =>
+export const isFilterGroup = (node: FilterNode): node is FilterGroup =>
   typeof (node as FilterGroup).op === "string" &&
   Array.isArray((node as FilterGroup).conditions);
 
-const isExists = (node: FilterNode): node is ExistsCondition =>
+export const isExists = (node: FilterNode): node is ExistsCondition =>
   typeof (node as ExistsCondition).exists === "string";
 
 /**
@@ -464,7 +469,7 @@ function buildExists(
   node: ExistsCondition,
   rootEntity: EntityDef,
   plan: JoinPlan,
-  role: number,
+  viewer: Viewer,
   binds: unknown[],
   depth: number,
 ): string {
@@ -478,7 +483,7 @@ function buildExists(
   }
 
   const relationName = segments[segments.length - 1];
-  const landing = walkToOne(rootEntity, segments.slice(0, -1), plan, role, node.exists);
+  const landing = walkToOne(rootEntity, segments.slice(0, -1), plan, viewer, node.exists);
   const relation = own(landing.entity.relations, relationName);
 
   if (!relation || relation.kind !== "toMany") {
@@ -486,7 +491,7 @@ function buildExists(
       `"${node.exists}" no es una relación de varios registros; use un filtro normal.`,
     );
   }
-  if (!isVisible(relation.roles, role)) {
+  if (!isVisible(relation.staffOnly, viewer)) {
     throw new ReportConfigError(`No tiene permiso para usar "${node.exists}".`);
   }
 
@@ -500,7 +505,7 @@ function buildExists(
   }
 
   if (node.where) {
-    const innerSql = buildFilters(node.where, target, innerPlan, role, binds, depth + 1);
+    const innerSql = buildFilters(node.where, target, innerPlan, viewer, binds, depth + 1);
     if (innerSql) conditions.push(innerSql);
   }
 
@@ -516,11 +521,30 @@ function buildExists(
 const isPlainDate = (v: unknown): v is string =>
   typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
+/** A full instant, the shape a stored configuration may carry. */
+const ISO_INSTANT = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2})?$/;
+
+/**
+ * True when a `yyyy-mm-dd` text names a day that exists.
+ *
+ * `new Date` does not refuse an impossible day, it rolls it forward: the 30th of
+ * February becomes the 2nd of March, and the report then quietly answered about
+ * a different day than the one written in the filter — no error anywhere, just a
+ * wrong number under an honest-looking header. Parsing the day and comparing it
+ * back against the text is what catches it. `"2026"` and `"01/17/2026"` reach
+ * the same place: JavaScript accepts both, means something by them, and what it
+ * means is not what the person typing them meant.
+ */
+function isRealDay(text: string): boolean {
+  const parsed = new Date(`${text}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
+}
+
 /** How long a single filter value may be. Longer than any real search term. */
 const MAX_FILTER_VALUE = 200;
 
 /**
- * Refuses a value the column cannot hold, before it becomes a bind.
+ * Refuses a value the column cannot hold, and returns the value that will bind.
  *
  * The operator was checked against the field's kind and the value was not, so
  * `{"path":"id","operator":"eq","value":"abc"}` built valid SQL and Postgres
@@ -531,11 +555,22 @@ const MAX_FILTER_VALUE = 200;
  * including `{}` and `[1,2]` on a number, "si" on a boolean and any text on a
  * date.
  *
+ * **Returning the value is the whole point of the second pass.** The first one
+ * judged the text by coercing it to a number and then bound the text anyway, so
+ * every shape that is only valid *as a number* passed a check it had no right to
+ * pass: `"1e5"`, `"7."` and `"3.0"` were approved here and refused by Postgres
+ * with the same unreadable 500 the check exists to prevent. What is judged and
+ * what is sent have to be the same value, so the judgement hands it back.
+ *
  * Objects are refused outright: nothing legitimate sends one, and a value that
  * is not a scalar is the shape an injection attempt takes.
  */
-function checkValue(value: unknown, kind: FieldKind, label: string): void {
-  if (value === null || value === undefined) return;
+function normalizeValue(
+  value: unknown,
+  field: Pick<ResolvedExpr, "kind" | "label" | "decimals">,
+): unknown {
+  const { kind, label } = field;
+  if (value === null || value === undefined) return value;
   if (typeof value === "object") {
     throw new ReportConfigError(`El filtro sobre "${label}" tiene un valor no válido.`);
   }
@@ -548,33 +583,65 @@ function checkValue(value: unknown, kind: FieldKind, label: string): void {
 
   switch (kind) {
     case "number": {
-      const n = typeof value === "number" ? value : Number(String(value).trim());
-      if (!Number.isFinite(n) || String(value).trim() === "") {
+      const text = String(value).trim();
+      const n = typeof value === "number" ? value : Number(text);
+      if (text === "" || !Number.isFinite(n)) {
         throw new ReportConfigError(`El filtro sobre "${label}" necesita un número.`);
       }
       // Beyond this Postgres refuses the bind as out of range for bigint, and
       // JavaScript has already stopped counting exactly.
-      if (!Number.isSafeInteger(n) && Math.abs(n) > Number.MAX_SAFE_INTEGER) {
+      if (Math.abs(n) > Number.MAX_SAFE_INTEGER) {
         throw new ReportConfigError(`El número del filtro sobre "${label}" está fuera de rango.`);
       }
-      return;
+      // Only the coordinates hold decimals. Everywhere else the column is an
+      // integer, and `2.5` typed into "Criticidad ≤" is a 22P02 that surfaces
+      // as "no se pudo generar el reporte" — a sentence about the server for a
+      // problem with one character in one box. Said here instead, once, with
+      // the name of the field in it.
+      if (!Number.isInteger(n) && field.decimals !== true) {
+        throw new ReportConfigError(
+          `El filtro sobre "${label}" sólo admite números enteros, sin decimales.`,
+        );
+      }
+      return n;
     }
     case "date": {
-      if (value instanceof Date) return;
-      if (typeof value !== "string" || Number.isNaN(new Date(value).getTime())) {
-        throw new ReportConfigError(`El filtro sobre "${label}" necesita una fecha.`);
+      if (value instanceof Date) return value;
+      const text = typeof value === "string" ? value.trim() : "";
+      if (isPlainDate(text)) {
+        if (!isRealDay(text)) {
+          throw new ReportConfigError(
+            `La fecha "${text}" del filtro sobre "${label}" no existe en el calendario.`,
+          );
+        }
+        // Handed back as a bare day so the whole-day semantics below still see
+        // it as one: turning it into an instant here would silently narrow
+        // "el 17 de enero" to one microsecond of that day.
+        return text;
       }
-      return;
+      const instant = ISO_INSTANT.exec(text);
+      if (instant && isRealDay(instant[1])) {
+        const parsed = new Date(text);
+        if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+      }
+      // Deliberately narrower than `new Date`: everything it accepts beyond
+      // these two shapes, it accepts by guessing — a bare year, a US-order
+      // day and month, a day that rolled over into the next month.
+      throw new ReportConfigError(
+        `El filtro sobre "${label}" necesita una fecha con formato AAAA-MM-DD.`,
+      );
     }
     case "boolean": {
-      if (typeof value === "boolean") return;
-      if (value === "true" || value === "false") return;
+      if (typeof value === "boolean") return value;
+      if (value === "true") return true;
+      if (value === "false") return false;
       throw new ReportConfigError(`El filtro sobre "${label}" sólo admite sí o no.`);
     }
     default: {
       if (typeof value !== "string") {
         throw new ReportConfigError(`El filtro sobre "${label}" necesita un texto.`);
       }
+      return value;
     }
   }
 }
@@ -610,7 +677,7 @@ function buildCondition(
   condition: FilterCondition,
   rootEntity: EntityDef,
   plan: JoinPlan,
-  role: number,
+  viewer: Viewer,
   binds: unknown[],
 ): string {
   if (!condition || typeof condition !== "object") {
@@ -620,9 +687,11 @@ function buildCondition(
     throw new ReportConfigError(`Operador no permitido: ${String(condition.operator)}`);
   }
 
-  const resolved = resolvePath(rootEntity, condition.path, plan, role);
+  const resolved = resolvePath(rootEntity, condition.path, plan, viewer);
   const expr = resolved.sql;
-  const { operator, value } = condition;
+  const { operator } = condition;
+  // Reassigned below with the normalised value, which is the one that binds.
+  let value: unknown = condition.value;
 
   // The catalog advertises which operators fit each type; enforce it here too,
   // or an invalid filter reaches Postgres and returns a raw type error.
@@ -650,11 +719,24 @@ function buildCondition(
     );
   }
 
-  // Every value, including each end of a range and each entry of a list. The
-  // array wrappers themselves are shape-checked by their own operators below.
-  for (const single of Array.isArray(value) ? value : [value]) {
-    checkValue(single, resolved.kind, resolved.label);
-  }
+  // Every value, including each end of a range and each entry of a list, and
+  // the result is what binds. The array wrappers themselves are shape-checked
+  // by their own operators below.
+  value = Array.isArray(value)
+    ? value.map((single) => {
+        // A null inside the list is not a filter for "unknown": `= ANY` and
+        // `BETWEEN` are both null-propagating, so one empty box among five
+        // values built valid SQL, returned zero rows, and said nothing. The
+        // operator for that question is "está vacío".
+        if (single === null || single === undefined) {
+          throw new ReportConfigError(
+            `El filtro "${OPERATOR_LABEL[operator]}" sobre "${resolved.label}" tiene un ` +
+              `valor vacío. Use "está vacío" para buscar los que no tienen valor.`,
+          );
+        }
+        return normalizeValue(single, resolved);
+      })
+    : normalizeValue(value, resolved);
 
   const bind = (v: unknown): string => {
     binds.push(v);
@@ -718,11 +800,6 @@ function buildCondition(
           `El filtro "en la lista" sobre "${resolved.label}" necesita al menos un valor.`,
         );
       }
-      if (value.some((v) => v !== null && typeof v === "object")) {
-        throw new ReportConfigError(
-          `El filtro "en la lista" sobre "${resolved.label}" tiene valores no válidos.`,
-        );
-      }
       return `${expr} = ANY(${bind(value)})`;
     }
     case "like": {
@@ -784,7 +861,7 @@ function buildFilters(
   group: FilterGroup,
   rootEntity: EntityDef,
   plan: JoinPlan,
-  role: number,
+  viewer: Viewer,
   binds: unknown[],
   depth = 0,
 ): string {
@@ -807,9 +884,9 @@ function buildFilters(
     }
     // depth + 1 for nested groups too: it used to bound only EXISTS, so deeply
     // nested groups blew the call stack.
-    if (isFilterGroup(node)) return buildFilters(node, rootEntity, plan, role, binds, depth + 1);
-    if (isExists(node)) return buildExists(node, rootEntity, plan, role, binds, depth);
-    return buildCondition(node, rootEntity, plan, role, binds);
+    if (isFilterGroup(node)) return buildFilters(node, rootEntity, plan, viewer, binds, depth + 1);
+    if (isExists(node)) return buildExists(node, rootEntity, plan, viewer, binds, depth);
+    return buildCondition(node, rootEntity, plan, viewer, binds);
   });
   const meaningful = parts.filter((p) => p.trim() !== "");
   if (meaningful.length === 0) return "";
@@ -878,10 +955,10 @@ function applyAggregate(expr: string, agg: AggFn, resolved: ResolvedExpr): strin
 /**
  * Builds the SQL for a report configuration.
  *
- * Pure function: same config and role always produce the same SQL and binds,
+ * Pure function: same config and viewer always produce the same SQL and binds,
  * which is what makes the engine testable without a database.
  */
-export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
+export function buildQuery(config: ReportConfig, viewer: Viewer): BuiltQuery {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new ReportConfigError("La configuración del reporte no es válida.");
   }
@@ -918,7 +995,7 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
   // Grouped expressions are resolved first so columns can be matched against them.
   const groupedExprs = new Map<string, string[]>();
   for (const path of groupBy) {
-    const resolved = resolvePath(rootEntity, path, plan, role);
+    const resolved = resolvePath(rootEntity, path, plan, viewer);
     if (resolved.selfAggregating) {
       throw new ReportConfigError(
         `No se puede agrupar por "${resolved.label}" porque ya es un resumen.`,
@@ -946,7 +1023,7 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
       );
     }
 
-    const resolved = resolvePath(rootEntity, spec.path, plan, role, spec.agg);
+    const resolved = resolvePath(rootEntity, spec.path, plan, viewer, spec.agg);
     let expr = resolved.sql;
     let kind = resolved.kind;
     const isGrouped = groupedExprs.has(spec.path);
@@ -1035,7 +1112,7 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
   if (!rootEntity.paranoid) whereSql = "TRUE";
   whereSql += requiredParentGuards(rootEntity, "t0");
   if (config.filters) {
-    const filterSql = buildFilters(config.filters, rootEntity, plan, role, binds);
+    const filterSql = buildFilters(config.filters, rootEntity, plan, viewer, binds);
     if (filterSql) whereSql = `${whereSql} AND ${filterSql}`;
   }
 
@@ -1050,7 +1127,7 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
     if (sort.agg && !AGG_FNS.includes(sort.agg)) {
       throw new ReportConfigError(`Resumen no permitido en el orden: ${String(sort.agg)}`);
     }
-    const resolved = resolvePath(rootEntity, sort.path, plan, role, sort.agg);
+    const resolved = resolvePath(rootEntity, sort.path, plan, viewer, sort.agg);
     // The same type check the columns get. Ordering never had one, so
     // `ORDER BY SUM(t0."description")` reached Postgres and came back a 500 —
     // and the identical mistake in a column is refused with a sentence that
@@ -1146,7 +1223,7 @@ export function buildQuery(config: ReportConfig, role: number): BuiltQuery {
  * Builds the matching COUNT query for pagination.
  * In summary mode it counts groups, not underlying rows.
  */
-export function buildCountQuery(config: ReportConfig, role: number): { sql: string; binds: unknown[] } {
+export function buildCountQuery(config: ReportConfig, viewer: Viewer): { sql: string; binds: unknown[] } {
   // Same checks as buildQuery, for the same reason: relying on the caller
   // invoking buildQuery first would make this a row-count oracle over non-root
   // entities. The shape check earns its place too — the export path counts
@@ -1164,18 +1241,23 @@ export function buildCountQuery(config: ReportConfig, role: number): { sql: stri
   const plan = new JoinPlan("t0");
   const binds: unknown[] = [];
 
-  const groupBy = config.groupBy ?? [];
-  const groupedExprs = groupBy.flatMap((path) => {
-    const resolved = resolvePath(rootEntity, path, plan, role);
-    return resolved.groupKeys ?? [resolved.sql];
-  });
+  // Keyed by path, like buildQuery: a configuration naming the same path twice
+  // groups by the same expression twice, which Postgres treats as grouping by
+  // it once — so the total was right either way. Written the same way in both
+  // places so nobody has to re-derive that to be sure the two agree.
+  const grouped = new Map<string, string[]>();
+  for (const path of config.groupBy ?? []) {
+    const resolved = resolvePath(rootEntity, path, plan, viewer);
+    grouped.set(path, resolved.groupKeys ?? [resolved.sql]);
+  }
+  const groupedExprs = [...grouped.values()].flat();
 
   // Same guard as buildQuery, or the two disagree and the total stops matching
   // the rows underneath it.
   let whereSql = rootEntity.paranoid ? `t0.${quote("deletedAt")} IS NULL` : "TRUE";
   whereSql += requiredParentGuards(rootEntity, "t0");
   if (config.filters) {
-    const filterSql = buildFilters(config.filters, rootEntity, plan, role, binds);
+    const filterSql = buildFilters(config.filters, rootEntity, plan, viewer, binds);
     if (filterSql) whereSql = `${whereSql} AND ${filterSql}`;
   }
 

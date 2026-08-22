@@ -15,10 +15,11 @@ import {
 import { sequelize } from "../database/sequelize.js";
 import { runReport } from "./execute.js";
 import type { ReportConfig } from "./types.js";
+import type { Viewer } from "./viewer.js";
 
 const FROM = "2000-01-01";
 const TO = "2030-12-31";
-const ADMIN = 1;
+const ADMIN: Viewer = { role: 1, staff: true };
 
 // Resolved before the suite is registered so the tests report as SKIPPED rather
 // than passing vacuously when Postgres is unreachable — a green tick that

@@ -1,10 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import ExcelJS from "exceljs";
 import { sequelize } from "../../database/sequelize.js";
 import {
-  buildExport, exceedsExportLimits, ExportTooLargeError, MAX_EXPORT_ROWS,
+  buildExport, exceedsExportLimits, exceedsExportWeight, ExportCanceledError,
+  ExportTooHeavyError, ExportTooLargeError, MAX_EXPORT_BYTES, MAX_EXPORT_ROWS,
 } from "./index.js";
+import { exportSlot } from "./queue.js";
 import type { ReportConfig } from "../types.js";
+import type { Viewer } from "../viewer.js";
 
 /**
  * Against the real database, which is where the pieces meet: the query engine,
@@ -16,7 +19,7 @@ const dbAvailable = await sequelize
   .then(() => true)
   .catch(() => false);
 
-const ADMIN = 1;
+const ADMIN: Viewer = { role: 1, staff: true };
 
 /** The columns the fixed "General" report shows, expressed as a configuration. */
 const generalConfig: ReportConfig = {
@@ -36,7 +39,7 @@ const generalConfig: ReportConfig = {
 describe.skipIf(!dbAvailable)("buildExport against real data", () => {
   it("produces a spreadsheet whose strip counts what the rows say", async () => {
     const output = await buildExport({
-      config: generalConfig, role: ADMIN, format: "excel", title: "Reporte general",
+      config: generalConfig, viewer: ADMIN, format: "excel", title: "Reporte general",
     });
 
     expect(output.filename).toMatch(/^Reporte general_.+\.xlsx$/);
@@ -59,7 +62,7 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
 
   it("counts resolved and pending against the rows it actually wrote", async () => {
     const output = await buildExport({
-      config: generalConfig, role: ADMIN, format: "excel", title: "Cuadre",
+      config: generalConfig, viewer: ADMIN, format: "excel", title: "Cuadre",
     });
 
     const workbook = new ExcelJS.Workbook();
@@ -90,7 +93,7 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
         groupBy: ["poste.tramo"],
         limit: 500,
       },
-      role: ADMIN, format: "excel", title: "Por tramo",
+      viewer: ADMIN, format: "excel", title: "Por tramo",
     });
 
     const workbook = new ExcelJS.Workbook();
@@ -122,7 +125,7 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
         groupBy: ["state"],
         limit: 500,
       },
-      role: ADMIN, format: "excel", title: "Por estado",
+      viewer: ADMIN, format: "excel", title: "Por estado",
     });
 
     const workbook = new ExcelJS.Workbook();
@@ -136,7 +139,7 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
 
   it("produces a document from the same configuration", async () => {
     const output = await buildExport({
-      config: generalConfig, role: ADMIN, format: "pdf", title: "Reporte general",
+      config: generalConfig, viewer: ADMIN, format: "pdf", title: "Reporte general",
     });
 
     expect(output.filename).toMatch(/\.pdf$/);
@@ -157,11 +160,11 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
     });
 
     await expect(
-      buildExport({ config: wide(60), role: ADMIN, format: "pdf", title: "Todas" }),
+      buildExport({ config: wide(60), viewer: ADMIN, format: "pdf", title: "Todas" }),
     ).rejects.toThrow(ExportTooLargeError);
 
     await expect(
-      buildExport({ config: wide(5), role: ADMIN, format: "pdf", title: "Todas" }),
+      buildExport({ config: wide(5), viewer: ADMIN, format: "pdf", title: "Todas" }),
     ).resolves.toBeTruthy();
     // Vitest's five seconds are for unit tests. The narrow case has to actually
     // render every revision in the database to a PDF — measured at ~11s, of
@@ -183,7 +186,7 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
         columns: [{ path: "poste.name" }, { path: "image", label: "Foto" }],
         limit: 50,
       },
-      role: ADMIN, format: "excel", title: "Con fotos", photos: true,
+      viewer: ADMIN, format: "excel", title: "Con fotos", photos: true,
     });
 
     expect(output.photos).not.toBeNull();
@@ -207,7 +210,7 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
     await expect(
       buildExport({
         config: { root: "no_existe", columns: [{ path: "id" }] },
-        role: ADMIN, format: "excel", title: "Malo",
+        viewer: ADMIN, format: "excel", title: "Malo",
       }),
     ).rejects.toThrow();
   });
@@ -225,7 +228,7 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
     await expect(
       buildExport({
         config: { root: "revision", columns: paths.map((path) => ({ path })), limit: 20000 },
-        role: ADMIN, format: "pdf", title: "Grande y mal",
+        viewer: ADMIN, format: "pdf", title: "Grande y mal",
       }),
     ).rejects.toThrow(/no existe en el catálogo/);
   });
@@ -283,5 +286,75 @@ describe("ExportTooLargeError", () => {
   it("says which format it could not fit into", () => {
     expect(new ExportTooLargeError(10_000, 10, "pdf").message).toContain("documento");
     expect(new ExportTooLargeError(10_000, 30, "excel").message).toContain("hoja de cálculo");
+  });
+});
+
+describe("what an export refuses, and when it gives up", () => {
+  it("stops when the caller has hung up, and gives the slot back", async () => {
+    // Cancelling used to cancel nothing: the browser dropped the request and the
+    // server kept building a file for nobody while holding the only export slot
+    // in the process. The next person was told "ya hay una exportación en curso"
+    // about their own abandoned one.
+    const abandoned = AbortSignal.abort();
+
+    await expect(
+      exportSlot.run(() =>
+        buildExport({
+          config: generalConfig, viewer: ADMIN, format: "excel", title: "Abandonado",
+          signal: abandoned,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ExportCanceledError);
+
+    // The point of the whole thing: the next export is not refused.
+    expect(exportSlot.isBusy).toBe(false);
+  });
+
+  it("counts the report once, in the same read the rows come from", async () => {
+    // Two counts per export: one to decide whether the file could be built and
+    // one inside `runReport`, in two separate transactions. So the number the
+    // decision was made on came from a different snapshot than the rows that
+    // went into the file — under a concurrent insert the header said one figure
+    // and the sheet held another — and every export paid for planning the same
+    // aggregate twice.
+    const spy = vi.spyOn(sequelize, "query");
+    try {
+      await buildExport({
+        config: { ...generalConfig, limit: 50 }, viewer: ADMIN, format: "excel",
+        title: "Un solo conteo",
+      });
+
+      const counts = spy.mock.calls.filter(([sql]) =>
+        typeof sql === "string" && sql.includes("COUNT(*)::int AS total"),
+      );
+      expect(counts).toHaveLength(1);
+
+      // And in one transaction, so the count and the rows share a snapshot.
+      const transactions = new Set(
+        spy.mock.calls
+          .map(([, options]) => (options as { transaction?: unknown } | undefined)?.transaction)
+          .filter(Boolean),
+      );
+      expect(transactions.size).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("weighs the file instead of inferring its weight from its shape", () => {
+    // The cell caps are justified in megabytes — "80.000 celdas son unos 25 MB,
+    // el adjunto más grande que acepta la mayoría de los servidores de correo" —
+    // and cells only predict megabytes while the cells are small. The same
+    // 80.000 with long text columns came out at 32,9 MB, a third over the limit
+    // the cap exists to respect, and nothing was measuring it.
+    expect(exceedsExportWeight(MAX_EXPORT_BYTES)).toBe(false);
+    expect(exceedsExportWeight(MAX_EXPORT_BYTES + 1)).toBe(true);
+    expect(exceedsExportWeight(Math.round(32.9 * 1024 * 1024))).toBe(true);
+
+    // And the message names the two numbers and the lever, like its sibling.
+    const message = new ExportTooHeavyError(Math.round(32.9 * 1024 * 1024), "pdf").message;
+    expect(message).toContain("32.9 MB");
+    expect(message).toContain("25.0 MB");
+    expect(message).toMatch(/texto largo|filtre/);
   });
 });

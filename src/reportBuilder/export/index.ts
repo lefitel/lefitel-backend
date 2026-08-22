@@ -5,10 +5,11 @@
 // was built from a copy that could be minutes old. Here the query runs against
 // a consistent read, moments before the file exists.
 
-import { countReport, runReport } from "../execute.js";
+import { runReport } from "../execute.js";
 import { buildQuery } from "../sqlBuilder.js";
 import { rowNoun } from "../catalogView.js";
 import type { ReportConfig } from "../types.js";
+import type { Viewer } from "../viewer.js";
 import { buildExcel } from "./excel.js";
 import { buildPdf } from "./pdf.js";
 import { loadPhotos, MAX_EXPORT_PHOTOS, type LoadedPhotos } from "./photos.js";
@@ -50,6 +51,25 @@ export const MAX_EXPORT_CELLS: Record<ExportFormat, number> = {
   pdf: 80_000,
 };
 
+/**
+ * What the file may weigh.
+ *
+ * The cell caps above are justified by weight — "80.000 celdas son unos 25 MB,
+ * el adjunto más grande que acepta la mayoría de los servidores de correo" —
+ * and cells only predict weight while the cells are small. With long text
+ * columns the same 80.000 came out at 32,9 MB: a third over the limit the cap
+ * exists to respect, and nothing anywhere noticed, because nothing was
+ * measuring what the sentence promised.
+ *
+ * So the promise is checked on the file itself. It costs building a document
+ * that is then refused, which only happens in the case that was silently
+ * broken before, and it is the only number that cannot be wrong.
+ */
+export const MAX_EXPORT_BYTES = 25 * 1024 * 1024;
+
+/** True when the finished file is heavier than the promise the caps make. */
+export const exceedsExportWeight = (bytes: number): boolean => bytes > MAX_EXPORT_BYTES;
+
 const CONTENT_TYPE: Record<ExportFormat, string> = {
   excel: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pdf: "application/pdf",
@@ -89,14 +109,51 @@ export function exceedsExportLimits(rows: number, columns: number, format: Expor
   return rows > MAX_EXPORT_ROWS || rows * columns > MAX_EXPORT_CELLS[format];
 }
 
+/**
+ * Thrown when the finished file is heavier than a mail server will carry.
+ * Answered with 413, like its sibling.
+ */
+export class ExportTooHeavyError extends Error {
+  constructor(readonly bytes: number, readonly format: ExportFormat) {
+    const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    super(
+      `El ${format === "excel" ? "archivo" : "documento"} pesó ${mb(bytes)} y el máximo por ` +
+        `archivo es ${mb(MAX_EXPORT_BYTES)}. Quite columnas de texto largo o filtre filas.`,
+    );
+    this.name = "ExportTooHeavyError";
+  }
+}
+
+/**
+ * Thrown when the caller hung up while the file was being built.
+ *
+ * Cancelling used to cancel nothing: the browser dropped the request and the
+ * server carried on building a file for nobody, holding the only export slot in
+ * the process. The next person read "ya hay una exportación en curso" without
+ * being told it was their own, abandoned one.
+ */
+export class ExportCanceledError extends Error {
+  constructor() {
+    super("La exportación se canceló.");
+    this.name = "ExportCanceledError";
+  }
+}
+
 export interface ExportRequest {
   config: ReportConfig;
-  role: number;
+  viewer: Viewer;
   format: ExportFormat;
   title: string;
   subtitle?: string | null;
   /** Ignored for PDF: two thousand photographs in a tabular document are unreadable. */
   photos?: boolean;
+  /**
+   * Aborted when the caller hangs up. Checked between the steps of the build —
+   * the query, the rows, the photographs, the rendering — which is where the
+   * time goes, so an abandoned export stops at the next boundary instead of
+   * running to the end for nobody.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ExportOutput {
@@ -108,25 +165,33 @@ export interface ExportOutput {
 }
 
 export async function buildExport(request: ExportRequest): Promise<ExportOutput> {
-  const { config, role, format } = request;
+  const { config, viewer, format, signal } = request;
+
+  /** Stops at the next boundary if the caller is no longer there. */
+  const stopIfAbandoned = () => {
+    if (signal?.aborted) throw new ExportCanceledError();
+  };
 
   // Validate before measuring. A count query does not need the columns, so it
   // never looks at them: a report naming a field that does not exist came back
   // as "too many cells" whenever it also happened to be large, sending the user
   // to delete columns that were not the problem. The call is a pure string
   // build and its result is deliberately discarded.
-  buildQuery(config, role);
+  buildQuery(config, viewer);
+  stopIfAbandoned();
 
-  // Then size, so an oversized report is refused before its rows are read.
-  // Materialising twenty thousand rows only to reject them is exactly the
-  // memory the limit exists to protect.
-  const total = await countReport(config, role);
+  // One query, one snapshot: the total is checked before a row is read — the
+  // memory the limit exists to protect — and it comes from the same read as the
+  // rows, so the count in the header always describes the rows underneath it.
   const width = Array.isArray(config.columns) ? config.columns.length : 0;
-  if (exceedsExportLimits(total, width, format)) {
-    throw new ExportTooLargeError(total, width, format);
-  }
-
-  const result = await runReport({ ...config, offset: 0, limit: MAX_EXPORT_ROWS }, role);
+  const result = await runReport({ ...config, offset: 0, limit: MAX_EXPORT_ROWS }, viewer, {
+    guard: (total) => {
+      if (exceedsExportLimits(total, width, format)) {
+        throw new ExportTooLargeError(total, width, format);
+      }
+    },
+  });
+  stopIfAbandoned();
   // Grouping changes what a row is, so the root's noun stops being true: over a
   // report grouped by tramo it said "89 eventos" about 89 tramos. `catalogView`
   // states the rule and this call ignored it. "grupos" is less informative than
@@ -137,10 +202,15 @@ export async function buildExport(request: ExportRequest): Promise<ExportOutput>
   const subtitle = request.subtitle?.trim() || null;
 
   if (format === "pdf") {
+    const buffer = await buildPdf({
+      columns: result.columns, rows: result.rows, title, subtitle, noun,
+    });
+    stopIfAbandoned();
+    if (exceedsExportWeight(buffer.length)) throw new ExportTooHeavyError(buffer.length, "pdf");
     return {
       filename: reportFileName(title, "pdf"),
       contentType: CONTENT_TYPE.pdf,
-      buffer: await buildPdf({ columns: result.columns, rows: result.rows, title, subtitle, noun }),
+      buffer,
       rows: result.rows.length,
       photos: null,
     };
@@ -151,16 +221,23 @@ export async function buildExport(request: ExportRequest): Promise<ExportOutput>
     const imageKeys = result.columns.filter((c) => c.kind === "image").map((c) => c.key);
     if (imageKeys.length > 0) {
       const values = result.rows.flatMap((row) => imageKeys.map((key) => row[key]));
-      photos = await loadPhotos(values, { cap: MAX_EXPORT_PHOTOS });
+      photos = await loadPhotos(values, { cap: MAX_EXPORT_PHOTOS, signal });
     }
+  }
+  stopIfAbandoned();
+
+  const buffer = await buildExcel({
+    columns: result.columns, rows: result.rows, title, subtitle, noun, photos,
+  });
+  stopIfAbandoned();
+  if (exceedsExportWeight(buffer.length)) {
+    throw new ExportTooHeavyError(buffer.length, "excel");
   }
 
   return {
     filename: reportFileName(title, "xlsx"),
     contentType: CONTENT_TYPE.excel,
-    buffer: await buildExcel({
-      columns: result.columns, rows: result.rows, title, subtitle, noun, photos,
-    }),
+    buffer,
     rows: result.rows.length,
     // `failed` travels with the rest: the bitácora is where anyone asks later
     // why an export came back without its photographs.

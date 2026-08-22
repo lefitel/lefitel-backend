@@ -8,7 +8,7 @@ import { jsPDF } from "jspdf";
 import { autoTable } from "jspdf-autotable";
 import type { ResultColumn } from "../types.js";
 import { buildIndicators } from "./indicators.js";
-import { rowStyleKeys, rowTint, tintRgb } from "./rowStyle.js";
+import { legendFor, rowStyleKeys, rowTint, tintRgb } from "./rowStyle.js";
 import { formatValue, reportDateLabel, toWinAnsi } from "./values.js";
 import { loadBranding } from "./branding.js";
 
@@ -83,6 +83,34 @@ export async function buildPdf(input: PdfInput): Promise<Buffer> {
     `Generado el ${reportDateLabel()}`,
   ].filter(Boolean).join("  ·  "));
 
+  /**
+   * The largest size at which `text` fits on one line, and the text to draw.
+   *
+   * Shrinks the type first, because losing two points of a heading costs the
+   * reader nothing and losing the end of a sentence costs them the sentence.
+   * Only when the floor is reached is the text cut, and then it says so with an
+   * ellipsis — three dots rather than the character, which WinAnsi does not
+   * carry.
+   */
+  const fitOneLine = (
+    text: string,
+    maxWidth: number,
+    from: number,
+    floor: number,
+  ): { text: string; size: number } => {
+    let size = from;
+    doc.setFontSize(size);
+    while (size > floor && doc.getTextWidth(text) > maxWidth) {
+      size -= 0.5;
+      doc.setFontSize(size);
+    }
+    let shown = text;
+    while (shown.length > 4 && doc.getTextWidth(shown) > maxWidth) {
+      shown = `${shown.slice(0, -4).trimEnd()}...`;
+    }
+    return { text: shown, size };
+  };
+
   /** "parte 2 de 3", or nothing when the report fits on one width. */
   const partLabel = (groupIndex: number) =>
     groups.length > 1 ? `parte ${groupIndex + 1} de ${groups.length}` : null;
@@ -96,8 +124,14 @@ export async function buildPdf(input: PdfInput): Promise<Buffer> {
 
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(14);
-    doc.text(title, 30, 12, { maxWidth: pageWidth - 68 });
+    // Fitted to one line rather than wrapped. The title is what somebody typed
+    // — up to 120 characters — and `maxWidth` makes jsPDF wrap, which grows the
+    // text downwards into the subtitle at y=19: past about 99 characters the two
+    // printed on top of each other. The band is a fixed 26 mm, so growing is not
+    // available; the type shrinks to a floor and only then is the text cut.
+    const fittedTitle = fitOneLine(title, pageWidth - 68, 14, 9);
+    doc.setFontSize(fittedTitle.size);
+    doc.text(fittedTitle.text, 30, 12);
 
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
@@ -105,7 +139,8 @@ export async function buildPdf(input: PdfInput): Promise<Buffer> {
     // The part belongs here too. Without it the reader got "parte 2 de 3" and
     // "parte 3 de 3" and nothing saying the first page was part 1.
     const part = partLabel(groupIndex);
-    doc.text(part ? `${subtitle}  ·  ${part}` : subtitle, 30, 19, { maxWidth: pageWidth - 68 });
+    const line = part ? `${subtitle}  ·  ${part}` : subtitle;
+    doc.text(fitOneLine(line, pageWidth - 68, 8, 8).text, 30, 19);
 
     // The strip sits below the band, on white, where the numbers can carry
     // their own colour instead of fighting the navy.
@@ -124,6 +159,31 @@ export async function buildPdf(input: PdfInput): Promise<Buffer> {
       doc.text(label, x, FULL_BAND_MM + 6);
       x += doc.getTextWidth(label);
     });
+
+    // What the row colours mean. The document tinted every row by criticality
+    // and by resolution and never said so anywhere, so the colour was either
+    // decoration or a code the reader had to guess — and the spreadsheet, built
+    // from the same rule, has carried this legend all along.
+    const legend = legendFor(keys);
+    if (legend.length > 0) {
+      let lx = 8;
+      doc.setFontSize(6.5);
+      doc.setFont("helvetica", "normal");
+      for (const entry of legend) {
+        doc.setFillColor(
+          Number.parseInt(entry.hex.slice(0, 2), 16),
+          Number.parseInt(entry.hex.slice(2, 4), 16),
+          Number.parseInt(entry.hex.slice(4, 6), 16),
+        );
+        doc.setDrawColor(...MUTED);
+        doc.rect(lx, FULL_BAND_MM + 8.2, 3, 2.4, "FD");
+        lx += 4;
+        doc.setTextColor(...MUTED);
+        const text = toWinAnsi(entry.label);
+        doc.text(text, lx, FULL_BAND_MM + 10.2);
+        lx += doc.getTextWidth(text) + 4;
+      }
+    }
   };
 
   /** Everything after the first page: enough to know what one is holding. */
@@ -135,7 +195,9 @@ export async function buildPdf(input: PdfInput): Promise<Buffer> {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(9);
     const part = partLabel(groupIndex);
-    doc.text(part ? `${title}  (${part})` : title, 21, 8.5, { maxWidth: pageWidth - 30 });
+    const fitted = fitOneLine(part ? `${title}  (${part})` : title, pageWidth - 30, 10, 8);
+    doc.setFontSize(fitted.size);
+    doc.text(fitted.text, 21, 8.5);
   };
 
   let bandDrawn = false;

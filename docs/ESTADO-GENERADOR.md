@@ -691,3 +691,230 @@ Aviso para esa prueba: `IMAGES_DIR` apunta a `C:/images`, que tiene 17 ficheros
 frente a las 1.514 fotos que referencia la base. Marcar «Fotos en el Excel» va a
 salir sin fotos —y ahora el subtítulo del fichero lo dice—; eso es la máquina, no
 el código.
+
+
+## Tercera tanda: los dos bloqueantes y la lista de abiertos, cerrada
+
+La sesión del 21 de agosto por la tarde. No es una auditoría nueva: es ejecutar
+lo que las dos anteriores dejaron escrito. Los dos bloqueantes y los quince
+hallazgos abiertos, uno por uno, cada uno con una prueba que falla sin el
+arreglo.
+
+**427 pruebas en `api` (27 ficheros), 164 en `web` (8 ficheros).** Typecheck y
+lint limpios en los dos, pruebas incluidas.
+
+### Bloqueante 1: un decimal en un filtro ya no da 500
+
+Tres pasos, los tres puestos.
+
+**Se liga lo que se valida.** `checkValue` juzgaba el texto convirtiéndolo a
+número y después ligaba el texto. `normalizeValue` devuelve el valor normalizado
+y ese es el que va al bind, así que `"1e5"`, `"7."`, `" 42 "` y `"3.0"` llegan a
+Postgres como números. Un booleano escrito `"false"` llega como `false`.
+
+**El catálogo sabe qué columna admite decimales.** Comprobado contra
+`osefi_local`: de las 31 columnas numéricas que toca el catálogo, exactamente
+cuatro son decimales — `lat` y `lng` de ciudad y de poste. Se declaran con
+`decimals: true` y todo lo demás rechaza un decimal con una frase que nombra el
+campo, en vez de un 22P02 que sale como «no se pudo generar el reporte». Es la
+respuesta honesta a `2.5` en «Criticidad ≤», que era el camino por el que se
+llegaba tecleando.
+
+**Fechas que existen de verdad.** `new Date("2026-02-30")` es el 2 de marzo:
+JavaScript no rechaza un día imposible, lo rueda al mes siguiente. Ahora se exige
+`AAAA-MM-DD` (o un instante ISO completo) y se comprueba la ida y vuelta, lo que
+descarta el 30 de febrero, `"2026"` a secas y `"01/17/2026"` leído en orden
+americano.
+
+**Y una red debajo:** la clase 22 de SQLSTATE —cualquier valor que una columna no
+puede leer— se contesta con 400 y una frase sobre los filtros, no con 500. Se
+registra como aviso, porque cada vez que salte es un agujero de la validación de
+arriba y la única forma de encontrar el siguiente es verlo.
+
+### Bloqueante 2: la visibilidad de campo la decide la matriz, no el número de rol
+
+Lo que había: `STAFF_ONLY = [1, 2]` en el catálogo y su espejo `STAFF_ROLES` en el
+controlador. La matriz no le da `seguridad.ver` al rol 2, así que `GET /usuario`
+le contestaba 403 mientras el generador le entregaba nombres, apellidos,
+**usuarios de login**, teléfonos y el nombre del rol.
+
+Ahora hay un tipo `Viewer { role, staff }` en `src/reportBuilder/viewer.ts`.
+`staff` se resuelve **una vez por petición** con `can(role, "seguridad", "ver")`
+—la matriz vive en memoria detrás de una caché de un minuto, así que no cuesta
+nada— y el catálogo declara qué *es* un campo (`staffOnly: true`) en lugar de
+quién puede verlo. `isVisible` es una línea, en un fichero, en vez de dos
+ayudantes idénticos en dos ficheros más un literal en un controlador: así fue como
+la fuga sobrevivió a una migración de permisos que debía borrar todos los números
+de rol del código.
+
+Los cinco puntos de entrada —`buildQuery`, `buildCountQuery`, `buildCatalogView`,
+`runReport`/`countReport` y `buildExport`— exigen `Viewer`. **No se acepta un
+número**: no hay camino de producción que pueda pasar uno por descuido. Y
+`ADMIN_ROLE = 1`, que decidía quién archiva reportes ajenos, ahora pregunta
+`seguridad.editar` — que el rol 1 ya tiene, así que no cambia de manos, pero por
+fin se puede mover desde la pantalla de Seguridad.
+
+🔴 **Cambio de comportamiento que hay que decidir:** el rol 2 (Coordinador) **deja
+de ver los campos de personal** en el generador, porque la matriz no le da
+`seguridad.ver`. Es exactamente el arreglo pedido y coincide con lo que ya hacía
+`GET /usuario`. Si se quiere que los vea, se le marca `seguridad.ver` en Seguridad
+— que es el sentido de todo el cambio.
+
+### Lo que estaba abierto, y cómo quedó
+
+**Cancelar una exportación cancela.** El navegador ya abortaba la petición; el
+servidor seguía construyendo el fichero para nadie y reteniendo el único hueco de
+exportación del proceso, así que el siguiente leía «ya hay una exportación en
+curso» sobre la suya abandonada. Ahora la petición lleva un `AbortSignal` que se
+comprueba entre pasos —validar, consultar, leer fotos, dibujar— y los lectores de
+fotos lo miran entre fichero y fichero.
+
+**Un solo conteo, en el mismo snapshot que las filas.** La exportación contaba dos
+veces, en dos transacciones: la cuenta que decidía si el fichero cabía no salía de
+la misma lectura que las filas que iban dentro, así que con una inserción
+simultánea la cabecera decía un número y la hoja tenía otro. Ahora `runReport`
+acepta una guarda que se llama con el total antes de leer una sola fila, dentro de
+la transacción.
+
+**El peso del fichero se mide, no se deduce.** Los topes de celdas se justifican
+en megabytes —«80.000 celdas son unos 25 MB, el adjunto más grande que acepta la
+mayoría de los servidores de correo»— y las celdas solo predicen el peso mientras
+son pequeñas: con columnas de texto largo las mismas 80.000 salían en 32,9 MB. Se
+comprueba el fichero terminado contra 25 MB. Cuesta construir un documento que
+luego se rechaza, y eso solo pasa en el caso que antes salía roto y callado.
+
+**El listado pagina y dice cuántos no muestra.** `GET /reportes` devolvía todos los
+reportes visibles, cada uno con su configuración entera, en una respuesta que crece
+mientras el producto se use. Ahora son cien por página (máximo 200) y el total
+viaja al lado: la barra dice «Mostrando 100 de 137» con un «Cargar más». Cambia la
+forma de la respuesta (`{ rows, total, limit, offset }`) y el cliente está
+actualizado.
+
+**Las escrituras tienen limitador.** El comentario decía que compartían «el
+global», y no existe ninguno: `app.ts` limita el login y nada más. Sesenta por
+minuto y por usuario para guardar, editar, archivar y duplicar.
+
+**Los 403 dejan rastro, y todo lleva IP.** Quien anduviera probando identificadores
+buscando reportes privados ajenos producía la misma bitácora que quien no lo
+intentó nunca. Cuatro acciones nuevas —`READ_REPORTE_DENIED`,
+`EDIT_REPORTE_DENIED`, `DELETE_REPORTE_DENIED`, `DUPLICATE_REPORTE_DENIED`— y
+`ip_address` en las seis entradas del módulo, que es lo que el resto del sistema
+guarda desde hace meses.
+
+**La configuración compartida se poda al salir.** Un reporte compartido nombra los
+campos con los que se armó, y se entregaba tal cual: le decía a cualquier lector
+que existe `usuario.user` y contra qué lo filtró alguien — los mismos datos
+personales que el catálogo le niega, llegando como metadato en vez de como filas.
+`pruneConfig` deja solo lo que ese lector puede pedir, en el listado y en el
+reporte suelto, y devuelve cuántos elementos quitó para que la pantalla lo diga en
+voz alta.
+
+**Duplicar poda en vez de rechazar.** Era un 400 citando una ruta interna
+—`usuario.user`, precisamente el nombre que el catálogo estaba escondiendo— sobre
+un reporte que la pantalla acababa de listar con su botón de Duplicar. Ahora la
+copia es siempre una que se puede ejecutar, y la bitácora anota cuánto se quedó
+fuera.
+
+**Un cambio de rol se ve sin recargar.** El servidor leía el rol de la base en cada
+petición y metía el fresco en el token que devuelve — esa parte ya estaba bien. El
+cliente adoptaba el token nuevo y se quedaba con los permisos del login, así que a
+quien ascendían seguía viendo la aplicación pequeña y a quien degradaban le seguían
+saliendo botones cuyo único resultado era un 403. Ahora compara el rol del token
+con el que tiene y solo entonces vuelve a preguntar: el caso normal —un token
+renovado en *cada* respuesta— no cuesta nada.
+
+**«No se sabe» deja de ser 0.** `GREATEST` en Postgres ignora los nulos en vez de
+propagarlos, así que `GREATEST(0, NULL)` es 0 y un evento sin fecha se leía como
+«abierto hace 0 días», con la misma seguridad que los datos de verdad. Hoy no se
+observa porque el único evento sin fecha está resuelto; el día que alguien registre
+uno pendiente sin fecha, la columna mentía.
+
+**Un `null` dentro de una lista o de un rango se rechaza.** `= ANY` y `BETWEEN`
+propagan nulos, así que una casilla vacía entre cinco valores construía SQL válido,
+devolvía cero filas y no decía nada.
+
+**Las fotos se deduplican por fichero.** Los datos guardan dos formas de la misma
+ruta —3.090 filas como `/foto.jpg` y 424 como `images/foto.jpg`— así que una sola
+foto se abría, redimensionaba y codificaba dos veces, y se incrustaba dos veces en
+el mismo libro. El tope cuenta ficheros por el mismo motivo.
+
+**Los topes del cliente salen de `catalog.limits`.** Se publican precisamente para
+no escribirlos dos veces y estaban escritos dos veces: quien cambie uno en el
+servidor no tiene por qué sospechar que hay una copia en el navegador, y entonces
+el aviso local no salta nunca o salta sobre un reporte que el servidor habría
+aceptado. Las constantes se quedan como respaldo para antes de que llegue el
+catálogo.
+
+**El PDF: título de una línea y leyenda de colores.** `maxWidth` hacía que jsPDF
+partiera el título en varias líneas, y crecer hacia abajo era meterse en el
+subtítulo: pasados unos 99 caracteres se imprimían uno encima del otro, en una
+banda de altura fija. Ahora la tipografía se reduce hasta un suelo y solo entonces
+se corta el texto. Y el documento pintaba las filas por criticidad y por
+resolución sin decirlo en ninguna parte: la leyenda que la hoja de cálculo lleva
+desde el principio ya está también aquí.
+
+**El pie de la tabla ya no se contradice.** Decía tres cosas calculadas con un
+total que era cierto cuando se pidió la página. Si alguien archiva eventos entre
+dos páginas, se leía «Mostrando 301–250 de 250» en la página 4 de 3: tres
+imposibles seguidos y ninguna pista. Ahora el caso se nombra —«esta página ya no
+existe: el reporte cambió mientras la miraba»— con el camino de vuelta.
+
+**`buildCountQuery` agrupa como `buildQuery`.** El total era correcto igual
+—`GROUP BY a, a` agrupa como `GROUP BY a`—, pero ahora los dos se leen igual y
+nadie tiene que deducirlo para estar seguro.
+
+### Pruebas que prometían más que su cuerpo
+
+Cuatro señaladas por la segunda auditoría, las cuatro reescritas:
+
+- **El numerado del PDF** comprobaba que existiera el texto «Pagina 1 de», que un
+  documento de una sola página también cumple. Ahora comprueba que cada página se
+  nombre, que todas citen el mismo total y que ese total sea el número de páginas.
+- **El peso del logo** medía el tamaño del PDF. Un logo que no se encuentra no es
+  un error —la banda sale sin él— así que la prueba pasaba *más* fácil justo cuando
+  lo que mide no estaba. Ahora establece primero que hay un logo incrustado.
+- **`routeGuards.test.ts`** leía el *nombre* de la función, y
+  `requirePermission("generador","ver")` y `("generador","archivar")` se llaman
+  igual: una ruta con la puerta equivocada —el error más probable de todos— pasaba
+  igual que una correcta. Ahora cada puerta lleva escrito el par que pide y el
+  fichero comprueba los nueve del generador uno por uno.
+- **La privacidad del listado** ahora se comprueba de verdad: que no salgan las
+  rutas escondidas, que no salgan los valores filtrados contra ellas, y que el
+  lector reciba el número de elementos que se le quitaron.
+
+### Pruebas nuevas donde no había ninguna
+
+`postConsulta` —el endpoint que de verdad extrae datos— no tenía ni una: ahora
+tiene seis, incluida la del orden (validar antes de medir) y la de que la bitácora
+guarda quién extrajo qué y desde dónde. `putReporte` tiene las dos caras de la
+revalidación. Y `src/index.ts`, que la suite no puede importar porque conecta,
+migra y ocupa un puerto al cargarse, ya no es intocable: la lógica de parada vive
+en `src/lifecycle.ts` con seis pruebas — el orden de los dos cierres, que el código
+de salida se ponga en vez de cortar el proceso, que el temporizador sea `unref`, y
+que dos fallos seguidos no cierren dos veces.
+
+**Y `npm test` volvió a ser determinista.** `logger.test.ts` fallaba en arranque en
+frío porque `logger.ts` lanza `chcp.com` de forma **síncrona** al cargarse para
+arreglar los acentos en la consola de Windows — una vez por worker de vitest, y
+vitest lanza un worker por fichero. Cinco segundos y un timeout. Bajo pruebas no
+hay consola que arreglar.
+
+### Lo que sigue abierto
+
+1. **Isaias no ha usado la pantalla.** Dos rondas de auditoría y una de arreglos no
+   son eso. La lista de lo que conviene probar a mano está más arriba.
+2. **Decidir si el Coordinador debe ver los datos de personal** en el generador
+   (ver el bloqueante 2). Es un clic en Seguridad, pero es una decisión, no un
+   arreglo.
+3. **La cancelación se comprueba entre pasos, no dentro de uno.** Una consulta que
+   tarda treinta segundos sigue treinta segundos aunque el cliente ya no esté; lo
+   que la corta es el `statement_timeout`. Cancelar una consulta en vuelo desde
+   Sequelize es otra cosa y no se ha intentado.
+4. **El tope de peso se comprueba después de construir**, así que el caso
+   patológico paga la memoria antes de que se le diga que no. Estimarlo antes
+   pediría medir el texto y multiplicar por un factor inventado; se prefirió el
+   número que no puede estar mal.
+5. **Nadie mira el aviso de la clase 22.** Cada vez que salte, es una forma que la
+   validación no previó. Está en el log del servidor y no hay alerta.
+6. `IMAGES_DIR` apunta a `C:/images`, con 17 ficheros frente a las 1.514 fotos que
+   referencia la base. Eso es la máquina, no el código.

@@ -15,10 +15,13 @@ import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
+/** The key every limiter here counts against. */
+const perUser = (req: { user?: { id?: number }; ip?: string }) =>
+  req.user?.id != null ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip ?? "")}`;
+
 /**
  * Running a report is the only endpoint here that can hold a database
- * connection for seconds at a time, so it gets its own budget. Listing and
- * saving are cheap and share the global one.
+ * connection for seconds at a time, so it gets the tightest budget.
  */
 const consultaLimiter = rateLimit({
   windowMs: 60_000,
@@ -32,8 +35,7 @@ const consultaLimiter = rateLimit({
   // its /56 block. A raw address let one holder of an IPv6 prefix walk through
   // billions of distinct keys and spend the budget as many times over.
   // Namespaced so a user id can never collide with an address.
-  keyGenerator: (req) =>
-    req.user?.id != null ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip ?? "")}`,
+  keyGenerator: perUser,
   message: { message: "Demasiadas consultas seguidas. Espere un momento e intente de nuevo." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -47,9 +49,29 @@ const consultaLimiter = rateLimit({
 const exportLimiter = rateLimit({
   windowMs: 60_000,
   limit: 10,
-  keyGenerator: (req) =>
-    req.user?.id != null ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip ?? "")}`,
+  keyGenerator: perUser,
   message: { message: "Demasiadas exportaciones seguidas. Espere un momento e intente de nuevo." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * Saving, editing, archiving and copying a report.
+ *
+ * These were left unlimited on the grounds that they "share the global one" —
+ * and there is no global one: `app.ts` rate-limits the login endpoint and
+ * nothing else. So the cheapest write in the system was also the only
+ * unbounded one, and each row it creates carries a configuration document. A
+ * loop could fill the table as fast as the network allows.
+ *
+ * Sixty a minute is far more than anyone pressing Guardar, and low enough that
+ * a script cannot use it to grow the database.
+ */
+const writeLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 60,
+  keyGenerator: perUser,
+  message: { message: "Demasiados cambios seguidos. Espere un momento e intente de nuevo." },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -67,9 +89,13 @@ router.post("/exportar", requirePermission("generador", "ver"), exportLimiter, p
 
 router.get("/reportes", requirePermission("generador", "ver"), getReportes);
 router.get("/reportes/:id", requirePermission("generador", "ver"), getReporte);
-router.post("/reportes", requirePermission("generador", "crear"), postReporte);
-router.put("/reportes/:id", requirePermission("generador", "editar"), putReporte);
-router.delete("/reportes/:id", requirePermission("generador", "archivar"), deleteReporte);
-router.post("/reportes/:id/duplicar", requirePermission("generador", "crear"), postDuplicar);
+router.post("/reportes", requirePermission("generador", "crear"), writeLimiter, postReporte);
+router.put("/reportes/:id", requirePermission("generador", "editar"), writeLimiter, putReporte);
+router.delete(
+  "/reportes/:id", requirePermission("generador", "archivar"), writeLimiter, deleteReporte,
+);
+router.post(
+  "/reportes/:id/duplicar", requirePermission("generador", "crear"), writeLimiter, postDuplicar,
+);
 
 export default router;
