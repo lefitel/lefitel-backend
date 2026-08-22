@@ -4,7 +4,7 @@ import bcryptjs from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { logAction } from "../utils/logAction.js";
 import { permissionsFor } from "../permissions/store.js";
-import { CREDENCIALES_INVALIDAS, hashRelleno } from "../config/security.js";
+import { CREDENCIALES_INVALIDAS, fillerHash } from "../config/security.js";
 
 const secretKey = process.env.JWT_SECRET;
 
@@ -45,7 +45,7 @@ export async function loginUsuario(req: Request, res: Response) {
     // against the filler hash costs the same as a real comparison and is what
     // makes the third of those true.
     if (!TempUsuario) {
-      await bcryptjs.compare(pass, await hashRelleno());
+      await bcryptjs.compare(pass, await fillerHash());
       return res.status(400).json({ message: CREDENCIALES_INVALIDAS });
     }
 

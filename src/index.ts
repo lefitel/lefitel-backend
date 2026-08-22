@@ -3,7 +3,7 @@ import app from "./app.js";
 import dotenv from "dotenv";
 import { connectionSource, sequelize } from "./database/sequelize.js";
 import { log } from "./utils/logger.js";
-import { requiredEnv } from "./config/security.js";
+import { requiredEnv, fillerHash } from "./config/security.js";
 import { createShutdown } from "./lifecycle.js";
 
 dotenv.config();
@@ -106,6 +106,21 @@ async function main() {
     await sequelize.authenticate();
   }
   bootLog.info("conexión establecida con PostgreSQL");
+
+  /**
+   * Warms the login filler-hash cache during boot, in parallel with whatever
+   * else start-up is doing, rather than leaving it lazy. Memoization alone
+   * still makes *someone* pay for the first bcrypt round after a cold start;
+   * without this, that someone is whichever request happens to try an
+   * unknown username first, and for that one request the unknown-user path
+   * costs hash + compare while a wrong password against a real account costs
+   * only compare — the exact timing asymmetry this mechanism exists to
+   * remove, just narrowed to once per process instead of every time.
+   * Fire-and-forget: nothing downstream awaits it, and a failure here should
+   * not stop the server from booting — the next call to `fillerHash()` will
+   * simply retry.
+   */
+  void fillerHash();
 
   const server = app.listen(port, () => {
     bootLog.info({ puerto: port }, `escuchando en el puerto ${port}`);

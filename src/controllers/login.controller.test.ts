@@ -174,13 +174,18 @@ describe("what comes back", () => {
   it("hashes even when the account does not exist", async () => {
     // The message being equal is half of it. Without a comparison against a
     // filler hash the unknown path returns in a millisecond and the known one
-    // in two hundred and fifty, and a stopwatch enumerates the payroll.
+    // in two hundred and fifty, and a stopwatch enumerates the payroll. Just
+    // asserting that `compare` was called would pass even if it compared
+    // against the wrong thing — an empty string, say — so the second
+    // argument is pinned to what the mocked `bcryptjs.hash` actually
+    // produces ("hashed", from the mock above), which is the value
+    // `fillerHash()` resolves to.
     const bcryptjs = (await import("bcryptjs")).default;
 
     findOne.mockResolvedValue(null);
     const c = call({ user: "nadie", pass: "x" });
     await loginUsuario(c.req, c.res);
 
-    expect(bcryptjs.compare).toHaveBeenCalled();
+    expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
   });
 });

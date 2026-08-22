@@ -69,12 +69,28 @@ export const CREDENCIALES_INVALIDAS = "Usuario o contraseña incorrectos.";
  * into every test suite that pulls in the app. Second, `bcryptjs` in
  * `login.controller.test.ts` is mocked with only `compare` and `hash` — no
  * `hashSync` — so a module-level `hashSync` call would throw at import time
- * there. Computing it lazily on first use and caching the result avoids both.
+ * there.
+ *
+ * The cache holds the *promise*, not the resolved string: caching the string
+ * would let several concurrent unknown-user logins all read the cache as
+ * empty before the first `bcryptjs.hash` finishes, and each start its own
+ * 250ms hash in parallel — one wasted round per request in the burst instead
+ * of one per process. Caching the promise means every call after the first
+ * one awaits that same in-flight hash. A rejection is not cached: the promise
+ * is cleared before it is rethrown, so a failed attempt does not wedge every
+ * later call behind a dead promise forever.
+ *
+ * `src/index.ts` calls this once at boot, unawaited, to warm the cache before
+ * the first request can reach it — see the comment there for why that matters
+ * on top of memoization alone.
  */
-let rellenoCache: string | null = null;
-export async function hashRelleno(): Promise<string> {
-  if (!rellenoCache) {
-    rellenoCache = await bcryptjs.hash(randomBytes(32).toString("hex"), BCRYPT_COST);
+let fillerHashPromise: Promise<string> | null = null;
+export function fillerHash(): Promise<string> {
+  if (!fillerHashPromise) {
+    fillerHashPromise = bcryptjs.hash(randomBytes(32).toString("hex"), BCRYPT_COST).catch((err) => {
+      fillerHashPromise = null;
+      throw err;
+    });
   }
-  return rellenoCache;
+  return fillerHashPromise;
 }
