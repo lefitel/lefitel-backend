@@ -4,6 +4,7 @@ import bcryptjs from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { logAction } from "../utils/logAction.js";
 import { permissionsFor } from "../permissions/store.js";
+import { CREDENCIALES_INVALIDAS, hashRelleno } from "../config/security.js";
 
 const secretKey = process.env.JWT_SECRET;
 
@@ -38,13 +39,21 @@ export async function loginUsuario(req: Request, res: Response) {
 
   try {
     const TempUsuario = await UsuarioModel.findOne({ where: { user } });
-    if (!TempUsuario)
-      return res.status(400).json({ message: "Usuario inexistente" });
+
+    // The account not existing and the password being wrong must be
+    // indistinguishable: same message, same status, same time. Comparing
+    // against the filler hash costs the same as a real comparison and is what
+    // makes the third of those true.
+    if (!TempUsuario) {
+      await bcryptjs.compare(pass, await hashRelleno());
+      return res.status(400).json({ message: CREDENCIALES_INVALIDAS });
+    }
+
     const data = TempUsuario.dataValues;
     const confirmPass = await bcryptjs.compare(pass, data.pass);
     if (!confirmPass) {
       logAction({ id_usuario: data.id, action: "LOGIN_FAILED", entity: "Usuario", entity_id: data.id, detail: `Login fallido para @${user}`, metadata: { user }, severity: 'warning', ip_address: req.ip ?? null });
-      return res.status(400).json({ message: "Contraseña incorrecta" });
+      return res.status(400).json({ message: CREDENCIALES_INVALIDAS });
     }
 
     const usuario = {

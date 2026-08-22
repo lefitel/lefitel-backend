@@ -7,6 +7,9 @@
  * went from 8 to 12 two of the three sites were missed.
  */
 
+import bcryptjs from "bcryptjs";
+import { randomBytes } from "node:crypto";
+
 /**
  * bcrypt work factor. Was 8, which is roughly 25 ms — fast enough that a leaked
  * table is worth attacking offline. 12 is about 250 ms: imperceptible to a
@@ -40,4 +43,38 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 export function requiredEnv(nodeEnv: string | undefined): string[] {
   const always = ["JWT_SECRET"];
   return nodeEnv === "production" ? [...always, "CORS_ORIGIN"] : always;
+}
+
+/**
+ * One answer for every way of failing to log in.
+ *
+ * "Usuario inexistente" and "Contraseña incorrecta" are a directory of who
+ * works here, answered to anyone who asks. So is a distinct message for a
+ * locked account.
+ */
+export const CREDENCIALES_INVALIDAS = "Usuario o contraseña incorrectos.";
+
+/**
+ * A real hash of a value nobody knows, to compare against when the account
+ * does not exist or is locked.
+ *
+ * Equal messages are not enough: without this, the failing paths that never
+ * reach bcrypt answer in a millisecond while a wrong password takes two
+ * hundred and fifty, and the difference is a two-order-of-magnitude oracle.
+ *
+ * This is a memoized async function over `bcryptjs.hash`, not a module-level
+ * constant computed with `hashSync`, for two reasons. First, a module-level
+ * `hashSync` call pays one bcrypt round (~250ms) every time this file is
+ * imported, and it is imported from `src/index.ts`, so that cost would leak
+ * into every test suite that pulls in the app. Second, `bcryptjs` in
+ * `login.controller.test.ts` is mocked with only `compare` and `hash` — no
+ * `hashSync` — so a module-level `hashSync` call would throw at import time
+ * there. Computing it lazily on first use and caching the result avoids both.
+ */
+let rellenoCache: string | null = null;
+export async function hashRelleno(): Promise<string> {
+  if (!rellenoCache) {
+    rellenoCache = await bcryptjs.hash(randomBytes(32).toString("hex"), BCRYPT_COST);
+  }
+  return rellenoCache;
 }

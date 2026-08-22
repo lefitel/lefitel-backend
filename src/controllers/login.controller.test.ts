@@ -152,9 +152,9 @@ describe("what comes back", () => {
   });
 
   it("says the same thing whether the user is unknown or the password is wrong", async () => {
-    // Two different messages tell an attacker which usernames exist. This is a
-    // known gap, pinned here so the day it is closed the test says so rather
-    // than quietly passing.
+    // Two different messages tell an attacker which usernames exist. This used
+    // to be a known gap pinned as such; it is closed now and the assertion is
+    // the other way round.
     const bcryptjs = (await import("bcryptjs")).default;
 
     findOne.mockResolvedValue(null);
@@ -168,7 +168,19 @@ describe("what comes back", () => {
 
     expect(unknown.status).toBe(400);
     expect(wrong.status).toBe(400);
-    // Today they differ. When that changes, delete this and assert equality.
-    expect(unknown.message).not.toBe(wrong.message);
+    expect(unknown.message).toBe(wrong.message);
+  });
+
+  it("hashes even when the account does not exist", async () => {
+    // The message being equal is half of it. Without a comparison against a
+    // filler hash the unknown path returns in a millisecond and the known one
+    // in two hundred and fifty, and a stopwatch enumerates the payroll.
+    const bcryptjs = (await import("bcryptjs")).default;
+
+    findOne.mockResolvedValue(null);
+    const c = call({ user: "nadie", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(bcryptjs.compare).toHaveBeenCalled();
   });
 });
