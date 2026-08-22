@@ -127,3 +127,23 @@ export function fillerHash(): Promise<string> {
   }
   return fillerHashPromise;
 }
+
+/**
+ * How long a session lives.
+ *
+ * Seven days of not being used and it is gone; every request pushes that back
+ * another seven. With an absolute ceiling of thirty days from creation, however
+ * much it is used — which is the thing the old JWT did not have, and why a
+ * stolen token could live forever by being used.
+ */
+export const SESSION_IDLE_DAYS = 7;
+export const SESSION_ABSOLUTE_DAYS = 30;
+
+/**
+ * How stale `last_used_at` is allowed to get before it is worth a write.
+ *
+ * Writing it on every request turns every read into a write: one report export
+ * makes around two thousand sequential requests, which would be two thousand
+ * UPDATEs and two thousand dead tuples on one row.
+ */
+export const SESSION_TOUCH_THROTTLE_MINUTES = 5;
