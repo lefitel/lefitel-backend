@@ -115,6 +115,22 @@ describe("a write authenticated by cookie", () => {
     }
   });
 
+  it("clears the session cookie on a header refusal, so a retry is not refused again", async () => {
+    // A proxy that eats the custom header locks a returning user out of every
+    // write, login included — and the frontend's logout never calls the server,
+    // so nothing else would ever discard this cookie. Taking it back here means
+    // the very next request, whichever route it hits, arrives with none and
+    // reaches the route instead of being refused a second time.
+    const res = await request(guarded())
+      .post("/x")
+      .set("Cookie", COOKIE)
+      .set("Origin", NUESTRO);
+
+    expect(res.status).toBe(403);
+    const setCookie = (res.headers["set-cookie"] ?? []) as string[];
+    expect(setCookie.some((c) => c.startsWith(`${SESSION_COOKIE_NAME}=;`))).toBe(true);
+  });
+
   it("is refused when the header is there but empty", async () => {
     // A proxy that rewrites unknown headers to nothing is likelier than one that
     // deletes them, and "present" has to mean present.
@@ -155,6 +171,22 @@ describe("a write authenticated by cookie", () => {
 
       expect(res.status, ajeno).toBe(403);
     }
+  });
+
+  it("leaves the cookie alone on an origin refusal, unlike a header refusal", async () => {
+    // `evil.osefi.net` is same-site, so `SameSite=Lax` does not stop it from
+    // carrying this cookie — it is exactly the kind of request that could try to
+    // force a logout if this refusal cleared the cookie too. It cannot: a script
+    // cannot forge `Origin`, so this path is never the "our own stale bundle, or
+    // a proxy ate our header" case the clearing on a header refusal exists for.
+    const res = await request(guarded())
+      .post("/x")
+      .set("Cookie", COOKIE)
+      .set("Origin", "https://evil.osefi.net")
+      .set(CSRF_CLIENT_HEADER, CLIENTE);
+
+    expect(res.status).toBe(403);
+    expect(res.headers["set-cookie"]).toBeUndefined();
   });
 
   it("is refused when it names no origin at all", async () => {
@@ -232,7 +264,10 @@ describe("the origin list", () => {
     // `CORS_ORIGIN=https://www.osefi.net/` is one keystroke and a total outage:
     // an `Origin` header never carries a path, so the untrimmed form matches
     // nothing, every browser request is blocked, and the server logs clean 200s.
-    const res = await request(guarded(allowedOrigins(`${NUESTRO}/`)))
+    // `nodeEnv` is "production" here on purpose: a configured value must work
+    // regardless of environment, which is what tells this branch apart from the
+    // fallback below.
+    const res = await request(guarded(allowedOrigins(`${NUESTRO}/`, "production")))
       .post("/x")
       .set("Cookie", COOKIE)
       .set("Origin", NUESTRO)
@@ -242,16 +277,38 @@ describe("the origin list", () => {
   });
 
   it("takes several origins from one variable", () => {
-    expect(allowedOrigins(` ${NUESTRO} , https://preview.osefi.net/ `)).toEqual([
+    expect(allowedOrigins(` ${NUESTRO} , https://preview.osefi.net/ `, "production")).toEqual([
       NUESTRO,
       "https://preview.osefi.net",
     ]);
   });
 
-  it("treats a blank variable as unset, exactly as requiredEnv does", () => {
-    expect(allowedOrigins(undefined)).toEqual([DEV_FRONTEND_ORIGIN]);
-    expect(allowedOrigins("")).toEqual([DEV_FRONTEND_ORIGIN]);
-    expect(allowedOrigins("   ")).toEqual([DEV_FRONTEND_ORIGIN]);
+  it("treats a blank variable as unset in development, exactly as requiredEnv's own carve-out for development", () => {
+    expect(allowedOrigins(undefined, "development")).toEqual([DEV_FRONTEND_ORIGIN]);
+    expect(allowedOrigins("", "development")).toEqual([DEV_FRONTEND_ORIGIN]);
+    expect(allowedOrigins("   ", "development")).toEqual([DEV_FRONTEND_ORIGIN]);
+  });
+
+  it("refuses everything instead of guessing development, for any nodeEnv that is not provably development", () => {
+    // This is the fix for the finding that a deployment path which never sets
+    // NODE_ENV at all — a platform's own buildpack instead of this repo's
+    // Dockerfile, an overridden start command, `node dist/index.js` run by
+    // hand — used to sail past both guards at once: `requiredEnv` only demands
+    // CORS_ORIGIN when nodeEnv is exactly "production", and this function used
+    // to hand out `DEV_FRONTEND_ORIGIN` — with credentials, once `app.ts` wires
+    // it into `cors()` — for every nodeEnv that merely wasn't that one exact
+    // string. Asking "is this NOT production?" and asking "is this KNOWN to be
+    // development?" agree on `"production"` itself but disagree on everything
+    // that is neither: this data set is exactly the cases where the two
+    // questions used to give different answers, which is the point being
+    // tested, not just the empty-list outcome.
+    expect(allowedOrigins(undefined, "production")).toEqual([]);
+    expect(allowedOrigins(undefined, undefined)).toEqual([]);
+    expect(allowedOrigins(undefined, "staging")).toEqual([]);
+    expect(allowedOrigins("", "production")).toEqual([]);
+
+    const res = allowedOrigins(undefined, undefined);
+    expect(res).not.toEqual([DEV_FRONTEND_ORIGIN]);
   });
 
   it("drops a wildcard instead of honouring it", async () => {
@@ -260,10 +317,10 @@ describe("the origin list", () => {
     // `Access-Control-Allow-Credentials: true` — so a deployment that writes one
     // is asking for something no browser accepts. An empty list refuses
     // everything loudly, which is the failure you can find.
-    expect(allowedOrigins("*")).toEqual([]);
-    expect(allowedOrigins(`*,${NUESTRO}`)).toEqual([NUESTRO]);
+    expect(allowedOrigins("*", "production")).toEqual([]);
+    expect(allowedOrigins(`*,${NUESTRO}`, "production")).toEqual([NUESTRO]);
 
-    const res = await request(guarded(allowedOrigins("*")))
+    const res = await request(guarded(allowedOrigins("*", "production")))
       .post("/x")
       .set("Cookie", COOKIE)
       .set("Origin", "*")
@@ -280,7 +337,7 @@ describe("mounted on the assembled app", () => {
   // permission gates. `/api/ciudad` is picked because it is an ordinary router
   // with nothing to do with sessions: the guard has to cover the whole API, not
   // the endpoints somebody remembered.
-  const ORIGEN = allowedOrigins(process.env.CORS_ORIGIN)[0];
+  const ORIGEN = allowedOrigins(process.env.CORS_ORIGIN, process.env.NODE_ENV)[0];
 
   it("answers 403 before authenticate ever runs", async () => {
     const res = await request(app).post("/api/ciudad").set("Cookie", COOKIE);
@@ -316,6 +373,12 @@ describe("mounted on the assembled app", () => {
       .send({ user: "nadie", pass: "" });
 
     expect(sinCabecera.status).toBe(403);
+    // The lockout this guards against: without this, a browser stuck with a
+    // header a proxy keeps stripping could never log back in either, because
+    // the frontend's logout never calls the server and nothing else would ever
+    // take this cookie back.
+    const setCookie = (sinCabecera.headers["set-cookie"] ?? []) as string[];
+    expect(setCookie.some((c) => c.startsWith(`${SESSION_COOKIE_NAME}=;`))).toBe(true);
   });
 
   it("leaves the bearer path alone on a real route", async () => {
@@ -324,5 +387,24 @@ describe("mounted on the assembled app", () => {
       .set("Authorization", "Bearer un-jwt-cualquiera");
 
     expect(res.status).toBe(401);
+  });
+
+  it("refuses an origin that exists only in a wider list, not in the one cors() was given", async () => {
+    // Guards the single-source-of-truth design itself: `app.ts` is supposed to
+    // read ORIGINS once and hand the identical array to `cors()` and to
+    // `requireSameOrigin`. A change such as
+    // `requireSameOrigin([...ORIGINS, "https://staging.osefi.net"])` — done to
+    // make a new preview deployment work without touching CORS_ORIGIN — would
+    // widen the guard's copy alone, and nothing above this test would notice:
+    // the probe-based tests build their own list by hand, and
+    // `app.security.test.ts` only exercises `cors()`. This runs the real app, so
+    // it fails the moment the two copies disagree.
+    const res = await request(app)
+      .post("/api/ciudad")
+      .set("Cookie", COOKIE)
+      .set("Origin", "https://staging.osefi.net")
+      .set(CSRF_CLIENT_HEADER, CLIENTE);
+
+    expect(res.status).toBe(403);
   });
 });

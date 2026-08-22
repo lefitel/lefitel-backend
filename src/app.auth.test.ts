@@ -79,7 +79,7 @@ const COOKIE = `${SESSION_COOKIE_NAME}=${TOKEN}`;
  * CORS_ORIGIN says in this environment.
  */
 const DEL_FRONTEND = {
-  Origin: allowedOrigins(process.env.CORS_ORIGIN)[0],
+  Origin: allowedOrigins(process.env.CORS_ORIGIN, process.env.NODE_ENV)[0],
   [CSRF_CLIENT_HEADER]: "web",
 };
 

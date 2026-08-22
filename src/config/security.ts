@@ -86,10 +86,20 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
  * The origin the frontend runs on in development, and the only origin this
  * process ever assumes instead of being told.
  *
- * Reaching it in production is not a matter of remembering to set a variable:
+ * Reaching it in production used to be described here as impossible because
  * `requiredEnv` puts CORS_ORIGIN on the production list and `index.ts` exits
- * before the server ever listens if it is missing, so a production process that
- * fell back to this value never answers a request at all.
+ * before the server ever listens if it is missing. That guarantee only fires
+ * when `process.env.NODE_ENV` reads exactly `"production"` — and NODE_ENV
+ * itself can never be added to `requiredEnv`'s list, because it is the value
+ * that *selects* the list. A deployment path that never sets it at all (a
+ * platform's auto-detected buildpack instead of this repo's Dockerfile, a
+ * start command that overrides `CMD`, `node dist/index.js` run by hand) skips
+ * `requiredEnv`'s production branch entirely: the process boots believing it
+ * needs only `JWT_SECRET`, and this constant is exactly what `allowedOrigins`
+ * used to fall back to — with `credentials: true` already applied to it, in
+ * whatever unknown environment happened to be running. See `allowedOrigins`
+ * for the fix, which no longer trusts "not literally production" to mean
+ * "safe to guess development".
  */
 export const DEV_FRONTEND_ORIGIN = "http://localhost:5173";
 
@@ -123,10 +133,31 @@ export const DEV_FRONTEND_ORIGIN = "http://localhost:5173";
  *
  * A blank CORS_ORIGIN counts as unset, which is the same test `requiredEnv`
  * applies — otherwise the two disagree about what "missing" means.
+ *
+ * **The second argument, and why an unset CORS_ORIGIN no longer means
+ * development.** It used to: `allowedOrigins(raw)` fell back to
+ * `DEV_FRONTEND_ORIGIN` for any `raw` that was missing or blank, regardless of
+ * environment, on the theory that `requiredEnv` would already have stopped a
+ * production process that reached here without CORS_ORIGIN set. That theory
+ * is true only for a process whose `NODE_ENV` is the exact string
+ * `"production"` — and a deployment that leaves `NODE_ENV` completely unset
+ * (see `DEV_FRONTEND_ORIGIN`'s comment) is not caught by that check either,
+ * because `nodeEnv === "production"` is false for `undefined` too. So the old
+ * code asked the wrong question — "is this *not* production?" — which every
+ * unset, misspelled, or merely-unfamiliar environment name answers "yes" to.
+ * The fix asks the opposite question, "is this *known* to be development?",
+ * and answers everything else — `"production"`, `"staging"`, a typo, or
+ * nothing at all — by refusing every credentialed origin. An empty list fails
+ * closed and loudly: `cors()` and the CSRF guard both refuse everything, which
+ * is a visible outage, not a silent hole answering production traffic with
+ * `Access-Control-Allow-Credentials: true` for `http://localhost:5173`.
  */
-export function allowedOrigins(raw: string | undefined): string[] {
-  const configured = raw && raw.trim() !== "" ? raw : DEV_FRONTEND_ORIGIN;
-  return configured
+export function allowedOrigins(raw: string | undefined, nodeEnv: string | undefined): string[] {
+  const configured = raw !== undefined && raw.trim() !== "";
+  if (!configured) {
+    return nodeEnv === "development" ? [DEV_FRONTEND_ORIGIN] : [];
+  }
+  return raw
     .split(",")
     .map((origin) => origin.trim().replace(/\/+$/, ""))
     .filter((origin) => origin !== "" && origin !== "*");
@@ -158,9 +189,11 @@ export const CSRF_CLIENT_HEADER = "x-osefi-client";
  *
  * The same sentence for both halves of the check, deliberately. For a real
  * person the realistic causes are a stale bundle and a proxy that strips headers
- * it does not recognise, and "reload the page" is the answer to both; which half
- * failed goes to the log, where it is useful, and not into the response, where
- * it would only help somebody probing.
+ * it does not recognise, and "reload the page" is the answer to both — for the
+ * header half literally: `middleware/csrf.ts`'s `refuse()` clears the session
+ * cookie on that refusal, so a stale one no longer answers the reload with the
+ * same failure. Which half failed goes to the log, where it is useful, and not
+ * into the response, where it would only help somebody probing.
  */
 export const PETICION_NO_VERIFICABLE =
   "No se pudo verificar el origen de la petición. Recargue la página e inténtelo de nuevo.";

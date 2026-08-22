@@ -102,7 +102,7 @@ app.use(cookieParser());
  * origin list that will differ in one place, and the difference nobody notices
  * is the guard's copy being the wider one.
  */
-const ORIGINS = allowedOrigins(process.env.CORS_ORIGIN);
+const ORIGINS = allowedOrigins(process.env.CORS_ORIGIN, process.env.NODE_ENV);
 
 app.use(
   cors({
@@ -136,8 +136,30 @@ app.use(
  * Mounted after `cors()`, and the order matters twice.
  *
  * A 403 written before `cors()` runs would come back without
- * `Access-Control-Allow-Origin`, so the browser would hide it behind a CORS
- * error and the frontend could never read the sentence explaining what to do.
+ * `Access-Control-Allow-Origin`, and a browser then hides the entire response —
+ * status code included, not only the body — behind an opaque CORS error. That
+ * used to be justified here as "so the frontend can read the sentence
+ * explaining what to do", which overstates what the frontend actually does with
+ * it: roughly thirty write functions across `src/api/` (`Ciudad.api.ts`,
+ * `Adss.api.ts`, and the same shape in Material, Obs, Poste, Propietario,
+ * TipoObs, Usuario, Evento) discard the whole response with `.catch(() => 400)`
+ * and hand the caller a hardcoded number, so the sentence in `message` never
+ * reaches a screen from most of them regardless of mount order. Only four call
+ * sites read `response.data.message` at all (`generador.api.ts`,
+ * `Permisos.api.ts`, `Login.api.ts`, `Usuario.api.ts`).
+ *
+ * What the order genuinely protects is narrower and still real: the global
+ * response interceptor in `SesionProvider.tsx` reads `error.response?.status`
+ * on *every* request to decide whether to end the session, and the four call
+ * sites above read the body — both need a response CORS lets through at all,
+ * with a real status code attached, rather than a network-level failure with
+ * nothing on it. Mounting after `cors()` is what keeps a same-origin 403 from
+ * degrading into that opaque failure for those five places. The practical
+ * consequence for everyone else: when a proxy strips this app's custom header
+ * in transit, what a user sees is not this sentence — it is an ordinary,
+ * unexplained "no se pudo guardar" from whichever screen they were on, because
+ * the write function that called it already turned the 403 into a bare 400.
+ *
  * And `cors()` answers the preflight itself, so no `OPTIONS` request ever
  * reaches this guard — which is right, since a preflight changes nothing.
  *

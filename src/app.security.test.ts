@@ -14,7 +14,7 @@ describe("security headers", () => {
   // The origin this process is really configured with, read the way `app.ts`
   // reads it instead of written out: these assertions are about the wiring, and a
   // literal here would only prove the literal.
-  const ORIGEN = allowedOrigins(process.env.CORS_ORIGIN)[0];
+  const ORIGEN = allowedOrigins(process.env.CORS_ORIGIN, process.env.NODE_ENV)[0];
 
   it("does not announce what it is running", async () => {
     const res = await request(app).get("/api/login");

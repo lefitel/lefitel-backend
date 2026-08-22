@@ -68,9 +68,16 @@
 // `verifyCredentials` answers 400 to a missing user. That is a real obstacle
 // today and an accidental one, and it disappears the day somebody mounts
 // `express.urlencoded()` for an unrelated reason.
+//
+// Covering the login by the ordinary rule means a *second* login — one made
+// with a cookie already in hand — can be refused by it too, and a refusal
+// there is not like a refusal anywhere else: it can block the very request
+// that would replace a broken cookie with a working one. See `refuse()` below
+// for why a header-refusal clears the cookie rather than leaving that trap in
+// place.
 
 import type { NextFunction, Request, RequestHandler, Response } from "express";
-import { readSessionCookie } from "../auth/sessionCookie.js";
+import { clearSessionCookie, readSessionCookie } from "../auth/sessionCookie.js";
 import { CSRF_CLIENT_HEADER, PETICION_NO_VERIFICABLE } from "../config/security.js";
 import { log } from "../utils/logger.js";
 
@@ -114,10 +121,20 @@ export function requireSameOrigin(allowed: readonly string[]): RequestHandler {
     if (typeof origin !== "string" || !permitted.has(origin)) {
       // Absent counts as refused, and that is the difference between a check and
       // a suggestion: if a missing header meant "allowed", stripping it would be
-      // the bypass. Nothing legitimate is lost — the one client that
+      // the bypass. Nothing legitimate is lost today — the one client that
       // authenticates by cookie is a browser talking to a different host from the
-      // one that served it the page, and a browser always names its origin on a
-      // request that carries a body.
+      // one that served it the page, and every such cross-origin request, made in
+      // CORS mode, names its origin.
+      //
+      // That is not quite "a browser always names its origin on a request that
+      // carries a body", which is what this comment used to claim. Per the Fetch
+      // standard, a *same-origin* non-GET request can still send `Origin: null`
+      // when the page's `Referrer-Policy` is `no-referrer` or `same-origin`. Not
+      // reachable here — the frontend is a different origin from the API and sets
+      // no referrer policy of its own — but if `/api` were ever proxied onto the
+      // frontend's own origin, such a policy would 403 every write with no
+      // attacker involved. Worth knowing as a trap, not as a hole: it fails
+      // closed, which is a bad afternoon and not a session handed over.
       return refuse(req, res, "origen", origin);
     }
 
@@ -138,6 +155,48 @@ export function requireSameOrigin(allowed: readonly string[]): RequestHandler {
  * Through the request's own logger when there is one, so the refusal and the
  * request line carry the same id and read as one event — the same thing
  * `requirePermission` does.
+ *
+ * **Why a refusal for a missing header also takes the cookie back, and a
+ * refusal for a bad origin does not.**
+ *
+ * `POST /api/login` reads the cookie too — `issueSession` calls `rotateOut`,
+ * which revokes the session it names — so this guard applies to it exactly
+ * like any other write, with no route carved out. That is correct, and it
+ * opened a lockout the previous version of this task did not name: the
+ * comment on `PETICION_NO_VERIFICABLE` already admits the realistic causes of
+ * a refusal are "a stale bundle and a proxy that strips headers it does not
+ * recognise" — both of which drop the custom header, not the `Origin` a
+ * browser sets itself. When that happens to a browser that already holds a
+ * cookie, every write 403s, *including the login that would replace the
+ * cookie with a working one*. The frontend's logout is client-only
+ * (`SesionProvider.tsx` clears `localStorage` and never calls the server), so
+ * nothing in the application could ever discard that cookie, and "reload the
+ * page" — the only advice this response gives — does nothing: the same
+ * cookie comes back on the retry and is refused again. A user in this state
+ * was stuck until they cleared cookies by hand.
+ *
+ * Two ways to close it were on the table. One: carve out `POST /api/login`
+ * from the header requirement, leaving only the `Origin` check on it. Two:
+ * have a header-refusal also clear the cookie, so the very next request —
+ * whichever route it hits — arrives with none, and this guard's first line
+ * (`if (!readSessionCookie(req)) return next()`) waves it through. Taken here,
+ * because it leaves the caller in a clean, retryable state instead of writing
+ * a permanent, route-specific exception into a rule whose entire point was
+ * having none. It costs nothing legitimate: `SameSite=Lax` already stops a
+ * cross-*site* request from carrying this cookie at all, so nothing outside
+ * osefi.net can trigger this refusal to force a logout, and the only thing
+ * clearing this cookie can ever do to a *following* request is remove a
+ * credential — never add one.
+ *
+ * It stays off a bad-`Origin` refusal on purpose, even though the mechanism
+ * would work there too. The two comment-named causes above both produce a
+ * missing header with a *correct* `Origin` — a script cannot forge `Origin`,
+ * so the only way to reach this app's own origin in that header is to already
+ * be a request from it. A bad-`Origin` refusal is a different situation: it
+ * can be triggered from `evil.osefi.net`, a same-site subdomain `SameSite=Lax`
+ * does not stop, and clearing the cookie there would hand that subdomain a
+ * free, repeatable way to log any visitor out — a real capability gained for
+ * a lockout that was never reachable through this path in the first place.
  */
 function refuse(
   req: Request,
@@ -150,5 +209,8 @@ function refuse(
     { motivo, origin: origin ?? null, metodo: req.method, ruta: req.originalUrl },
     "escritura con cookie rechazada: no se pudo verificar el origen",
   );
+  if (motivo === "cabecera") {
+    clearSessionCookie(res);
+  }
   res.status(403).json({ message: PETICION_NO_VERIFICABLE });
 }
