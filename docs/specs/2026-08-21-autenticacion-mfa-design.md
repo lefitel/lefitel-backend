@@ -921,6 +921,71 @@ FROM usuarios WHERE "deletedAt" IS NULL AND email IS NOT NULL
 GROUP BY 1 HAVING count(*) > 1;
 ```
 
+### El despliegue del cimiento de sesión, que tiene reglas propias
+
+Esto sale de haber implementado el Plan 2A y no estaba previsto al escribir el
+diseño. **El backend vive en Coolify y el frontend en Vercel, y se despliegan por
+separado**, así que el orden importa y no es reversible:
+
+```
+1. COOKIE_NAME=__Host-osefi_session y COOKIE_SECURE=true en Coolify.
+   ANTES del código: el proceso se niega a arrancar sin ellas, y sin arrancar
+   el contenedor entra en bucle de reinicio con el ERP entero caído.
+2. Las dos consultas de roles contra producción (abajo).
+3. migrate:deploy. Si no corre, el login sigue funcionando por el camino viejo
+   y NADIE se migra: el plan parece desplegado y no lo está. Comprobar que la
+   tabla `sesiones` existe después.
+4. El BACKEND. A solas es compatible: el frontend viejo no manda credenciales,
+   así que sigue autenticando con el token antiguo y el guard CSRF no se le
+   aplica.
+5. El FRONTEND, y cuanto antes mejor: cada login en la ventana entre 4 y 5
+   deja una fila de sesión que nadie posee, porque el navegador descarta la
+   cookie y la rotación no encuentra nada que revocar.
+6. Verificar EN UN NAVEGADOR, no con curl.
+```
+
+**El orden 4 → 5 no admite el inverso ni la vuelta atrás.** El frontend a solas
+rompe **todas** las peticiones, lecturas incluidas: el navegador falla una
+petición en modo credenciales cuya respuesta no trae
+`Access-Control-Allow-Credentials`. Y por lo mismo, **una vez desplegado el
+frontend, revertir el backend es una caída total**, no una degradación. Después
+del paso 5, el backend solo puede ir hacia adelante.
+
+**`curl` no sirve para verificar esto.** No aplica CORS, así que daría por bueno
+un camino de cookie que en un navegador no funciona — que es exactamente el
+agujero que el Plan 2A tuvo durante seis de sus ocho tareas. Para la
+verificación en local hace falta además `COOKIE_SECURE=false` en el `.env`, que
+no está.
+
+**Las dos consultas de roles**, por dos cambios de permisos que entraron en el
+mismo arco. La matriz es dato editable desde la pantalla de Seguridad, así que
+ningún test puede saber qué roles existen de verdad:
+
+```sql
+-- Roles que podrían perder el registro de revisiones
+SELECT id_rol FROM permisos WHERE modulo='eventos' AND accion='crear' AND permitido
+  AND id_rol NOT IN (SELECT id_rol FROM permisos WHERE modulo='eventos' AND accion='editar' AND permitido);
+
+-- Roles que se quedarían con la pantalla de inicio en error
+SELECT DISTINCT id_rol FROM permisos
+  WHERE id_rol NOT IN (SELECT id_rol FROM permisos WHERE modulo='eventos' AND accion='ver' AND permitido);
+```
+
+### Mientras el token antiguo siga valiendo: si roban una cuenta, se archiva
+
+Esto hay que tenerlo escrito antes de necesitarlo, porque es contraintuitivo.
+Durante la coexistencia —los planes 2A y 2B— un token antiguo robado **no lo
+alcanza ninguna revocación**: el atacante no manda cookie, así que su petición va
+por el camino viejo, que por definición no tiene fila que marcar. Ni cambiar la
+contraseña, ni «cerrar todas mis sesiones», ni nada.
+
+**Lo único que lo echa es archivar la cuenta**, porque entonces la consulta del
+usuario devuelve vacío en los dos caminos y la sesión muere en el acto. Luego se
+desarchiva y se le pone una contraseña nueva.
+
+Deja de hacer falta cuando el Plan 2C retire el camino viejo. Hasta entonces, la
+respuesta a «me han robado la cuenta» es archivar, no cambiar la contraseña.
+
 ## 12. Riesgos
 
 **El `rpID` es irreversible.** Se fija en `www.osefi.net`. Si algún día la web se
