@@ -17,9 +17,23 @@ describe("validarPassword", () => {
   });
 
   it("counts characters, not bytes", () => {
-    // Twelve accented characters are twelve characters. Counting bytes would
-    // let a shorter password through, and would be nobody's intent.
-    expect(validarPassword("ñññññññññññí")).toBeNull();
+    // Six emoji are six characters, not twelve: each one is a surrogate
+    // pair, two UTF-16 code units apiece, so `.length` would report 12 and
+    // wrongly accept this as long enough. Only counting code points — the
+    // spread in the implementation — correctly sees 6 and rejects it.
+    // Accented BMP characters like "ñ" could not tell these two
+    // implementations apart: they take one code unit each, so `.length`
+    // and the spread agree on them, and a regression back to `.length`
+    // would still pass a test built on those.
+    const seisEmoji = "\u{1F600}".repeat(6);
+    expect(validarPassword(seisEmoji)).not.toBeNull();
+  });
+
+  it("accepts twelve multi-byte characters as the twelve they are", () => {
+    // The other side of the same fix: twelve emoji are twelve characters
+    // and must be enough, even though `.length` would see 24.
+    const doceEmoji = "\u{1F600}".repeat(12);
+    expect(validarPassword(doceEmoji)).toBeNull();
   });
 
   it("rejects a common password even when it is long enough", () => {
@@ -38,5 +52,19 @@ describe("validarPassword", () => {
   it("rejects whitespace-only padding", () => {
     // Twelve spaces is twelve characters and no secret at all.
     expect(validarPassword("            ")).not.toBeNull();
+  });
+
+  it("rejects a short secret padded out to the minimum with trailing spaces", () => {
+    // "clave1" is six characters of actual secret; the other six are
+    // trailing padding. Measuring the raw string let this through — the
+    // length that matters is the trimmed one.
+    expect(validarPassword("clave1      ")).not.toBeNull();
+  });
+
+  it("still counts spaces between words as part of the secret, not padding", () => {
+    // Trimming only touches the two ends. A passphrase's internal spaces
+    // are real secret and must stay counted, or this rule and the padding
+    // rule above would be the same check pointed the wrong way.
+    expect(validarPassword("el poste de la esquina")).toBeNull();
   });
 });

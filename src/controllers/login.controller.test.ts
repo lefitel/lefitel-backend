@@ -232,6 +232,42 @@ describe("what comes back", () => {
     expect(c.status).toBe(200);
     expect(bcryptjs.hash).toHaveBeenCalledWith("secreta", 12);
   });
+
+  it("re-hashes a hash stored at cost 10 or 11, not only the historical 8", async () => {
+    // The detection reads the cost back out of the hash and compares it to
+    // BCRYPT_COST, rather than testing for one specific old prefix like
+    // `$2a$08$`. A fixed-prefix check would only ever catch that one value —
+    // a row sitting at 10 or 11 would pass through untouched, silently.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    const user = storedUser();
+    user.dataValues.pass = "$2a$10$hash";
+    findOne.mockResolvedValue(user);
+
+    const c = call({ user: "isaias", pass: "secreta" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(bcryptjs.hash).toHaveBeenCalledWith("secreta", 12);
+  });
+
+  it("leaves a hash already at or above the current cost alone", async () => {
+    // The other direction of the same comparison: a hash that is not below
+    // BCRYPT_COST must not be touched, including one above it — the
+    // constant might move down again someday, and this is not the place
+    // that decides that.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    const user = storedUser();
+    user.dataValues.pass = "$2a$14$hash";
+    findOne.mockResolvedValue(user);
+
+    const c = call({ user: "isaias", pass: "secreta" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(bcryptjs.hash).not.toHaveBeenCalled();
+  });
 });
 
 describe("account lockout", () => {

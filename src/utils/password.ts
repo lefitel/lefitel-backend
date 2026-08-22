@@ -23,21 +23,32 @@ const COMUNES = new Set([
  * Length is the only rule with teeth. Composition rules are absent on purpose:
  * they push people toward one predictable shape and toward writing the result
  * down, which trades an attack nobody was running for one that works.
+ *
+ * Measured on the *trimmed* password, never on the raw one: "clave1" padded
+ * out with six trailing spaces is a six-character secret wearing a
+ * twelve-character costume, and measuring the raw string let it through.
+ * Spaces *between* words ("el poste de la esquina") are not padding and stay
+ * counted either way, since trimming only touches the two ends.
+ *
+ * What gets hashed and stored is a separate matter, and is never trimmed —
+ * see login.controller.ts's own rule that a password is a secret and every
+ * character in it counts. Trimming what is stored would silently accept a
+ * shorter secret than the one chosen and would break any account whose
+ * password legitimately starts or ends with a space; this function only
+ * ever reads `pass`, it does not decide what gets saved.
  */
 export function validarPassword(pass: string): string | null {
+  const recortada = pass.trim();
+
   // Spread rather than `.length`: a string's length counts UTF-16 code units,
   // so an emoji or some accented forms would count as two.
-  const caracteres = [...pass];
+  const caracteres = [...recortada];
 
   if (caracteres.length < PASSWORD_MIN_LENGTH) {
     return `La contraseña debe tener al menos ${PASSWORD_MIN_LENGTH} caracteres.`;
   }
 
-  if (pass.trim().length === 0) {
-    return "La contraseña no puede ser solo espacios.";
-  }
-
-  const normalizada = pass.trim().toLowerCase();
+  const normalizada = recortada.toLowerCase();
   if (COMUNES.has(normalizada)) {
     return "Esa contraseña es demasiado común. Elija otra.";
   }

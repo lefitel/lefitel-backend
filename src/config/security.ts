@@ -17,6 +17,26 @@ import { randomBytes } from "node:crypto";
  */
 export const BCRYPT_COST = 12;
 
+/**
+ * The cost a bcrypt hash was actually made with, read back out of its own
+ * prefix (`$2a$12$...`), or `null` if the string does not look like a
+ * bcrypt hash at all.
+ *
+ * This exists so a login can decide whether to re-hash by comparing against
+ * `BCRYPT_COST` — a number — rather than testing the hash *string* against a
+ * literal like `$2a$08$`. A literal only ever knows about one specific old
+ * value: it caught cost 8 today, but a hash sitting at 10 or 11 would never
+ * match it, and it would silently stop catching anything the next time
+ * `BCRYPT_COST` itself moves (say, 12 to 14 — cost 12 and 13 would then be
+ * "old" too, and a fixed prefix check has no way to know that). Deriving the
+ * cost and comparing it to the constant stays correct no matter how many
+ * times the constant changes.
+ */
+export function bcryptCostOf(hash: string): number | null {
+  const match = /^\$2[aby]\$(\d\d)\$/.exec(hash);
+  return match ? Number(match[1]) : null;
+}
+
 /** Twelve characters, and none of the common ones. No symbol requirement: the
  * NIST guidance has advised against composition rules since 2017, because they
  * produce `Password1!` and a note stuck to the monitor. */
