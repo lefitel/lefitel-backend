@@ -36,6 +36,7 @@ vi.mock("bcryptjs", () => ({
 
 const app = (await import("./app.js")).default;
 const { SESSION_COOKIE_NAME } = await import("./auth/sessionCookie.js");
+const { allowedOrigins, CSRF_CLIENT_HEADER } = await import("./config/security.js");
 const { hashSessionToken } = await import("./auth/sessionToken.js");
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { SesionModel } = await import("./models/sesion.model.js");
@@ -64,6 +65,23 @@ const TOKEN = "un-token-opaco-de-treinta-y-dos-bytes";
 const MI_SESION = "aaaaaaaa-11cd-4111-8111-aaaaaaaaaaaa";
 const AJENA = "ffffffff-99ab-4999-8999-ffffffffffff";
 const COOKIE = `${SESSION_COOKIE_NAME}=${TOKEN}`;
+
+/**
+ * What the browser sends alongside the cookie, and what these requests would be
+ * refused for lacking.
+ *
+ * `requireSameOrigin` turns a write that arrives with a session cookie and
+ * cannot show it came from our own frontend into a 403 before it reaches any
+ * controller, so every cookie-carrying write below has to look like the request
+ * a browser actually makes: an `Origin` this API knows, and a header no
+ * cross-site form can attach. Read off `allowedOrigins` rather than written out,
+ * so the value is the one the app is really configured with, whatever
+ * CORS_ORIGIN says in this environment.
+ */
+const DEL_FRONTEND = {
+  Origin: allowedOrigins(process.env.CORS_ORIGIN)[0],
+  [CSRF_CLIENT_HEADER]: "web",
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -178,7 +196,10 @@ describe("who the cookie says I am", () => {
 
 describe("closing sessions, through the real stack", () => {
   it("revokes exactly this session on logout and takes the cookie back", async () => {
-    const res = await request(app).post("/api/auth/logout").set("Cookie", COOKIE);
+    const res = await request(app)
+      .post("/api/auth/logout")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
 
     expect(res.status).toBe(200);
     // `id_usuario` in a logout too. It is not needed there — the caller's own
@@ -197,7 +218,10 @@ describe("closing sessions, through the real stack", () => {
     // mocked store, or checking only the status — removing `id_usuario` from
     // `revokeSessionOf`'s `where` would leave this file green while any account
     // with a session could close anybody else's.
-    const res = await request(app).delete(`/api/auth/sessions/${AJENA}`).set("Cookie", COOKIE);
+    const res = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
 
     expect(res.status).toBe(200);
     expect(updateWhere()).toEqual({ id: AJENA, id_usuario: YO, revoked_at: null });
@@ -205,7 +229,10 @@ describe("closing sessions, through the real stack", () => {
 
   it("answers 404, not 403 and not 500, when the row was somebody else's", async () => {
     sesionUpdate.mockResolvedValue([0] as never);
-    const res = await request(app).delete(`/api/auth/sessions/${AJENA}`).set("Cookie", COOKIE);
+    const res = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
 
     expect(res.status).toBe(404);
     // The filter still went to the database — the 404 is the query finding
@@ -217,7 +244,10 @@ describe("closing sessions, through the real stack", () => {
     // `WHERE id = 'pepito'` on a `uuid` column is not "no rows", it is Postgres
     // error 22P02. Without the shape check this would be a 500 with a stack
     // trace in the log, produced on demand by any account with a session.
-    const res = await request(app).delete("/api/auth/sessions/pepito").set("Cookie", COOKIE);
+    const res = await request(app)
+      .delete("/api/auth/sessions/pepito")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
 
     expect(res.status).toBe(404);
     expect(sesionUpdate).not.toHaveBeenCalled();
@@ -225,7 +255,10 @@ describe("closing sessions, through the real stack", () => {
 
   it("revokes everything the caller has on logout-all", async () => {
     sesionUpdate.mockResolvedValue([3] as never);
-    const res = await request(app).post("/api/auth/logout-all").set("Cookie", COOKIE);
+    const res = await request(app)
+      .post("/api/auth/logout-all")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
 
     expect(res.status).toBe(200);
     expect(res.body.cerradas).toBe(3);
@@ -245,6 +278,7 @@ describe("logging in twice from the same browser", () => {
     const res = await request(app)
       .post("/api/auth/login")
       .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
       .send({ user: "isaias", pass: "una-clave-de-prueba" });
 
     expect(res.status).toBe(200);

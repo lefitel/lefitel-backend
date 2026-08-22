@@ -83,6 +83,89 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
 }
 
 /**
+ * The origin the frontend runs on in development, and the only origin this
+ * process ever assumes instead of being told.
+ *
+ * Reaching it in production is not a matter of remembering to set a variable:
+ * `requiredEnv` puts CORS_ORIGIN on the production list and `index.ts` exits
+ * before the server ever listens if it is missing, so a production process that
+ * fell back to this value never answers a request at all.
+ */
+export const DEV_FRONTEND_ORIGIN = "http://localhost:5173";
+
+/**
+ * The origins allowed to send a credentialed request, and the only ones.
+ *
+ * Read once in `app.ts` and handed to both `cors()` and the CSRF guard, because
+ * two copies of a list are two copies that can drift — and the drift nobody
+ * notices is the one where the guard's copy is the wider of the two.
+ *
+ * Comma-separated, so a second frontend (a preview deployment) is a variable
+ * and not a code change.
+ *
+ * Two normalisations, and the asymmetry with the `Origin` header is the point of
+ * them. This list is typed by a person into a deployment panel, so surrounding
+ * whitespace and one trailing slash are forgiven: `CORS_ORIGIN=https://www.osefi.net/`
+ * otherwise matches nothing whatsoever, because an `Origin` header never carries
+ * a path — and that failure is total and silent, every browser request blocked
+ * while the server logs clean 200s. The header itself is written by the browser
+ * and is compared byte for byte; normalising *that* would be inventing latitude
+ * for somebody else to use.
+ *
+ * `*` is dropped rather than passed through. A wildcard cannot coexist with
+ * credentials — every browser refuses `Access-Control-Allow-Origin: *` next to
+ * `Access-Control-Allow-Credentials: true` — so a deployment that writes one is
+ * asking for something no browser will honour. Dropping it leaves an empty list,
+ * which refuses everything loudly, instead of a header that is quietly ignored.
+ * It is also why `app.ts` hands the result to `cors()` as an array: given the
+ * bare string `"*"` that middleware emits the forbidden wildcard, given `["*"]`
+ * it emits no `Access-Control-Allow-Origin` at all.
+ *
+ * A blank CORS_ORIGIN counts as unset, which is the same test `requiredEnv`
+ * applies — otherwise the two disagree about what "missing" means.
+ */
+export function allowedOrigins(raw: string | undefined): string[] {
+  const configured = raw && raw.trim() !== "" ? raw : DEV_FRONTEND_ORIGIN;
+  return configured
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/+$/, ""))
+    .filter((origin) => origin !== "" && origin !== "*");
+}
+
+/**
+ * The header a cookie-authenticated write has to carry, lower-cased because
+ * that is how Node presents `req.headers`.
+ *
+ * What protects anything here is neither the name nor the value: it is that the
+ * header is not one of the four CORS-safelisted request headers, so a browser
+ * refuses to send it cross-site without asking permission first, and the only
+ * origins this API grants that permission to are `allowedOrigins`. A form posted
+ * from evil.osefi.net *can* carry the session cookie — a subdomain is same-site,
+ * so `SameSite=Lax` does not stop it — and it cannot carry this.
+ *
+ * The value is therefore never checked, only its presence, and that is a
+ * decision rather than an omission. Any value ships inside a JavaScript bundle
+ * that anybody can read, so it cannot be a secret; pinning a particular string
+ * would only invite somebody to "rotate" it later and refuse every browser still
+ * holding the previous bundle, for nothing gained. It also means the two
+ * repositories share a header *name* and no value: the name is a wire format and
+ * has to match, and there is no constant to keep in step across two deployments.
+ */
+export const CSRF_CLIENT_HEADER = "x-osefi-client";
+
+/**
+ * What a write refused by the origin check is told.
+ *
+ * The same sentence for both halves of the check, deliberately. For a real
+ * person the realistic causes are a stale bundle and a proxy that strips headers
+ * it does not recognise, and "reload the page" is the answer to both; which half
+ * failed goes to the log, where it is useful, and not into the response, where
+ * it would only help somebody probing.
+ */
+export const PETICION_NO_VERIFICABLE =
+  "No se pudo verificar el origen de la petición. Recargue la página e inténtelo de nuevo.";
+
+/**
  * One answer for every way of failing to log in.
  *
  * "Usuario inexistente" and "Contraseña incorrecta" are a directory of who

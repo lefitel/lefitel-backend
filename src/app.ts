@@ -14,7 +14,8 @@ import helmet from "helmet";
 import { httpLogger } from "./middleware/httpLogger.js";
 import { authenticate } from "./middleware/authenticate.js";
 import { loginRateLimit } from "./middleware/loginLimiters.js";
-import { HSTS_MAX_AGE_SECONDS } from "./config/security.js";
+import { requireSameOrigin } from "./middleware/csrf.js";
+import { allowedOrigins, HSTS_MAX_AGE_SECONDS } from "./config/security.js";
 
 // Import routes
 import uploadRoutes from "./routes/upload.routes.js";
@@ -91,19 +92,60 @@ app.use(express.json());
 // `res.cookie` is native to Express; `req.cookies` is not. Without this the
 // session can be handed out and never read back.
 app.use(cookieParser());
+/**
+ * One list of origins, read once, used by both of the next two middlewares.
+ *
+ * `allowedOrigins` holds the parsing and the reasoning, including why falling
+ * back to the development origin cannot happen on a process that serves
+ * production traffic. Handing the same array to `cors()` and to
+ * `requireSameOrigin` is the point: an origin list kept in two places is an
+ * origin list that will differ in one place, and the difference nobody notices
+ * is the guard's copy being the wider one.
+ */
+const ORIGINS = allowedOrigins(process.env.CORS_ORIGIN);
+
 app.use(
   cors({
-    // No fallback in production: `index.ts` refuses to start without the
-    // variable, so reaching here without one means development. Leaving the
-    // Vite port as a silent default would, once credentials are enabled in the
-    // next plan, authorise whatever is listening on the visitor's own machine.
-    origin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
+    origin: ORIGINS,
+    /**
+     * Without this the whole cookie is unreachable code.
+     *
+     * A browser throws away the `Set-Cookie` of a cross-origin response unless
+     * it also carries `Access-Control-Allow-Credentials: true`, and refuses to
+     * send the cookie back unless the request was made in credentials mode.
+     * www.osefi.net and api.osefi.net are different origins, so both halves
+     * apply: the login was setting a cookie the browser discarded, and six
+     * tasks of session work could never have run in production. The other half
+     * lives in the frontend — see `web/src/api/http.ts`.
+     *
+     * Safe here only because `origin` is a list and never a wildcard. `*`
+     * alongside credentials is the combination browsers forbid outright, and
+     * `allowedOrigins` cannot produce it: `requiredEnv` stops the process
+     * booting in production without CORS_ORIGIN, and a CORS_ORIGIN of `*` is
+     * dropped from the list rather than honoured.
+     */
+    credentials: true,
     // x-new-token is not a CORS-safelisted response header, so without this the
     // browser cannot read it and the sliding session never renews: the server
     // was re-signing a JWT on every request and throwing it away.
     exposedHeaders: ["x-new-token", "Content-Disposition"],
   }),
 );
+
+/**
+ * Mounted after `cors()`, and the order matters twice.
+ *
+ * A 403 written before `cors()` runs would come back without
+ * `Access-Control-Allow-Origin`, so the browser would hide it behind a CORS
+ * error and the frontend could never read the sentence explaining what to do.
+ * And `cors()` answers the preflight itself, so no `OPTIONS` request ever
+ * reaches this guard — which is right, since a preflight changes nothing.
+ *
+ * Global rather than per router: a CSRF check that has to be remembered at each
+ * mount is a check that will be forgotten at the next one. It decides for itself
+ * which requests it applies to, from the method and the credential.
+ */
+app.use(requireSameOrigin(ORIGINS));
 
 // Routes
 app.use(express.static(process.env.IMAGES_DIR ?? "/images"));

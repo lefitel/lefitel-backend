@@ -8,9 +8,14 @@
 import { describe, it, expect } from "vitest";
 import request from "supertest";
 import app from "./app.js";
-import { HSTS_MAX_AGE_SECONDS } from "./config/security.js";
+import { allowedOrigins, CSRF_CLIENT_HEADER, HSTS_MAX_AGE_SECONDS } from "./config/security.js";
 
 describe("security headers", () => {
+  // The origin this process is really configured with, read the way `app.ts`
+  // reads it instead of written out: these assertions are about the wiring, and a
+  // literal here would only prove the literal.
+  const ORIGEN = allowedOrigins(process.env.CORS_ORIGIN)[0];
+
   it("does not announce what it is running", async () => {
     const res = await request(app).get("/api/login");
     expect(res.headers["x-powered-by"]).toBeUndefined();
@@ -36,6 +41,52 @@ describe("security headers", () => {
     expect(res.headers["strict-transport-security"]).toBe(
       `max-age=${HSTS_MAX_AGE_SECONDS}; includeSubDomains`,
     );
+  });
+
+  it("lets the browser keep the session cookie it is sent", async () => {
+    // The header the whole cookie depends on, and the one `curl` can never tell
+    // you is missing. A browser discards the `Set-Cookie` of a cross-origin
+    // response that does not carry this, and www.osefi.net and api.osefi.net are
+    // different origins — so without it the login sets a cookie the browser
+    // throws away, `authenticate` never sees one, and six tasks of session work
+    // are code that cannot run in production. curl applies no CORS at all: it
+    // would have answered 200 with a `Set-Cookie` in hand the whole time.
+    const res = await request(app).get("/api/login");
+    expect(res.headers["access-control-allow-credentials"]).toBe("true");
+  });
+
+  it("grants our own frontend permission to send its CSRF header", async () => {
+    // The preflight, which is the half of the CSRF defence that lives in the
+    // browser rather than in our code. A header that is not CORS-safelisted only
+    // stops anything if the browser is refused permission to send it — and only
+    // helps if our own frontend is granted it.
+    const res = await request(app)
+      .options("/api/ciudad")
+      .set("Origin", ORIGEN)
+      .set("Access-Control-Request-Method", "POST")
+      .set("Access-Control-Request-Headers", CSRF_CLIENT_HEADER);
+
+    expect(res.status).toBe(204);
+    expect(res.headers["access-control-allow-origin"]).toBe(ORIGEN);
+    expect(res.headers["access-control-allow-credentials"]).toBe("true");
+    expect(res.headers["access-control-allow-headers"]).toContain(CSRF_CLIENT_HEADER);
+  });
+
+  it("refuses that permission to anybody else, including a lookalike domain", async () => {
+    // No `Access-Control-Allow-Origin` means the browser never sends the real
+    // request, so the header the guard demands can never be attached from here.
+    // `evil-osefi.net` is a different registrable domain that ends in the same
+    // letters: it is what passes a check written as a suffix match, and it is
+    // refused here by the same list the guard uses.
+    for (const ajeno of ["https://evil-osefi.net", "https://evil.osefi.net"]) {
+      const res = await request(app)
+        .options("/api/ciudad")
+        .set("Origin", ajeno)
+        .set("Access-Control-Request-Method", "POST")
+        .set("Access-Control-Request-Headers", CSRF_CLIENT_HEADER);
+
+      expect(res.headers["access-control-allow-origin"], ajeno).toBeUndefined();
+    }
   });
 
   it("lets another origin load the photographs", async () => {
