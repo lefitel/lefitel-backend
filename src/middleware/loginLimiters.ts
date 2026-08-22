@@ -6,7 +6,8 @@
 // an escalation with no ceiling is a button for locking a colleague out.
 
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
-import type { Request } from "express";
+import type { RateLimitRequestHandler } from "express-rate-limit";
+import type { NextFunction, Request, Response } from "express";
 import {
   LOGIN_IP_LIMIT,
   LOGIN_ACCOUNT_IP_LIMIT,
@@ -33,6 +34,32 @@ function usuarioDe(req: Request): string {
 }
 
 /**
+ * The key each bucket counts a request against.
+ *
+ * Named functions rather than arrows written inline in the options, because
+ * inline they could not be tested and were not: the only tests this file had
+ * covered the two pure functions at the bottom. Every part of these two strings
+ * is load-bearing and every part could be removed without a single test
+ * noticing — dropping `ipKeyGenerator` (which folds an IPv6 address into its
+ * /56 block, without which one holder of a prefix walks through billions of
+ * separate buckets), or dropping `usuarioDe` from the second one (which is what
+ * makes it a per-account bucket instead of a second, smaller copy of the first).
+ *
+ * The prefixes are not what keeps the two apart: every `rateLimit()` call builds
+ * a store of its own, so these keys never meet. They are there so that a key
+ * read back out of a store says which bucket it belongs to, and so that the day
+ * a shared store arrives — Redis, once there is more than one process — the two
+ * do not silently merge into one.
+ */
+export function ipBucketKey(req: Request): string {
+  return `ip:${ipKeyGenerator(req.ip ?? "")}`;
+}
+
+export function accountBucketKey(req: Request): string {
+  return `ipu:${ipKeyGenerator(req.ip ?? "")}:${usuarioDe(req)}`;
+}
+
+/**
  * By address, counting failures only.
  *
  * The budget it replaces was ten per quarter hour counting successes as well,
@@ -47,7 +74,7 @@ export const loginIpLimiter = rateLimit({
   windowMs: LOGIN_WINDOW_MS,
   limit: LOGIN_IP_LIMIT,
   skipSuccessfulRequests: true,
-  keyGenerator: (req) => `ip:${ipKeyGenerator(req.ip ?? "")}`,
+  keyGenerator: ipBucketKey,
   message: { message: "Demasiados intentos desde esta red. Espere unos minutos." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -61,11 +88,44 @@ export const loginAccountIpLimiter = rateLimit({
   windowMs: LOGIN_WINDOW_MS,
   limit: LOGIN_ACCOUNT_IP_LIMIT,
   skipSuccessfulRequests: true,
-  keyGenerator: (req) => `ipu:${ipKeyGenerator(req.ip ?? "")}:${usuarioDe(req)}`,
+  keyGenerator: accountBucketKey,
   message: { message: "Demasiados intentos. Espere unos minutos." },
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+/** The buckets a login request passes, in order: the flood first, the guess second. */
+const loginBuckets: readonly RateLimitRequestHandler[] = [loginIpLimiter, loginAccountIpLimiter];
+
+/**
+ * The whole login gate as one middleware, POST only.
+ *
+ * This was an anonymous arrow written inline at the mount in `app.ts`, and
+ * taking either bucket out of it, or taking the POST guard out, left all 460
+ * tests in this project green. Here it has a name and a home next to the buckets
+ * it runs, which is what let `loginLimiters.test.ts` put a request through the
+ * real mount and then read each bucket's counter to see what it charged.
+ *
+ * The POST guard is not a detail. `GET /api/login` is `comprobarToken`, which
+ * the client calls on every page load to find out whether its token is still
+ * good — counting those would spend an entire office's failure budget on people
+ * who are already logged in.
+ */
+export function loginRateLimit(req: Request, res: Response, next: NextFunction) {
+  if (req.method !== "POST") return next();
+
+  // Each bucket is ordinary Express middleware: it either answers 429 itself
+  // and never calls on, or calls on. So the chain is a walk down the array
+  // where each step's `next` is the following bucket, and the last one is the
+  // caller's own `next`. An error from any of them short-circuits to `next(err)`
+  // so the terminal handler in `app.ts` answers, rather than the rejection
+  // being dropped.
+  const run = (i: number) => {
+    if (i === loginBuckets.length) return next();
+    loginBuckets[i](req, res, (err?: unknown) => (err ? next(err) : run(i + 1)));
+  };
+  run(0);
+}
 
 /** Whether this account is resting right now. */
 export function estaBloqueada(u: { failed_attempts?: number; locked_until?: Date | null }): boolean {

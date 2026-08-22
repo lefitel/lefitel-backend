@@ -80,8 +80,22 @@ function call(body: unknown) {
   };
 }
 
-/** The username the lookup actually went looking for. */
-const searchedFor = () => (findOne.mock.calls[0][0] as { where: { user: string } }).where.user;
+/**
+ * The `where` the lookup actually went looking with.
+ *
+ * Not `where.user` any more: the lookup compares `lower("user")`, the same way
+ * `usuarios_user_uniq` and the per-account rate-limit bucket do, so what arrives
+ * here is a Sequelize `Where` object rather than a plain field. The shape is
+ * asserted rather than trusted — `looksCaseFolded` below is what fails if
+ * somebody puts `{ where: { user } }` back.
+ */
+const searchedWith = () => (findOne.mock.calls[0][0] as { where: unknown }).where;
+
+/** The name the lookup compared against, after folding. */
+const searchedFor = () => (searchedWith() as { logic?: unknown }).logic;
+
+/** `lower("user") = <something>`, which is what the unique index indexes. */
+const looksCaseFolded = { attribute: { fn: "lower", args: [{ col: "user" }] }, comparator: "=" };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -107,8 +121,43 @@ describe("the username", () => {
     const c = call({ user: " Omar Mita ", pass: "secreta" });
     await loginUsuario(c.req, c.res);
 
-    expect(searchedFor()).toBe("Omar Mita");
+    // Lower-cased by the lookup, so "omar mita" — with the space still in it,
+    // which is the part this test is about.
+    expect(searchedFor()).toBe("omar mita");
     expect(c.status).toBe(200);
+  });
+
+  it("finds an account whose stored name has capitals, typed in lower case", async () => {
+    // The gap this closes. Three places folded case — the unique index on
+    // `lower("user")`, the per-account rate-limit bucket, the username
+    // collision check — and this lookup compared bytes. So `Omar Mita`, a real
+    // account, typing `omar mita` fell into the unknown-user branch and got
+    // "Usuario o contraseña incorrectos", which since the message became
+    // uniform is exactly what a wrong password gets. He retried, and after ten
+    // tries the bucket answered 429. No way in, and nothing saying why — and no
+    // way round it either, because the collision check would refuse him the
+    // lower-case name as already taken.
+    findOne.mockResolvedValue(storedUser("Omar Mita"));
+    const c = call({ user: "omar mita", pass: "secreta" });
+    await loginUsuario(c.req, c.res);
+
+    expect(searchedWith()).toMatchObject({ ...looksCaseFolded, logic: "omar mita" });
+    expect(c.status).toBe(200);
+  });
+
+  it("looks for one and the same account however it was capitalised", async () => {
+    // The shape assertion above says the query mentions `lower`. This says the
+    // *value* is folded too: a query of `lower("user") = 'Omar Mita'` matches
+    // nothing at all and would satisfy the shape perfectly.
+    for (const typed of ["Omar Mita", "OMAR MITA", "omar mita", " oMaR mItA "]) {
+      vi.clearAllMocks();
+      findOne.mockResolvedValue(storedUser("Omar Mita"));
+      const c = call({ user: typed, pass: "secreta" });
+      await loginUsuario(c.req, c.res);
+
+      expect(searchedFor(), typed).toBe("omar mita");
+      expect(c.status, typed).toBe(200);
+    }
   });
 
   it("is refused when it is nothing but spaces", async () => {
@@ -270,6 +319,76 @@ describe("what comes back", () => {
   });
 });
 
+/**
+ * How long each way of failing takes, which is a channel of its own.
+ *
+ * The message is uniform and the status is uniform. The clock was not: raising
+ * bcrypt from 8 to 12 made the filler hash — paid on the unknown-name and
+ * locked-account paths — twelve times more expensive than the comparison
+ * against a stored hash that is still at 8, which is every account in this
+ * database until its owner next logs in successfully. Measured on this machine:
+ * 228 ms for an unknown name, 19 ms for a wrong password against a real
+ * account. Two attempts and a median tell an attacker which names exist, and
+ * two is under the lockout threshold, so nobody gets locked while it happens.
+ *
+ * These tests count `compare` calls, which is the only thing a unit test can
+ * see of a duration. Deleting the extra compare in `login.controller.ts` — it
+ * looks exactly like a pointless one — fails the first of them.
+ */
+describe("what a failure costs", () => {
+  it("pays a second hash when the stored one is cheaper than the current cost", async () => {
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    findOne.mockResolvedValue(storedUser()); // stored at cost 8, like every real row
+
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(bcryptjs.compare).toHaveBeenCalledWith("x", "$2a$08$hash");
+    // "hashed" is what the mocked `bcryptjs.hash` returns, so it is what
+    // `fillerHash()` resolves to — the same value the unknown-user and
+    // locked-account paths compare against.
+    expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
+    expect(bcryptjs.compare).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not pay it twice once the account has been re-hashed", async () => {
+    // The other direction: an account already at BCRYPT_COST costs the same as
+    // the filler by itself, so a second compare would be waste with nothing to
+    // hide. This is what stops the fix being "always hash twice".
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const user = storedUser();
+    user.dataValues.pass = "$2a$12$hash";
+    findOne.mockResolvedValue(user);
+
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(bcryptjs.compare).toHaveBeenCalledTimes(1);
+    expect(bcryptjs.compare).not.toHaveBeenCalledWith("x", "hashed");
+  });
+
+  it("pays it for a stored value that is not a bcrypt hash at all", async () => {
+    // A corrupt row, or something written by hand. `compare` rejects it in
+    // microseconds, which is the same oracle as cost 8 and wider — so the cost
+    // is treated as zero rather than as unknown.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const user = storedUser();
+    user.dataValues.pass = "esto-no-es-un-hash";
+    findOne.mockResolvedValue(user);
+
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
+  });
+});
+
 describe("account lockout", () => {
   it("says the same thing, with the same status, whether the account is locked or the password is simply wrong", async () => {
     // A lockout that answered differently from a wrong password would be a
@@ -365,6 +484,55 @@ describe("account lockout", () => {
     // earlier would reopen the same race under a narrower window.
     expect(values).not.toHaveProperty("failed_attempts");
     expect(where.where.id).toBe(1);
+  });
+
+  it("writes the lockout to the bitácora, which nothing recorded before", async () => {
+    // Without this line the log shows five LOGIN_FAILED and then one every
+    // fifteen minutes, and nowhere the fact that the account has been shut the
+    // whole time — the one thing somebody reading it is looking for. Its own
+    // action name so a panel can separate it from ordinary failure noise.
+    const { logAction } = await import("../utils/logAction.js");
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const user = storedUser();
+    user.dataValues.failed_attempts = LOCKOUT_AFTER_FAILURES - 1;
+    findOne
+      .mockResolvedValueOnce(user)
+      .mockResolvedValueOnce({ dataValues: { failed_attempts: LOCKOUT_AFTER_FAILURES } });
+
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "ACCOUNT_LOCKED",
+        severity: "critical",
+        entity_id: 1,
+        // The address matters: the whole point of reading these is telling one
+        // machine grinding one account from a person mistyping their own.
+        ip_address: "::1",
+      }),
+    );
+  });
+
+  it("does not announce a lockout that has not happened", async () => {
+    // A line written on every wrong password would make the action worthless:
+    // whoever reads the bitácora would be back to counting LOGIN_FAILED by hand,
+    // which is the state this replaced.
+    const { logAction } = await import("../utils/logAction.js");
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const user = storedUser();
+    user.dataValues.failed_attempts = 1;
+    findOne.mockResolvedValueOnce(user).mockResolvedValueOnce({ dataValues: { failed_attempts: 2 } });
+
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: "LOGIN_FAILED" }));
+    expect(logAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "ACCOUNT_LOCKED" }),
+    );
   });
 
   it("still counts each wrong guess when two arrive at the same time", async () => {

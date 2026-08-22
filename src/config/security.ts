@@ -59,6 +59,19 @@ export const LOGIN_IP_LIMIT = 100;
 export const LOGIN_ACCOUNT_IP_LIMIT = 10;
 export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
+/**
+ * How long a browser must refuse to reach this host over plain HTTP, in
+ * seconds. Two years, which is what the preload list asks for.
+ *
+ * Here rather than written into the `helmet` call so that `app.security.test.ts`
+ * can assert the header a browser actually receives without repeating the
+ * digits. What that assertion catches is the wiring, not the number: `hsts:
+ * { maxAge: ... }` misspelled, or the whole option lost in a helmet upgrade,
+ * silently falls back to helmet's own default and nothing on the server reports
+ * anything.
+ */
+export const HSTS_MAX_AGE_SECONDS = 63072000;
+
 /** Variables the process refuses to start without, by environment. */
 export function requiredEnv(nodeEnv: string | undefined): string[] {
   const always = ["JWT_SECRET"];

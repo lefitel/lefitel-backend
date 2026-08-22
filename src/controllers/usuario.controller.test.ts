@@ -13,6 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
+import { LOCKOUT_AFTER_FAILURES } from "../config/security.js";
 
 const findOne = vi.fn();
 const create = vi.fn();
@@ -38,8 +39,15 @@ vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },
 }));
 
-const { createUsuario, updateUsuario, updateUserName, updateUserPass, deleteUsuario, desarchivarUsuario } =
-  await import("./usuario.controller.js");
+const {
+  createUsuario,
+  updateUsuario,
+  updateUserName,
+  updateUserPass,
+  deleteUsuario,
+  desarchivarUsuario,
+  desbloquearUsuario,
+} = await import("./usuario.controller.js");
 
 const ADMIN = 1;
 const TECNICO = 3;
@@ -338,6 +346,112 @@ describe("what a request may actually change", () => {
   });
 });
 
+/**
+ * The same question for the door next to it, which nobody had asked.
+ *
+ * `updateUsuario` has refused a role change from anybody without the Roles
+ * permission since the day that allowlist was written. `createUsuario` built its
+ * payload from a blacklist of two field names and let everything else through,
+ * `id_rol` included — and its only gate is `seguridad.crear`. So a role holding
+ * that and not `roles.editar` — separate modules, separate checkboxes on the
+ * Seguridad screen — could POST an account with `id_rol: 1` and log in as a full
+ * administrator a second later. One request, from a role that was never meant to
+ * hand out authority at all.
+ */
+describe("what a creation request may set", () => {
+  /** Everything in Seguridad, nothing in Roles: the escalation's starting point. */
+  function soloSeguridad() {
+    can.mockImplementation(async (_rol: number, modulo: string) => modulo === "seguridad");
+  }
+
+  it("refuses the escalation, and writes it down", async () => {
+    const { logAction } = await import("../utils/logAction.js");
+    soloSeguridad();
+
+    const c = call(
+      { id: SELF, id_rol: 2 },
+      { body: { user: "tmp", pass: "una-clave-de-prueba", id_rol: ADMIN } },
+    );
+    await createUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(create).not.toHaveBeenCalled();
+    // The same action name `updateUsuario` uses for the same reach: somebody
+    // asking for authority they may not hand out is one thing to look for.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "ROLE_CHANGE_DENIED", severity: "critical" }),
+    );
+  });
+
+  it("refuses even when no role was asked for, rather than dying on the column", async () => {
+    // Every account is born with a role and `id_rol` is NOT NULL, so without
+    // the Roles permission there is nothing this handler can legitimately do.
+    // Before, a request that simply left the field out reached the database and
+    // came back a 500 with Postgres's own text in it.
+    const { logAction } = await import("../utils/logAction.js");
+    soloSeguridad();
+
+    const c = call({ id: SELF, id_rol: 2 }, { body: { user: "tmp", pass: "una-clave-de-prueba" } });
+    await createUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(c.message).toMatch(/roles/i);
+    expect(create).not.toHaveBeenCalled();
+    // Not an attack, so not a critical line. Only a refusal.
+    expect(logAction).not.toHaveBeenCalled();
+  });
+
+  it("writes only the fields a creation may bring, whatever else was sent", async () => {
+    // A blacklist accepts every column added to the model from now on, and
+    // nobody adding one would think to come here. `id` is an autoincrement
+    // primary key, `deletedAt` would make an account born archived, and the two
+    // lockout fields are the server's bookkeeping.
+    findOne.mockResolvedValueOnce(null);
+    create.mockResolvedValue({ dataValues: { id: 42 }, toJSON: () => ({ id: 42 }) });
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      {
+        body: {
+          user: "nuevo",
+          pass: "una-clave-de-prueba",
+          name: "Ana",
+          phone: "700",
+          id_rol: TECNICO,
+          id: 999,
+          deletedAt: null,
+          failed_attempts: 99,
+          locked_until: new Date("2100-01-01"),
+        },
+      },
+    );
+    await createUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(create.mock.calls[0][0]).toEqual({
+      user: "nuevo",
+      pass: "hashed",
+      name: "Ana",
+      phone: "700",
+      id_rol: TECNICO,
+    });
+  });
+
+  it("lets the Roles permission choose the role, which is the point of asking", async () => {
+    findOne.mockResolvedValueOnce(null);
+    create.mockResolvedValue({ dataValues: { id: 42 }, toJSON: () => ({ id: 42 }) });
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { body: { user: "nuevo", pass: "una-clave-de-prueba", id_rol: TECNICO } },
+    );
+    await createUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(create.mock.calls[0][0]).toMatchObject({ id_rol: TECNICO });
+  });
+});
+
 describe("changing a password", () => {
   it("demands the current one from anybody who is not an administrator", async () => {
     findOne.mockResolvedValue(storedUser().model);
@@ -398,6 +512,112 @@ describe("changing a password", () => {
 
     expect(bcryptjs.hash).toHaveBeenCalledWith("una-clave-de-prueba", 12);
     expect(stored.set).toHaveBeenCalledWith(expect.objectContaining({ pass: "hashed" }));
+  });
+});
+
+/**
+ * The way out of a lockout, of which there were none.
+ *
+ * `failed_attempts` was only ever cleared by a successful login, and a locked
+ * account cannot log in successfully — the login answers before it compares
+ * anything. So the count only grew, the wait pinned itself at the ceiling, and
+ * one request every quarter of an hour kept an account shut indefinitely from a
+ * single address, without coming near any rate-limit bucket. Neither field is on
+ * any allowlist and there was no endpoint, so the only remedy was an UPDATE by
+ * hand in Postgres.
+ *
+ * Two ways out now: a password reset clears it as part of the same write, and
+ * this endpoint clears it on its own.
+ */
+describe("lifting a lockout", () => {
+  /** When the wait would be over, if nobody lifted it. */
+  const HASTA = new Date(Date.now() + 60_000);
+
+  /** An account that has run out of attempts and is resting. */
+  function bloqueado() {
+    return storedUser({ failed_attempts: LOCKOUT_AFTER_FAILURES, locked_until: HASTA });
+  }
+
+  it("comes off with a password reset, in the same write", async () => {
+    // The everyday case, and the reason it cannot wait for the endpoint below:
+    // an administrator resets a password precisely because somebody cannot get
+    // in. With the lock left on they dictate the new password and the login
+    // still answers "Usuario o contraseña incorrectos" for up to fifteen
+    // minutes — indistinguishable, to either of them, from having heard it
+    // wrong.
+    const stored = bloqueado();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(OTHER) }, body: { pass: "una-clave-de-prueba" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(written(stored.set)).toEqual({ pass: "hashed", failed_attempts: 0, locked_until: null });
+  });
+
+  it("comes off on its own through the unlock endpoint", async () => {
+    const stored = bloqueado();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await desbloquearUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(written(stored.set)).toEqual({ failed_attempts: 0, locked_until: null });
+    expect(stored.save).toHaveBeenCalled();
+  });
+
+  it("is refused to anybody who may not edit accounts", async () => {
+    const stored = bloqueado();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call({ id: SELF, id_rol: TECNICO }, { params: { id: String(OTHER) } });
+    await desbloquearUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(findOne).not.toHaveBeenCalled();
+    expect(stored.save).not.toHaveBeenCalled();
+  });
+
+  it("is refused when there is no session at all", async () => {
+    const c = call(undefined, { params: { id: String(OTHER) } });
+    await desbloquearUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(findOne).not.toHaveBeenCalled();
+  });
+
+  it("leaves a critical line in the bitácora saying what was undone", async () => {
+    // Removing a protection from an account is the sort of thing somebody asks
+    // about afterwards. Recorded with the lockout it cleared, so the entry says
+    // what was undone rather than merely that something was.
+    const { logAction } = await import("../utils/logAction.js");
+    const stored = bloqueado();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await desbloquearUsuario(c.req, c.res);
+
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "ACCOUNT_UNLOCKED",
+        severity: "critical",
+        entity_id: OTHER,
+        metadata: { before: { failed_attempts: LOCKOUT_AFTER_FAILURES, locked_until: HASTA } },
+      }),
+    );
+  });
+
+  it("answers 404 rather than unlocking nothing when the id does not exist", async () => {
+    findOne.mockResolvedValue(null);
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: "999" } });
+    await desbloquearUsuario(c.req, c.res);
+
+    expect(c.status).toBe(404);
   });
 });
 

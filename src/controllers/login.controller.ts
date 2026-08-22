@@ -6,6 +6,7 @@ import { logAction } from "../utils/logAction.js";
 import { permissionsFor } from "../permissions/store.js";
 import { BCRYPT_COST, CREDENCIALES_INVALIDAS, bcryptCostOf, fillerHash } from "../config/security.js";
 import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js";
+import { whereUsernameIs } from "../utils/username.js";
 
 const secretKey = process.env.JWT_SECRET;
 
@@ -39,7 +40,14 @@ export async function loginUsuario(req: Request, res: Response) {
   }
 
   try {
-    const TempUsuario = await UsuarioModel.findOne({ where: { user } });
+    // Case-insensitively, the same way `usuarios_user_uniq` and the per-account
+    // rate-limit bucket already were — see `whereUsernameIs`. This lookup was
+    // the one place of the four that still compared bytes, and the people it
+    // shut out were the ones whose stored name carries a capital: they typed it
+    // in lower case, fell into the unknown-user branch, and got the same
+    // "Usuario o contraseña incorrectos" a wrong password gets. Nothing told
+    // them why, and there was no way around it.
+    const TempUsuario = await UsuarioModel.findOne({ where: whereUsernameIs(user) });
 
     // The account not existing and the password being wrong must be
     // indistinguishable: same message, same status, same time. Comparing
@@ -62,6 +70,40 @@ export async function loginUsuario(req: Request, res: Response) {
 
     const confirmPass = await bcryptjs.compare(pass, data.pass);
     if (!confirmPass) {
+      /**
+       * A second compare that throws its result away, and it has to stay.
+       *
+       * The comparison above costs whatever the *stored* hash costs, and every
+       * account in this database predates the rise from 8 to 12 until its owner
+       * logs in successfully once. So a wrong password against a real account
+       * answers in about 19 ms, while the two branches above — unknown name and
+       * locked account — each pay one compare at BCRYPT_COST against the filler
+       * and answer in about 228 ms. Twelve times slower. That is the same
+       * enumeration oracle the filler hash was added to close, with the polarity
+       * reversed: fast now means "this account exists". Two attempts per
+       * candidate name and the median tells you, and two is below
+       * LOCKOUT_AFTER_FAILURES, so the whole payroll can be enumerated without
+       * locking a single account.
+       *
+       * Paying one BCRYPT_COST compare here brings the difference down from
+       * 209 ms to the ~19 ms of the cost-8 compare itself, which is inside the
+       * jitter of any real network.
+       *
+       * It narrows on its own as people log in and get re-hashed below, and it
+       * never closes: an account that never logs in stays cheap forever, and
+       * former staff not yet archived, service accounts and the spare
+       * administrator account are exactly the ones worth finding.
+       *
+       * `?? 0` covers a stored value that is not a bcrypt hash at all — a
+       * corrupt row, something written by hand — where `compare` returns false
+       * in microseconds. Same hole, wider.
+       *
+       * `login.controller.test.ts` fails if this is deleted.
+       */
+      if ((bcryptCostOf(data.pass) ?? 0) < BCRYPT_COST) {
+        await bcryptjs.compare(pass, await fillerHash());
+      }
+
       // The count is incremented in the database, not read into Node,
       // added to, and written back. That three-step version loses updates
       // under concurrency: ten wrong guesses arriving together all read
@@ -100,10 +142,11 @@ export async function loginUsuario(req: Request, res: Response) {
         attributes: ["failed_attempts"],
       });
       if (actualizado) {
+        const fallos = actualizado.dataValues.failed_attempts ?? 0;
         // siguienteBloqueo expects the count *before* this failure and adds
         // one itself; the database already added it, so passing the fresh
         // count minus one gets the same arithmetic without adding it twice.
-        const { locked_until } = siguienteBloqueo((actualizado.dataValues.failed_attempts ?? 0) - 1);
+        const { locked_until } = siguienteBloqueo(fallos - 1);
         // Only locked_until is written here — failed_attempts is left alone
         // because it is already correct in the database. Writing it again
         // from a value read a moment ago would reopen the exact race this
@@ -111,6 +154,15 @@ export async function loginUsuario(req: Request, res: Response) {
         // above and this write.
         if (locked_until) {
           await UsuarioModel.update({ locked_until }, { where: { id: data.id } });
+          // The moment of locking, which nothing recorded until now. The
+          // bitácora showed a run of LOGIN_FAILED and then one every so often,
+          // and nowhere the single fact anyone reading it would want: that this
+          // account has been shut since Tuesday. `critical` and not `warning`
+          // because a LOGIN_FAILED is somebody mistyping and this is somebody
+          // unable to work — whether they did it to themselves or whether
+          // someone who knows their username did it to them. Its own action
+          // name so a panel can pull just these out of the failure noise.
+          logAction({ id_usuario: data.id, action: "ACCOUNT_LOCKED", entity: "Usuario", entity_id: data.id, detail: `Cuenta @${data.user} bloqueada tras ${fallos} intentos fallidos`, metadata: { user: data.user, failed_attempts: fallos, locked_until }, severity: 'critical', ip_address: req.ip ?? null });
         }
       }
       logAction({ id_usuario: data.id, action: "LOGIN_FAILED", entity: "Usuario", entity_id: data.id, detail: `Login fallido para @${user}`, metadata: { user }, severity: 'warning', ip_address: req.ip ?? null });

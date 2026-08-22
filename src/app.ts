@@ -13,7 +13,8 @@ import helmet from "helmet";
 import { httpLogger } from "./middleware/httpLogger.js";
 import jwt from "jsonwebtoken";
 import { UsuarioModel } from "./models/usuario.model.js";
-import { loginIpLimiter, loginAccountIpLimiter } from "./middleware/loginLimiters.js";
+import { loginRateLimit } from "./middleware/loginLimiters.js";
+import { HSTS_MAX_AGE_SECONDS } from "./config/security.js";
 
 // Import routes
 import uploadRoutes from "./routes/upload.routes.js";
@@ -84,7 +85,7 @@ app.use(
   helmet({
     contentSecurityPolicy: false,
     crossOriginResourcePolicy: { policy: "cross-origin" },
-    hsts: { maxAge: 63072000, includeSubDomains: true },
+    hsts: { maxAge: HSTS_MAX_AGE_SECONDS, includeSubDomains: true },
   }),
 );
 app.use(express.json());
@@ -143,10 +144,10 @@ function authenticateToken(req: Request, res: Response, next: NextFunction) {
 
 // Routes
 app.use(express.static(process.env.IMAGES_DIR ?? "/images"));
-app.use("/api/login", (req, res, next) => {
-  if (req.method !== "POST") return next();
-  loginIpLimiter(req, res, (err) => (err ? next(err) : loginAccountIpLimiter(req, res, next)));
-}, loginRoutes);
+// Both login buckets and the POST-only rule live in loginLimiters.ts, as one
+// named middleware. Written out here it was an anonymous arrow nothing could
+// assert about.
+app.use("/api/login", loginRateLimit, loginRoutes);
 
 app.use("/api/upload", authenticateToken, uploadRoutes);
 app.use("/api/reporte", authenticateToken, reporteRoutes);

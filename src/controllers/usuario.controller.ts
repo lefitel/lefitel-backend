@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { Op, fn, col, where as sequelizeWhere } from "sequelize";
+import { Op } from "sequelize";
 import { RolModel } from "../models/rol.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import bcryptjs from "bcryptjs";
@@ -8,6 +8,7 @@ import { logAction } from "../utils/logAction.js";
 import { can } from "../permissions/store.js";
 import { BCRYPT_COST } from "../config/security.js";
 import { validarPassword } from "../utils/password.js";
+import { whereUsernameIs } from "../utils/username.js";
 
 /** Shared text: whichever endpoint hit this, the fix is the same username. */
 const USERNAME_TAKEN_MESSAGE = "El nombre de usuario ya está tomado por otra persona.";
@@ -24,7 +25,7 @@ const USERNAME_TAKEN_MESSAGE = "El nombre de usuario ya está tomado por otra pe
  */
 async function nombreEnUso(user: string, exceptoId?: number): Promise<boolean> {
   const existing = await UsuarioModel.findOne({
-    where: sequelizeWhere(fn("lower", col("user")), user.toLowerCase()),
+    where: whereUsernameIs(user),
     attributes: ["id"],
   });
   if (!existing) return false;
@@ -116,7 +117,48 @@ export async function createUsuario(req: Request, res: Response) {
   if (!(await can(req.user?.id_rol, "seguridad", "crear"))) {
     return res.status(403).json({ message: "No tienes permiso para crear usuarios." });
   }
+
+  // The same separation of powers `updateUsuario` has always applied, and this
+  // door had none: handing out authority belongs to the Roles module, not to
+  // whoever may open an account.
+  const mayAssignRoles = await can(req.user?.id_rol, "roles", "editar");
+
   try {
+    /**
+     * Every new account is born with a role, and choosing it is the Roles
+     * permission. So without that permission there is nothing this handler can
+     * legitimately do, and it says so rather than failing later:
+     *
+     * - Asking for a role without the permission is an escalation attempt, and
+     *   is refused with the same `critical` line in the bitácora that
+     *   `updateUsuario` writes for the same reach. Same action name on purpose:
+     *   "somebody reached for authority they may not hand out" is one thing to
+     *   look for, not two.
+     * - Not asking for one is not an attack, so no `critical` line — but it
+     *   still cannot succeed. `id_rol` is `NOT NULL`, so before this the same
+     *   request died on the database and came back as a 500 with Postgres's own
+     *   text in it. A 403 naming the missing permission is the honest answer.
+     *
+     * The rejected alternative was to fall back to some default role. There is
+     * no such thing in this system — no constant, no column default — so it
+     * would have meant inventing a policy nobody decided, and quietly giving an
+     * account a different role from the one the operator picked. Refusing is
+     * louder and cannot surprise anyone.
+     *
+     * Nothing legitimate loses out today: role 1 holds `roles.editar`, and
+     * roles 2 and 3 hold nothing at all in `seguridad`, so no role that can
+     * reach this handler is affected.
+     */
+    if (!mayAssignRoles) {
+      const enviado = (req.body ?? {}) as Record<string, unknown>;
+      if (enviado.id_rol !== undefined) {
+        logAction({ id_usuario: req.user?.id, action: "ROLE_CHANGE_DENIED", entity: "Usuario", entity_id: null, detail: "Intentó crear una cuenta con un rol elegido, sin permiso sobre Roles", metadata: { requested: enviado.id_rol, user: enviado.user }, severity: 'critical', ip_address: req.ip ?? null });
+      }
+      return res.status(403).json({
+        message: "Crear una cuenta implica asignarle un rol. Hace falta permiso de edición sobre Roles.",
+      });
+    }
+
     // Trimmed on the way in, not only on the way out. An account stored as
     // " Diego " can never be logged into: the person types "Diego" and the
     // lookup does not match, and nothing on screen explains why.
@@ -138,7 +180,7 @@ export async function createUsuario(req: Request, res: Response) {
 
     req.body.pass = await bcryptjs.hash(req.body.pass, BCRYPT_COST);
 
-    const payload = withoutControlFields(req.body);
+    const payload = creatableFrom(req.body);
     const TempUsuario = await UsuarioModel.create(payload);
     logAction({ id_usuario: req.user?.id, action: "CREATE_USUARIO", entity: "Usuario", entity_id: TempUsuario.dataValues.id as number, detail: `Creó usuario @${req.body.user}`, metadata: { after: { user: req.body.user } }, severity: 'info' });
     res.status(200).json(withoutPass(TempUsuario));
@@ -164,30 +206,54 @@ const EDITABLE_FIELDS = ["name", "lastname", "birthday", "image", "phone"] as co
 const ROLE_ASSIGNMENT_FIELDS = ["id_rol"] as const;
 
 /**
- * Fields the server manages for account lockout, not something a creation
- * request gets to set. Without this, anyone with permission to create
- * accounts could seed `locked_until` far in the future on the very account
- * they create — a lockout planted through the front door, at signup time.
+ * The fields a creation request may set: the profile, the two credentials, and
+ * the role — which `createUsuario` only reaches here after checking the Roles
+ * permission.
+ *
+ * This used to be a blacklist of two names, `failed_attempts` and
+ * `locked_until`, and everything else went through. What that let past:
+ *
+ * - `id_rol`. The route asks only for `seguridad.crear`, and the permission
+ *   matrix treats Seguridad and Roles as separate modules that the Seguridad
+ *   screen lets an administrator tick separately. So a role holding
+ *   `seguridad.crear` and nothing else could POST
+ *   `{"user":"tmp","pass":"…","id_rol":1}`, log in as that account a second
+ *   later, and be a full administrator. `updateUsuario` refuses exactly that
+ *   reach and writes a `critical` line about it; the door beside it checked
+ *   nothing. That is the escalation this list closes.
+ * - `id`, choosing your own primary key on an autoincrement column.
+ * - `deletedAt`, an account born archived.
+ *
+ * And the reason it is a list of what is allowed rather than a list of what is
+ * not: every column added to this model from now on is otherwise accepted by
+ * default, and nobody adding one would think to come here. The two lockout
+ * fields it used to name are still refused — they are simply not on the list,
+ * which is also what stops whoever may create accounts from planting a
+ * `locked_until` far in the future on the account they create.
  */
-const CONTROL_FIELDS = ["failed_attempts", "locked_until"] as const;
+const CREATABLE_FIELDS = [...EDITABLE_FIELDS, "user", "pass"] as const;
 
-function editableFrom(body: unknown, mayAssignRoles: boolean): Record<string, unknown> {
+/** Only the named fields, and only the ones the body actually sent. */
+function pick(body: unknown, fields: readonly string[]): Record<string, unknown> {
   const source = (body ?? {}) as Record<string, unknown>;
-  const allowed: readonly string[] = mayAssignRoles
-    ? [...EDITABLE_FIELDS, ...ROLE_ASSIGNMENT_FIELDS]
-    : EDITABLE_FIELDS;
-
-  const patch: Record<string, unknown> = {};
-  for (const field of allowed) {
-    if (Object.prototype.hasOwnProperty.call(source, field)) patch[field] = source[field];
+  const chosen: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (Object.prototype.hasOwnProperty.call(source, field)) chosen[field] = source[field];
   }
-  return patch;
+  return chosen;
 }
 
-function withoutControlFields(body: unknown): Record<string, unknown> {
-  const patch = { ...((body ?? {}) as Record<string, unknown>) };
-  for (const field of CONTROL_FIELDS) delete patch[field];
-  return patch;
+function editableFrom(body: unknown, mayAssignRoles: boolean): Record<string, unknown> {
+  return pick(body, mayAssignRoles ? [...EDITABLE_FIELDS, ...ROLE_ASSIGNMENT_FIELDS] : EDITABLE_FIELDS);
+}
+
+/**
+ * No `mayAssignRoles` argument, unlike `editableFrom`: `createUsuario` has
+ * already refused the request outright without that permission, so by the time
+ * this runs the role is always allowed.
+ */
+function creatableFrom(body: unknown): Record<string, unknown> {
+  return pick(body, [...CREATABLE_FIELDS, ...ROLE_ASSIGNMENT_FIELDS]);
 }
 
 /**
@@ -339,7 +405,25 @@ export async function updateUserPass(req: Request, res: Response) {
     if (motivo) return res.status(400).json({ message: motivo });
 
     const hashedPass = await bcryptjs.hash(pass, BCRYPT_COST);
-    TempUsuario.set({ pass: hashedPass });
+    /**
+     * A new password lifts the lockout, in the same write.
+     *
+     * The lockout had no way out at all. `failed_attempts` is only ever cleared
+     * by a successful login, and a successful login is impossible while the
+     * account is locked, because the login answers before it compares anything.
+     * So the count only ever grew: five wrong guesses, wait out the minute, send
+     * one more, and from the fourth round on the wait pins itself at
+     * LOCKOUT_MAX_MINUTES. From there one request every quarter of an hour keeps
+     * the account shut indefinitely, from a single address, without coming near
+     * any rate-limit bucket. The only remedy was an UPDATE by hand in Postgres.
+     *
+     * And the everyday half of the same problem: an administrator resets a
+     * password precisely because somebody cannot get in. Leaving the lock on
+     * meant dictating the new password and having the login still answer
+     * "Usuario o contraseña incorrectos" for up to fifteen minutes, with neither
+     * of them able to tell that apart from having heard it wrong.
+     */
+    TempUsuario.set({ pass: hashedPass, failed_attempts: 0, locked_until: null });
     await TempUsuario.save();
     const isSelf = req.user?.id === Number(id);
     logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf }, severity: 'critical', ip_address: req.ip ?? null });
@@ -356,6 +440,54 @@ export async function deleteUsuario(req: Request, res: Response) {
   try {
     await UsuarioModel.destroy({ where: { id } });
     logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, severity: 'critical' });
+    return res.sendStatus(200);
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+}
+/**
+ * Lets a locked account back in.
+ *
+ * The valve. Until now a lockout could only be cleared by a successful login,
+ * and a locked account cannot log in successfully — see the comment in
+ * `updateUserPass`, which clears it as a side effect of a reset. That covered
+ * the case where the password also needs changing; this covers the case where it
+ * does not, and it is the one an administrator with a phone in their hand can
+ * actually reach.
+ *
+ * `seguridad.editar`, the same permission a password reset needs: undoing a
+ * lockout for somebody else is the same kind of act on the same kind of record.
+ * Not `requireSelfOrPermission` — a locked-out person has no session to call it
+ * with, and "unlock yourself" would not be a lockout.
+ *
+ * The design this came from (`docs/specs/2026-08-21-autenticacion-mfa-design.md`,
+ * §6) mitigates the same problem differently: the lockout would not apply to a
+ * login arriving with a valid remembered-device cookie. That cannot be built
+ * yet — remembered devices belong to a later plan and the table does not exist —
+ * so this endpoint is the provisional way out, and §8 of the same document
+ * already plans a rescue script beside it.
+ */
+export async function desbloquearUsuario(req: Request, res: Response) {
+  const { id } = req.params;
+  if (!(await can(req.user?.id_rol, "seguridad", "editar"))) {
+    return res.status(403).json({ message: "No tienes permiso para desbloquear usuarios." });
+  }
+  try {
+    const TempUsuario = await UsuarioModel.findOne({ where: { id } });
+    if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
+
+    const antes = {
+      failed_attempts: TempUsuario.dataValues.failed_attempts ?? 0,
+      locked_until: TempUsuario.dataValues.locked_until ?? null,
+    };
+    TempUsuario.set({ failed_attempts: 0, locked_until: null });
+    await TempUsuario.save();
+    // `critical`, like changing somebody else's password: this removes a
+    // protection from an account, and it is exactly the line to read when
+    // asking how an attacker got past a lockout. Recorded with what the
+    // lockout was, so the entry says what was undone and not merely that
+    // something was.
+    logAction({ id_usuario: req.user?.id, action: "ACCOUNT_UNLOCKED", entity: "Usuario", entity_id: Number(id), detail: `Desbloqueó la cuenta del usuario #${id}`, metadata: { before: antes }, severity: 'critical', ip_address: req.ip ?? null });
     return res.sendStatus(200);
   } catch (error) {
     return res.status(500).json({ message: error.message });

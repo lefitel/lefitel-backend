@@ -5,8 +5,20 @@
 // account. The arithmetic of the third is the part that goes wrong quietly —
 // an escalation with no ceiling is a button for locking a colleague out.
 
-import { describe, it, expect } from "vitest";
-import { estaBloqueada, siguienteBloqueo } from "./loginLimiters.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import express from "express";
+import request from "supertest";
+import type { RateLimitRequestHandler } from "express-rate-limit";
+import type { Request } from "express";
+import app from "../app.js";
+import {
+  accountBucketKey,
+  estaBloqueada,
+  ipBucketKey,
+  loginAccountIpLimiter,
+  loginIpLimiter,
+  siguienteBloqueo,
+} from "./loginLimiters.js";
 import { LOCKOUT_AFTER_FAILURES, LOCKOUT_MAX_MINUTES } from "../config/security.js";
 
 describe("estaBloqueada", () => {
@@ -50,5 +62,193 @@ describe("siguienteBloqueo", () => {
     const r = siguienteBloqueo(40);
     const minutos = (r.locked_until!.getTime() - Date.now()) / 60_000;
     expect(minutos).toBeLessThanOrEqual(LOCKOUT_MAX_MINUTES + 0.1);
+  });
+});
+
+/**
+ * The buckets themselves, which had no tests at all.
+ *
+ * Everything above this line covers the two pure functions at the bottom of
+ * `loginLimiters.ts`. Nothing touched the buckets, their keys, the rule that a
+ * login which works costs nothing, or the chain in `app.ts` — so taking
+ * `ipKeyGenerator` out of a key, taking the username out of the per-account
+ * key, or setting `skipSuccessfulRequests: false` all left 460 tests green.
+ *
+ * These read the counter out of each bucket directly, through `getKey`, instead
+ * of sending a hundred requests and watching for a 429. Same fact, measured
+ * where it lives.
+ */
+
+/** A fixed address, so the keys these tests assert on are known in advance. */
+const DESDE = "203.0.113.9";
+const CLAVE_IP = `ip:${DESDE}`;
+const claveCuenta = (user: string) => `ipu:${DESDE}:${user}`;
+
+function fakeReq(ip: string, body?: unknown): Request {
+  return { ip, body } as unknown as Request;
+}
+
+/**
+ * A one-route app around a single bucket, answering whatever the test asks for.
+ *
+ * `trust proxy` is one hop, the same as `app.ts`, so `req.ip` is the
+ * X-Forwarded-For value these tests send. That is what lets the expected key be
+ * written out in full above, instead of being whatever the loopback address
+ * happens to look like on this machine.
+ */
+function appAround(limiter: RateLimitRequestHandler, status: number) {
+  const bare = express();
+  bare.set("trust proxy", 1);
+  bare.use(express.json());
+  bare.post("/", limiter, (_req, res) => {
+    res.status(status).json({});
+  });
+  return bare;
+}
+
+const post = (target: express.Express, body: object) =>
+  request(target).post("/").set("X-Forwarded-For", DESDE).send(body);
+
+/**
+ * express-rate-limit refunds a skipped request from the response's own `finish`
+ * handler, which is asynchronous: by the time supertest has resolved, the
+ * refund may still be queued. One turn of the event loop is enough, and without
+ * it these assertions read the counter mid-flight and flake.
+ */
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+
+const hits = async (limiter: RateLimitRequestHandler, key: string) =>
+  (await limiter.getKey(key))?.totalHits;
+
+describe("the key a bucket counts against", () => {
+  it("names the address for the address bucket, and the account for the other", () => {
+    // The prefixes are not what keeps the buckets apart — each has a store of
+    // its own — but they say which bucket a key belongs to when it is read back
+    // out, and they are what would stop the two merging behind a shared store.
+    expect(ipBucketKey(fakeReq(DESDE))).toBe(CLAVE_IP);
+    expect(accountBucketKey(fakeReq(DESDE, { user: "isaias" }))).toBe(claveCuenta("isaias"));
+  });
+
+  it("folds the username to one case, and trims it", () => {
+    // Usernames are unique case-insensitively, so "Isaias" and "isaias" are one
+    // account and must share one budget. Without this, capitalising a guess
+    // buys a second, fresh bucket against the same target — and then a third.
+    for (const typed of ["Isaias", "ISAIAS", " isaias ", "\tIsAiAs\n"]) {
+      expect(accountBucketKey(fakeReq(DESDE, { user: typed })), typed).toBe(claveCuenta("isaias"));
+    }
+  });
+
+  it("does not read a username out of a body that has none", () => {
+    // These run before the controller, so they see bodies the controller would
+    // refuse: no field, the wrong type, a crafted object.
+    for (const body of [undefined, {}, { user: 7 }, { user: { ne: null } }, { user: ["isaias"] }]) {
+      expect(accountBucketKey(fakeReq(DESDE, body)), JSON.stringify(body)).toBe(claveCuenta(""));
+    }
+  });
+
+  it("folds an IPv6 address into its block rather than counting it whole", () => {
+    // Without `ipKeyGenerator` one holder of a /56 walks through billions of
+    // distinct keys, each with a budget of its own, and the address bucket
+    // stops nothing at all.
+    const dentro = ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2:ffff:ffff:ffff:ffff"];
+    expect(ipBucketKey(fakeReq(dentro[0]))).toBe(ipBucketKey(fakeReq(dentro[1])));
+    expect(ipBucketKey(fakeReq("2001:db8:1:100::1"))).not.toBe(
+      ipBucketKey(fakeReq("2001:db8:1:200::1")),
+    );
+    // And it is the block, not the address it was handed.
+    expect(ipBucketKey(fakeReq(dentro[0]))).not.toContain(dentro[0]);
+  });
+});
+
+describe("what each bucket spends", () => {
+  beforeEach(async () => {
+    // The buckets are module singletons shared with the real app, so the
+    // address key has to start each test empty. The account keys do not: every
+    // test below uses a username of its own.
+    await loginIpLimiter.resetKey(CLAVE_IP);
+  });
+
+  it("charges the address bucket for a login that fails", async () => {
+    const bare = appAround(loginIpLimiter, 400);
+    await post(bare, { user: "quienquiera" });
+    await settled();
+
+    expect(await hits(loginIpLimiter, CLAVE_IP)).toBe(1);
+  });
+
+  it("charges the address bucket nothing for a login that works", async () => {
+    // `skipSuccessfulRequests`. Without it the budget is spent by people
+    // getting in, and behind one NAT the whole office shares it — which is how
+    // the limiter this replaced put everybody out on day one.
+    const bare = appAround(loginIpLimiter, 200);
+    await post(bare, { user: "quienquiera" });
+    await settled();
+
+    expect(await hits(loginIpLimiter, CLAVE_IP)).toBe(0);
+  });
+
+  it("charges the account bucket under the username, however it was capitalised", async () => {
+    // The assertion this bucket exists for. Drop the username from the key and
+    // this record does not exist at all; keep it but stop folding case and the
+    // two requests land in two separate buckets and this reads 1.
+    const bare = appAround(loginAccountIpLimiter, 400);
+    await post(bare, { user: "Rebeca" });
+    await post(bare, { user: " REBECA " });
+    await settled();
+
+    expect(await hits(loginAccountIpLimiter, claveCuenta("rebeca"))).toBe(2);
+  });
+
+  it("keeps two accounts from the same address apart", async () => {
+    // The other half: were the key the address alone, one person failing to log
+    // in would be spending a colleague's budget from the same office.
+    const bare = appAround(loginAccountIpLimiter, 400);
+    await post(bare, { user: "camila" });
+    await post(bare, { user: "teodoro" });
+    await settled();
+
+    expect(await hits(loginAccountIpLimiter, claveCuenta("camila"))).toBe(1);
+    expect(await hits(loginAccountIpLimiter, claveCuenta("teodoro"))).toBe(1);
+  });
+
+  it("charges the account bucket nothing for a login that works", async () => {
+    const bare = appAround(loginAccountIpLimiter, 200);
+    await post(bare, { user: "marisol" });
+    await settled();
+
+    expect(await hits(loginAccountIpLimiter, claveCuenta("marisol"))).toBe(0);
+  });
+});
+
+describe("the chain the real login endpoint is mounted behind", () => {
+  beforeEach(async () => {
+    await loginIpLimiter.resetKey(CLAVE_IP);
+  });
+
+  it("puts a POST through both buckets", async () => {
+    // Both of them, in one request, on the app as `app.ts` assembled it. This
+    // was an anonymous arrow written at the mount: dropping either bucket from
+    // it changed nothing any test could see.
+    //
+    // An empty password is refused by `loginUsuario` before it looks anything
+    // up, so this needs no database — and a 400 is a failure, which is what
+    // these buckets count.
+    await request(app)
+      .post("/api/login")
+      .set("X-Forwarded-For", DESDE)
+      .send({ user: "Nicolasa", pass: "" });
+    await settled();
+
+    expect(await hits(loginIpLimiter, CLAVE_IP)).toBe(1);
+    expect(await hits(loginAccountIpLimiter, claveCuenta("nicolasa"))).toBe(1);
+  });
+
+  it("spends nothing on a GET, which is how the client checks its token", async () => {
+    // `GET /api/login` is `comprobarToken`, asked on every page load. Counting
+    // those would spend an office's failure budget on people already logged in.
+    await request(app).get("/api/login").set("X-Forwarded-For", DESDE);
+    await settled();
+
+    expect(await loginIpLimiter.getKey(CLAVE_IP)).toBeUndefined();
   });
 });

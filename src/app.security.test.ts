@@ -8,6 +8,7 @@
 import { describe, it, expect } from "vitest";
 import request from "supertest";
 import app from "./app.js";
+import { HSTS_MAX_AGE_SECONDS } from "./config/security.js";
 
 describe("security headers", () => {
   it("does not announce what it is running", async () => {
@@ -23,6 +24,18 @@ describe("security headers", () => {
   it("does not sniff content types", async () => {
     const res = await request(app).get("/api/login");
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("tells the browser never to come back over plain HTTP", async () => {
+    // Nothing asserted this header at all, so the whole option could go missing
+    // in a helmet upgrade — or `maxAge` be misspelled, which silently falls back
+    // to helmet's own much shorter default — and the tests would stay green.
+    // `includeSubDomains` is the half that is easiest to lose and the half that
+    // covers api.osefi.net.
+    const res = await request(app).get("/api/login");
+    expect(res.headers["strict-transport-security"]).toBe(
+      `max-age=${HSTS_MAX_AGE_SECONDS}; includeSubDomains`,
+    );
   });
 
   it("lets another origin load the photographs", async () => {

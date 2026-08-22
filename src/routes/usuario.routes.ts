@@ -3,6 +3,7 @@ import {
   createUsuario,
   deleteUsuario,
   desarchivarUsuario,
+  desbloquearUsuario,
   getUsuario,
   searchUsuario,
   searchUsuario_user,
@@ -25,6 +26,10 @@ const router = Router();
 router.post("/", requirePermission("seguridad", "crear"), createUsuario);
 router.delete("/:id", requirePermission("seguridad", "archivar"), deleteUsuario);
 router.patch("/:id/desarchivar", requirePermission("seguridad", "archivar"), desarchivarUsuario);
+// `editar` and not `archivar`: lifting a lockout is the same kind of act as
+// resetting a password, which is the other way out of one. PATCH like its
+// neighbour above — both flip a state on a row that already exists.
+router.patch("/:id/desbloquear", requirePermission("seguridad", "editar"), desbloquearUsuario);
 router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);
 
 // The full directory backs the security and bitácora screens.
