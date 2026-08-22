@@ -1,7 +1,9 @@
 import { Request, Response } from "express";
 import { Op } from "sequelize";
+import { sequelize } from "../database/sequelize.js";
 import { RolModel } from "../models/rol.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
+import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import bcryptjs from "bcryptjs";
 import { deleteImageFile } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
@@ -425,8 +427,36 @@ export async function updateUserPass(req: Request, res: Response) {
      */
     TempUsuario.set({ pass: hashedPass, failed_attempts: 0, locked_until: null });
     await TempUsuario.save();
-    const isSelf = req.user?.id === Number(id);
-    logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf }, severity: 'critical', ip_address: req.ip ?? null });
+
+    const isSelf = loggedUser.id === Number(id);
+    /**
+     * A new password ends the old sessions, which until now it did not.
+     *
+     * `pass_changed_at` has been on the table since the first migration of this
+     * plan and nothing read it, so changing a password — the thing you do
+     * *because* somebody else may know the old one — left every browser that
+     * knew it logged in, for up to thirty days. An administrator resetting the
+     * password of a leaver was doing nothing at all to the laptop in their bag.
+     *
+     * One exception, and only one: your own current session survives. Without
+     * it, changing your own password answers 200 and then refuses your very
+     * next request, which reads as the change having failed and invites doing it
+     * again. `except` is only passed when the account being changed is the
+     * caller's own — an administrator resetting somebody else must not spare
+     * anything, and their own session id would not be among that person's rows
+     * anyway.
+     *
+     * `id_sesion` is `undefined` on a request that arrived with the old bearer
+     * token, and `revokeAllSessionsOf` reads that as "spare nothing": there is
+     * no row to spare, the JWT keeps working until it expires, and every real
+     * session of that account is closed. Answering that case by sparing an
+     * unknown id would revoke nothing at all.
+     */
+    const revocadas = await revokeAllSessionsOf(Number(id), {
+      except: isSelf ? loggedUser.id_sesion : undefined,
+    });
+
+    logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf, sesiones_revocadas: revocadas }, severity: 'critical', ip_address: req.ip ?? null });
     res.status(200).json(withoutPass(TempUsuario));
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -438,8 +468,30 @@ export async function deleteUsuario(req: Request, res: Response) {
     return res.status(403).json({ message: "No tienes permiso para eliminar usuarios." });
   }
   try {
-    await UsuarioModel.destroy({ where: { id } });
-    logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, severity: 'critical' });
+    /**
+     * Archiving an account and ending its sessions, or neither.
+     *
+     * The `ON DELETE RESTRICT` on `sesiones.id_usuario` does nothing here and
+     * never will: this is a soft delete, the row stays where it is with a
+     * `deletedAt` on it, and no foreign key fires on an UPDATE. So archiving
+     * somebody used to leave every browser they were logged in on working
+     * until the session hit its own expiry — up to thirty days for the person
+     * whose access you just took away. `authenticate` refuses an archived
+     * account on the next request, which covers it from the moment this
+     * commits; revoking the rows is what makes the sessions screen honest and
+     * what closes the gap if that check is ever moved or cached.
+     *
+     * One transaction, because half of this is worse than none. Archived with
+     * live sessions is the hole itself; sessions killed without the archive is
+     * an account that looks fine to an administrator and cannot be used. If the
+     * revocation fails the archive rolls back, the caller gets a 500, and
+     * retrying does the whole thing.
+     */
+    const revocadas = await sequelize.transaction(async (transaction) => {
+      await UsuarioModel.destroy({ where: { id }, transaction });
+      return revokeAllSessionsOf(Number(id), { transaction });
+    });
+    logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, metadata: { sesiones_revocadas: revocadas }, severity: 'critical' });
     return res.sendStatus(200);
   } catch (error) {
     return res.status(500).json({ message: error.message });

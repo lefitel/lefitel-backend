@@ -37,6 +37,7 @@ const {
   findLiveSession,
   touchSession,
   revokeSession,
+  revokeSessionOf,
   revokeAllSessionsOf,
   listSessionsOf,
   purgeExpiredSessions,
@@ -213,6 +214,73 @@ describe("revoking", () => {
     expect(await revokeAllSessionsOf(7)).toBe(3);
     const [, options] = update.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
     expect(options.where).toMatchObject({ id_usuario: 7, revoked_at: null });
+  });
+
+  it("will not revoke one session without being told whose it is", async () => {
+    // The IDOR surface of this plan, asserted where it is actually decided.
+    // `DELETE /api/auth/sessions/:id` takes the id from the URL, so `id` alone
+    // in this `where` means any account with a session can close anybody
+    // else's. This repository has already shipped a `:id` route that trusted
+    // the URL, and it let any authenticated user make themselves an
+    // administrator.
+    update.mockResolvedValue([1]);
+    expect(await revokeSessionOf(7, "una-id")).toBe(true);
+    const [values, options] = update.mock.calls[0] as [Record<string, unknown>, { where: Record<string, unknown> }];
+    expect(values.revoked_at).toBeInstanceOf(Date);
+    // The exact where and not a subset: the whole point is that `id_usuario` is
+    // in there, and `toMatchObject({ id })` would pass with it missing.
+    expect(options.where).toEqual({ id: "una-id", id_usuario: 7, revoked_at: null });
+  });
+
+  it("says no when the update matched nothing, so the route can answer 404", async () => {
+    // Not yours, never existed, already closed — one answer for all three, so
+    // the endpoint cannot be used to find out which. A 403 would confirm the
+    // row exists and belongs to somebody.
+    update.mockResolvedValue([0]);
+    expect(await revokeSessionOf(7, "una-id")).toBe(false);
+  });
+
+  it("spares one session when asked, and only that one", async () => {
+    // What a password change needs: everything of that person's ends except the
+    // browser they changed it from, which otherwise gets a 200 followed
+    // immediately by a 401 and reads as the change having failed.
+    update.mockResolvedValue([2]);
+    await revokeAllSessionsOf(7, { except: "la-actual" });
+    const [, options] = update.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
+    expect(options.where).toMatchObject({ id_usuario: 7, revoked_at: null });
+    expect(boundOf(options.where.id, Op.ne)).toBe("la-actual");
+  });
+
+  it("revokes everything when the session to spare is undefined", async () => {
+    // The branch that matters most, and the one that fails silently if it is
+    // written as `if ("except" in options)`. A request that arrived on the old
+    // bearer token has no session row, so callers pass `undefined` straight
+    // through; written that way the clause becomes `id != NULL`, which is never
+    // true in SQL, so the update would match **nothing** and a password change
+    // would revoke no sessions at all — while answering 200.
+    update.mockResolvedValue([4]);
+    for (const options of [{}, { except: undefined }, { except: "" }]) {
+      update.mockClear();
+      expect(await revokeAllSessionsOf(7, options)).toBe(4);
+      const [, opts] = update.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
+      expect(opts.where, JSON.stringify(options)).toEqual({ id_usuario: 7, revoked_at: null });
+      expect(opts.where.id, JSON.stringify(options)).toBeUndefined();
+    }
+  });
+
+  it("runs inside the caller's transaction when it is given one", async () => {
+    // `deleteUsuario` archives an account and ends its sessions, and half of
+    // that is worse than none: archived with live sessions is the hole itself.
+    // Without the option reaching the query, the revocation would commit on its
+    // own and a rolled-back archive would leave somebody locked out of an
+    // account that still looks fine.
+    const transaction = { id: "una-transaccion" } as unknown as Parameters<
+      typeof revokeAllSessionsOf
+    >[1]["transaction"];
+    update.mockResolvedValue([1]);
+    await revokeAllSessionsOf(7, { transaction });
+    const [, options] = update.mock.calls[0] as [unknown, { transaction?: unknown }];
+    expect(options.transaction).toBe(transaction);
   });
 });
 

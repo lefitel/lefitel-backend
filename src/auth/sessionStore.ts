@@ -1,4 +1,4 @@
-import { Op } from "sequelize";
+import { Op, type Transaction, type WhereOptions } from "sequelize";
 import { SesionModel } from "../models/sesion.model.js";
 import { newSessionToken, hashSessionToken } from "./sessionToken.js";
 import {
@@ -123,11 +123,59 @@ export async function revokeSession(id: string): Promise<void> {
   await SesionModel.update({ revoked_at: new Date() }, { where: { id, revoked_at: null } });
 }
 
-/** End every live session of one person. Returns how many were ended. */
-export async function revokeAllSessionsOf(id_usuario: number): Promise<number> {
+/**
+ * End one session, but only if it belongs to this person.
+ *
+ * The `id_usuario` in the `where` is the whole function. `DELETE
+ * /api/auth/sessions/:id` takes the id from the URL, which is the caller's to
+ * write, so without it any account with a session could close anybody else's —
+ * and this repository has already shipped one `:id` route that trusted the URL
+ * (any authenticated user could make themselves an administrator). The filter
+ * lives in the query rather than in a check before it, so there is no read to
+ * forget and no window between reading and writing.
+ *
+ * Returns whether a row was actually ended, which is what lets the endpoint
+ * answer 404 for "not yours", "does not exist" and "already closed" with the
+ * same words. A 403 would confirm the row exists and belongs to somebody.
+ */
+export async function revokeSessionOf(id_usuario: number, id: string): Promise<boolean> {
   const [count] = await SesionModel.update(
     { revoked_at: new Date() },
-    { where: { id_usuario, revoked_at: null } },
+    { where: { id, id_usuario, revoked_at: null } },
+  );
+  return count > 0;
+}
+
+/**
+ * End every live session of one person. Returns how many were ended.
+ *
+ * `except` spares one session, and it exists for exactly one case: somebody
+ * changing their own password must not be thrown out of the browser they
+ * changed it from. Everything else — an administrator resetting somebody
+ * else's password, archiving an account, `POST /api/auth/logout-all` — passes
+ * nothing and ends them all.
+ *
+ * The truthiness check is load-bearing, not sloppiness. A request that arrived
+ * on the old JWT path has no session row, so `req.user.id_sesion` is
+ * `undefined`, and callers pass it straight through. Written as `if ("except"
+ * in options)` the clause would become `id != NULL`, which in SQL is never
+ * true, so the update would match **nothing** and the password change would
+ * revoke no sessions at all — the failure this whole function exists to
+ * prevent, arriving silently. Undefined and empty mean "spare nothing".
+ *
+ * `transaction` is here for `deleteUsuario`, which archives an account and ends
+ * its sessions and must not be able to do one without the other.
+ */
+export async function revokeAllSessionsOf(
+  id_usuario: number,
+  options: { except?: string; transaction?: Transaction } = {},
+): Promise<number> {
+  const where: WhereOptions<ISesion> = options.except
+    ? { id_usuario, revoked_at: null, id: { [Op.ne]: options.except } }
+    : { id_usuario, revoked_at: null };
+  const [count] = await SesionModel.update(
+    { revoked_at: new Date() },
+    { where, transaction: options.transaction },
   );
   return count;
 }

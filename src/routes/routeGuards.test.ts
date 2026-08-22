@@ -126,6 +126,29 @@ const WRITES = ["POST", "PUT", "PATCH", "DELETE"];
 
 const routes = mountedRoutes();
 
+/**
+ * The only routes that may run without `authenticate` in front of them.
+ *
+ * Named one by one rather than by prefix, which is what this used to do: the
+ * filter was `!r.path.startsWith("/api/login")`, so every route ever added
+ * under that prefix would have been exempt without anybody deciding it was.
+ * A list of exact routes cannot grow by accident, and the honesty check below
+ * makes it shrink when a route stops needing to be here.
+ *
+ * All three are the same case: they are what a credential is produced or
+ * checked by, so they cannot ask for one.
+ */
+const AUTHENTICATION_NOT_APPLICABLE = [
+  // The old door. Hands out a JWT and, since this plan, a session cookie too.
+  "POST /api/login/",
+  // `comprobarToken` — the app asks on every reload whether its token is still
+  // good. It verifies the token itself; going through `authenticate` would mean
+  // answering 401 instead of answering the question.
+  "GET /api/login/",
+  // The new door. Same reason as the first: it is what produces the session.
+  "POST /api/auth/login",
+];
+
 describe("the route table we are actually asserting about", () => {
   it("was read off the app, not guessed", () => {
     expect(routes.length).toBeGreaterThan(40);
@@ -136,10 +159,29 @@ describe("the route table we are actually asserting about", () => {
   });
 
   it("puts authentication in front of everything except logging in", () => {
+    const known = new Set(AUTHENTICATION_NOT_APPLICABLE);
     const open = routes
-      .filter((r) => !r.path.startsWith("/api/login"))
-      .filter((r) => !r.chain.includes("authenticate"));
-    expect(open, `rutas sin authenticate: ${JSON.stringify(open)}`).toEqual([]);
+      .filter((r) => !r.chain.includes("authenticate"))
+      .map((r) => `${r.method} ${r.path}`)
+      .filter((r) => !known.has(r))
+      .sort();
+
+    expect(open, `rutas sin authenticate:\n  ${open.join("\n  ")}`).toEqual([]);
+  });
+
+  it("keeps the unauthenticated list honest", () => {
+    // The same trap the two exception lists below guard against: a line here for
+    // a route that does authenticate turns the list into a place where an
+    // exemption can hide behind a name nobody questions later.
+    const stillOpen = new Set(
+      routes.filter((r) => !r.chain.includes("authenticate")).map((r) => `${r.method} ${r.path}`),
+    );
+    const stale = AUTHENTICATION_NOT_APPLICABLE.filter((r) => !stillOpen.has(r));
+
+    expect(
+      stale,
+      `ya autentican; bórralas de AUTHENTICATION_NOT_APPLICABLE:\n  ${stale.join("\n  ")}`,
+    ).toEqual([]);
   });
 });
 
@@ -156,6 +198,23 @@ const GATE_NOT_APPLICABLE = [
   // Serves three screens at once, one of which is your own profile photograph.
   // See upload.routes.ts.
   "POST /api/upload/",
+
+  // ── The session endpoints ───────────────────────────────────────────────
+  // Same reason for all four, and it is not "we did not get round to it":
+  // every one of them acts on the caller's own session and on nothing else.
+  // There is no role that may or may not log itself out, so there is no
+  // checkbox to ask for — the same argument `requireSelfOrPermission` makes
+  // for the profile routes, except that here there is not even another
+  // person's record these could be pointed at.
+  "POST /api/auth/login",
+  "POST /api/auth/logout",
+  "POST /api/auth/logout-all",
+  // The one that is not merely "your own" by construction: the id comes from
+  // the URL. What keeps it to your own rows is `revokeSessionOf`, which puts
+  // `id_usuario` in the same `where` as the id — not a permission. See
+  // `auth.controller.ts`, and `app.auth.test.ts` for the assertion that the
+  // filter is really in the query.
+  "DELETE /api/auth/sessions/:id",
 ];
 
 describe("who may change data", () => {
@@ -211,6 +270,13 @@ const READ_GATE_NOT_APPLICABLE = [
   // Your own permission matrix. Gating this would need a permission to learn
   // which permissions you hold.
   "GET /api/permisos/mias",
+  // Who you are and what you may do — the same argument as the line above, and
+  // the endpoint the new frontend asks on every reload.
+  "GET /api/auth/me",
+  // The devices *you* are logged in on. `listSessionsOf` takes the id from
+  // `req.user`, never from the request, so there is no other person's list this
+  // could return.
+  "GET /api/auth/sessions",
 
   // ── Everything below is the debt ────────────────────────────────────────
   // Reads that any logged-in account may call, whatever its role. Counted:

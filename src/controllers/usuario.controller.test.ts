@@ -19,6 +19,7 @@ const findOne = vi.fn();
 const create = vi.fn();
 const findAll = vi.fn();
 const restore = vi.fn();
+const destroy = vi.fn();
 
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: {
@@ -26,7 +27,24 @@ vi.mock("../models/usuario.model.js", () => ({
     create: (...args: unknown[]) => create(...args),
     findAll: (...args: unknown[]) => findAll(...args),
     restore: (...args: unknown[]) => restore(...args),
+    destroy: (...args: unknown[]) => destroy(...args),
   },
+}));
+// Two things this controller reaches for now that it ends sessions: the store,
+// and a transaction to end them in. Mocked rather than real — what is under
+// test is which sessions this controller asks to end and inside what, not the
+// SQL, which is `sessionStore.test.ts`'s business.
+//
+// The store also *has* to be mocked for this file to load at all: it imports
+// `sesion.model.ts`, which calls `UsuarioModel.hasMany` while being imported,
+// and `UsuarioModel` here is the plain object above with no such method.
+const revokeAllSessionsOf = vi.fn();
+vi.mock("../auth/sessionStore.js", () => ({
+  revokeAllSessionsOf: (...args: unknown[]) => revokeAllSessionsOf(...args),
+}));
+const transaction = vi.fn();
+vi.mock("../database/sequelize.js", () => ({
+  sequelize: { transaction: (...args: unknown[]) => transaction(...args) },
 }));
 vi.mock("../models/rol.model.js", () => ({ RolModel: { findByPk: vi.fn() } }));
 // The permission matrix is mocked rather than read: what is under test is what
@@ -55,7 +73,7 @@ const SELF = 7;
 const OTHER = 99;
 
 function call(
-  user: { id: number; id_rol: number } | undefined,
+  user: { id: number; id_rol: number; id_sesion?: string } | undefined,
   { params = {}, body = {} }: { params?: Record<string, unknown>; body?: unknown } = {},
 ) {
   const res = {
@@ -127,11 +145,19 @@ function written(set: ReturnType<typeof vi.fn>): Record<string, unknown> {
   return set.mock.calls[0][0] as Record<string, unknown>;
 }
 
+/** Stands in for the Sequelize transaction the archive runs inside. */
+const TRANSACCION = { id: "una-transaccion" };
+
 beforeEach(() => {
   vi.clearAllMocks();
   // The matrix as the migration seeds it: administration holds everything, and
   // the other roles hold nothing in these two modules.
   can.mockImplementation(async (rol: number) => rol === ADMIN);
+  destroy.mockResolvedValue(1);
+  revokeAllSessionsOf.mockResolvedValue(0);
+  // Runs the callback and hands it the stand-in, which is what lets the tests
+  // below check that the archive and the revocation received the *same* one.
+  transaction.mockImplementation(async (fn: (t: unknown) => Promise<unknown>) => fn(TRANSACCION));
 });
 
 describe("creating and archiving users", () => {
@@ -874,5 +900,153 @@ describe("username collisions", () => {
       expect(c.status).toBe(409);
       expect(c.message).not.toMatch(/constraint|duplicate key/i);
     });
+  });
+});
+
+/**
+ * What a new password does to the sessions that knew the old one.
+ *
+ * Nothing, until now. `pass_changed_at` has been on the `usuarios` table since
+ * the first migration of this plan and no code has ever read it, so changing a
+ * password — the thing you do precisely because somebody else may know the old
+ * one — left every browser that knew it logged in for up to thirty days. An
+ * administrator resetting the password of somebody who has left the company was
+ * doing nothing whatsoever to the laptop in their bag.
+ *
+ * The exception is the interesting half. Your own current session has to
+ * survive, or changing your own password answers 200 and then refuses your very
+ * next request, which reads as the change having failed and invites doing it
+ * again.
+ */
+describe("a new password ends the old sessions", () => {
+  const MI_SESION = "11111111-1111-4111-8111-111111111111";
+
+  it("ends the others and keeps the one it was changed from", async () => {
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+    revokeAllSessionsOf.mockResolvedValue(2);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO, id_sesion: MI_SESION },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(SELF, { except: MI_SESION });
+  });
+
+  it("ends every one of them when the request arrived on the old token", async () => {
+    // A request authenticated by the old JWT has no session row, so there is
+    // nothing to spare: everything real gets closed and the person comes back
+    // in. `undefined` reaching the store as "spare nothing" is what makes this
+    // work — see `sessionStore.test.ts`, where writing that check the obvious
+    // way revokes nothing at all.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(SELF, { except: undefined });
+  });
+
+  it("spares nothing when an administrator resets somebody else's", async () => {
+    // The case the whole thing is for. Sparing anything here would be sparing a
+    // session of the person being reset, chosen by an id belonging to the
+    // administrator doing the resetting.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN, id_sesion: MI_SESION },
+      { params: { id: String(OTHER) }, body: { pass: "una-clave-de-prueba" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(OTHER, { except: undefined });
+  });
+
+  it("ends nothing when the password was refused", async () => {
+    // Every refusal, one loop: a bad current password, a policy failure, and a
+    // request with no permission at all. None of them may close a session,
+    // because none of them changed anything.
+    const bcryptjs = (await import("bcryptjs")).default;
+
+    const casos = [
+      ["contraseña actual incorrecta", { pass: "una-clave-de-prueba", oldPass: "mala" }, false],
+      ["contraseña nueva demasiado corta", { pass: "corta", oldPass: "vieja" }, true],
+    ] as const;
+
+    for (const [what, body, compareOk] of casos) {
+      vi.clearAllMocks();
+      can.mockImplementation(async (rol: number) => rol === ADMIN);
+      vi.mocked(bcryptjs.compare).mockResolvedValue(compareOk as never);
+      const stored = storedUser();
+      findOne.mockResolvedValue(stored.model);
+
+      const c = call({ id: SELF, id_rol: TECNICO, id_sesion: MI_SESION }, { params: { id: String(SELF) }, body });
+      await updateUserPass(c.req, c.res);
+
+      expect(c.status, what).not.toBe(200);
+      expect(stored.save, what).not.toHaveBeenCalled();
+      expect(revokeAllSessionsOf, what).not.toHaveBeenCalled();
+    }
+  });
+});
+
+/**
+ * Archiving an account ends its sessions, in the same transaction.
+ *
+ * The `ON DELETE RESTRICT` on `sesiones.id_usuario` does nothing here and never
+ * will: this is a soft delete, the row stays where it is with a `deletedAt` on
+ * it, and no foreign key fires on an UPDATE. So archiving the technician who
+ * was let go used to leave his laptop working until the session reached its own
+ * expiry — up to thirty days.
+ *
+ * One transaction because half of this is worse than none. Archived with live
+ * sessions is the hole itself; sessions killed without the archive is an
+ * account that looks fine to an administrator and cannot be used.
+ */
+describe("archiving an account ends its sessions", () => {
+  it("archives and revokes inside one transaction", async () => {
+    revokeAllSessionsOf.mockResolvedValue(2);
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    // Both writes, and both carrying the *same* transaction. Either of them
+    // outside it would commit on its own, which is precisely the half-done
+    // state this is meant to make impossible.
+    expect(destroy).toHaveBeenCalledWith({ where: { id: String(OTHER) }, transaction: TRANSACCION });
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(OTHER, { transaction: TRANSACCION });
+  });
+
+  it("answers 500 rather than archiving an account whose sessions are still live", async () => {
+    // The rollback itself is Sequelize's, not ours. What this pins is that the
+    // failure is not swallowed: the caller is told, and retrying does the whole
+    // thing rather than leaving somebody archived with a working session.
+    revokeAllSessionsOf.mockRejectedValue(new Error("no se pudo revocar"));
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(500);
+  });
+
+  it("revokes nothing when the caller may not archive", async () => {
+    const c = call({ id: SELF, id_rol: TECNICO }, { params: { id: String(OTHER) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
   });
 });

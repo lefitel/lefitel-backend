@@ -40,6 +40,7 @@ import propietarioRoutes from "./routes/propietario.routes.js";
 import tipoObsRoutes from "./routes/tipoObs.routes.js";
 import usuarioRoutes from "./routes/usuario.routes.js";
 import loginRoutes from "./routes/login.routes.js";
+import authRoutes from "./routes/auth.routes.js";
 import reporteRoutes from "./routes/reporte.routes.js";
 import generadorRoutes from "./routes/generador.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
@@ -110,6 +111,11 @@ app.use(express.static(process.env.IMAGES_DIR ?? "/images"));
 // named middleware. Written out here it was an anonymous arrow nothing could
 // assert about.
 app.use("/api/login", loginRateLimit, loginRoutes);
+// No `authenticate` at the mount, unlike every router below it. `POST
+// /api/auth/login` is what produces a credential and cannot ask for one, so
+// each route in auth.routes.ts declares its own — which is also what makes the
+// exception visible on the line it applies to instead of here.
+app.use("/api/auth", authRoutes);
 
 app.use("/api/upload", authenticate, uploadRoutes);
 app.use("/api/reporte", authenticate, reporteRoutes);

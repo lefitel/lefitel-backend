@@ -33,6 +33,14 @@ vi.mock("bcryptjs", () => ({
 }));
 vi.mock("jsonwebtoken", () => ({ default: { sign: () => "un.token.firmado" } }));
 vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }));
+// Opening the session cookie is not what this file is about, and it cannot be
+// left real: `issueSession` reaches `sesion.model.ts`, which calls
+// `UsuarioModel.hasMany` while it is being imported — on the stub above, which
+// has no such method, so the whole suite would fail to load before running a
+// single assertion. `authenticate.test.ts` mocks the session store for the same
+// reason. What the old login now does with the cookie is asserted in
+// `login.session.test.ts`; nothing else in this file changed.
+vi.mock("../auth/issueSession.js", () => ({ issueSession: vi.fn() }));
 
 const { loginUsuario } = await import("./login.controller.js");
 
