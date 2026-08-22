@@ -9,6 +9,7 @@ declare global {
   }
 }
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import { httpLogger } from "./middleware/httpLogger.js";
 import jwt from "jsonwebtoken";
@@ -89,6 +90,9 @@ app.use(
   }),
 );
 app.use(express.json());
+// `res.cookie` is native to Express; `req.cookies` is not. Without this the
+// session can be handed out and never read back.
+app.use(cookieParser());
 app.use(
   cors({
     // No fallback in production: `index.ts` refuses to start without the

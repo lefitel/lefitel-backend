@@ -75,7 +75,11 @@ export const HSTS_MAX_AGE_SECONDS = 63072000;
 /** Variables the process refuses to start without, by environment. */
 export function requiredEnv(nodeEnv: string | undefined): string[] {
   const always = ["JWT_SECRET"];
-  return nodeEnv === "production" ? [...always, "CORS_ORIGIN"] : always;
+  // COOKIE_NAME must be `__Host-osefi_session` in production. A deployment
+  // that forgets it does not fail — it boots with a cookie missing the
+  // `__Host-` prefix's guarantee, shadowable from any subdomain, and nothing
+  // would report it.
+  return nodeEnv === "production" ? [...always, "CORS_ORIGIN", "COOKIE_NAME", "COOKIE_SECURE"] : always;
 }
 
 /**
@@ -159,3 +163,17 @@ export const SESSION_TOUCH_THROTTLE_MINUTES = 5;
  */
 export const SESSION_USER_AGENT_MAX = 255;
 export const SESSION_IP_MAX = 45;
+
+/**
+ * The session cookie's name, and whether it must be Secure.
+ *
+ * In production the name carries the `__Host-` prefix, which a browser only
+ * accepts on a cookie that has no `domain`, has `path=/`, and is `Secure`.
+ * That makes the cookie impossible to shadow from a subdomain by construction
+ * rather than by our own care.
+ *
+ * In development the prefix cannot be used, because `Secure` rules out
+ * `http://localhost`. Hence a variable rather than a constant.
+ */
+export const SESSION_COOKIE_NAME = process.env.COOKIE_NAME ?? "osefi_session";
+export const SESSION_COOKIE_SECURE = process.env.COOKIE_SECURE !== "false";
