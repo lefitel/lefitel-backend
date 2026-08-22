@@ -1,7 +1,7 @@
 import app from "./app.js";
 
 import dotenv from "dotenv";
-import { connectionSource, sequelize } from "./database/sequelize.js";
+import { sequelize } from "./database/sequelize.js";
 import { log } from "./utils/logger.js";
 import { requiredEnv, fillerHash } from "./config/security.js";
 import { createShutdown } from "./lifecycle.js";
@@ -66,45 +66,19 @@ process.on("uncaughtException", (err) => {
 
 const port = process.env.PORT || 3000;
 
-/**
- * Rewriting the schema to match the models is destructive: it drops and alters
- * real columns. It used to run whenever NODE_ENV was not "production", which
- * meant a container that merely forgot the variable reshaped the live database
- * on every boot. Then it took saying `DB_SYNC=true` — better, but a variable in
- * a file is one careless line away from pointing somewhere it should not.
- *
- * So asking is no longer enough. It also has to be a connection assembled from
- * the discrete PG_* variables, which is how a local database is configured; a
- * `DATABASE_URL` is how a hosted one is, and this refuses to touch those
- * whatever the flag says. Commenting out PG_DATABASE to debug for five minutes
- * used to be all it took to reshape production on the next boot.
- *
- * It also contradicts the migrations. Enable it only against a local database
- * you are willing to lose.
- */
-const syncRequested = process.env.DB_SYNC === "true";
-const shouldSyncSchema = syncRequested && connectionSource === "discrete";
-
 async function main() {
   bootLog.info(
     { entorno: process.env.NODE_ENV ?? "sin definir", nivel: process.env.LOG_LEVEL ?? "info" },
     `entorno ${process.env.NODE_ENV ?? "sin definir"}`,
   );
 
-  if (syncRequested && !shouldSyncSchema) {
-    bootLog.error(
-      "DB_SYNC=true pero la conexión viene de DATABASE_URL: NO se sincroniza. " +
-      "sync({ alter: true }) reescribe columnas reales y esa es la forma de una base alojada. " +
-      "Si de verdad quieres sincronizar, configura PG_DATABASE, PG_USER, PG_PASS, PG_IP y PG_PORT.",
-    );
-  }
-
-  if (shouldSyncSchema) {
-    bootLog.warn("DB_SYNC=true: sincronizando el esquema con los modelos");
-    await sequelize.sync({ alter: true });
-  } else {
-    await sequelize.authenticate();
-  }
+  // The schema comes from the migrations and only from them. `sync({ alter:
+  // true })` used to live here behind a flag; it drops any column the model
+  // does not declare, which for a model written with default timestamps
+  // against a table with explicit ones means dropping real data on boot. The
+  // flag was one careless line away from pointing at production, and with the
+  // session and factor tables coming, what it would take with it grew.
+  await sequelize.authenticate();
   bootLog.info("conexión establecida con PostgreSQL");
 
   /**
