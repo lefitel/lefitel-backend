@@ -154,6 +154,194 @@ describe.skipIf(!dbAvailable)("archived records stay out of every root", () => {
   });
 });
 
+describe.skipIf(!dbAvailable)("the three roots that were missing", () => {
+  it("gives one row per repair, not one per event that has one", async () => {
+    // A repair was only reachable as `evento.solucion`, a `toOneLatest` — the
+    // most recent one — so "what work was done in March" came out as one row
+    // per event whose latest repair fell in March. Five events carry two
+    // repairs, and those five second repairs could not be shown at all.
+    const total = await countReport(
+      { root: "solucion", columns: [{ path: "id" }], limit: 1 },
+      ADMIN,
+    );
+    const [row] = await sequelize.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM "solucions" s
+         JOIN "eventos" e ON e."id" = s."id_evento" AND e."deletedAt" IS NULL
+        WHERE s."deletedAt" IS NULL`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+
+    expect(total).toBe(Number(row.n));
+
+    // And it is more than the number of events that have one, which is the
+    // whole point: the difference is the repairs that were invisible.
+    const [conSolucion] = await sequelize.query<{ n: number }>(
+      `SELECT count(DISTINCT s."id_evento")::int AS n FROM "solucions" s
+         JOIN "eventos" e ON e."id" = s."id_evento" AND e."deletedAt" IS NULL
+        WHERE s."deletedAt" IS NULL`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+    expect(total).toBeGreaterThan(Number(conSolucion.n));
+  });
+
+  it("counts a city's poles and events the way a hand-written query does", async () => {
+    const built = buildQuery(
+      {
+        root: "ciudad",
+        columns: [
+          { path: "name" },
+          { path: "numPostes" },
+          { path: "numEventos" },
+          { path: "numPendientes" },
+        ],
+        sort: [{ path: "numEventos", dir: "desc" }],
+        limit: 5,
+      },
+      ADMIN,
+    );
+    const rows = await sequelize.query<Record<string, unknown>>(built.sql, {
+      bind: built.binds,
+      type: QueryTypes.SELECT,
+      logging: false,
+    });
+
+    const [key, postes, eventos, pendientes] = built.columns.map((c) => c.key);
+    for (const row of rows) {
+      const [truth] = await sequelize.query<{ postes: number; eventos: number; pend: number }>(
+        `SELECT
+           (SELECT count(*)::int FROM "postes" p WHERE p."deletedAt" IS NULL
+              AND (p."id_ciudadA" = c."id" OR p."id_ciudadB" = c."id")) AS postes,
+           (SELECT count(*)::int FROM "eventos" e
+              JOIN "postes" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL
+             WHERE e."deletedAt" IS NULL
+               AND (p."id_ciudadA" = c."id" OR p."id_ciudadB" = c."id")) AS eventos,
+           (SELECT count(*)::int FROM "eventos" e
+              JOIN "postes" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL
+             WHERE e."deletedAt" IS NULL AND e."state" IS NOT TRUE
+               AND (p."id_ciudadA" = c."id" OR p."id_ciudadB" = c."id")) AS pend
+           FROM "ciudads" c WHERE c."name" = $1 AND c."deletedAt" IS NULL LIMIT 1`,
+        { bind: [row[key]], type: QueryTypes.SELECT, logging: false },
+      );
+
+      expect(Number(row[postes]), `postes de ${String(row[key])}`).toBe(truth.postes);
+      expect(Number(row[eventos]), `eventos de ${String(row[key])}`).toBe(truth.eventos);
+      expect(Number(row[pendientes]), `pendientes de ${String(row[key])}`).toBe(truth.pend);
+    }
+  });
+
+  it("shows the cities that have nothing, which is why the root exists", async () => {
+    // Grouping events by city can only ever show the cities that have events.
+    // The thirteen with no pole at all are invisible from every other root, and
+    // "where have we not been yet" is a question somebody asks.
+    const built = buildQuery(
+      {
+        root: "ciudad",
+        columns: [{ path: "name" }, { path: "numPostes" }],
+        filters: { op: "and", conditions: [{ path: "numPostes", operator: "eq", value: 0 }] },
+        limit: 200,
+      },
+      ADMIN,
+    );
+    const rows = await sequelize.query<Record<string, unknown>>(built.sql, {
+      bind: built.binds,
+      type: QueryTypes.SELECT,
+      logging: false,
+    });
+    const [truth] = await sequelize.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM "ciudads" c WHERE c."deletedAt" IS NULL
+         AND NOT EXISTS (SELECT 1 FROM "postes" p WHERE p."deletedAt" IS NULL
+           AND (p."id_ciudadA" = c."id" OR p."id_ciudadB" = c."id"))`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+
+    expect(rows).toHaveLength(Number(truth.n));
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
+  it("does not add up across cities, and says so in the header", async () => {
+    // A pole stands on a tramo and belongs to both of its cities, so the column
+    // counts it twice. That is right per row and false as a total, which is
+    // exactly the shape of defect two audits found — a number that reads
+    // perfectly under an honest header. The header is the only defence, so the
+    // label has to carry the unit, and this pins it.
+    const built = buildQuery(
+      { root: "ciudad", columns: [{ path: "numPostes" }], limit: 200 },
+      ADMIN,
+    );
+    expect(built.columns[0].label).toContain("tramos");
+
+    const rows = await sequelize.query<Record<string, unknown>>(built.sql, {
+      bind: built.binds,
+      type: QueryTypes.SELECT,
+      logging: false,
+    });
+    const suma = rows.reduce((total, row) => total + Number(row[built.columns[0].key]), 0);
+    const [postes] = await sequelize.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM "postes" WHERE "deletedAt" IS NULL`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+
+    // Nearly twice: every pole counts at both ends, except the two whose two
+    // ends are the same city. Asserted rather than left as a surprise.
+    expect(suma).toBeGreaterThan(Number(postes.n));
+    expect(suma).toBeLessThanOrEqual(Number(postes.n) * 2);
+  });
+
+  it("counts what each person registered, and only what the schema records", async () => {
+    // `revicions` and `solucions` carry no `id_usuario`, so an inspection and a
+    // repair have no recorded author. This root can only answer for events and
+    // poles, and that limit belongs in a test so nobody reads more into the
+    // report than it says.
+    const built = buildQuery(
+      {
+        root: "usuario",
+        columns: [{ path: "user" }, { path: "numEventos" }, { path: "numPostes" }],
+        limit: 50,
+      },
+      ADMIN,
+    );
+    const rows = await sequelize.query<Record<string, unknown>>(built.sql, {
+      bind: built.binds,
+      type: QueryTypes.SELECT,
+      logging: false,
+    });
+    const [eventos] = built.columns.slice(1).map((c) => c.key);
+    const suma = rows.reduce((total, row) => total + Number(row[eventos] ?? 0), 0);
+
+    // One event has exactly one author, so unlike the city columns this one
+    // does add up — but only over the events whose author still exists. Two
+    // gaps sit between this total and the 1.376 events, and both belong in a
+    // test rather than in somebody's afternoon:
+    //
+    //   211 events carry no `id_usuario` at all (imported data), and
+    //    70 more were registered by one of the six archived accounts, which a
+    //       per-user report cannot show because the account is not a row.
+    //
+    // So a report of "events per person" accounts for 1.095 of 1.376. Anyone
+    // summing the column and comparing it against the event count needs to know
+    // that, and the number is asserted so a change in it is noticed.
+    const [truth] = await sequelize.query<{ vivos: number; total: number; huerfanos: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM "eventos" e
+            JOIN "usuarios" u ON u."id" = e."id_usuario" AND u."deletedAt" IS NULL
+           WHERE e."deletedAt" IS NULL) AS vivos,
+         (SELECT count(*)::int FROM "eventos" WHERE "deletedAt" IS NULL) AS total,
+         (SELECT count(*)::int FROM "eventos" WHERE "deletedAt" IS NULL
+            AND "id_usuario" IS NULL) AS huerfanos`,
+      { type: QueryTypes.SELECT, logging: false },
+    );
+    expect(suma).toBe(Number(truth.vivos));
+    expect(Number(truth.vivos)).toBeLessThan(Number(truth.total));
+    expect(Number(truth.huerfanos)).toBeGreaterThan(0);
+
+    // And there is no way to ask for inspections here, because there is no
+    // column to ask about.
+    expect(() =>
+      buildQuery({ root: "usuario", columns: [{ path: "numRevisiones" }] }, ADMIN),
+    ).toThrow(/no existe/);
+  });
+});
+
 describe.skipIf(!dbAvailable)("a value nobody knows stays unknown", () => {
   it("does not report zero days open for an event with no date", async () => {
     // `GREATEST` ignores nulls instead of propagating them, so `GREATEST(0,

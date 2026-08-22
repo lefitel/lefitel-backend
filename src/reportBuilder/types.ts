@@ -126,6 +126,19 @@ export interface CalculatedDef {
   semantic?: FieldSemantic;
   /** Set when the expression exposes personal data. See FieldDef. */
   staffOnly?: boolean;
+  /**
+   * Only offered by the picker when this entity is the report's root.
+   *
+   * For summaries that only mean something as "one row per X". A city's three
+   * counts are the reason a city root exists, and they are also inherited by
+   * every path that reaches a city — so adding them took the field list of an
+   * event report from 78 entries to 132, and "eventos en los tramos de la
+   * ciudad A del poste de este evento" is not a column anybody was looking for.
+   *
+   * This prunes the *menu*, not the language: a stored configuration that names
+   * one still builds and still runs, because the SQL was always valid.
+   */
+  rootOnly?: boolean;
 }
 
 export interface EntityDef {
@@ -134,6 +147,16 @@ export interface EntityDef {
   label: string;
   /** Whether the table has a deletedAt column. `rols` does not. */
   paranoid: boolean;
+  /**
+   * Set when the entity *is* personal data, which hides it as a query root.
+   *
+   * Separate from the per-field flag, and needed because of what a root is: a
+   * root whose every field is hidden is still offered in the picker as a level
+   * of detail, and choosing it gives an empty report and an error. Hiding the
+   * whole question is the honest answer. Reached through a relation the fields
+   * keep deciding for themselves.
+   */
+  staffOnly?: boolean;
   fields: Record<string, FieldDef>;
   relations: Record<string, RelationDef>;
   calculated?: Record<string, CalculatedDef>;

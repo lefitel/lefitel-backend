@@ -135,6 +135,30 @@ class JoinPlan {
 const own = <T>(record: Record<string, T>, key: string): T | undefined =>
   typeof key === "string" && Object.hasOwn(record, key) ? record[key] : undefined;
 
+/**
+ * The root of a report, or a sentence saying why it is not one.
+ *
+ * Both builders asked the same two questions in two places, and a third
+ * question had to be added to both: whether this viewer may use this root at
+ * all. `usuario` is a level of detail made entirely of other people's personal
+ * data, so for anyone without `seguridad.ver` it does not exist — and the
+ * message says exactly that rather than naming the table.
+ */
+function rootOrThrow(key: string, viewer: Viewer): EntityDef {
+  if (!catalog.roots.includes(key)) {
+    throw new ReportConfigError(
+      `"${String(key)}" no es un nivel de detalle válido para un reporte.`,
+    );
+  }
+  const entity = entityOrThrow(key);
+  if (!isVisible(entity.staffOnly, viewer)) {
+    throw new ReportConfigError(
+      `No tiene permiso para hacer reportes sobre "${entity.label}".`,
+    );
+  }
+  return entity;
+}
+
 const entityOrThrow = (key: string): EntityDef => {
   const entity = own(catalog.entities, key);
   if (!entity) throw new ReportConfigError(`Entidad desconocida: ${key}`);
@@ -962,11 +986,6 @@ export function buildQuery(config: ReportConfig, viewer: Viewer): BuiltQuery {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new ReportConfigError("La configuración del reporte no es válida.");
   }
-  if (!catalog.roots.includes(config.root)) {
-    throw new ReportConfigError(
-      `"${String(config.root)}" no es un nivel de detalle válido para un reporte.`,
-    );
-  }
   if (!Array.isArray(config.columns) || config.columns.length === 0) {
     throw new ReportConfigError("El reporte necesita al menos una columna.");
   }
@@ -985,7 +1004,7 @@ export function buildQuery(config: ReportConfig, viewer: Viewer): BuiltQuery {
     throw new ReportConfigError(`El reporte tiene demasiados criterios de orden (máximo ${MAX_SORTS}).`);
   }
 
-  const rootEntity = entityOrThrow(config.root);
+  const rootEntity = rootOrThrow(config.root, viewer);
   const plan = new JoinPlan("t0");
   const binds: unknown[] = [];
 
@@ -1232,12 +1251,7 @@ export function buildCountQuery(config: ReportConfig, viewer: Viewer): { sql: st
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new ReportConfigError("La configuración del reporte no es válida.");
   }
-  if (!catalog.roots.includes(config.root)) {
-    throw new ReportConfigError(
-      `"${String(config.root)}" no es un nivel de detalle válido para un reporte.`,
-    );
-  }
-  const rootEntity = entityOrThrow(config.root);
+  const rootEntity = rootOrThrow(config.root, viewer);
   const plan = new JoinPlan("t0");
   const binds: unknown[] = [];
 

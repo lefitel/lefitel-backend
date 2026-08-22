@@ -31,11 +31,66 @@ const ciudad: EntityDef = {
   label: "Ciudad",
   paranoid: true,
   fields: {
+    // Exposed because three cities share a name: without the id, two rows of a
+    // city-rooted report are indistinguishable.
+    id: { column: "id", kind: "number", label: "ID de la ciudad" },
     name: { column: "name", kind: "string", label: "Nombre" },
     lat: { column: "lat", kind: "number", label: "Latitud", decimals: true },
     lng: { column: "lng", kind: "number", label: "Longitud", decimals: true },
   },
   relations: {},
+  /**
+   * The counts that make a city worth a row of its own.
+   *
+   * **Every one of these counts a pole in both of its cities**, and that is not
+   * a defect: a pole stands on a tramo between two cities and belongs to both
+   * ends. But it means the column does not add up — summed over the 98 cities,
+   * "Postes en sus tramos" gives 3.080 against 1.541 real poles (twice, less
+   * the two poles whose two ends are the same city). The generator never totals
+   * a column for you, so the risk is somebody doing it in a spreadsheet, and
+   * the only defence is the header: every label here says "en sus tramos" so
+   * the unit is named where it will be read.
+   *
+   * A city is reached through no relation, so these are the only way to see it
+   * from here — and the reason a city root exists at all is the zeros:
+   * grouping events by city shows the cities that *have* events, and never the
+   * 13 that have no pole at all.
+   */
+  calculated: {
+    numPostes: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Postes en sus tramos",
+      rootOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.poste}" p WHERE p."deletedAt" IS NULL` +
+        ` AND (p."id_ciudadA" = ${a}."id" OR p."id_ciudadB" = ${a}."id"))`,
+    },
+    numEventos: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Eventos en sus tramos",
+      rootOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.evento}" e` +
+        ` JOIN "${TABLE.poste}" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL` +
+        ` WHERE e."deletedAt" IS NULL` +
+        ` AND (p."id_ciudadA" = ${a}."id" OR p."id_ciudadB" = ${a}."id"))`,
+    },
+    // `state` is nullable with no default and the app treats anything but true
+    // as pending, so IS NOT TRUE keeps eventos = pendientes + resueltos.
+    numPendientes: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Eventos pendientes en sus tramos",
+      rootOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.evento}" e` +
+        ` JOIN "${TABLE.poste}" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL` +
+        ` WHERE e."deletedAt" IS NULL AND e."state" IS NOT TRUE` +
+        ` AND (p."id_ciudadA" = ${a}."id" OR p."id_ciudadB" = ${a}."id"))`,
+    },
+  },
 };
 
 const material: EntityDef = {
@@ -96,13 +151,29 @@ const obs: EntityDef = {
   },
 };
 
+/**
+ * A person, and therefore personal data end to end.
+ *
+ * `staffOnly` on the entity is what hides it as a *root*: the fields already
+ * carried the flag, but a root with every field hidden is a level of detail
+ * that offers nothing, which is worse than not offering it. Reached through
+ * `evento.usuario` the per-field flags still do the work.
+ *
+ * As a root it answers "who has been registering what" — and answers it only
+ * halfway, because `revicions` and `solucions` carry no `id_usuario` at all.
+ * An inspection and a repair have no recorded author in this schema; the
+ * bitácora knows (1.319 ADD_REVISION entries do name their user) and the
+ * business tables do not. So no report here can say who inspects the most.
+ */
 const usuario: EntityDef = {
   // `pass` is deliberately absent. A test asserts no credential field ever
   // appears in the catalog.
   table: TABLE.usuario,
   label: "Usuario",
   paranoid: true,
+  staffOnly: true,
   fields: {
+    id: { column: "id", kind: "number", label: "ID del usuario", staffOnly: true },
     name: { column: "name", kind: "string", label: "Nombre del usuario", staffOnly: true },
     lastname: { column: "lastname", kind: "string", label: "Apellido del usuario", staffOnly: true },
     user: { column: "user", kind: "string", label: "Usuario", staffOnly: true },
@@ -111,18 +182,61 @@ const usuario: EntityDef = {
   relations: {
     rol: { kind: "toOne", target: "rol", label: "Rol", localKey: "id_rol", staffOnly: true },
   },
+  // Only what the schema actually records. There is no `id_usuario` on
+  // `revicions` or `solucions`, so "revisiones hechas" cannot be counted here
+  // at all — see the note above the entity.
+  calculated: {
+    numEventos: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Eventos registrados",
+      rootOnly: true,
+      staffOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.evento}" e` +
+        ` WHERE e."id_usuario" = ${a}."id" AND e."deletedAt" IS NULL)`,
+    },
+    numPostes: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Postes dados de alta",
+      rootOnly: true,
+      staffOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.poste}" p` +
+        ` WHERE p."id_usuario" = ${a}."id" AND p."deletedAt" IS NULL)`,
+    },
+  },
 };
 
+/**
+ * A repair that was carried out.
+ *
+ * Reachable from an event as `solucion` — a `toOneLatest`, so *the most recent
+ * one* — and that was the only way in, which made a whole question
+ * unanswerable: "what work was done in March" came out as one row per event
+ * whose latest repair fell in March, never one row per repair. Five events
+ * carry two solutions, and those five second repairs could not be shown at all.
+ *
+ * So it is a root as well. The relation up to the event is `required`, like
+ * revision's: a repair whose event was archived is history, not work in hand,
+ * and leaving it in would show a row with every event column empty.
+ */
 const solucion: EntityDef = {
   table: TABLE.solucion,
   label: "Solución",
   paranoid: true,
   fields: {
+    id: { column: "id", kind: "number", label: "ID de la solución" },
     description: { column: "description", kind: "string", label: "Descripción de la solución" },
     date: { column: "date", kind: "date", label: "Fecha de solución" },
     image: { column: "image", kind: "image", label: "Foto de la solución" },
   },
-  relations: {},
+  relations: {
+    evento: {
+      kind: "toOne", target: "evento", label: "Evento", localKey: "id_evento", required: true,
+    },
+  },
 };
 
 /**
@@ -349,7 +463,19 @@ export const catalog: Catalog = {
     rol,
   },
   // Each root defines what a single row of the report represents.
-  roots: ["evento", "poste", "revision", "eventoObs"],
+  /**
+   * Each root defines what one row means, so this list is the set of questions
+   * the generator can answer. The four facts came first — an event, a pole, an
+   * inspection, an observation. `solucion` is the fifth fact and was missing.
+   *
+   * `ciudad` and `usuario` are dimensions, and a dimension earns a root for one
+   * reason only: **the zeros**. Grouping events by city shows the cities that
+   * have events and never the 13 with no pole at all; the same for the accounts
+   * that have registered nothing. Everything else a dimension can answer is
+   * already reachable by grouping, which is why propietario (12), obs (32),
+   * tipoObs (4), material (3) and rol (3) are deliberately not here.
+   */
+  roots: ["evento", "poste", "revision", "eventoObs", "solucion", "ciudad", "usuario"],
 };
 
 /** Maximum relation hops allowed in a path, counted from the root. */

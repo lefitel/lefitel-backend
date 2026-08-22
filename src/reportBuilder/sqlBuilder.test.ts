@@ -1223,8 +1223,86 @@ describe("buildQuery — malformed input", () => {
 
 describe("buildCountQuery — root validation", () => {
   it("rejects a non-root entity even when called directly", () => {
-    expect(() => buildCountQuery({ root: "usuario", columns: [{ path: "name" }] }, ADMIN))
+    // `propietario` exists in the catalog and is deliberately not a root: with
+    // twelve rows and no owner lacking poles, there are no zeros to see, and
+    // everything else it can answer comes from grouping. This used to say
+    // "usuario", which *became* a root — and the assertion silently stopped
+    // testing anything until it failed.
+    expect(() => buildCountQuery({ root: "propietario", columns: [{ path: "name" }] }, ADMIN))
       .toThrow(ReportConfigError);
+  });
+
+  it("counts the roots the same way buildQuery accepts them", () => {
+    // Both builders had the same two checks written out twice, and a third had
+    // to be added to both. They share one function now, and this is what says
+    // they still agree.
+    for (const root of ["evento", "poste", "revision", "eventoObs", "solucion", "ciudad"]) {
+      const columns = [{ path: root === "ciudad" ? "name" : "id" }];
+      expect(() => buildQuery({ root, columns }, ADMIN), `buildQuery ${root}`).not.toThrow();
+      expect(() => buildCountQuery({ root, columns }, ADMIN), `count ${root}`).not.toThrow();
+    }
+  });
+});
+
+describe("buildQuery — a root that is personal data", () => {
+  it("refuses the whole level of detail, not just its fields", () => {
+    // A root made entirely of other people's personal data. The per-field flags
+    // would have hidden every column and left the level of detail itself on
+    // offer: choosing it gave an empty report and an error, which is a worse
+    // answer than not offering the question.
+    expect(() => buildQuery({ root: "usuario", columns: [{ path: "id" }] }, OPERATIVO))
+      .toThrow(/permiso/);
+    expect(() => buildCountQuery({ root: "usuario", columns: [{ path: "id" }] }, OPERATIVO))
+      .toThrow(/permiso/);
+
+    expect(() => buildQuery({ root: "usuario", columns: [{ path: "id" }] }, ADMIN)).not.toThrow();
+  });
+
+  it("does not offer it in the picker either", () => {
+    const forStaff = buildCatalogView(ADMIN).roots.map((r) => r.key);
+    const forEveryone = buildCatalogView(OPERATIVO).roots.map((r) => r.key);
+
+    expect(forStaff).toContain("usuario");
+    expect(forEveryone).not.toContain("usuario");
+    // And nothing else disappeared with it.
+    expect(forEveryone).toContain("solucion");
+    expect(forEveryone).toContain("ciudad");
+  });
+});
+
+describe("the picker does not offer its way home the long way round", () => {
+  it("never walks back into an entity the path is already inside", () => {
+    // An event report listed a group called "Evento › Última revisión ›
+    // Evento": the description of the very event being reported on, reached by
+    // a detour, and under it the same pole again. Thirty-three of seventy-eight
+    // fields were that, and adding one relation to Solución doubled it.
+    for (const root of buildCatalogView(ADMIN).roots) {
+      for (const field of root.fields) {
+        const hops = field.path.split(".").slice(0, -1);
+        expect(
+          new Set(hops).size,
+          `${root.key}: ${field.path} pasa dos veces por lo mismo`,
+        ).toBe(hops.length);
+      }
+      // The group label is what a person reads, so it must not repeat either.
+      for (const field of root.fields) {
+        const parts = field.group.split(" › ");
+        expect(new Set(parts).size, `${root.key}: grupo repetido en "${field.group}"`)
+          .toBe(parts.length);
+      }
+    }
+  });
+
+  it("still offers two relations that point at the same entity", () => {
+    // `ciudadA` and `ciudadB` both lead to Ciudad from the same pole. Neither
+    // is inside the other, so pruning cycles must not touch them — the tramo is
+    // the pair, and losing one end would lose the report.
+    const groups = buildCatalogView(ADMIN).roots
+      .find((r) => r.key === "poste")!
+      .fields.map((f) => f.group);
+
+    expect(groups).toContain("Poste › Ciudad A");
+    expect(groups).toContain("Poste › Ciudad B");
   });
 });
 
