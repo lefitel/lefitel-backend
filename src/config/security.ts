@@ -147,3 +147,15 @@ export const SESSION_ABSOLUTE_DAYS = 30;
  * UPDATEs and two thousand dead tuples on one row.
  */
 export const SESSION_TOUCH_THROTTLE_MINUTES = 5;
+
+/**
+ * Widths of `sesiones.user_agent` and `sesiones.ip_address`.
+ *
+ * These already exist twice — as literal column widths in `sesion.model.ts`
+ * and again in the migration that created them — so the session store reads
+ * the number from here instead of holding a third silent copy in a `.slice`
+ * call, the kind of copy that keeps truncating at the old width the day the
+ * column actually grows.
+ */
+export const SESSION_USER_AGENT_MAX = 255;
+export const SESSION_IP_MAX = 45;

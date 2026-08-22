@@ -4,6 +4,14 @@
 // the conditions of what gets read. A session that stays valid after being
 // revoked, or one whose lookup forgets to check expiry, is the whole reason
 // this table exists — so those are the assertions, not the happy path.
+//
+// Several checks below read a Sequelize operator clause (`{ [Op.gt]: ... }`)
+// directly instead of `JSON.stringify`-ing the `where` and matching a regex
+// against it. `JSON.stringify` drops Symbol-keyed properties entirely, so a
+// stringified clause can prove a *key* like `expires_at` is present but can
+// never prove which operator or bound it holds — an `Op.gt` flipped to
+// `Op.lt` (a query that returns only dead rows) stringifies to the exact
+// same text as the correct one.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Op } from "sequelize";
@@ -34,7 +42,12 @@ const {
   purgeExpiredSessions,
 } = await import("./sessionStore.js");
 const { hashSessionToken } = await import("./sessionToken.js");
-const { SESSION_IDLE_DAYS, SESSION_ABSOLUTE_DAYS } = await import("../config/security.js");
+const {
+  SESSION_IDLE_DAYS,
+  SESSION_ABSOLUTE_DAYS,
+  SESSION_USER_AGENT_MAX,
+  SESSION_IP_MAX,
+} = await import("../config/security.js");
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -47,6 +60,10 @@ beforeEach(() => {
 const written = () => create.mock.calls[0][0] as Record<string, unknown>;
 /** The `where` the store used to look a session up. */
 const lookedUpWith = () => (findOne.mock.calls[0][0] as { where: Record<string, unknown> }).where;
+/** The bound of a `{ [Op.x]: value }` clause, read past the Symbol key. */
+const boundOf = (clause: unknown, op: symbol) => (clause as Record<symbol, unknown>)[op];
+/** The operators actually present on a `{ [Op.x]: value }` clause. */
+const opsOf = (clause: unknown) => Object.getOwnPropertySymbols(clause as object);
 
 describe("createSession", () => {
   it("never writes the token itself", async () => {
@@ -68,20 +85,46 @@ describe("createSession", () => {
     expect(dias).toBeLessThan(SESSION_IDLE_DAYS + 0.01);
   });
 
+  it("writes a complete, well-formed row", async () => {
+    // Cheap insurance: dropping id_usuario, created_at, last_used_at or the
+    // revoked_at: null would pass every other test here and fail in
+    // production against a NOT NULL column instead.
+    await createSession(7, {});
+    const row = written();
+    expect(row.id_usuario).toBe(7);
+    expect(row.created_at).toBeInstanceOf(Date);
+    expect(row.last_used_at).toBeInstanceOf(Date);
+    expect(row.expires_at).toBeInstanceOf(Date);
+    expect(row.revoked_at).toBeNull();
+  });
+
   it("truncates a browser's absurd user agent instead of failing the insert", async () => {
-    await createSession(7, { userAgent: "x".repeat(400) });
-    expect(String(written().user_agent).length).toBeLessThanOrEqual(255);
+    const enviado = "x".repeat(400);
+    await createSession(7, { userAgent: enviado });
+    // Not just "short enough": the stored value has to be the input's own
+    // prefix, or a function that always returned e.g. an empty string would
+    // pass a bare length check too.
+    expect(written().user_agent).toBe(enviado.slice(0, SESSION_USER_AGENT_MAX));
+    expect(String(written().user_agent).length).toBe(SESSION_USER_AGENT_MAX);
   });
 
   it("truncates an oversized IP instead of failing the insert", async () => {
-    // `ip_address` is STRING(45), the length of one IPv6 address. Behind the
-    // `trust proxy` this server runs with, `X-Forwarded-For` arrives as a
-    // comma-separated chain of every hop once there is more than one, which
-    // runs past that easily. Postgres does not truncate to fit a column: an
-    // oversized value fails the insert outright (error 22001), which would
-    // turn a login into a 500 instead of a session.
-    await createSession(7, { ip: "1".repeat(400) });
-    expect(String(written().ip_address).length).toBeLessThanOrEqual(45);
+    // `ip_address` is STRING(SESSION_IP_MAX), the length of one IPv6 address.
+    // Postgres does not truncate to fit a column: an oversized value fails
+    // the insert outright (error 22001), which would turn a login into a 500
+    // instead of a session.
+    const enviado = "1".repeat(400);
+    await createSession(7, { ip: enviado });
+    expect(written().ip_address).toBe(enviado.slice(0, SESSION_IP_MAX));
+    expect(String(written().ip_address).length).toBe(SESSION_IP_MAX);
+  });
+
+  it("keeps only the first hop of a comma-separated forwarded-for chain", async () => {
+    // The realistic shape of an oversized ip, if `trust proxy` were ever
+    // misconfigured: several addresses, not one long one. The client's own
+    // address is the first, and is what a session list should show.
+    await createSession(7, { ip: "203.0.113.5, 10.0.0.1, 10.0.0.2" });
+    expect(written().ip_address).toBe("203.0.113.5");
   });
 });
 
@@ -101,8 +144,19 @@ describe("findLiveSession", () => {
 
   it("requires the session not to have expired", async () => {
     findOne.mockResolvedValue(null);
+    const before = Date.now();
     await findLiveSession("t");
-    expect(JSON.stringify(lookedUpWith())).toMatch(/expires_at/);
+    const after = Date.now();
+    const clause = lookedUpWith().expires_at;
+    // The clause has to be an upper bound in the future (Op.gt "now"), not
+    // merely mention expires_at — an inverted Op.lt would return only
+    // sessions that already expired, and a stringify-based check cannot
+    // tell the two apart.
+    expect(opsOf(clause)).toContain(Op.gt);
+    expect(opsOf(clause)).not.toContain(Op.lt);
+    const bound = boundOf(clause, Op.gt) as Date;
+    expect(bound.getTime()).toBeGreaterThanOrEqual(before);
+    expect(bound.getTime()).toBeLessThanOrEqual(after);
   });
 
   it("requires the session not to have passed the thirty-day absolute ceiling", async () => {
@@ -113,8 +167,9 @@ describe("findLiveSession", () => {
     await findLiveSession("t");
     const where = lookedUpWith();
     expect(where).toHaveProperty("created_at");
-    const clause = where.created_at as Record<symbol, Date>;
-    const cutoff = clause[Op.gt];
+    const clause = where.created_at;
+    expect(opsOf(clause)).toContain(Op.gt);
+    const cutoff = boundOf(clause, Op.gt) as Date;
     const dias = (Date.now() - cutoff.getTime()) / 86_400_000;
     expect(dias).toBeGreaterThan(SESSION_ABSOLUTE_DAYS - 0.01);
     expect(dias).toBeLessThan(SESSION_ABSOLUTE_DAYS + 0.01);
@@ -146,7 +201,10 @@ describe("revoking", () => {
     expect(update).toHaveBeenCalled();
     const [values, options] = update.mock.calls[0] as [Record<string, unknown>, { where: Record<string, unknown> }];
     expect(values.revoked_at).toBeInstanceOf(Date);
-    expect(options.where).toMatchObject({ id: "una-id" });
+    // The exact where, not just a subset: without the revoked_at: null guard,
+    // revoking an already-revoked session would overwrite its original
+    // revocation time, and `toMatchObject({ id })` alone would never notice.
+    expect(options.where).toEqual({ id: "una-id", revoked_at: null });
     expect(destroy).not.toHaveBeenCalled();
   });
 
@@ -164,8 +222,21 @@ describe("listSessionsOf", () => {
     await listSessionsOf(7);
     const [options] = findAll.mock.calls[0] as [{ where: Record<string, unknown>; order: unknown }];
     expect(options.where).toMatchObject({ id_usuario: 7, revoked_at: null });
-    expect(JSON.stringify(options.where)).toMatch(/expires_at/);
+    const clause = options.where.expires_at;
+    expect(opsOf(clause)).toContain(Op.gt);
+    expect(opsOf(clause)).not.toContain(Op.lt);
     expect(options.order).toEqual([["last_used_at", "DESC"]]);
+  });
+
+  it("never hands the token hash to whatever renders this list", async () => {
+    // This list is what the profile screen turns into a res.json. Nothing
+    // can be done with a SHA-256 of a 256-bit token, but the module's whole
+    // premise is that the hash does not leave the database — this is the one
+    // read path where "harmless if leaked" is not the same as "fine to skip".
+    findAll.mockResolvedValue([]);
+    await listSessionsOf(7);
+    const [options] = findAll.mock.calls[0] as [{ attributes: { exclude: string[] } }];
+    expect(options.attributes).toEqual({ exclude: ["token_hash"] });
   });
 
   it("hands back plain rows, not the model wrapper", async () => {
@@ -175,19 +246,26 @@ describe("listSessionsOf", () => {
 });
 
 describe("purgeExpiredSessions", () => {
-  it("deletes rows that are long past being useful, and only those", async () => {
-    // Note: `where` here is `{ [Op.or]: [...] }` — a single Symbol-keyed
-    // property. `JSON.stringify` drops Symbol keys entirely, so stringifying
-    // this `where` (unlike `findLiveSession`'s, whose Symbol keys sit one
-    // level deeper under plain string keys) always yields "{}" and can never
-    // match anything — the check has to look at the clauses directly.
+  it("deletes rows whose idle expiry, revocation, or absolute ceiling is more than thirty days behind", async () => {
     destroy.mockResolvedValue(12);
     expect(await purgeExpiredSessions()).toBe(12);
     const where = (destroy.mock.calls[0][0] as { where: Record<symbol, unknown> }).where;
     const clauses = where[Op.or] as Record<string, unknown>[];
-    expect(clauses.some((c) => "expires_at" in c)).toBe(true);
-    expect(clauses.some((c) => "revoked_at" in c)).toBe(true);
-    // The absolute ceiling is the longest a row can matter for.
-    expect(SESSION_ABSOLUTE_DAYS).toBeGreaterThan(0);
+
+    // Each of the three columns must appear in its own Op.or branch, each
+    // bounded with Op.lt (strictly in the past) rather than Op.gt — the
+    // inverted operator is what would delete every *live* row instead of the
+    // dead ones, and a mere "the key is present" check cannot catch that.
+    for (const column of ["expires_at", "revoked_at", "created_at"]) {
+      const branch = clauses.find((c) => column in c);
+      expect(branch, `missing an Op.or branch for ${column}`).toBeDefined();
+      const clause = branch![column];
+      expect(opsOf(clause)).toContain(Op.lt);
+      expect(opsOf(clause)).not.toContain(Op.gt);
+      const cutoff = boundOf(clause, Op.lt) as Date;
+      const dias = (Date.now() - cutoff.getTime()) / 86_400_000;
+      expect(dias).toBeGreaterThan(SESSION_ABSOLUTE_DAYS - 0.01);
+      expect(dias).toBeLessThan(SESSION_ABSOLUTE_DAYS + 0.01);
+    }
   });
 });
