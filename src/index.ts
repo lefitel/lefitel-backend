@@ -116,11 +116,17 @@ async function main() {
    * costs hash + compare while a wrong password against a real account costs
    * only compare — the exact timing asymmetry this mechanism exists to
    * remove, just narrowed to once per process instead of every time.
-   * Fire-and-forget: nothing downstream awaits it, and a failure here should
-   * not stop the server from booting — the next call to `fillerHash()` will
-   * simply retry.
+   *
+   * Fire-and-forget, but not `void` on its own: `fillerHash()`'s internal
+   * `.catch` clears its cache and rethrows on failure so a later call can
+   * retry, which means the promise returned here can still be rejected. An
+   * unhandled rejection at boot hits the `process.on("unhandledRejection")`
+   * handler above and kills the process — exactly what this call must not
+   * do. The `.catch` below is what actually keeps a failure here from
+   * stopping the server: log it and move on, since the next `fillerHash()`
+   * call (the first real login) will simply try again.
    */
-  void fillerHash();
+  fillerHash().catch((err) => bootLog.warn({ err }, "no se pudo precalentar el hash de relleno"));
 
   const server = app.listen(port, () => {
     bootLog.info({ puerto: port }, `escuchando en el puerto ${port}`);
