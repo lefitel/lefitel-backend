@@ -439,6 +439,21 @@ describe("username collisions", () => {
       expect(create).toHaveBeenCalledOnce();
     });
 
+    it("rejects with 400, not 500, when the body sends a username that is not a string", async () => {
+      // `nombreEnUso` calls `.toLowerCase()` on whatever it is given.
+      // `POST /usuario` has no body validation, and `tsconfig.json` disables
+      // strict mode, so `{ user: 123 }` used to reach `.create()` and become
+      // the account "123", silently. Now it has to be rejected before that
+      // question is even asked, or `.toLowerCase()` throws and turns into a
+      // 500 instead.
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: 123, pass: "x" } });
+      await createUsuario(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(findOne).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    });
+
     it("strips failed_attempts and locked_until from what a creation request may set", async () => {
       // These are control fields the server manages, not profile data. Left
       // open, anyone who may create accounts could seed a `locked_until` far
@@ -483,6 +498,17 @@ describe("username collisions", () => {
       // updateUserName's own check (case-sensitive) and die on the database
       // (case-insensitive) with a 500 instead of the 409 this endpoint already
       // knows how to give.
+      //
+      // `findOne` here is a bare mock that returns the queued row regardless
+      // of what it was asked — so the *old*, case-sensitive
+      // `findOne({ where: { user } })` would pass this test too (it would
+      // still get the row back, and `3 !== 7` still says "someone else has
+      // it"). The 409 alone does not prove the fix; the query that produced
+      // it does. Asserting on `findOne.mock.calls[0][0]` closes that, and
+      // catches a second, unrelated regression the same way: if `nombreEnUso`
+      // ever grows a `paranoid: false`, it would start counting archived rows
+      // as "taken" too — exactly the Critical this round fixed — and every
+      // test would stay green unless something looks at the call itself.
       findOne.mockResolvedValueOnce(storedUser({ id: 3, user: "isaias" }).model);
 
       const c = call(
@@ -492,6 +518,27 @@ describe("username collisions", () => {
       await updateUserName(c.req, c.res);
 
       expect(c.status).toBe(409);
+
+      expect(findOne).toHaveBeenCalledOnce();
+      const options = findOne.mock.calls[0][0] as { where: unknown };
+      // lower("user") = 'isaias' — not the exact string "Isaias" that was sent.
+      expect(options.where).toMatchObject({
+        attribute: { fn: "lower", args: [{ col: "user" }] },
+        comparator: "=",
+        logic: "isaias",
+      });
+      expect(options).not.toHaveProperty("paranoid");
+    });
+
+    it("rejects with 400, not 500, when the body sends a username that is not a string", async () => {
+      const c = call(
+        { id: SELF, id_rol: TECNICO },
+        { params: { id: String(SELF) }, body: { user: 123 } },
+      );
+      await updateUserName(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(findOne).not.toHaveBeenCalled();
     });
 
     it("still answers 409, not raw Postgres text, when the race wins", async () => {

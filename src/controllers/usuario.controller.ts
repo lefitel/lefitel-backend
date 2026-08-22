@@ -30,6 +30,25 @@ async function nombreEnUso(user: string, exceptoId?: number): Promise<boolean> {
 }
 
 /**
+ * `nombreEnUso`'s signature promises a string, but nothing upstream
+ * guarantees one: there is no body validation on this route
+ * (`usuario.routes.ts` only checks permissions), and `tsconfig.json` has
+ * `strict: false`, so the type annotation catches nothing at compile time.
+ * `user.toLowerCase()` would throw on anything else and turn into a 500.
+ *
+ * Rejecting rather than coercing with `String(user)`: `POST /usuario
+ * { "user": 123 }` used to create the account "123" — the write went
+ * through the type conversion Postgres's `varchar` column did for it,
+ * silently. A number where a username belongs was already a bad request;
+ * this makes the server say so instead of agreeing with it.
+ */
+function requireUsernameString(user: unknown): user is string {
+  return typeof user === "string";
+}
+
+const USERNAME_NOT_STRING_MESSAGE = "El nombre de usuario debe ser un texto.";
+
+/**
  * True for a Postgres unique-violation on `usuarios_user_uniq` specifically.
  *
  * `nombreEnUso` closes the collision for an ordinary request, but not the
@@ -100,6 +119,10 @@ export async function createUsuario(req: Request, res: Response) {
     // " Diego " can never be logged into: the person types "Diego" and the
     // lookup does not match, and nothing on screen explains why.
     if (typeof req.body?.user === "string") req.body.user = req.body.user.trim();
+
+    if (!requireUsernameString(req.body?.user)) {
+      return res.status(400).json({ message: USERNAME_NOT_STRING_MESSAGE });
+    }
 
     // Used to duplicate in silence — the vulnerability `usuarios_user_uniq`
     // closes. Now it has to ask first, or the database answers with a 500
@@ -251,6 +274,10 @@ export async function updateUserName(req: Request, res: Response) {
   }
 
   try {
+    if (!requireUsernameString(user)) {
+      return res.status(400).json({ message: USERNAME_NOT_STRING_MESSAGE });
+    }
+
     // Case-insensitive, matching `usuarios_user_uniq`. The exact-match check
     // this replaced let a rename to `Isaias` pass the application layer while
     // `isaias` already existed, and it died on the database instead.
