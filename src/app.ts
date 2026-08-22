@@ -12,8 +12,8 @@ import cors from "cors";
 import helmet from "helmet";
 import { httpLogger } from "./middleware/httpLogger.js";
 import jwt from "jsonwebtoken";
-import rateLimit from "express-rate-limit";
 import { UsuarioModel } from "./models/usuario.model.js";
+import { loginIpLimiter, loginAccountIpLimiter } from "./middleware/loginLimiters.js";
 
 // Import routes
 import uploadRoutes from "./routes/upload.routes.js";
@@ -141,19 +141,11 @@ function authenticateToken(req: Request, res: Response, next: NextFunction) {
   });
 }
 
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutos
-  limit: 10,                 // máximo 10 intentos por IP
-  message: { message: "Demasiados intentos. Intente nuevamente en 15 minutos." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 // Routes
 app.use(express.static(process.env.IMAGES_DIR ?? "/images"));
 app.use("/api/login", (req, res, next) => {
-  if (req.method === "POST") return loginLimiter(req, res, next);
-  next();
+  if (req.method !== "POST") return next();
+  loginIpLimiter(req, res, (err) => (err ? next(err) : loginAccountIpLimiter(req, res, next)));
 }, loginRoutes);
 
 app.use("/api/upload", authenticateToken, uploadRoutes);

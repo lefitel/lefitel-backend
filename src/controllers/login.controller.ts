@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { logAction } from "../utils/logAction.js";
 import { permissionsFor } from "../permissions/store.js";
 import { CREDENCIALES_INVALIDAS, fillerHash } from "../config/security.js";
+import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js";
 
 const secretKey = process.env.JWT_SECRET;
 
@@ -50,10 +51,27 @@ export async function loginUsuario(req: Request, res: Response) {
     }
 
     const data = TempUsuario.dataValues;
+
+    // A locked account answers exactly like a wrong password, filler hash
+    // included. Answering differently — or faster — turns the lockout into the
+    // oracle the uniform message was meant to close.
+    if (estaBloqueada(data)) {
+      await bcryptjs.compare(pass, await fillerHash());
+      return res.status(400).json({ message: CREDENCIALES_INVALIDAS });
+    }
+
     const confirmPass = await bcryptjs.compare(pass, data.pass);
     if (!confirmPass) {
+      await UsuarioModel.update(siguienteBloqueo(data.failed_attempts ?? 0), { where: { id: data.id } });
       logAction({ id_usuario: data.id, action: "LOGIN_FAILED", entity: "Usuario", entity_id: data.id, detail: `Login fallido para @${user}`, metadata: { user }, severity: 'warning', ip_address: req.ip ?? null });
       return res.status(400).json({ message: CREDENCIALES_INVALIDAS });
+    }
+
+    // A good password clears the slate. Otherwise yesterday's four failures and
+    // today's one lock an account whose owner never got anything wrong twice
+    // in a row.
+    if ((data.failed_attempts ?? 0) > 0 || data.locked_until) {
+      await UsuarioModel.update({ failed_attempts: 0, locked_until: null }, { where: { id: data.id } });
     }
 
     const usuario = {

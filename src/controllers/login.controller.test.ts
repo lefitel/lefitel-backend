@@ -7,10 +7,18 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
+import { CREDENCIALES_INVALIDAS, LOCKOUT_AFTER_FAILURES } from "../config/security.js";
 
 const findOne = vi.fn();
+// `update` is exposed alongside `findOne` so the lockout bookkeeping — recording
+// a failure, escalating the wait, clearing the slate on success — can be
+// asserted on directly instead of only inferred from the response.
+const update = vi.fn();
 vi.mock("../models/usuario.model.js", () => ({
-  UsuarioModel: { findOne: (...args: unknown[]) => findOne(...args) },
+  UsuarioModel: {
+    findOne: (...args: unknown[]) => findOne(...args),
+    update: (...args: unknown[]) => update(...args),
+  },
 }));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 vi.mock("bcryptjs", () => ({
@@ -23,7 +31,21 @@ const { loginUsuario } = await import("./login.controller.js");
 
 /** A stored account whose password is whatever the test says it is. */
 function storedUser(user = "isaias") {
-  return { dataValues: { id: 1, id_rol: 1, user, pass: "$2a$08$hash", name: "I", lastname: "S", image: null } };
+  return {
+    dataValues: {
+      id: 1,
+      id_rol: 1,
+      user,
+      pass: "$2a$08$hash",
+      name: "I",
+      lastname: "S",
+      image: null,
+      // Matching the model's own defaults (see usuario.model.ts): a fresh
+      // account has never failed and is never locked.
+      failed_attempts: 0,
+      locked_until: null as Date | null,
+    },
+  };
 }
 
 function call(body: unknown) {
@@ -187,5 +209,124 @@ describe("what comes back", () => {
     await loginUsuario(c.req, c.res);
 
     expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
+  });
+});
+
+describe("account lockout", () => {
+  it("says the same thing, with the same status, whether the account is locked or the password is simply wrong", async () => {
+    // A lockout that answered differently from a wrong password would be a
+    // second oracle, right next to the one the uniform message just closed —
+    // this time naming which accounts are locked instead of which exist.
+    const bcryptjs = (await import("bcryptjs")).default;
+
+    const locked = storedUser();
+    locked.dataValues.locked_until = new Date(Date.now() + 60_000);
+    findOne.mockResolvedValue(locked);
+    const lockedCall = call({ user: "isaias", pass: "x" });
+    await loginUsuario(lockedCall.req, lockedCall.res);
+
+    findOne.mockResolvedValue(storedUser());
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const wrong = call({ user: "isaias", pass: "x" });
+    await loginUsuario(wrong.req, wrong.res);
+
+    expect(lockedCall.status).toBe(400);
+    expect(lockedCall.message).toBe(CREDENCIALES_INVALIDAS);
+    expect(wrong.status).toBe(lockedCall.status);
+    expect(wrong.message).toBe(lockedCall.message);
+  });
+
+  it("pays the filler hash while locked, instead of returning before it", async () => {
+    // The message being equal is half of it, same as for the unknown-user
+    // path above. A locked account that skipped the hash would answer in a
+    // millisecond next to a wrong password's two hundred and fifty — the
+    // lockout would be the fast path this time, and just as measurable.
+    const bcryptjs = (await import("bcryptjs")).default;
+
+    const locked = storedUser();
+    locked.dataValues.locked_until = new Date(Date.now() + 60_000);
+    findOne.mockResolvedValue(locked);
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
+    expect(bcryptjs.compare).not.toHaveBeenCalledWith("x", locked.dataValues.pass);
+  });
+
+  it("does not touch the account row while it is locked", async () => {
+    // The lockout is read-only on the way in: only a real attempt against the
+    // real hash below is allowed to change failed_attempts or locked_until.
+    const locked = storedUser();
+    locked.dataValues.locked_until = new Date(Date.now() + 60_000);
+    findOne.mockResolvedValue(locked);
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("records a failure and escalates the wait on a wrong password", async () => {
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const user = storedUser();
+    user.dataValues.failed_attempts = 2;
+    findOne.mockResolvedValue(user);
+
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    expect(update).toHaveBeenCalledWith({ failed_attempts: 3, locked_until: null }, { where: { id: 1 } });
+  });
+
+  it("locks the account once the failure threshold is reached", async () => {
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const user = storedUser();
+    user.dataValues.failed_attempts = LOCKOUT_AFTER_FAILURES - 1;
+    findOne.mockResolvedValue(user);
+
+    const c = call({ user: "isaias", pass: "x" });
+    await loginUsuario(c.req, c.res);
+
+    const [update_args, where] = update.mock.calls[0] as [
+      { failed_attempts: number; locked_until: Date | null },
+      { where: { id: number } },
+    ];
+    expect(update_args.failed_attempts).toBe(LOCKOUT_AFTER_FAILURES);
+    expect(update_args.locked_until).toBeInstanceOf(Date);
+    expect(where.where.id).toBe(1);
+  });
+
+  it("clears the failure count on a correct password", async () => {
+    // Earlier tests in this file leave `bcryptjs.compare` mocked to resolve
+    // `false`; `vi.clearAllMocks()` in `beforeEach` clears call history but
+    // not that resolved value, so it has to be pinned back here rather than
+    // relying on the module's default mock.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    const user = storedUser();
+    user.dataValues.failed_attempts = 4;
+    user.dataValues.locked_until = null;
+    findOne.mockResolvedValue(user);
+
+    const c = call({ user: "isaias", pass: "secreta" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(update).toHaveBeenCalledWith({ failed_attempts: 0, locked_until: null }, { where: { id: 1 } });
+  });
+
+  it("does not write to the account row on a correct password that had a clean record", async () => {
+    // A write on every successful login would be a database hit nobody asked
+    // for. The bookkeeping only has something to clear when there is
+    // something to clear.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    findOne.mockResolvedValue(storedUser());
+    const c = call({ user: "isaias", pass: "secreta" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(update).not.toHaveBeenCalled();
   });
 });
