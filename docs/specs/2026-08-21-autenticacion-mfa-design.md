@@ -476,10 +476,21 @@ depende de que Resend, el DNS de `osefi.net`, el buzón del técnico y su memori
 de la contraseña de Gmail funcionen todos a la vez, el sábado por la noche.
 
 Queda así: se entra en `onboarding` y se puede trabajar. Lo que exige email
-verificado son las operaciones de la lista de step-up. Y **los emails se
-precargan y preverifican antes del despliegue** con los que ya se conozcan,
-mediante `auth:rescue --set-email`, para sacar al proveedor de correo del camino
-crítico del día 0.
+verificado son las operaciones de la lista de step-up.
+
+**No hay precarga posible.** Son entre 20 y 60 usuarios y la empresa no tiene sus
+direcciones recogidas, así que cada uno escribirá la suya. Lo que saca a Resend
+del camino crítico es lo anterior —que el email no impida entrar— más el hecho
+de que la gracia arranca en el primer login de cada persona: el onboarding se
+reparte solo por los días en que cada uno vuelve a entrar, en vez de concentrarse
+el sábado. `--set-email` se mantiene para los casos sueltos: el correo que no
+llega, la errata que hay que corregir.
+
+Aun así, **hay que mirar el contador de Resend durante los primeros días**. El
+tope son 100 al día y los reenvíos —"no me ha llegado", "míralo en spam"— son la
+mayor parte del tráfico real de este tipo de flujo. Si se agota, quien falte se
+queda sin poder verificar hasta el día siguiente; puede seguir trabajando, pero
+no puede tocar nada de la lista de step-up.
 
 ### Step-up: dónde no vale el dispositivo recordado
 
@@ -861,20 +872,53 @@ tienen `down`, pero `runMigrations()` solo llama a `up()` y no hay ningún
 "email")` **se lleva todos los emails verificados durante el fin de semana**.
 
 ```
-0. pg_dump -Fc  →  RESTAURAR en otra base y verificar recuentos.
+0. ENSAYO EN LOCAL. La base local de desarrollo es una copia de producción,
+   así que las nueve migraciones se prueban ahí primero, contra datos reales:
+   emails duplicados, usuarios archivados que retienen su dirección, filas
+   antiguas sin pass_changed_at. Es el ensayo general y es gratis.
+   Refrescar la copia desde producción antes de empezar, para no ensayar
+   contra un estado de hace semanas.
+1. pg_dump -Fc de PRODUCCIÓN  →  RESTAURAR en otra base y verificar recuentos.
    Un dump sin restauración probada es una suposición, no una copia.
    Guardar también MFA_ENCRYPTION_KEY: sin ella el dump es inservible para MFA.
-1. Verificar SPF/DKIM de osefi.net en Resend. Envío de prueba real. (Días antes.)
-2. Precargar emails con --set-email para los que se conozcan.
+2. Verificar SPF/DKIM de osefi.net en Resend. Envío de prueba real. (Días antes.)
 3. Añadir las variables nuevas. NO borrar JWT_SECRET.
 4. Probar auth:rescue:deploy DENTRO del contenedor.
-5. migrate:deploy
-6. Desplegar la API. Desplegar la web. (Da igual el orden: /api/login sigue vivo.)
-7. Probar el flujo completo con la cuenta de prueba.
-8. Si falla → volver a la imagen anterior en Coolify. Arranca porque JWT_SECRET
+5. Crear la cuenta de rescate (rol 1) y guardar sus códigos impresos.
+6. migrate:deploy
+7. Desplegar la API. Desplegar la web. (Da igual el orden: /api/login sigue vivo.)
+8. Probar el flujo completo con la cuenta de prueba.
+9. Si falla → volver a la imagen anterior en Coolify. Arranca porque JWT_SECRET
    sigue puesto. DEJAR EL ESQUEMA NUEVO: el código viejo lo ignora.
-   Solo si el esquema es el problema, restaurar el dump del paso 0.
-9. Una semana después, si todo va bien: borrar JWT_SECRET y los alias de /api/login.
+   Solo si el esquema es el problema, restaurar el dump del paso 1.
+10. Una semana después, si todo va bien: borrar JWT_SECRET y los alias de
+    /api/login.
+```
+
+El paso 0 es la mejor noticia del procedimiento y conviene no desaprovecharla:
+tener una copia de producción en local significa que las migraciones **no se
+estrenan sobre datos reales el sábado por la noche**. Se estrenan un martes por
+la tarde, sobre los mismos datos, sin nadie esperando.
+
+**Pero una copia no es producción.** Los índices únicos que estas migraciones
+crean —el de `user` y el de `email`— pueden encontrar en producción duplicados
+que la copia no tenga: bien porque divergió, bien porque se crearon entre el
+volcado y el despliegue, que es posible precisamente porque `createUsuario` no
+comprueba colisión. El fallo es seguro —la transacción revierte y `SequelizeMeta`
+no se marca— pero el despliegue muere y reintenta con el mismo error hasta que
+alguien lo mire. Así que las consultas de diagnóstico se corren **contra
+producción justo antes de migrar**, no días antes:
+
+```sql
+-- Nombres de usuario duplicados entre las cuentas vivas
+SELECT lower("user"), count(*), array_agg(id)
+FROM usuarios WHERE "deletedAt" IS NULL
+GROUP BY 1 HAVING count(*) > 1;
+
+-- Y, cuando llegue el plan 3, lo mismo con el correo
+SELECT lower(email), count(*), array_agg(id)
+FROM usuarios WHERE "deletedAt" IS NULL AND email IS NOT NULL
+GROUP BY 1 HAVING count(*) > 1;
 ```
 
 ## 12. Riesgos
