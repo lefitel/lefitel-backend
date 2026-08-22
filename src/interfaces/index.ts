@@ -157,3 +157,16 @@ export interface IPermiso {
   accion: string;
   permitido: boolean;
 }
+
+/** One logged-in device, backed by the `sesiones` table. */
+export interface ISesion {
+  id: string;
+  id_usuario: number;
+  token_hash: string;
+  user_agent?: string | null;
+  ip_address?: string | null;
+  created_at: Date;
+  last_used_at: Date;
+  expires_at: Date;
+  revoked_at?: Date | null;
+}
