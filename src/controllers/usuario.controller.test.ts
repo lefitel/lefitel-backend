@@ -7,7 +7,7 @@
 //
 // The three guards labelled "IDOR protection" used to read
 // `if (loggedUser && …)`, which skips the whole check when there is no session
-// instead of refusing. `authenticateToken` runs first on every route, so it was
+// instead of refusing. `authenticate` runs first on every route, so it was
 // not reachable — but a guard that depends on another guard having run is not
 // defence in depth, and the tests below fail if it goes back.
 

@@ -70,8 +70,8 @@ function fromPromise(
  *
  * This is that same matrix, asked on the server, where the answer is binding.
  *
- * Must run after authenticateToken, which is what populates req.user — and
- * `authenticateToken` re-reads the role from the database on every request, so
+ * Must run after authenticate, which is what populates req.user — and
+ * `authenticate` re-reads the role from the database on every request, so
  * revoking a permission takes effect without waiting for anyone to log out.
  */
 export function requirePermission(modulo: Module, accion: Action) {

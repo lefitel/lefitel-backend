@@ -2,7 +2,7 @@
 //
 // `requirePermission.test.ts` proves the middleware decides correctly when it
 // runs. It says nothing about whether a route actually mounts it — and that is
-// where the gap used to live: `authenticateToken` is on every router, so the API
+// where the gap used to live: `authenticate` is on every router, so the API
 // knew *who* was calling, but on most of them it never asked *whether they may*.
 // A Cliente could not see the Roles screen in the interface, and could still
 // call `DELETE /api/rol/:id` from the browser console.
@@ -138,8 +138,8 @@ describe("the route table we are actually asserting about", () => {
   it("puts authentication in front of everything except logging in", () => {
     const open = routes
       .filter((r) => !r.path.startsWith("/api/login"))
-      .filter((r) => !r.chain.includes("authenticateToken"));
-    expect(open, `rutas sin authenticateToken: ${JSON.stringify(open)}`).toEqual([]);
+      .filter((r) => !r.chain.includes("authenticate"));
+    expect(open, `rutas sin authenticate: ${JSON.stringify(open)}`).toEqual([]);
   });
 });
 

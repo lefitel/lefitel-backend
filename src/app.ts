@@ -4,7 +4,7 @@ declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      user?: { id: number; id_rol: number };
+      user?: { id: number; id_rol: number; id_sesion?: string };
     }
   }
 }
@@ -12,8 +12,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import { httpLogger } from "./middleware/httpLogger.js";
-import jwt from "jsonwebtoken";
-import { UsuarioModel } from "./models/usuario.model.js";
+import { authenticate } from "./middleware/authenticate.js";
 import { loginRateLimit } from "./middleware/loginLimiters.js";
 import { HSTS_MAX_AGE_SECONDS } from "./config/security.js";
 
@@ -51,8 +50,6 @@ const app = express();
 // Express announces itself in every response. It costs nothing to remove and
 // it is free reconnaissance for anyone deciding which exploits to try.
 app.disable("x-powered-by");
-
-const secretKey = process.env.JWT_SECRET;
 
 // The Coolify proxy terminates TLS in front of the app, so without this every request
 // carries the proxy's address and the rate limiters below share a single bucket
@@ -107,45 +104,6 @@ app.use(
   }),
 );
 
-// Middleware para verificar el token en rutas protegidas (+ sliding expiry)
-// Además valida que el usuario siga existiendo (no archivado) para revocar acceso al instante.
-function authenticateToken(req: Request, res: Response, next: NextFunction) {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (token == null) {
-    return res.status(401).json({ message: "Su sesión expiró. Vuelva a iniciar sesión." });
-  }
-
-  jwt.verify(token, secretKey, async (err, user) => {
-    // 401, not 403: the token is missing or invalid, so the caller is not
-    // authenticated. The client uses this distinction to decide whether to log
-    // the user out — a 403 over an individual resource must not end a session.
-    if (err) return res.status(401).json({ message: "Su sesión expiró. Vuelva a iniciar sesión." });
-    const u = user as { id: number; id_rol: number };
-
-    try {
-      // Read the role from the database rather than trusting the token. The
-      // token is re-issued on every request, so a stale id_rol would survive
-      // indefinitely and a demoted user would keep their old permissions until
-      // the account was archived.
-      const current = await UsuarioModel.findByPk(u.id, { attributes: ["id", "id_rol"] });
-      if (!current) {
-        return res.status(401).json({ message: "Su cuenta ya no está activa." });
-      }
-      u.id_rol = current.dataValues.id_rol as number;
-    } catch {
-      return res.sendStatus(500);
-    }
-
-    req.user = u;
-    // Re-issue a fresh 7d token on every authenticated request (sliding expiry)
-    const { iat: _iat, exp: _exp, ...payload } = user as Record<string, unknown>;
-    const newToken = jwt.sign(payload, secretKey, { expiresIn: "7d" });
-    res.setHeader("x-new-token", newToken);
-    next();
-  });
-}
-
 // Routes
 app.use(express.static(process.env.IMAGES_DIR ?? "/images"));
 // Both login buckets and the POST-only rule live in loginLimiters.ts, as one
@@ -153,31 +111,31 @@ app.use(express.static(process.env.IMAGES_DIR ?? "/images"));
 // assert about.
 app.use("/api/login", loginRateLimit, loginRoutes);
 
-app.use("/api/upload", authenticateToken, uploadRoutes);
-app.use("/api/reporte", authenticateToken, reporteRoutes);
-app.use("/api/generador", authenticateToken, generadorRoutes);
-app.use("/api/dashboard", authenticateToken, dashboardRoutes);
+app.use("/api/upload", authenticate, uploadRoutes);
+app.use("/api/reporte", authenticate, reporteRoutes);
+app.use("/api/generador", authenticate, generadorRoutes);
+app.use("/api/dashboard", authenticate, dashboardRoutes);
 
-app.use("/api/adss", authenticateToken, adssRoutes);
-app.use("/api/adssposte", authenticateToken, adssPosteRoutes);
+app.use("/api/adss", authenticate, adssRoutes);
+app.use("/api/adssposte", authenticate, adssPosteRoutes);
 
-app.use("/api/bitacora", authenticateToken, bitacoraRoutes);
-app.use("/api/ciudad", authenticateToken, ciudadRoutes);
-app.use("/api/eventoObs", authenticateToken, eventoObsRoutes);
-app.use("/api/evento", authenticateToken, eventoRoutes);
-app.use("/api/material", authenticateToken, materialRoutes);
-app.use("/api/obs", authenticateToken, obsRoutes);
-app.use("/api/poste", authenticateToken, posteRoutes);
-app.use("/api/propietario", authenticateToken, propietarioRoutes);
-app.use("/api/revision", authenticateToken, revisionRoutes);
-app.use("/api/solucion", authenticateToken, solucionRoutes);
-app.use("/api/tipoObs", authenticateToken, tipoObsRoutes);
-app.use("/api/rol", authenticateToken, rolRoutes);
-app.use("/api/usuario", authenticateToken, usuarioRoutes);
-app.use("/api/permisos", authenticateToken, permisoRoutes);
+app.use("/api/bitacora", authenticate, bitacoraRoutes);
+app.use("/api/ciudad", authenticate, ciudadRoutes);
+app.use("/api/eventoObs", authenticate, eventoObsRoutes);
+app.use("/api/evento", authenticate, eventoRoutes);
+app.use("/api/material", authenticate, materialRoutes);
+app.use("/api/obs", authenticate, obsRoutes);
+app.use("/api/poste", authenticate, posteRoutes);
+app.use("/api/propietario", authenticate, propietarioRoutes);
+app.use("/api/revision", authenticate, revisionRoutes);
+app.use("/api/solucion", authenticate, solucionRoutes);
+app.use("/api/tipoObs", authenticate, tipoObsRoutes);
+app.use("/api/rol", authenticate, rolRoutes);
+app.use("/api/usuario", authenticate, usuarioRoutes);
+app.use("/api/permisos", authenticate, permisoRoutes);
 // The gate is inside files.routes.ts now, one per action: listing the folder and
 // emptying it are not the same permission.
-app.use("/api/files", authenticateToken, filesRoutes);
+app.use("/api/files", authenticate, filesRoutes);
 
 /**
  * Terminal error handler.

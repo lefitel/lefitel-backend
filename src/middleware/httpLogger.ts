@@ -68,7 +68,7 @@ export const httpLogger = pinoHttp({
   /**
    * Who was asking.
    *
-   * `authenticateToken` has run by the time a response is logged, so the session
+   * `authenticate` has run by the time a response is logged, so the session
    * is available — and it is the single most useful thing to have on the line
    * when somebody reports a problem, because it turns "a user" into "user 14".
    */
