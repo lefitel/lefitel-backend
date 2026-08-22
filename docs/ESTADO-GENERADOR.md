@@ -918,3 +918,112 @@ hay consola que arreglar.
    validación no previó. Está en el log del servidor y no hay alerta.
 6. `IMAGES_DIR` apunta a `C:/images`, con 17 ficheros frente a las 1.514 fotos que
    referencia la base. Eso es la máquina, no el código.
+
+
+## Estado al 22 de agosto: decisiones tomadas y qué sigue
+
+Esta sección existe porque lo de abajo se decidió hablando y no está en ningún
+otro sitio. Sin ella, la siguiente sesión vuelve a proponer lo mismo.
+
+### Lo que se hizo el 22
+
+Cuatro commits, todos en `isaias`:
+
+- `api 5ff69f3` — **tres raíces nuevas**: Solución (1.024 filas), Ciudad (98) y
+  Usuario (15, solo con `seguridad.ver`). Y el hallazgo de camino: el catálogo
+  ofrecía caminos circulares («Evento › Última revisión › Evento › Poste»), 33 de
+  los 78 campos de un reporte de eventos. Un reporte de eventos pasó a **52
+  campos en 12 grupos** ofreciendo tres preguntas más.
+- `api 4defb3a` — **`POST /conteo`** (cuenta sin leer filas, 120/min) y el campo
+  `path` en cada columna del resultado.
+- `web 6656c37` — **los cinco arreglos comunes**: refresco automático con
+  interruptor, contador en vivo, ordenar desde la cabecera, guardados arriba,
+  confirmación al cambiar el nivel de detalle. Y tres líneas en `src/test/setup.ts`
+  que hacen probables todos los `<Select>` de la aplicación.
+
+**538 pruebas en `api`, 188 en `web`.** Comprobado arrancando el servidor de
+verdad, no solo con pruebas.
+
+### Decisiones de Isaias, para no volver a preguntárselas
+
+1. **Quién usa el generador: cualquiera con el permiso, igual que los reportes.**
+   Lo cual incluye al rol 3, que **se llama «Cliente»** y tiene `generador.ver`,
+   `crear`, `editar` y `archivar`. O sea que el cliente entra — y eso hace que
+   las plantillas dejen de ser una comodidad: nadie de fuera arma un reporte
+   partiendo de 52 campos en 12 grupos.
+2. **El Coordinador se queda sin datos de personal** en el generador. Coincide
+   con lo que ya hacía `GET /usuario`. Si algún día se quiere, es una casilla
+   (`seguridad.ver`) en la pantalla de Seguridad, no código.
+3. **Los seis reportes fijos no traen ni un dato de personal** — comprobado: el
+   controlador no incluye `UsuarioModel` en ninguna consulta. El generador es el
+   único sitio del producto que puede producir datos de personal en un reporte.
+4. **Dirección de UX elegida: A + C** — «la tabla manda» con plantillas de
+   entrada. Ver la página con las cuatro opciones:
+   `https://claude.ai/code/artifact/97ec563b-92fb-4999-b6ea-4ede11e869f7`
+5. **Autoría de revisiones y soluciones: sí, columna y relleno desde la
+   bitácora.** Aprobado, **no hecho todavía** (ver abajo).
+
+### La resolución de A + C, para cuando se retome
+
+A no puede eliminar el panel izquierdo del todo: tres cosas no caben en un menú
+de cabecera.
+
+- **El orden múltiple.** Pinchando cabeceras no existe «este es el segundo
+  criterio». Hace falta una ficha `Orden (2)` que abra la lista ordenada.
+- **Muchos filtros.** Las fichas en una barra funcionan hasta cuatro; con doce
+  son un muro, y el «cumplir todos / cualquiera» no tiene dónde vivir.
+- **Sesenta columnas.** La `+` de la cabecera se va a la derecha y desaparece, y
+  reordenar la columna 47 arrastrando no es viable.
+
+Así que el panel **se colapsa en tres botones** —`Columnas (6)`, `Filtros (2)`,
+`Orden (1)`— que abren su panel cuando hace falta. El caso normal se maneja
+entero desde la tabla; el caso pesado sigue teniendo su lista. No se pierde
+ninguna capacidad, cambia cuándo se ve.
+
+Peaje que hay que aceptar al elegir A: **cambia visibilidad por calma.** Hoy los
+seis iconos por fila son feos pero están a la vista. La mitigación es que el `⌄`
+de cada cabecera sea visible siempre, nunca clic derecho.
+
+Orden que no rompe la pantalla en ningún momento: (1) los cinco arreglos comunes
+— **hecho**; (2) la galería y el modo simple; (3) el menú por columna, que vacía
+la lista de la izquierda de a poco; (4) colapsar el panel, último, cuando ya no
+quede casi nada dentro.
+
+### Las seis plantillas propuestas (pendiente de que Isaias las confirme)
+
+1. **General de eventos** — el que ya se entrega: poste, propietario,
+   descripción, criticidad, estado, fecha. Existe como `generalConfig` en
+   `export.integration.test.ts`.
+2. **Pendientes por tramo** — agrupado por tramo, nº de eventos y criticidad
+   mínima. Son 438 pendientes.
+3. **Trabajos hechos** — raíz Solución. Imposible antes del 22 de agosto.
+4. **Revisiones del mes** — raíz Revisión, 7.741 filas, el volumen real del
+   trabajo.
+5. **Cobertura por ciudad** — raíz Ciudad, con las 13 que no tienen ni un poste.
+6. **Tiempos de resolución** — promedio de días del evento a su última revisión.
+
+### Pendiente
+
+1. 🔴 **La migración de autoría.** Aprobada y sin hacer, a propósito: cambia el
+   esquema y merece su propio arco, solo, para poder revisarla sin nada más de
+   por medio. Contra `osefi_local`.
+   - `id_usuario` en `revicions` (7.741 filas) y en `solucions` (1.024).
+   - Relleno hacia atrás desde la bitácora: hay **1.319 entradas
+     `ADD_REVISION`** que nombran a su usuario. Emparejar por `entity_id` y
+     `createdAt`.
+   - Sin esto, «quién inspecciona más» no se puede contestar nunca. Y la raíz
+     Usuario solo cuenta eventos y postes.
+   - Datos medidos que hay que respetar al hacerlo: de 1.376 eventos, **211 no
+     tienen autor** y **70 más lo tienen archivado**; un informe por persona
+     rinde cuentas de 1.095. Está asertado en `sqlExecution.test.ts`.
+2. **Pregunta sin contestar:** hoy cualquiera ve todos los reportes marcados
+   «compartido», venga de quien venga. Si un coordinador comparte un análisis
+   interno, el rol Cliente lo ve en su lista. ¿«Compartido» debería significar
+   «con mi equipo» y no con los clientes?
+3. **Isaias todavía no ha usado la pantalla.** Sigue siendo lo que más vale, y
+   ahora hay más que probar: el refresco automático, el contador, ordenar desde
+   la cabecera y las tres raíces nuevas.
+4. Lo que ya estaba abierto y sigue: la cancelación de exportación se comprueba
+   entre pasos y no dentro de uno; el tope de peso se mide después de construir;
+   nadie mira el aviso de la clase 22; `IMAGES_DIR` apunta a `C:/images` con 17
+   ficheros frente a 1.514 fotos referenciadas.
