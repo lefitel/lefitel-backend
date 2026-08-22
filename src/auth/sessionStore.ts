@@ -82,7 +82,7 @@ export async function createSession(
  */
 export async function findLiveSession(
   token: string,
-): Promise<{ id: string; id_usuario: number; expires_at: Date; last_used_at: Date } | null> {
+): Promise<{ id: string; id_usuario: number; created_at: Date; expires_at: Date; last_used_at: Date } | null> {
   const now = new Date();
   const found = await SesionModel.findOne({
     where: {
@@ -91,16 +91,33 @@ export async function findLiveSession(
       expires_at: { [Op.gt]: now },
       created_at: { [Op.gt]: new Date(now.getTime() - SESSION_ABSOLUTE_DAYS * DAY_MS) },
     },
-    attributes: ["id", "id_usuario", "expires_at", "last_used_at"],
+    attributes: ["id", "id_usuario", "created_at", "expires_at", "last_used_at"],
   });
   if (!found) return null;
   const v = found.dataValues;
   return {
     id: v.id,
     id_usuario: v.id_usuario,
+    created_at: v.created_at,
     expires_at: v.expires_at,
     last_used_at: v.last_used_at,
   };
+}
+
+/**
+ * How far a cookie may say a session is good for, measured from `at`.
+ *
+ * The idle window pushed forward from `at`, capped at the absolute ceiling
+ * measured from this session's own `createdAt`. Without the cap, a cookie
+ * reissued on every touch would slide forever and the thirty-day ceiling
+ * `findLiveSession` enforces would never be the reason a browser actually
+ * drops it — the row would already be dead server-side for up to twenty-
+ * three days before the browser noticed.
+ */
+export function slidingExpiry(createdAt: Date, at: Date): Date {
+  const idle = at.getTime() + SESSION_IDLE_DAYS * DAY_MS;
+  const ceiling = createdAt.getTime() + SESSION_ABSOLUTE_DAYS * DAY_MS;
+  return new Date(Math.min(idle, ceiling));
 }
 
 /** Push the idle expiry back, and record that the session was used. */

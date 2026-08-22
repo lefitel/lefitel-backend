@@ -3,7 +3,14 @@ import app from "./app.js";
 import dotenv from "dotenv";
 import { sequelize } from "./database/sequelize.js";
 import { log } from "./utils/logger.js";
-import { requiredEnv, fillerHash, SESSION_PURGE_INTERVAL_MS } from "./config/security.js";
+import {
+  requiredEnv,
+  fillerHash,
+  SESSION_PURGE_INTERVAL_MS,
+  cookieNameCarriesHostPrefix,
+  SESSION_COOKIE_NAME,
+  SESSION_COOKIE_SECURE,
+} from "./config/security.js";
 import { createShutdown } from "./lifecycle.js";
 import { schedulePurge } from "./auth/purgeJob.js";
 import { purgeExpiredSessions } from "./auth/sessionStore.js";
@@ -40,6 +47,22 @@ if (missing.length > 0) {
   bootLog.fatal(
     { faltan: missing },
     `faltan variables obligatorias: ${missing.join(", ")}. El servidor no puede arrancar.`,
+  );
+  process.exit(1);
+}
+
+/**
+ * `requiredEnv` only proves `COOKIE_NAME` was set, not that it can deliver
+ * what a `Secure` cookie relies on. `__host-osefi_session`, `_Host-...`, or
+ * a plain name with no prefix at all would all pass that check, boot clean,
+ * and log in fine — a browser grants the `__Host-` protection to nothing
+ * less than the exact prefix, so any of those ships a cookie a hostile
+ * subdomain can shadow, silently. See `cookieNameCarriesHostPrefix`.
+ */
+if (!cookieNameCarriesHostPrefix(SESSION_COOKIE_NAME, SESSION_COOKIE_SECURE)) {
+  bootLog.fatal(
+    { nombre: SESSION_COOKIE_NAME },
+    `COOKIE_NAME ("${SESSION_COOKIE_NAME}") debe empezar por "__Host-" cuando la cookie es Secure. El servidor no puede arrancar.`,
   );
   process.exit(1);
 }

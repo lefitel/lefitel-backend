@@ -75,10 +75,11 @@ export const HSTS_MAX_AGE_SECONDS = 63072000;
 /** Variables the process refuses to start without, by environment. */
 export function requiredEnv(nodeEnv: string | undefined): string[] {
   const always = ["JWT_SECRET"];
-  // COOKIE_NAME must be `__Host-osefi_session` in production. A deployment
-  // that forgets it does not fail — it boots with a cookie missing the
-  // `__Host-` prefix's guarantee, shadowable from any subdomain, and nothing
-  // would report it.
+  // COOKIE_NAME should be `__Host-osefi_session` in production. This only
+  // proves it was *set* — a deployment that sets it to something without
+  // the `__Host-` prefix still boots, and this list has no way to catch
+  // that. `index.ts` runs the value check separately, at boot, with
+  // `cookieNameCarriesHostPrefix`.
   return nodeEnv === "production" ? [...always, "CORS_ORIGIN", "COOKIE_NAME", "COOKIE_SECURE"] : always;
 }
 
@@ -317,3 +318,25 @@ export const SESSION_IP_MAX = 45;
  */
 export const SESSION_COOKIE_NAME = process.env.COOKIE_NAME ?? "osefi_session";
 export const SESSION_COOKIE_SECURE = process.env.COOKIE_SECURE !== "false";
+
+/**
+ * Whether `name` can actually deliver the guarantee a `Secure` session
+ * cookie relies on.
+ *
+ * `requiredEnv` only checks that `COOKIE_NAME` was *set* — it has no opinion
+ * on what it says. A deployment that types `__host-osefi_session` (lower
+ * case), `_Host-osefi_session` (one underscore), or the bare name with no
+ * prefix at all boots clean and logs in fine: nothing about that failure is
+ * visible until a hostile subdomain shadows the cookie, because a browser
+ * reads `__Host-` byte for byte and grants its protection to nothing less.
+ * This is the check that has to run at boot, before that deployment ever
+ * takes traffic.
+ *
+ * Only meaningful when the cookie is `Secure`: `__Host-` itself requires
+ * `Secure`, so an insecure cookie — development's plain name over
+ * `http://localhost` — could never carry the prefix regardless, and is not
+ * a violation of anything.
+ */
+export function cookieNameCarriesHostPrefix(name: string, secure: boolean): boolean {
+  return !secure || name.startsWith("__Host-");
+}

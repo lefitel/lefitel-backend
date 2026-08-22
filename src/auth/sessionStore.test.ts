@@ -40,6 +40,7 @@ const {
   revokeAllSessionsOf,
   listSessionsOf,
   purgeExpiredSessions,
+  slidingExpiry,
 } = await import("./sessionStore.js");
 const { hashSessionToken } = await import("./sessionToken.js");
 const {
@@ -178,6 +179,59 @@ describe("findLiveSession", () => {
   it("returns null when there is no row, rather than something falsy-ish", async () => {
     findOne.mockResolvedValue(null);
     expect(await findLiveSession("t")).toBeNull();
+  });
+
+  it("selects and returns created_at, which the cookie's own absolute cap needs", async () => {
+    // `authenticate` reissues the cookie on every touch, and the reissued
+    // `Expires` may never pass this session's own thirtieth day — a bound it
+    // cannot enforce without `created_at`. Sequelize only returns the columns
+    // named in `attributes`, so this is two failures in one: the column
+    // missing from the SELECT, or dropped again on the way out of the
+    // function, both leave the caller with `undefined`.
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    findOne.mockResolvedValue({
+      dataValues: {
+        id: "s1",
+        id_usuario: 7,
+        created_at: createdAt,
+        expires_at: new Date(),
+        last_used_at: new Date(),
+      },
+    });
+    const found = await findLiveSession("t");
+    expect(found?.created_at).toEqual(createdAt);
+    const [options] = findOne.mock.calls[0] as [{ attributes: string[] }];
+    expect(options.attributes).toContain("created_at");
+  });
+});
+
+describe("slidingExpiry", () => {
+  it("slides forward from `at` when that stays under the absolute ceiling", () => {
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const at = new Date("2026-01-03T00:00:00.000Z"); // two days into the session
+    const dias = (slidingExpiry(createdAt, at).getTime() - at.getTime()) / 86_400_000;
+    expect(dias).toBeGreaterThan(SESSION_IDLE_DAYS - 0.01);
+    expect(dias).toBeLessThan(SESSION_IDLE_DAYS + 0.01);
+  });
+
+  it("caps at the absolute ceiling instead of sliding past it", () => {
+    // A session touched daily for its whole life: by day 25, sliding seven
+    // more days would land on day 32 — past the thirty-day ceiling this
+    // session was created under. The cookie must not promise day 32.
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const at = new Date(createdAt.getTime() + 25 * 86_400_000);
+    const ceiling = new Date(createdAt.getTime() + SESSION_ABSOLUTE_DAYS * 86_400_000);
+    expect(slidingExpiry(createdAt, at)).toEqual(ceiling);
+  });
+
+  it("returns exactly the ceiling, not a day short of it, right at the boundary", () => {
+    // Guards against an off-by-one (`<=` written as `<`, or a stray
+    // `- DAY_MS`) that would shave a day off a session that is still,
+    // correctly, allowed to reach the full thirty.
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const at = new Date(createdAt.getTime() + (SESSION_ABSOLUTE_DAYS - 1) * 86_400_000);
+    const ceiling = new Date(createdAt.getTime() + SESSION_ABSOLUTE_DAYS * 86_400_000);
+    expect(slidingExpiry(createdAt, at)).toEqual(ceiling);
   });
 });
 

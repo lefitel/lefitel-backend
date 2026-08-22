@@ -1,8 +1,8 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { UsuarioModel } from "../models/usuario.model.js";
-import { findLiveSession, touchSession } from "../auth/sessionStore.js";
-import { readSessionCookie } from "../auth/sessionCookie.js";
+import { findLiveSession, touchSession, slidingExpiry } from "../auth/sessionStore.js";
+import { readSessionCookie, setSessionCookie } from "../auth/sessionCookie.js";
 import { SESSION_TOUCH_THROTTLE_MINUTES } from "../config/security.js";
 import { log } from "../utils/logger.js";
 
@@ -91,6 +91,17 @@ async function authenticateBySession(
     touchSession(sesion.id, now).catch((err) =>
       authLog.warn({ err }, "no se pudo actualizar el último uso de la sesión"),
     );
+
+    // The cookie's own `Expires` is fixed once, at login (`issueSession.ts`),
+    // and nothing short of a fresh `Set-Cookie` moves it. Without this, the
+    // "seven days of inactivity" this design promises is actually "seven
+    // days since login" — a hard ceiling nobody chose. Reissued here, on the
+    // same throttle as the database write above, so this is one `Set-Cookie`
+    // header per throttle window rather than one per request. Capped at the
+    // absolute ceiling measured from this session's own `created_at`, so a
+    // session touched regularly still cannot slide the cookie past the day
+    // the row itself stops being honoured.
+    setSessionCookie(res, token, slidingExpiry(new Date(sesion.created_at), now));
   }
 
   req.user = { id: usuario.id, id_rol: usuario.id_rol, id_sesion: sesion.id };

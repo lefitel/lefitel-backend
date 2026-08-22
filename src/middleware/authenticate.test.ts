@@ -10,6 +10,7 @@ import type { Request, Response, NextFunction } from "express";
 
 const findLiveSession = vi.fn();
 const touchSession = vi.fn();
+const slidingExpiry = vi.fn();
 const findByPk = vi.fn();
 const jwtVerify = vi.fn();
 // Fixed, reachable mocks — not a fresh `vi.fn()` handed out on every `log(...)`
@@ -21,9 +22,15 @@ const jwtVerify = vi.fn();
 const authInfo = vi.fn();
 const authWarn = vi.fn();
 
+// `slidingExpiry`'s own arithmetic — the idle window, the absolute cap, the
+// boundary between them — is `sessionStore.test.ts`'s job, against the real
+// function. Here it is mocked like `touchSession`: what this file is
+// responsible for proving is that `authenticate` calls it with the right
+// arguments and puts its answer, verbatim, on the cookie it reissues.
 vi.mock("../auth/sessionStore.js", () => ({
   findLiveSession: (...a: unknown[]) => findLiveSession(...a),
   touchSession: (...a: unknown[]) => touchSession(...a),
+  slidingExpiry: (...a: unknown[]) => slidingExpiry(...a),
 }));
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: { findByPk: (...a: unknown[]) => findByPk(...a) },
@@ -41,9 +48,14 @@ function call(opts: { cookie?: string; bearer?: string } = {}) {
   const res = {
     statusCode: 0,
     body: undefined as unknown,
+    cookieCalls: [] as { name: string; value: string; options: Record<string, unknown> }[],
     status(c: number) { this.statusCode = c; return this; },
     json(p: unknown) { this.body = p; return this; },
     sendStatus(c: number) { this.statusCode = c; return this; },
+    cookie(name: string, value: string, options: Record<string, unknown>) {
+      this.cookieCalls.push({ name, value, options });
+      return this;
+    },
   };
   const req = {
     cookies: opts.cookie ? { [SESSION_COOKIE_NAME]: opts.cookie } : {},
@@ -51,13 +63,20 @@ function call(opts: { cookie?: string; bearer?: string } = {}) {
     ip: "::1",
   } as unknown as Request;
   const next = vi.fn() as unknown as NextFunction;
-  return { req, res: res as unknown as Response, next, get status() { return res.statusCode; } };
+  return {
+    req,
+    res: res as unknown as Response,
+    next,
+    get status() { return res.statusCode; },
+    get cookieCalls() { return res.cookieCalls; },
+  };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 2 } });
   touchSession.mockResolvedValue(undefined);
+  slidingExpiry.mockReturnValue(new Date(0));
 });
 
 describe("with a session cookie", () => {
@@ -123,12 +142,16 @@ describe("with a session cookie", () => {
       // Writing on each one is two thousand UPDATEs on one row.
       findLiveSession.mockResolvedValue({
         id: "s1", id_usuario: 7,
+        created_at: new Date(NOW.getTime() - 2 * 86_400_000),
         expires_at: new Date(NOW.getTime() + 1e6),
         last_used_at: new Date(NOW.getTime() - (THROTTLE_MS - 1_000)),
       });
       const c = call({ cookie: "t" });
       await authenticate(c.req, c.res, c.next);
       expect(touchSession).not.toHaveBeenCalled();
+      // No write means no new expiry either: a `Set-Cookie` on every request
+      // is exactly what this throttle exists to avoid.
+      expect(c.cookieCalls).toHaveLength(0);
     });
 
     it("writes the current time, not the session's own stale timestamp, once the window has passed", async () => {
@@ -139,12 +162,42 @@ describe("with a session cookie", () => {
       // point of the test.
       findLiveSession.mockResolvedValue({
         id: "s1", id_usuario: 7,
+        created_at: new Date(NOW.getTime() - 2 * 86_400_000),
         expires_at: new Date(NOW.getTime() + 1e6),
         last_used_at: new Date(NOW.getTime() - (THROTTLE_MS + 1_000)),
       });
       const c = call({ cookie: "t" });
       await authenticate(c.req, c.res, c.next);
       expect(touchSession).toHaveBeenCalledWith("s1", NOW);
+    });
+
+    it("reissues the cookie itself once the throttle window has passed", async () => {
+      // The database row sliding is worthless if the browser's own copy of
+      // the expiry never moves: the whole point of this test. Without a
+      // fresh `Set-Cookie` here, the browser drops the cookie seven days
+      // after login regardless of how often the row gets touched.
+      //
+      // `slidingExpiry`'s own arithmetic (idle window, absolute cap, the
+      // boundary between the two) is proven against the real function in
+      // `sessionStore.test.ts`; this only has to show that `authenticate`
+      // asks it the right question and puts its exact answer on the cookie.
+      const createdAt = new Date(NOW.getTime() - 2 * 86_400_000);
+      const capped = new Date("2099-06-01T00:00:00.000Z");
+      slidingExpiry.mockReturnValue(capped);
+      findLiveSession.mockResolvedValue({
+        id: "s1", id_usuario: 7,
+        created_at: createdAt,
+        expires_at: new Date(NOW.getTime() + 1e6),
+        last_used_at: new Date(NOW.getTime() - (THROTTLE_MS + 1_000)),
+      });
+      const c = call({ cookie: "el-token" });
+      await authenticate(c.req, c.res, c.next);
+
+      expect(slidingExpiry).toHaveBeenCalledWith(createdAt, NOW);
+      expect(c.cookieCalls).toHaveLength(1);
+      expect(c.cookieCalls[0].name).toBe(SESSION_COOKIE_NAME);
+      expect(c.cookieCalls[0].value).toBe("el-token");
+      expect(c.cookieCalls[0].options.expires).toBe(capped);
     });
   });
 
@@ -157,6 +210,7 @@ describe("with a session cookie", () => {
     // producing one warning line.
     findLiveSession.mockResolvedValue({
       id: "s1", id_usuario: 7,
+      created_at: new Date(Date.now() - 2 * 86_400_000),
       expires_at: new Date(Date.now() + 1e6),
       last_used_at: new Date(Date.now() - 60 * 60 * 1000),
     });
