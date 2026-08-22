@@ -217,6 +217,21 @@ describe("what comes back", () => {
 
     expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
   });
+
+  it("quietly re-hashes a password stored at the old cost", async () => {
+    // Raising the cost only helps passwords hashed after the change. Every
+    // existing account would keep its cost-8 hash for as long as nobody changed
+    // it — which, for an internal ERP, is forever. So a successful login pays
+    // one extra hash and the account moves up.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+
+    const c = call({ user: "isaias", pass: "secreta" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(bcryptjs.hash).toHaveBeenCalledWith("secreta", 12);
+  });
 });
 
 describe("account lockout", () => {
@@ -364,10 +379,14 @@ describe("account lockout", () => {
   it("does not write to the account row on a correct password that had a clean record", async () => {
     // A write on every successful login would be a database hit nobody asked
     // for. The bookkeeping only has something to clear when there is
-    // something to clear.
+    // something to clear. Stored at the current cost, deliberately: this is
+    // about the failed-attempts bookkeeping, not about the re-hash above —
+    // an old-cost hash would trigger that other write and confuse the two.
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
-    findOne.mockResolvedValue(storedUser());
+    const clean = storedUser();
+    clean.dataValues.pass = "$2a$12$hash";
+    findOne.mockResolvedValue(clean);
     const c = call({ user: "isaias", pass: "secreta" });
     await loginUsuario(c.req, c.res);
 

@@ -376,7 +376,7 @@ describe("changing a password", () => {
 
     const c = call(
       { id: ADMIN, id_rol: ADMIN },
-      { params: { id: String(OTHER) }, body: { pass: "nueva" } },
+      { params: { id: String(OTHER) }, body: { pass: "una-clave-de-prueba" } },
     );
     await updateUserPass(c.req, c.res);
 
@@ -392,12 +392,41 @@ describe("changing a password", () => {
 
     const c = call(
       { id: SELF, id_rol: TECNICO },
-      { params: { id: String(SELF) }, body: { pass: "nueva", oldPass: "vieja" } },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
     );
     await updateUserPass(c.req, c.res);
 
-    expect(bcryptjs.hash).toHaveBeenCalledWith("nueva", 8);
+    expect(bcryptjs.hash).toHaveBeenCalledWith("una-clave-de-prueba", 12);
     expect(stored.set).toHaveBeenCalledWith(expect.objectContaining({ pass: "hashed" }));
+  });
+});
+
+/**
+ * The password policy has two doors — creating an account and changing one —
+ * and `validarPassword` itself is only ever exercised directly in
+ * `password.test.ts`. Nothing here proved the controllers actually called it:
+ * removing the check from either site left every test above still green.
+ * These two close that gap.
+ */
+describe("the password policy at the door", () => {
+  it("refuses to create an account with a password that fails the policy", async () => {
+    findOne.mockResolvedValueOnce(null); // nombreEnUso: name is free
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "nuevo", pass: "corta" } });
+    await createUsuario(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("refuses to set an account's password to one that fails the policy", async () => {
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) }, body: { pass: "corta" } });
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(stored.save).not.toHaveBeenCalled();
   });
 });
 
@@ -432,7 +461,7 @@ describe("username collisions", () => {
         toJSON: () => ({ id: 42, user: "nuevo" }),
       });
 
-      const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "nuevo", pass: "x" } });
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "nuevo", pass: "una-clave-de-prueba" } });
       await createUsuario(c.req, c.res);
 
       expect(c.status).toBe(200);
@@ -466,7 +495,7 @@ describe("username collisions", () => {
 
       const c = call(
         { id: ADMIN, id_rol: ADMIN },
-        { body: { user: "nuevo", pass: "x", failed_attempts: 99, locked_until: new Date("2100-01-01") } },
+        { body: { user: "nuevo", pass: "una-clave-de-prueba", failed_attempts: 99, locked_until: new Date("2100-01-01") } },
       );
       await createUsuario(c.req, c.res);
 
@@ -484,7 +513,7 @@ describe("username collisions", () => {
         shapedAsUniqueViolation('duplicate key value violates unique constraint "usuarios_user_uniq"'),
       );
 
-      const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "isaias", pass: "x" } });
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "isaias", pass: "una-clave-de-prueba" } });
       await createUsuario(c.req, c.res);
 
       expect(c.status).toBe(409);

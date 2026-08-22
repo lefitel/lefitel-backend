@@ -4,7 +4,7 @@ import bcryptjs from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { logAction } from "../utils/logAction.js";
 import { permissionsFor } from "../permissions/store.js";
-import { CREDENCIALES_INVALIDAS, fillerHash } from "../config/security.js";
+import { BCRYPT_COST, CREDENCIALES_INVALIDAS, fillerHash } from "../config/security.js";
 import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js";
 
 const secretKey = process.env.JWT_SECRET;
@@ -122,6 +122,13 @@ export async function loginUsuario(req: Request, res: Response) {
     // in a row.
     if ((data.failed_attempts ?? 0) > 0 || data.locked_until) {
       await UsuarioModel.update({ failed_attempts: 0, locked_until: null }, { where: { id: data.id } });
+    }
+
+    // The stored hash carries its own cost in the prefix: `$2a$08$` is the old
+    // one. Re-hashing here is the only moment the plaintext is in hand.
+    if (data.pass.startsWith(`$2a$0`) || data.pass.startsWith(`$2b$0`)) {
+      const nuevo = await bcryptjs.hash(pass, BCRYPT_COST);
+      await UsuarioModel.update({ pass: nuevo }, { where: { id: data.id } });
     }
 
     const usuario = {

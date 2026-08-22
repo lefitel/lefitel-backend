@@ -6,6 +6,8 @@ import bcryptjs from "bcryptjs";
 import { deleteImageFile } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
 import { can } from "../permissions/store.js";
+import { BCRYPT_COST } from "../config/security.js";
+import { validarPassword } from "../utils/password.js";
 
 /** Shared text: whichever endpoint hit this, the fix is the same username. */
 const USERNAME_TAKEN_MESSAGE = "El nombre de usuario ya está tomado por otra persona.";
@@ -131,7 +133,10 @@ export async function createUsuario(req: Request, res: Response) {
       return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
     }
 
-    req.body.pass = await bcryptjs.hash(req.body.pass, 8);
+    const motivo = validarPassword(req.body.pass ?? "");
+    if (motivo) return res.status(400).json({ message: motivo });
+
+    req.body.pass = await bcryptjs.hash(req.body.pass, BCRYPT_COST);
 
     const payload = withoutControlFields(req.body);
     const TempUsuario = await UsuarioModel.create(payload);
@@ -330,7 +335,10 @@ export async function updateUserPass(req: Request, res: Response) {
        return res.status(400).json({ message: "Debe proporcionar su contraseña actual." });
     }
 
-    const hashedPass = await bcryptjs.hash(pass, 8);
+    const motivo = validarPassword(pass ?? "");
+    if (motivo) return res.status(400).json({ message: motivo });
+
+    const hashedPass = await bcryptjs.hash(pass, BCRYPT_COST);
     TempUsuario.set({ pass: hashedPass });
     await TempUsuario.save();
     const isSelf = req.user?.id === Number(id);
