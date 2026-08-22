@@ -187,6 +187,92 @@ describe("who may change data", () => {
 });
 
 /**
+ * Read routes that deliberately ask for no permission.
+ *
+ * The write test above has always been the whole of this file's ambition, and
+ * that was the gap: `WRITES` excludes GET, so no read has ever been asserted
+ * about. Every route below is a read that any logged-in account may call today,
+ * whatever its role — which means the `ver` column of the permission matrix
+ * decides which buttons the browser draws and nothing more.
+ *
+ * This list is a snapshot of that debt, not an endorsement of it. It exists so
+ * that a *new* ungated read fails the test instead of joining the pile
+ * unnoticed, and so the pile is countable. Shortening it is its own piece of
+ * work: gating a read that a screen depends on turns that screen into an error
+ * state, so each line needs its own decision about what the caller sees.
+ */
+const READ_GATE_NOT_APPLICABLE = [
+  // Two that genuinely cannot ask for a permission, each for the same reason:
+  // they are what the answer to "may I?" is built from.
+  //
+  // Checking whether the session is still good, which the app does on every
+  // reload before it knows what the account may do.
+  "GET /api/login/",
+  // Your own permission matrix. Gating this would need a permission to learn
+  // which permissions you hold.
+  "GET /api/permisos/mias",
+
+  // ── Everything below is the debt ────────────────────────────────────────
+  // Reads that any logged-in account may call, whatever its role. Counted:
+  // twenty-five. `GET /api/dashboard/` used to be the twenty-sixth and the
+  // worst of them — no `where`, no `limit`, the whole asset register in one
+  // response — which is why it was gated first.
+  "GET /api/adss/",
+  "GET /api/adss/stats",
+  "GET /api/adssposte/:id_poste",
+  "GET /api/ciudad/",
+  "GET /api/ciudad/:id",
+  "GET /api/evento/",
+  "GET /api/evento/:id",
+  "GET /api/evento/poste/:id_poste",
+  "GET /api/evento/usuario/:id_usuario",
+  "GET /api/eventoObs/:id_evento",
+  "GET /api/material/",
+  "GET /api/material/stats",
+  "GET /api/obs/",
+  "GET /api/obs/stats",
+  "GET /api/poste/",
+  "GET /api/poste/:id",
+  "GET /api/poste/tramos",
+  "GET /api/propietario/",
+  "GET /api/propietario/stats",
+  "GET /api/revision/:id_evento",
+  "GET /api/rol/",
+  "GET /api/solucion/",
+  "GET /api/solucion/evento/:id_evento",
+  "GET /api/tipoObs/",
+  "GET /api/tipoObs/stats",
+];
+
+describe("who may read data", () => {
+  const ungated = routes
+    .filter((r) => r.method === "GET")
+    .filter((r) => !r.chain.some((name) => GATES.includes(name)))
+    .map((r) => `${r.method} ${r.path}`)
+    .sort();
+
+  it("gates every route that reads behind a permission", () => {
+    const known = new Set(READ_GATE_NOT_APPLICABLE);
+    const unexpected = ungated.filter((r) => !known.has(r));
+
+    expect(
+      unexpected,
+      `lecturas sin decidir quién puede llamarlas:\n  ${unexpected.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  it("keeps the read exception list honest", () => {
+    const stillOpen = new Set(ungated);
+    const stale = READ_GATE_NOT_APPLICABLE.filter((r) => !stillOpen.has(r));
+
+    expect(
+      stale,
+      `ya están protegidas; bórralas de READ_GATE_NOT_APPLICABLE:\n  ${stale.join("\n  ")}`,
+    ).toEqual([]);
+  });
+});
+
+/**
  * What each route of the report builder must ask for, exactly.
  *
  * Written out rather than derived, because deriving it from the same source the
@@ -208,10 +294,45 @@ const GENERADOR_GATES: Record<string, string> = {
   "POST /api/generador/reportes/:id/duplicar": "generador.crear",
 };
 
+/**
+ * What the incident routes must ask for, exactly.
+ *
+ * There is no `revisiones` module and no `soluciones` module: a revision and a
+ * resolution are both work recorded against an incident that already exists, so
+ * within `eventos` the line is drawn at whether a new incident comes into being.
+ * `crear` is opening one. Everything done to one afterwards — resolving it,
+ * reopening it, recording an inspection — is `editar`.
+ *
+ * That line matters because of the role it makes expressible: a field account
+ * that records inspections but may not open incidents is `ver` + `editar`
+ * without `crear`. If a revision asked for `crear`, that role could not exist.
+ * The opposite role — may open incidents, may not record inspections — is not a
+ * job anybody has.
+ *
+ * `POST /api/revision/` asked for `crear` until this list was written, while
+ * `POST /api/evento/:id/resolver` two files over asked for `editar` for the same
+ * kind of act, and every button in the interface asked the browser for `editar`.
+ * The interface and the server disagreed, and nothing here noticed.
+ */
+const EVENTOS_GATES: Record<string, string> = {
+  "POST /api/evento/": "eventos.crear",
+  "PUT /api/evento/:id": "eventos.editar",
+  "POST /api/evento/:id/resolver": "eventos.editar",
+  "POST /api/evento/:id/reabrir": "eventos.editar",
+  "DELETE /api/evento/:id": "eventos.archivar",
+  "POST /api/revision/": "eventos.editar",
+  "PUT /api/revision/:id": "eventos.editar",
+  "DELETE /api/revision/:id": "eventos.archivar",
+  // The one read on this list, and the reason the read test above has an
+  // exception list instead of nothing: it hands over every incident and every
+  // pole in one response, so `ver` has to mean something here.
+  "GET /api/dashboard/": "eventos.ver",
+};
+
 describe("which permission each gate asks for", () => {
   it("asks for the one the route is about, not merely for one", () => {
     const wrong: string[] = [];
-    for (const [route, expected] of Object.entries(GENERADOR_GATES)) {
+    for (const [route, expected] of Object.entries({ ...GENERADOR_GATES, ...EVENTOS_GATES })) {
       const [method, path] = route.split(" ");
       const found = routes.find((r) => r.method === method && r.path === path);
       if (!found) {
