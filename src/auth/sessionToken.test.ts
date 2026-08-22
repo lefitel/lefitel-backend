@@ -8,9 +8,12 @@ import { describe, it, expect } from "vitest";
 import { newSessionToken, hashSessionToken } from "./sessionToken.js";
 
 describe("newSessionToken", () => {
-  it("carries 32 bytes of entropy", () => {
+  it("produces a 43-character token, which is 32 bytes in base64url", () => {
     // base64url of 32 bytes is 43 characters with no padding. Fewer characters
     // than that means fewer bytes than that.
+    // Note: the guarantee that the source is cryptographic lives in the use of
+    // randomBytes() from node:crypto, not in this test. This assert catches
+    // encoding changes or byte-count errors; randomBytes guarantees quality.
     expect(newSessionToken()).toHaveLength(43);
   });
 
