@@ -273,6 +273,17 @@ export const SESSION_IDLE_DAYS = 7;
 export const SESSION_ABSOLUTE_DAYS = 30;
 
 /**
+ * How often `purgeExpiredSessions` runs once the process has booted.
+ *
+ * Daily is fine-grained enough: expiry is measured in days, so a row sits
+ * around at most one extra day past the moment it stopped mattering — nothing
+ * a browser or an audit would ever notice — and coarse enough that the purge
+ * is not competing with real traffic for the connection pool every few
+ * minutes.
+ */
+export const SESSION_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
  * How stale `last_used_at` is allowed to get before it is worth a write.
  *
  * Writing it on every request turns every read into a write: one report export

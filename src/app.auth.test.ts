@@ -82,6 +82,12 @@ const DEL_FRONTEND = {
   Origin: allowedOrigins(process.env.CORS_ORIGIN, process.env.NODE_ENV)[0],
   [CSRF_CLIENT_HEADER]: "web",
 };
+/**
+ * `DEL_FRONTEND.Origin` typed as definitely present: this suite's `.env`
+ * always configures `CORS_ORIGIN` (see `app.auth.test.ts`'s sibling
+ * `csrf.test.ts` for the same note), so the list is never empty here.
+ */
+const ORIGIN_NUESTRO = DEL_FRONTEND.Origin as string;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -296,6 +302,71 @@ describe("logging in twice from the same browser", () => {
     expect(res.status).toBe(200);
     expect(sesionUpdate).not.toHaveBeenCalled();
     expect(sesionCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * What Task 8's own live verification could not check by itself.
+ *
+ * That verification ran `curl -i` against a booted server for exactly the
+ * login → me → logout and logout-all cycle below, and `curl` sends whatever
+ * headers it is told and prints whatever comes back — it does not decide
+ * anything from them. A real browser does: `Access-Control-Allow-Credentials`
+ * and `Access-Control-Allow-Origin` are what it reads to decide whether to
+ * keep a cross-origin `Set-Cookie` at all and whether to let the page's own
+ * script see the response. A `curl` transcript showing 200 and a cookie
+ * cannot tell that story apart from one a browser would have discarded on the
+ * spot — only reading these two headers, through the real CORS middleware,
+ * can.
+ */
+describe("what curl could not check live: whether a browser would keep the credential", () => {
+  it("carries both CORS-credential headers at every step of the cycle this task verifies live", async () => {
+    const login = await request(app)
+      .post("/api/auth/login")
+      .set(DEL_FRONTEND)
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+    const me = await request(app).get("/api/auth/me").set("Cookie", COOKIE).set(DEL_FRONTEND);
+    const logout = await request(app).post("/api/auth/logout").set("Cookie", COOKIE).set(DEL_FRONTEND);
+    const logoutAll = await request(app)
+      .post("/api/auth/logout-all")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
+
+    for (const [route, res] of [
+      ["POST /api/auth/login", login],
+      ["GET /api/auth/me", me],
+      ["POST /api/auth/logout", logout],
+      ["POST /api/auth/logout-all", logoutAll],
+    ] as const) {
+      expect(res.headers["access-control-allow-credentials"], route).toBe("true");
+      expect(res.headers["access-control-allow-origin"], route).toBe(ORIGIN_NUESTRO);
+    }
+  });
+
+  it("withholds the matching allow-origin from an origin that is not ours, on the very endpoint that revokes every session", async () => {
+    // `logout-all` is the endpoint this whole plan exists to make possible —
+    // revocation the old JWT never had. If a hostile origin could read its
+    // response, it could confirm a stolen cookie had just killed every one of
+    // the victim's live sessions.
+    //
+    // `cors()` here is configured with a bare `credentials: true` — a single
+    // boolean, not a function of the origin — so it stamps
+    // `Access-Control-Allow-Credentials: true` on *every* response, this one
+    // included, whatever `Origin` asked. That header alone changes nothing:
+    // per the Fetch spec, a credentialed cross-origin response is only
+    // readable when `Access-Control-Allow-Origin` also names the exact
+    // requesting origin, and a wildcard does not count. `allowedOrigins`
+    // never puts `evil-osefi.net` in that list, so `cors()` sends no
+    // `Access-Control-Allow-Origin` at all for it — and that absence, on its
+    // own, is what makes a browser hide the response from the page that
+    // asked, whatever status code Express sent underneath.
+    const res = await request(app)
+      .post("/api/auth/logout-all")
+      .set("Cookie", COOKIE)
+      .set("Origin", "https://evil-osefi.net")
+      .set(CSRF_CLIENT_HEADER, "web");
+
+    expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   });
 });
 

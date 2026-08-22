@@ -3,8 +3,10 @@ import app from "./app.js";
 import dotenv from "dotenv";
 import { sequelize } from "./database/sequelize.js";
 import { log } from "./utils/logger.js";
-import { requiredEnv, fillerHash } from "./config/security.js";
+import { requiredEnv, fillerHash, SESSION_PURGE_INTERVAL_MS } from "./config/security.js";
 import { createShutdown } from "./lifecycle.js";
+import { schedulePurge } from "./auth/purgeJob.js";
+import { purgeExpiredSessions } from "./auth/sessionStore.js";
 
 dotenv.config();
 
@@ -80,6 +82,26 @@ async function main() {
   // session and factor tables coming, what it would take with it grew.
   await sequelize.authenticate();
   bootLog.info("conexión establecida con PostgreSQL");
+
+  /**
+   * Starts the background purge of expired sessions: one pass now, then daily
+   * for as long as the process runs. Nothing else deletes from `sesiones`
+   * (see `purgeExpiredSessions`'s own comment), so without this the table
+   * only grows.
+   *
+   * `schedulePurge` carries its own `.catch` at the exact point it calls
+   * `purgeExpiredSessions` — same shape, and same reason, as `fillerHash()`
+   * below: a promise rejected here with nobody holding it is an
+   * `unhandledRejection` in `index.ts`, and that handler kills the process. A
+   * midnight where the database happens to be unreachable must not take the
+   * whole ERP down with it — see `purgeJob.ts` for the rest of the reasoning,
+   * including why its interval is `unref`'d.
+   */
+  schedulePurge({
+    purge: purgeExpiredSessions,
+    intervalMs: SESSION_PURGE_INTERVAL_MS,
+    onError: (err) => bootLog.warn({ err }, "no se pudo purgar las sesiones caducadas"),
+  });
 
   /**
    * Warms the login filler-hash cache during boot, in parallel with whatever
