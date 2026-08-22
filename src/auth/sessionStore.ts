@@ -112,19 +112,20 @@ export async function touchSession(id: string, at: Date): Promise<void> {
 }
 
 /**
- * End one session.
+ * End one session, and there is no version of this that does not name its owner.
  *
- * Marked rather than deleted, so the profile screen can show that it ended and
- * when, and so an audit can see it happened at all. The `revoked_at: null`
- * guard makes a second call a no-op instead of overwriting the original
- * revocation time with a later one.
- */
-export async function revokeSession(id: string): Promise<void> {
-  await SesionModel.update({ revoked_at: new Date() }, { where: { id, revoked_at: null } });
-}
-
-/**
- * End one session, but only if it belongs to this person.
+ * There used to be a `revokeSession(id)` beside this, with no `id_usuario` in
+ * its `where`. Its only caller was `logout`, which has the owner in scope, so it
+ * was correct everywhere it was used — and it was a loaded gun in a shared
+ * module: the next person who needs to close a session, reaching for the
+ * shorter name with an id that came out of a request, reintroduces exactly the
+ * IDOR this plan was written to close. So there is one way to revoke, and the
+ * owner is not optional in it.
+ *
+ * Marked rather than deleted, so the profile screen can show that a session
+ * ended and when, and so an audit can see it happened at all. The
+ * `revoked_at: null` guard makes a second call a no-op instead of overwriting
+ * the original revocation time with a later one.
  *
  * The `id_usuario` in the `where` is the whole function. `DELETE
  * /api/auth/sessions/:id` takes the id from the URL, which is the caller's to

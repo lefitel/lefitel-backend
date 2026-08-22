@@ -17,13 +17,12 @@
 import type { Request, Response } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { permissionsFor } from "../permissions/store.js";
-import { verifyCredentials } from "../auth/credentials.js";
+import { logLogin, verifyCredentials } from "../auth/credentials.js";
 import { issueSession } from "../auth/issueSession.js";
 import { clearSessionCookie } from "../auth/sessionCookie.js";
 import {
   listSessionsOf,
   revokeAllSessionsOf,
-  revokeSession,
   revokeSessionOf,
 } from "../auth/sessionStore.js";
 import { logAction } from "../utils/logAction.js";
@@ -54,8 +53,13 @@ const SESION_NO_ENCONTRADA = "Esa sesión no existe o ya se cerró.";
  * `WHERE id = 'pepito'`, it raises 22P02 — invalid input syntax for type uuid —
  * so without this, any authenticated caller could turn a `DELETE
  * /api/auth/sessions/anything` into a 500 with a stack trace in the log.
+ *
+ * No `i` flag, and that is not an oversight: the id is lower-cased before it
+ * gets here. Should that normalisation ever be removed, an upper-case id fails
+ * this check and gets a clean 404, instead of quietly taking the path that used
+ * to revoke the row and leave the cookie behind.
  */
-const ES_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ES_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * One place that turns an unexpected failure into a 500.
@@ -131,6 +135,9 @@ export const login = handler("login", async (req: Request, res: Response) => {
   await issueSession(req, res, check.usuario.id);
 
   const permisos = await permissionsFor(check.usuario.id_rol);
+  // Last, not first. Written before the session existed, this line would claim
+  // somebody logged in on a request that answered 500.
+  logLogin(check.usuario, req.ip ?? null);
   return res.status(200).json({ usuario: check.usuario, permisos, message: "Login exitoso" });
 });
 
@@ -187,7 +194,10 @@ export const logout = handler("logout", async (req: Request, res: Response) => {
     return res.status(400).json({ message: SIN_FILA_DE_SESION });
   }
 
-  await revokeSession(caller.id_sesion);
+  // `revokeSessionOf` and not a revoke-by-id: the owner is in scope here, so
+  // there is no reason for this call to be the one place in the codebase that
+  // closes a session without saying whose it is.
+  await revokeSessionOf(caller.id, caller.id_sesion);
   clearSessionCookie(res);
   logAction({ id_usuario: caller.id, action: "LOGOUT", entity: "Usuario", entity_id: caller.id, detail: "Cerró la sesión de este dispositivo", metadata: { id_sesion: caller.id_sesion }, severity: 'info', ip_address: req.ip ?? null });
   return res.status(200).json({ message: "Sesión cerrada." });
@@ -208,8 +218,21 @@ export const logoutAll = handler("logoutAll", async (req: Request, res: Response
 
   const cerradas = await revokeAllSessionsOf(caller.id);
   clearSessionCookie(res);
-  logAction({ id_usuario: caller.id, action: "LOGOUT_ALL", entity: "Usuario", entity_id: caller.id, detail: `Cerró todas sus sesiones (${cerradas})`, metadata: { sesiones_revocadas: cerradas }, severity: 'warning', ip_address: req.ip ?? null });
-  return res.status(200).json({ message: "Se cerraron todas sus sesiones.", cerradas });
+  logAction({ id_usuario: caller.id, action: "LOGOUT_ALL", entity: "Usuario", entity_id: caller.id, detail: `Cerró todas sus sesiones (${cerradas})`, metadata: { sesiones_revocadas: cerradas, tenia_fila: Boolean(caller.id_sesion) }, severity: 'warning', ip_address: req.ip ?? null });
+  /**
+   * Two messages, because on the old path the first one would be a lie.
+   *
+   * A caller who arrived with a bearer token has no session row, so nothing
+   * that was just revoked was theirs — and their own credential cannot be
+   * revoked at all. "Se cerraron todas sus sesiones" while the caller is still
+   * inside is the kind of reassurance somebody acts on: you press this button
+   * because you think a token has been stolen, and you need to be told plainly
+   * that this browser is the one exception and what to do about it.
+   */
+  const message = caller.id_sesion
+    ? "Se cerraron todas sus sesiones."
+    : "Se cerraron sus sesiones. Este navegador seguirá dentro porque entró con el sistema anterior: vuelva a iniciar sesión para cerrarlo también.";
+  return res.status(200).json({ message, cerradas });
 });
 
 /**
@@ -261,11 +284,27 @@ export const endSession = handler("endSession", async (req: Request, res: Respon
   const caller = callerOf(req);
   if (!caller) return res.sendStatus(401);
 
-  const id = req.params.id;
+  const raw = req.params.id;
   // Same 404 as a session that is not yours: from the caller's side a malformed
   // id and a stranger's id are both "no such session of mine", and answering
   // differently would be one more thing to measure.
-  if (typeof id !== "string" || !ES_UUID.test(id)) {
+  if (typeof raw !== "string") {
+    return res.status(404).json({ message: SESION_NO_ENCONTRADA });
+  }
+  /**
+   * Lower-cased before anything else looks at it.
+   *
+   * Postgres normalises the `uuid` type, so `WHERE id = 'ABC…'` finds the row
+   * stored as `abc…` and the revocation worked in upper case. The comparison
+   * against `caller.id_sesion` further down is JavaScript's, and that one is
+   * byte-for-byte: closing your *own* session with the id typed in upper case
+   * answered 200, revoked the row, wrote `era_la_actual: false` in the bitácora
+   * and **left the cookie in place** — so the browser went on sending a revoked
+   * token and collecting 401s with nothing to explain why. Precisely the
+   * failure the comment further down says it prevents.
+   */
+  const id = raw.toLowerCase();
+  if (!ES_UUID.test(id)) {
     return res.status(404).json({ message: SESION_NO_ENCONTRADA });
   }
 

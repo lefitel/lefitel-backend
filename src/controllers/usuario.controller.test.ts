@@ -906,12 +906,16 @@ describe("username collisions", () => {
 /**
  * What a new password does to the sessions that knew the old one.
  *
- * Nothing, until now. `pass_changed_at` has been on the `usuarios` table since
- * the first migration of this plan and no code has ever read it, so changing a
- * password — the thing you do precisely because somebody else may know the old
- * one — left every browser that knew it logged in for up to thirty days. An
- * administrator resetting the password of somebody who has left the company was
- * doing nothing whatsoever to the laptop in their bag.
+ * Nothing, until now. Changing a password — the thing you do precisely because
+ * somebody else may know the old one — left every browser that knew it logged in
+ * for up to thirty days. An administrator resetting the password of somebody who
+ * has left the company was doing nothing whatsoever to the laptop in their bag.
+ *
+ * The design plans a `pass_changed_at` column and a check against it on top of
+ * this. **That column does not exist**: the Plan 1 migration created only
+ * `failed_attempts` and `locked_until`, and it is deliberately not added here —
+ * a column nobody writes is worse than no column, so it comes with its write
+ * and its reader or not at all.
  *
  * The exception is the interesting half. Your own current session has to
  * survive, or changing your own password answers 200 and then refuses your very
@@ -919,7 +923,7 @@ describe("username collisions", () => {
  * again.
  */
 describe("a new password ends the old sessions", () => {
-  const MI_SESION = "11111111-1111-4111-8111-111111111111";
+  const MI_SESION = "aaaaaaaa-11cd-4111-8111-aaaaaaaaaaaa";
 
   it("ends the others and keeps the one it was changed from", async () => {
     const stored = storedUser();
@@ -933,7 +937,58 @@ describe("a new password ends the old sessions", () => {
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(revokeAllSessionsOf).toHaveBeenCalledWith(SELF, { except: MI_SESION });
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(SELF, {
+      except: MI_SESION,
+      transaction: TRANSACCION,
+    });
+  });
+
+  it("saves the hash and revokes inside one transaction", async () => {
+    // Outside a transaction this endpoint had a failure mode that does not
+    // repair itself. The save lands, the revocation fails, the caller gets a
+    // 500 — and the retry is *worse*: the form sends the same `oldPass`, which
+    // no longer matches the stored hash, so the second attempt answers 401 "La
+    // contraseña actual suministrada no es correcta". Ana changes her password
+    // because she thinks somebody knows it, the UPDATE on `sesiones` loses a
+    // lock race against an export's `touchSession` writes, and she is told her
+    // current password is wrong — while it has in fact changed and her old
+    // sessions are alive for another week.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO, id_sesion: MI_SESION },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    // Both writes carrying the same transaction is the whole assertion: either
+    // one outside it can commit on its own.
+    expect(stored.save).toHaveBeenCalledWith({ transaction: TRANSACCION });
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(
+      SELF,
+      expect.objectContaining({ transaction: TRANSACCION }),
+    );
+  });
+
+  it("answers 500 rather than leaving the password changed with the sessions alive", async () => {
+    // The rollback itself is Sequelize's. What this pins is that the failure is
+    // not swallowed and that the save was inside the transaction, which is what
+    // makes the rollback possible at all.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+    revokeAllSessionsOf.mockRejectedValue(new Error("lock timeout en sesiones"));
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO, id_sesion: MI_SESION },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(500);
+    expect(stored.save).toHaveBeenCalledWith({ transaction: TRANSACCION });
   });
 
   it("ends every one of them when the request arrived on the old token", async () => {
@@ -952,7 +1007,10 @@ describe("a new password ends the old sessions", () => {
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(revokeAllSessionsOf).toHaveBeenCalledWith(SELF, { except: undefined });
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(SELF, {
+      except: undefined,
+      transaction: TRANSACCION,
+    });
   });
 
   it("spares nothing when an administrator resets somebody else's", async () => {
@@ -969,7 +1027,10 @@ describe("a new password ends the old sessions", () => {
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(revokeAllSessionsOf).toHaveBeenCalledWith(OTHER, { except: undefined });
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(OTHER, {
+      except: undefined,
+      transaction: TRANSACCION,
+    });
   });
 
   it("ends nothing when the password was refused", async () => {

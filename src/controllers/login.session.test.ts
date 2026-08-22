@@ -36,8 +36,12 @@ vi.mock("../models/usuario.model.js", () => ({
 // the file: what is under test is the wiring between them, so the half that
 // talks to Postgres is replaced and the half that talks to the browser is real.
 const createSession = vi.fn();
+const findLiveSession = vi.fn();
+const revokeSessionOf = vi.fn();
 vi.mock("../auth/sessionStore.js", () => ({
   createSession: (...a: unknown[]) => createSession(...a),
+  findLiveSession: (...a: unknown[]) => findLiveSession(...a),
+  revokeSessionOf: (...a: unknown[]) => revokeSessionOf(...a),
 }));
 
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
@@ -75,7 +79,7 @@ function storedUser() {
   };
 }
 
-function call(body: unknown) {
+function call(body: unknown, cookies?: Record<string, unknown>) {
   const res = {
     statusCode: 0,
     body: undefined as unknown,
@@ -92,6 +96,7 @@ function call(body: unknown) {
   return {
     req: {
       body,
+      cookies,
       ip: "203.0.113.9",
       headers: { "user-agent": NAVEGADOR },
     } as unknown as Request,
@@ -112,6 +117,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   findOne.mockResolvedValue(storedUser());
   createSession.mockResolvedValue({ token: TOKEN, expiresAt: CADUCA });
+  findLiveSession.mockResolvedValue(null);
+  revokeSessionOf.mockResolvedValue(true);
 });
 
 describe("the old login, once the credential is good", () => {
@@ -168,6 +175,48 @@ describe("the old login, once the credential is good", () => {
     expect(c.status).toBe(200);
     expect(c.payload?.usuario?.token).toBe("un.token.firmado");
     expect(warn).toHaveBeenCalled();
+  });
+
+  it("closes the session this browser was already holding", async () => {
+    // The frontend as it stands never calls `logout` — it drops the JWT and
+    // reloads — so nothing revokes a row from that side, ever. Without rotating
+    // here, twenty people entering one to three times a day against seven-day
+    // sessions leaves seven to twenty live rows per account, every one of them
+    // with the same user_agent and the same IP. `GET /auth/sessions`, the screen
+    // where somebody decides what to close, would be a column of identical
+    // entries, none of which is a browser anybody is using — and every
+    // abandoned token stays a working credential for a week.
+    findLiveSession.mockResolvedValue({ id: "la-anterior", id_usuario: 7 });
+
+    const c = call({ user: "isaias", pass: "secreta" }, { osefi_session: "token-anterior" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(findLiveSession).toHaveBeenCalledWith("token-anterior");
+    expect(revokeSessionOf).toHaveBeenCalledWith(7, "la-anterior");
+    // And the new one still gets opened: rotation replaces, it does not skip.
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything());
+  });
+
+  it("revokes nothing when the cookie it was sent is already dead", async () => {
+    // An expired or revoked token has no row to close, and `findLiveSession`
+    // saying so must not turn into a revocation of something else.
+    findLiveSession.mockResolvedValue(null);
+
+    const c = call({ user: "isaias", pass: "secreta" }, { osefi_session: "token-caducado" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(revokeSessionOf).not.toHaveBeenCalled();
+    expect(createSession).toHaveBeenCalled();
+  });
+
+  it("does not go looking for a previous session when there is no cookie", async () => {
+    const c = call({ user: "isaias", pass: "secreta" });
+    await loginUsuario(c.req, c.res);
+
+    expect(findLiveSession).not.toHaveBeenCalled();
+    expect(revokeSessionOf).not.toHaveBeenCalled();
   });
 
   it("opens nothing when the credential is wrong", async () => {

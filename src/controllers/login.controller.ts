@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
 import jwt from "jsonwebtoken";
 import { permissionsFor } from "../permissions/store.js";
-import { verifyCredentials } from "../auth/credentials.js";
+import { logLogin, verifyCredentials } from "../auth/credentials.js";
 import { issueSession } from "../auth/issueSession.js";
 import { log } from "../utils/logger.js";
 
@@ -65,6 +65,10 @@ export async function loginUsuario(req: Request, res: Response) {
     // logging in is already right, rather than flashing everything and then
     // hiding what this role cannot reach.
     const permisos = await permissionsFor(check.usuario.id_rol);
+    // After the work, not inside `verifyCredentials`. It used to be written the
+    // moment the password checked out, which meant a request that then answered
+    // 500 still left "Inició sesión" in the bitácora.
+    logLogin(check.usuario, req.ip ?? null);
     res.status(200).json({ usuario: { ...check.usuario, token }, permisos, message: "Login exitoso" });
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Error desconocido";

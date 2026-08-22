@@ -92,6 +92,19 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
 export const CREDENCIALES_INVALIDAS = "Usuario o contraseña incorrectos.";
 
 /**
+ * The other thing a login can answer, and the only other one.
+ *
+ * Here beside `CREDENCIALES_INVALIDAS` rather than in `auth/credentials.ts`,
+ * where it started. Two login messages living in two files is how one of them
+ * gets reworded by somebody who never sees the other, and the whole point of
+ * the pair is the line between them: this one is about the *request* — a field
+ * missing or not a string — and it gives nothing away about who has an account
+ * here, so it may be specific. Anything that depends on the account itself says
+ * `CREDENCIALES_INVALIDAS` and takes the same time doing it.
+ */
+export const CREDENCIALES_INCOMPLETAS = "Usuario y contraseña son obligatorios.";
+
+/**
  * A real hash of a value nobody knows, to compare against when the account
  * does not exist or is locked.
  *

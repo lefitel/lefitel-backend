@@ -36,14 +36,14 @@ vi.mock("../models/usuario.model.js", () => ({
 }));
 
 const createSession = vi.fn();
+const findLiveSession = vi.fn();
 const listSessionsOf = vi.fn();
-const revokeSession = vi.fn();
 const revokeSessionOf = vi.fn();
 const revokeAllSessionsOf = vi.fn();
 vi.mock("../auth/sessionStore.js", () => ({
   createSession: (...a: unknown[]) => createSession(...a),
+  findLiveSession: (...a: unknown[]) => findLiveSession(...a),
   listSessionsOf: (...a: unknown[]) => listSessionsOf(...a),
-  revokeSession: (...a: unknown[]) => revokeSession(...a),
   revokeSessionOf: (...a: unknown[]) => revokeSessionOf(...a),
   revokeAllSessionsOf: (...a: unknown[]) => revokeAllSessionsOf(...a),
 }));
@@ -65,14 +65,20 @@ vi.mock("../utils/logger.js", () => ({
 
 const { login, me, logout, logoutAll, sessions, endSession } = await import("./auth.controller.js");
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
-const { CREDENCIALES_INVALIDAS } = await import("../config/security.js");
+const { CREDENCIALES_INCOMPLETAS, CREDENCIALES_INVALIDAS } = await import(
+  "../config/security.js"
+);
 const bcryptjs = (await import("bcryptjs")).default;
 
 const YO = 7;
 const MI_ROL = 2;
-const MI_SESION = "11111111-1111-4111-8111-111111111111";
-const OTRA_SESION = "22222222-2222-4222-8222-222222222222";
-const AJENA = "33333333-3333-4333-8333-333333333333";
+// Hex *letters* in these on purpose. With all-numeric ids, the upper-case test
+// below could not fail: `"1111-…".toUpperCase()` is the same string, so it went
+// green with and without the normalisation it exists to pin. Found by breaking
+// the code and watching nothing fall over.
+const MI_SESION = "aaaaaaaa-11cd-4111-8111-aaaaaaaaaaaa";
+const OTRA_SESION = "bbbbbbbb-22de-4222-8222-bbbbbbbbbbbb";
+const AJENA = "cccccccc-33ef-4333-8333-cccccccccccc";
 const TOKEN = "un-token-opaco-de-sesion";
 const CADUCA = new Date("2026-09-01T00:00:00.000Z");
 const PERMISOS = { seguridad: { ver: true } };
@@ -161,8 +167,8 @@ beforeEach(() => {
   findOne.mockResolvedValue(storedUser());
   findByPk.mockResolvedValue(storedUser());
   createSession.mockResolvedValue({ token: TOKEN, expiresAt: CADUCA });
+  findLiveSession.mockResolvedValue(null);
   listSessionsOf.mockResolvedValue([]);
-  revokeSession.mockResolvedValue(undefined);
   revokeSessionOf.mockResolvedValue(true);
   revokeAllSessionsOf.mockResolvedValue(0);
   permissionsFor.mockResolvedValue(PERMISOS);
@@ -211,6 +217,12 @@ describe("POST /api/auth/login", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(400);
+    // The exact sentence, and deliberately not the one a bad credential gets:
+    // this is about the request and gives nothing away about who has an account
+    // here. Both messages live in `config/security.ts` now, so neither can be
+    // reworded without the other in view.
+    expect(c.message).toBe(CREDENCIALES_INCOMPLETAS);
+    expect(c.message).not.toBe(CREDENCIALES_INVALIDAS);
     expect(findOne).not.toHaveBeenCalled();
     expect(createSession).not.toHaveBeenCalled();
   });
@@ -262,6 +274,34 @@ describe("POST /api/auth/login", () => {
     expect(c.status).toBe(500);
     expect(c.raw.cookie).not.toHaveBeenCalled();
   });
+
+  it("does not write a LOGIN line for a login that answered 500", async () => {
+    // The line used to be written the moment the password checked out, from
+    // inside `verifyCredentials`. So a request that then failed to open a
+    // session answered 500 while the bitacora said that person had logged in —
+    // and the bitacora is read precisely to find out what happened.
+    const { logAction } = await import("../utils/logAction.js");
+    createSession.mockRejectedValue(new Error("pool agotado"));
+    const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(500);
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: "LOGIN" }));
+  });
+
+  it("writes the LOGIN line when the person really is in", async () => {
+    // The other direction of the same move: it must still be written, and with
+    // the address, which is what tells one machine grinding one account apart
+    // from a person mistyping their own.
+    const { logAction } = await import("../utils/logAction.js");
+    const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "LOGIN", entity_id: YO, ip_address: "203.0.113.9" }),
+    );
+  });
 });
 
 describe("GET /api/auth/me", () => {
@@ -309,7 +349,11 @@ describe("POST /api/auth/logout", () => {
     await logout(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(revokeSession).toHaveBeenCalledWith(MI_SESION);
+    // With the caller's own id, not merely with the session id. There is one way
+    // to revoke a session in this codebase now and the owner is not optional in
+    // it — the shorter `revokeSession(id)` was deleted rather than left lying
+    // around for the next person to reach for.
+    expect(revokeSessionOf).toHaveBeenCalledWith(YO, MI_SESION);
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
   });
 
@@ -336,7 +380,7 @@ describe("POST /api/auth/logout", () => {
 
     expect(c.status).toBe(400);
     expect(c.message).toMatch(/vuelva a iniciar sesión/i);
-    expect(revokeSession).not.toHaveBeenCalled();
+    expect(revokeSessionOf).not.toHaveBeenCalled();
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
   });
 });
@@ -355,15 +399,26 @@ describe("POST /api/auth/logout-all", () => {
     expect(c.raw.clearCookie).toHaveBeenCalled();
   });
 
-  it("works for a caller who arrived on the old token", async () => {
+  it("works on the old token path, and says what really happened", async () => {
     // Revocation is by user id, so there is nothing this needs a session row
-    // for. The bearer token itself stays valid until it expires, which is the
-    // hole this plan documents rather than the one it can close today.
+    // for. But the caller's own bearer token cannot be revoked at all, so the
+    // usual "se cerraron todas sus sesiones" would be a lie — told to somebody
+    // who pressed this button because they believe a credential was stolen.
+    // They are told plainly that this browser is the exception, and what to do.
     const c = call(YO_CON_TOKEN_VIEJO);
     await logoutAll(c.req, c.res);
 
     expect(c.status).toBe(200);
     expect(revokeAllSessionsOf).toHaveBeenCalledWith(YO);
+    expect(c.message).toMatch(/seguirá dentro/i);
+    expect(c.message).toMatch(/vuelva a iniciar sesión/i);
+  });
+
+  it("says the plain thing when the caller did have a session row", async () => {
+    const c = call(YO_CON_SESION);
+    await logoutAll(c.req, c.res);
+
+    expect(c.message).toBe("Se cerraron todas sus sesiones.");
   });
 
   it("never revokes anybody else's, whatever the request says", async () => {
@@ -456,12 +511,20 @@ describe("DELETE /api/auth/sessions/:id", () => {
     // 403 would confirm the row exists and belongs to somebody, which turns the
     // endpoint into a way of finding out who is logged in right now.
     revokeSessionOf.mockResolvedValue(false);
-    const c = call(YO_CON_SESION, { params: { id: AJENA } });
-    await endSession(c.req, c.res);
+    const ajena = call(YO_CON_SESION, { params: { id: AJENA } });
+    await endSession(ajena.req, ajena.res);
 
-    expect(c.status).toBe(404);
-    expect(c.status).not.toBe(403);
+    expect(ajena.status).toBe(404);
     expect(revokeSessionOf).toHaveBeenCalledWith(YO, AJENA);
+
+    // And indistinguishable from an id that never named anything: same status,
+    // same words. A `toBe(404)` followed by `not.toBe(403)` would have been two
+    // assertions saying one thing; this is the second thing.
+    const inventada = call(YO_CON_SESION, { params: { id: "no-es-un-uuid" } });
+    await endSession(inventada.req, inventada.res);
+
+    expect(inventada.status).toBe(ajena.status);
+    expect(inventada.message).toBe(ajena.message);
   });
 
   it("does not reach the database with an id that is not a uuid", async () => {
@@ -488,6 +551,21 @@ describe("DELETE /api/auth/sessions/:id", () => {
     await endSession(c.req, c.res);
 
     expect(c.status).toBe(200);
+    expect(c.raw.clearCookie).toHaveBeenCalled();
+  });
+
+  it("takes the cookie back even when the id arrives in upper case", async () => {
+    // Postgres normalises the `uuid` type, so the row was always revoked; the
+    // comparison that decides whether to clear the cookie is JavaScript's, and
+    // that one is byte-for-byte. Before the id was lower-cased, closing your own
+    // session in upper case answered 200, revoked the row, wrote
+    // `era_la_actual: false` and left the cookie in place — and the browser went
+    // on sending a revoked token, collecting 401s with nothing to explain why.
+    const c = call(YO_CON_SESION, { params: { id: MI_SESION.toUpperCase() } });
+    await endSession(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(revokeSessionOf).toHaveBeenCalledWith(YO, MI_SESION);
     expect(c.raw.clearCookie).toHaveBeenCalled();
   });
 
@@ -525,7 +603,6 @@ describe("with no caller at all", () => {
       await handler(c.req, c.res);
 
       expect(c.status, what).toBe(401);
-      expect(revokeSession, what).not.toHaveBeenCalled();
       expect(revokeSessionOf, what).not.toHaveBeenCalled();
       expect(revokeAllSessionsOf, what).not.toHaveBeenCalled();
       expect(listSessionsOf, what).not.toHaveBeenCalled();
@@ -546,7 +623,7 @@ describe("when the database falls over", () => {
   it("answers 500 rather than leaving the request hanging", async () => {
     const cases = [
       ["me", me, () => findByPk.mockRejectedValue(new Error("caída"))],
-      ["logout", logout, () => revokeSession.mockRejectedValue(new Error("caída"))],
+      ["logout", logout, () => revokeSessionOf.mockRejectedValue(new Error("caída"))],
       ["logoutAll", logoutAll, () => revokeAllSessionsOf.mockRejectedValue(new Error("caída"))],
       ["sessions", sessions, () => listSessionsOf.mockRejectedValue(new Error("caída"))],
       ["endSession", endSession, () => revokeSessionOf.mockRejectedValue(new Error("caída"))],

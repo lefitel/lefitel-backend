@@ -340,7 +340,7 @@ describe("what comes back", () => {
  * two is under the lockout threshold, so nobody gets locked while it happens.
  *
  * These tests count `compare` calls, which is the only thing a unit test can
- * see of a duration. Deleting the extra compare in `login.controller.ts` — it
+ * see of a duration. Deleting the extra compare in `auth/credentials.ts` — it
  * looks exactly like a pointless one — fails the first of them.
  */
 describe("what a failure costs", () => {
@@ -453,7 +453,7 @@ describe("account lockout", () => {
   it("records a failure through an atomic increment, not a computed update", async () => {
     // The lookup's own `findOne` returns the account as it was before this
     // request; the second `findOne` below stands in for the re-read that
-    // follows the atomic increment in `login.controller.ts`, returning the
+    // follows the atomic increment in `auth/credentials.ts`, returning the
     // count the database actually holds afterwards.
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);

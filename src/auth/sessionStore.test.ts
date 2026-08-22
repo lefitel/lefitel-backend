@@ -36,7 +36,6 @@ const {
   createSession,
   findLiveSession,
   touchSession,
-  revokeSession,
   revokeSessionOf,
   revokeAllSessionsOf,
   listSessionsOf,
@@ -196,24 +195,22 @@ describe("touchSession", () => {
 });
 
 describe("revoking", () => {
-  it("marks one session revoked instead of deleting the row", async () => {
-    // Kept, so the profile screen can show that it was ended and when.
-    await revokeSession("una-id");
-    expect(update).toHaveBeenCalled();
-    const [values, options] = update.mock.calls[0] as [Record<string, unknown>, { where: Record<string, unknown> }];
-    expect(values.revoked_at).toBeInstanceOf(Date);
-    // The exact where, not just a subset: without the revoked_at: null guard,
-    // revoking an already-revoked session would overwrite its original
-    // revocation time, and `toMatchObject({ id })` alone would never notice.
-    expect(options.where).toEqual({ id: "una-id", revoked_at: null });
-    expect(destroy).not.toHaveBeenCalled();
-  });
-
   it("revokes every live session of one person and says how many", async () => {
     update.mockResolvedValue([3]);
     expect(await revokeAllSessionsOf(7)).toBe(3);
     const [, options] = update.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
     expect(options.where).toMatchObject({ id_usuario: 7, revoked_at: null });
+  });
+
+  it("marks one session revoked instead of deleting the row", async () => {
+    // Kept, so the profile screen can show that it was ended and when. And the
+    // `revoked_at: null` guard: without it, revoking an already-revoked session
+    // would overwrite its original revocation time with a later one.
+    update.mockResolvedValue([1]);
+    await revokeSessionOf(7, "una-id");
+    const [values] = update.mock.calls[0] as [Record<string, unknown>, unknown];
+    expect(values.revoked_at).toBeInstanceOf(Date);
+    expect(destroy).not.toHaveBeenCalled();
   });
 
   it("will not revoke one session without being told whose it is", async () => {

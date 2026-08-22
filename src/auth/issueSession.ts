@@ -1,18 +1,20 @@
 // Opening a session and handing it to the browser, in one place.
 //
-// Two lines that always go together: a row in `sesiones` and the cookie that
-// names it. Written out at each call site they can be got half right — a row
-// created and no cookie set is a session nobody can use and nothing will ever
+// Three things that always go together: the session this browser was already
+// holding is closed, a new row is written, and the cookie that names it is put
+// on the response. Written out at each call site they can be got partly right —
+// a row created and no cookie set is a session nobody can use and nothing will
 // clean up before the purge; a cookie set from a token that was never stored is
-// a 401 on the very next request.
+// a 401 on the very next request; and forgetting the first one is what left the
+// sessions screen unreadable (see `rotateOut` below).
 //
 // Both doors call this: `POST /api/auth/login`, where it is the whole point,
 // and `POST /api/login`, where it rides along beside the JWT so that everybody
 // who logs in through the current frontend is migrated without noticing.
 
 import type { Request, Response } from "express";
-import { createSession } from "./sessionStore.js";
-import { setSessionCookie } from "./sessionCookie.js";
+import { createSession, findLiveSession, revokeSessionOf } from "./sessionStore.js";
+import { readSessionCookie, setSessionCookie } from "./sessionCookie.js";
 
 /**
  * Open a session for this person and put it in the response as a cookie.
@@ -28,9 +30,46 @@ import { setSessionCookie } from "./sessionCookie.js";
  * client's address and not the Coolify proxy's.
  */
 export async function issueSession(req: Request, res: Response, id_usuario: number): Promise<void> {
+  await rotateOut(req);
   const { token, expiresAt } = await createSession(id_usuario, {
     userAgent: req.headers["user-agent"],
     ip: req.ip,
   });
   setSessionCookie(res, token, expiresAt);
+}
+
+/**
+ * End the session this browser was already holding, before opening the next.
+ *
+ * Without this, logging in twice from the same browser leaves two live rows,
+ * and nothing ever removes the first. That is not a corner case: the frontend
+ * as it stands today never calls `logout` — it drops the JWT and reloads — so
+ * no row is ever revoked from that side at all. Twenty people entering one to
+ * three times a day, against sessions that live seven days, is on the order of
+ * seven to twenty live rows per account, **every one of them with the same
+ * `user_agent` and the same IP address**.
+ *
+ * Which lands squarely on this task's own deliverable. `GET /auth/sessions` is
+ * the screen where somebody decides what to close, and it would show a column
+ * of indistinguishable entries, not one of which corresponds to a browser
+ * anybody is actually using. Meanwhile each abandoned token stays a working
+ * credential for a week — the exact thing this plan exists to be able to
+ * revoke.
+ *
+ * Rotating the session on login is also good practice on its own account, and
+ * this is the only moment where the old credential and the new one are both in
+ * hand.
+ *
+ * The row's owner is deliberately not compared against the person logging in.
+ * Whoever it belonged to, its token lived in the cookie this response is about
+ * to overwrite, so leaving the row live leaves a credential that cannot be
+ * reached from this browser any more. In every real case it is the same person
+ * entering again.
+ */
+async function rotateOut(req: Request): Promise<void> {
+  const previous = readSessionCookie(req);
+  if (!previous) return;
+  const live = await findLiveSession(previous);
+  if (!live) return;
+  await revokeSessionOf(live.id_usuario, live.id);
 }

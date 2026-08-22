@@ -426,17 +426,21 @@ export async function updateUserPass(req: Request, res: Response) {
      * of them able to tell that apart from having heard it wrong.
      */
     TempUsuario.set({ pass: hashedPass, failed_attempts: 0, locked_until: null });
-    await TempUsuario.save();
 
     const isSelf = loggedUser.id === Number(id);
     /**
      * A new password ends the old sessions, which until now it did not.
      *
-     * `pass_changed_at` has been on the table since the first migration of this
-     * plan and nothing read it, so changing a password — the thing you do
-     * *because* somebody else may know the old one — left every browser that
-     * knew it logged in, for up to thirty days. An administrator resetting the
-     * password of a leaver was doing nothing at all to the laptop in their bag.
+     * Changing a password — the thing you do *because* somebody else may know
+     * the old one — left every browser that knew it logged in, for up to thirty
+     * days. An administrator resetting the password of a leaver was doing
+     * nothing whatsoever to the laptop in their bag. The design plans a
+     * `pass_changed_at` column and a `sesion.created_at >= u.pass_changed_at`
+     * check on top of this, as belt and braces; **that column does not exist
+     * yet** — the Plan 1 migration created only `failed_attempts` and
+     * `locked_until` — and it is not added here on purpose: a column nobody
+     * writes is worse than no column, so it arrives together with its write and
+     * the query that reads it, or not at all.
      *
      * One exception, and only one: your own current session survives. Without
      * it, changing your own password answers 200 and then refuses your very
@@ -451,9 +455,26 @@ export async function updateUserPass(req: Request, res: Response) {
      * no row to spare, the JWT keeps working until it expires, and every real
      * session of that account is closed. Answering that case by sparing an
      * unknown id would revoke nothing at all.
+     *
+     * Both writes in one transaction, for the same reason `deleteUsuario` uses
+     * one, and the failure it prevents is nastier than it looks. Saved outside a
+     * transaction, a revocation that fails leaves the password **already
+     * changed** and answers 500 — and the retry does not repair it, it makes it
+     * worse: the form sends the same `oldPass`, which no longer matches the
+     * stored hash, so the second attempt answers 401 "La contraseña actual
+     * suministrada no es correcta". Ana changes her password because she thinks
+     * somebody knows it, the UPDATE on `sesiones` loses a lock race against the
+     * `touchSession` writes of a running export, and she is told her current
+     * password is wrong — while it has in fact changed and her old sessions are
+     * still alive for a week. It does not take the database being down; it
+     * takes one lock conflict on a table every request writes to.
      */
-    const revocadas = await revokeAllSessionsOf(Number(id), {
-      except: isSelf ? loggedUser.id_sesion : undefined,
+    const revocadas = await sequelize.transaction(async (transaction) => {
+      await TempUsuario.save({ transaction });
+      return revokeAllSessionsOf(Number(id), {
+        except: isSelf ? loggedUser.id_sesion : undefined,
+        transaction,
+      });
     });
 
     logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf, sesiones_revocadas: revocadas }, severity: 'critical', ip_address: req.ip ?? null });

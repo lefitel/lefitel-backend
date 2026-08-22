@@ -61,8 +61,8 @@ const usuarioFindOne = vi.spyOn(UsuarioModel, "findOne");
 const YO = 7;
 const MI_ROL = 2;
 const TOKEN = "un-token-opaco-de-treinta-y-dos-bytes";
-const MI_SESION = "11111111-1111-4111-8111-111111111111";
-const AJENA = "99999999-9999-4999-8999-999999999999";
+const MI_SESION = "aaaaaaaa-11cd-4111-8111-aaaaaaaaaaaa";
+const AJENA = "ffffffff-99ab-4999-8999-ffffffffffff";
 const COOKIE = `${SESSION_COOKIE_NAME}=${TOKEN}`;
 
 beforeEach(() => {
@@ -181,7 +181,10 @@ describe("closing sessions, through the real stack", () => {
     const res = await request(app).post("/api/auth/logout").set("Cookie", COOKIE);
 
     expect(res.status).toBe(200);
-    expect(updateWhere()).toEqual({ id: MI_SESION, revoked_at: null });
+    // `id_usuario` in a logout too. It is not needed there — the caller's own
+    // session id came from their own cookie — but there is one way to revoke a
+    // session in this codebase and the owner is not optional in it.
+    expect(updateWhere()).toEqual({ id: MI_SESION, id_usuario: YO, revoked_at: null });
     const setCookie = (res.headers["set-cookie"] as unknown as string[])?.join("; ") ?? "";
     // Cleared by being set to nothing with an expiry in the past — which is the
     // only way to remove a cookie — so the name must be there with an empty
@@ -229,6 +232,36 @@ describe("closing sessions, through the real stack", () => {
     // By user, and with nothing spared: this is the one that has to be all of
     // them.
     expect(updateWhere()).toEqual({ id_usuario: YO, revoked_at: null });
+  });
+});
+
+describe("logging in twice from the same browser", () => {
+  it("closes the row the browser was already holding before opening the next", async () => {
+    // Through the real stack, so the cookie really travels and the real
+    // `findLiveSession` really hashes it. Without this rotation the current
+    // frontend — which never calls logout — leaves one live row per login
+    // forever, all with the same user_agent and IP, which is what would make
+    // `GET /auth/sessions` useless as a screen.
+    const res = await request(app)
+      .post("/api/auth/login")
+      .set("Cookie", COOKIE)
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+
+    expect(res.status).toBe(200);
+    // The previous row, revoked, by id and owner.
+    expect(updateWhere()).toEqual({ id: MI_SESION, id_usuario: YO, revoked_at: null });
+    // And a new row written all the same.
+    expect(sesionCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the session without any revocation when the browser had no cookie", async () => {
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+
+    expect(res.status).toBe(200);
+    expect(sesionUpdate).not.toHaveBeenCalled();
+    expect(sesionCreate).toHaveBeenCalledTimes(1);
   });
 });
 

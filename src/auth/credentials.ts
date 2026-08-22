@@ -22,7 +22,13 @@
 import bcryptjs from "bcryptjs";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { logAction } from "../utils/logAction.js";
-import { BCRYPT_COST, CREDENCIALES_INVALIDAS, bcryptCostOf, fillerHash } from "../config/security.js";
+import {
+  BCRYPT_COST,
+  CREDENCIALES_INCOMPLETAS,
+  CREDENCIALES_INVALIDAS,
+  bcryptCostOf,
+  fillerHash,
+} from "../config/security.js";
 import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js";
 import { whereUsernameIs } from "../utils/username.js";
 
@@ -42,17 +48,6 @@ export interface UsuarioAutenticado {
   lastname: string;
   image: string | null;
 }
-
-/**
- * The other message a login can answer with, and the only other one.
- *
- * It is not `CREDENCIALES_INVALIDAS`, and that difference is safe: this one is
- * about the *request* — a field missing or not a string — and answering it
- * tells an attacker nothing about who has an account here. Anything that
- * depends on the account itself says `CREDENCIALES_INVALIDAS` and takes the
- * same time doing it.
- */
-export const CREDENCIALES_INCOMPLETAS = "Usuario y contraseña son obligatorios.";
 
 /**
  * Either the person, or the one sentence they get told.
@@ -273,11 +268,21 @@ export async function verifyCredentials(input: {
     image: data.image,
   };
 
-  // Logged here rather than in each caller. It is this function that knows a
-  // correct credential was presented, and one line written from one place
-  // cannot end up saying two different things on the two doors — or, more
-  // likely, being forgotten on the newer one.
-  logAction({ id_usuario: data.id, action: "LOGIN", entity: "Usuario", entity_id: data.id, detail: "Inició sesión", metadata: { user: data.user }, severity: 'info', ip_address: ip });
-
   return { ok: true, usuario };
+}
+
+/**
+ * Write the LOGIN line, once the person is actually in.
+ *
+ * The wording, the action name and the severity live here, beside the three
+ * failure lines, so the two doors cannot describe the same event differently or
+ * forget it on the newer one. *When* it is written is each door's business, and
+ * that is the part this got wrong at first: called from inside
+ * `verifyCredentials`, the line was written before the session row existed, so
+ * a failure to open one — or to read the permission matrix — answered 500 while
+ * the bitácora said that person had logged in. The bitácora is read to find out
+ * what happened; a line for a login that did not happen is worse than no line.
+ */
+export function logLogin(usuario: UsuarioAutenticado, ip: string | null): void {
+  logAction({ id_usuario: usuario.id, action: "LOGIN", entity: "Usuario", entity_id: usuario.id, detail: "Inició sesión", metadata: { user: usuario.user }, severity: 'info', ip_address: ip });
 }
