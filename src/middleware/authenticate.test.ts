@@ -5,13 +5,21 @@
 // happens when a session has been revoked — that is the entire reason this
 // middleware is being rewritten.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Request, Response, NextFunction } from "express";
 
 const findLiveSession = vi.fn();
 const touchSession = vi.fn();
 const findByPk = vi.fn();
 const jwtVerify = vi.fn();
+// Fixed, reachable mocks — not a fresh `vi.fn()` handed out on every `log(...)`
+// call. `authenticate.ts` calls `log("auth")` exactly once at module load, so
+// this is the one object every log line in the module goes through, and tests
+// can assert on it. A mock that returns a new, unreachable function each call
+// would let the bearer path's log line (or the touch-failure warning) be
+// deleted without any test noticing.
+const authInfo = vi.fn();
+const authWarn = vi.fn();
 
 vi.mock("../auth/sessionStore.js", () => ({
   findLiveSession: (...a: unknown[]) => findLiveSession(...a),
@@ -23,10 +31,11 @@ vi.mock("../models/usuario.model.js", () => ({
 vi.mock("jsonwebtoken", () => ({
   default: { verify: (...a: unknown[]) => jwtVerify(...a) },
 }));
-vi.mock("../utils/logger.js", () => ({ log: () => ({ info: vi.fn(), warn: vi.fn() }) }));
+vi.mock("../utils/logger.js", () => ({ log: () => ({ info: authInfo, warn: authWarn }) }));
 
 const { authenticate } = await import("./authenticate.js");
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
+const { SESSION_TOUCH_THROTTLE_MINUTES } = await import("../config/security.js");
 
 function call(opts: { cookie?: string; bearer?: string } = {}) {
   const res = {
@@ -88,26 +97,75 @@ describe("with a session cookie", () => {
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
     expect(c.status).toBe(401);
+    expect(c.next).not.toHaveBeenCalled();
   });
 
-  it("does not write last_used_at on every single request", async () => {
-    // One report export makes around two thousand sequential requests. Writing
-    // on each one is two thousand UPDATEs on one row.
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
-    const c = call({ cookie: "t" });
-    await authenticate(c.req, c.res, c.next);
-    expect(touchSession).not.toHaveBeenCalled();
+  describe("touching last_used_at", () => {
+    // A pair of tests that only bracket 0 minutes and 60 minutes cannot tell a
+    // 5-minute throttle from a 30-second one — both pass either way. The window
+    // has to be measured from the real constant, on both sides of it, or a
+    // `* 6_000` typo (30s) where `* 60_000` (minutes) belongs sails through
+    // green while writing on nearly every request in production.
+    const THROTTLE_MS = SESSION_TOUCH_THROTTLE_MINUTES * 60_000;
+    const NOW = new Date("2026-01-01T00:00:00.000Z");
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("does not write while still inside the throttle window", async () => {
+      // One report export makes around two thousand sequential requests.
+      // Writing on each one is two thousand UPDATEs on one row.
+      findLiveSession.mockResolvedValue({
+        id: "s1", id_usuario: 7,
+        expires_at: new Date(NOW.getTime() + 1e6),
+        last_used_at: new Date(NOW.getTime() - (THROTTLE_MS - 1_000)),
+      });
+      const c = call({ cookie: "t" });
+      await authenticate(c.req, c.res, c.next);
+      expect(touchSession).not.toHaveBeenCalled();
+    });
+
+    it("writes the current time, not the session's own stale timestamp, once the window has passed", async () => {
+      // `expect.any(Date)` would accept `sesion.last_used_at` re-written as
+      // itself — which is exactly the bug that pins the throttle open forever:
+      // every later request would see the same "stale" timestamp and touch
+      // again, and `expires_at` would stop sliding. The exact value is the
+      // point of the test.
+      findLiveSession.mockResolvedValue({
+        id: "s1", id_usuario: 7,
+        expires_at: new Date(NOW.getTime() + 1e6),
+        last_used_at: new Date(NOW.getTime() - (THROTTLE_MS + 1_000)),
+      });
+      const c = call({ cookie: "t" });
+      await authenticate(c.req, c.res, c.next);
+      expect(touchSession).toHaveBeenCalledWith("s1", NOW);
+    });
   });
 
-  it("does write it once the throttle has passed", async () => {
+  it("logs the touch failure instead of leaving it unhandled", async () => {
+    // `touchSession(...).catch(...)` is fire-and-forget on purpose — the
+    // request must not wait on a write nobody asked for — but that is exactly
+    // what makes a missing `.catch` dangerous: `src/index.ts` treats any
+    // unhandled rejection as fatal and restarts the whole process, so one
+    // failed UPDATE under an exhausted pool would take the API down instead of
+    // producing one warning line.
     findLiveSession.mockResolvedValue({
       id: "s1", id_usuario: 7,
       expires_at: new Date(Date.now() + 1e6),
       last_used_at: new Date(Date.now() - 60 * 60 * 1000),
     });
+    touchSession.mockRejectedValue(new Error("pool agotado"));
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
-    expect(touchSession).toHaveBeenCalledWith("s1", expect.any(Date));
+
+    expect(c.next).toHaveBeenCalled();
+    await vi.waitFor(() => expect(authWarn).toHaveBeenCalled());
   });
 
   it("never consults the old bearer path when a cookie is present", async () => {
@@ -123,13 +181,19 @@ describe("with a session cookie", () => {
 });
 
 describe("with the old bearer token, during the transition", () => {
-  it("still lets it through", async () => {
+  it("still lets it through, with the role the database has and not the one the token carries", async () => {
+    // The JWT payload says id_rol: 1; the mocked database (see the top-level
+    // beforeEach) says 2. Only the database's answer may end up on req.user —
+    // reading the token's own id_rol instead would look like a harmless
+    // optimisation (it saves the lookup the cookie path already pays for) and
+    // would silently bring back the exact bug this rewrite exists to close:
+    // a demoted or archived account keeps acting on a week-old JWT.
     jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
     const c = call({ bearer: "un.jwt.valido" });
     await authenticate(c.req, c.res, c.next);
 
     expect(c.next).toHaveBeenCalled();
-    expect(c.req.user).toMatchObject({ id: 7 });
+    expect(c.req.user).toEqual({ id: 7, id_rol: 2 });
   });
 
   it("leaves id_sesion empty, because there is no row for it", async () => {
@@ -139,11 +203,41 @@ describe("with the old bearer token, during the transition", () => {
     expect(c.req.user?.id_sesion).toBeUndefined();
   });
 
+  it("turns away someone whose account was archived since the token was issued", async () => {
+    // The cookie path has its own test for this. The bearer path runs the
+    // identical `!usuario` check through a different function
+    // (`authenticateByLegacyToken`), reached through a `jwt.verify` callback
+    // rather than a plain `await` — nothing proves it independently unless a
+    // test exercises this path with a null lookup.
+    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
+    findByPk.mockResolvedValue(null);
+    const c = call({ bearer: "t" });
+    await authenticate(c.req, c.res, c.next);
+    expect(c.status).toBe(401);
+    expect(c.next).not.toHaveBeenCalled();
+  });
+
   it("rejects an invalid one", async () => {
     jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown) => void) => cb(new Error("bad")));
     const c = call({ bearer: "malo" });
     await authenticate(c.req, c.res, c.next);
     expect(c.status).toBe(401);
+    expect(c.next).not.toHaveBeenCalled();
+  });
+
+  it("logs every use of the old path, without the token itself ending up in the log", async () => {
+    // This line is the count the retirement plan reads: the day it can show
+    // zero uses in a week is the day the old path can be deleted. Losing it
+    // silently would make that decision a guess again.
+    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
+    const c = call({ bearer: "un.jwt.secreto" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(authInfo).toHaveBeenCalledWith(
+      expect.objectContaining({ id_usuario: 7 }),
+      expect.any(String),
+    );
+    expect(JSON.stringify(authInfo.mock.calls[0])).not.toContain("un.jwt.secreto");
   });
 });
 

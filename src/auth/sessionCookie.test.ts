@@ -91,4 +91,13 @@ describe("readSessionCookie", () => {
     // cookie-parser not mounted, or a client that sends none. Must not throw.
     expect(readSessionCookie({} as Request)).toBeUndefined();
   });
+
+  it("ignores a value cookie-parser has already parsed as JSON", () => {
+    // `Cookie: osefi_session=j:1` makes cookie-parser's own JSONCookies step
+    // hand this a number, not a string. Returning it anyway would send a
+    // number into `hashSessionToken`, which throws on anything that is not a
+    // string or Buffer — turning an unauthenticated request into a 500.
+    const req = { cookies: { [SESSION_COOKIE_NAME]: 1 } } as unknown as Request;
+    expect(readSessionCookie(req)).toBeUndefined();
+  });
 });

@@ -39,7 +39,20 @@ export function clearSessionCookie(res: Response): void {
   res.clearCookie(SESSION_COOKIE_NAME, cookieOptions());
 }
 
-/** The token the browser sent, if it sent one. */
+/**
+ * The token the browser sent, if it sent one.
+ *
+ * `cookie-parser` runs `JSONCookies` on every request regardless of secret: any
+ * raw value starting with `j:` is parsed as JSON before this function ever
+ * sees it. So `Cookie: osefi_session=j:1` arrives here as the *number* `1`,
+ * not a string — this function's own return type said `string | undefined`
+ * and would have lied. Passing that number on to `hashSessionToken`
+ * (`createHash(...).update()`, which requires a string or Buffer) throws,
+ * which turned an unauthenticated request into a free 500 — with a full stack
+ * trace logged — on every one of the API's protected routes, instead of a
+ * plain 401. The `typeof` check is what keeps the return type honest.
+ */
 export function readSessionCookie(req: Request): string | undefined {
-  return (req as Request & { cookies?: Record<string, string> }).cookies?.[SESSION_COOKIE_NAME];
+  const value = (req as Request & { cookies?: Record<string, unknown> }).cookies?.[SESSION_COOKIE_NAME];
+  return typeof value === "string" ? value : undefined;
 }
