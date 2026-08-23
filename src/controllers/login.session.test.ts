@@ -207,12 +207,14 @@ describe("the old login, once the credential is good", () => {
 
   it("closes the session this browser was already holding", async () => {
     // The frontend does call `logout` now, but only when somebody presses the
-    // button: closing the tab revokes nothing, and the call is fire-and-forget
-    // with its failure swallowed, so an abandoned row per login is still the
-    // normal case rather than the exception. Without rotating here, twenty
-    // people entering one to three times a day against seven-day
-    // sessions leaves seven to twenty live rows per account, every one of them
-    // with the same user_agent and the same IP. `GET /auth/sessions`, the screen
+    // button: closing the tab revokes nothing, and a logout the network lost is
+    // announced rather than retried — `SesionProvider.tsx` puts the failure on
+    // screen, which is not the same as closing the row. So an abandoned row per
+    // login is still the normal case rather than the exception. Without
+    // rotating here, twenty people entering one to three times a day against
+    // seven-day sessions leaves seven to twenty live rows per account, every one
+    // of them with the same user_agent and the same IP. `GET /auth/sessions`,
+    // the screen
     // where somebody decides what to close, would be a column of identical
     // entries, none of which is a browser anybody is using — and every
     // abandoned token stays a working credential for a week.

@@ -52,6 +52,7 @@ const { allowedOrigins, CSRF_CLIENT_HEADER, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_
 const CABECERA_ROL = "x-osefi-role";
 const CABECERA_VENCIMIENTO = "x-osefi-session-expires";
 const { hashSessionToken } = await import("./auth/sessionToken.js");
+const { loginIpLimiter, loginAccountIpLimiter } = await import("./middleware/loginLimiters.js");
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { SesionModel } = await import("./models/sesion.model.js");
 
@@ -419,9 +420,10 @@ describe("logging in twice from the same browser", () => {
     // Through the real stack, so the cookie really travels and the real
     // `findLiveSession` really hashes it. Without this rotation, every login
     // that was not preceded by somebody pressing the logout button — closing
-    // the tab, or a logout request that failed and was swallowed — leaves one
-    // more live row for a week, all with the same user_agent and IP, which is
-    // what would make `GET /auth/sessions` useless as a screen.
+    // the tab, or a logout request that failed and was left on screen for
+    // somebody to retry — leaves one more live row for a week, all with the
+    // same user_agent and IP, which is what would make `GET /auth/sessions`
+    // useless as a screen.
     const res = await request(app)
       .post("/api/auth/login")
       .set("Cookie", COOKIE)
@@ -530,4 +532,83 @@ describe("the session list", () => {
     expect(res.body.sesiones[0]).toMatchObject({ id: MI_SESION, actual: true });
     expect(JSON.stringify(res.body)).not.toContain("token_hash");
   });
+});
+
+describe("what a database outage costs the office's login budget", () => {
+  /**
+   * One address for these two, and not the loopback the rest of this file
+   * arrives on, so the counters read below belong to these requests alone.
+   * `app.ts` sets `trust proxy` to one hop, which is what makes
+   * `X-Forwarded-For` the address the buckets key on.
+   */
+  const DESDE = "198.51.100.7";
+  const CLAVE_IP = `ip:${DESDE}`;
+  const claveCuenta = (user: string) => `ipu:${DESDE}:${user}`;
+
+  /**
+   * express-rate-limit refunds from the response's own `finish` handler, which
+   * is asynchronous: without one turn of the event loop these assertions read
+   * the counter mid-flight.
+   */
+  const settled = () => new Promise((resolve) => setImmediate(resolve));
+  const hits = async (limiter: { getKey: (k: string) => unknown }, key: string) =>
+    ((await limiter.getKey(key)) as { totalHits?: number } | undefined)?.totalHits;
+
+  beforeEach(async () => {
+    await loginIpLimiter.resetKey(CLAVE_IP);
+  });
+
+  it("spends nothing on the old door's 503, on the real mount", async () => {
+    // The two halves joined: `loginLimiters.test.ts` proves a 5xx is refunded
+    // and `login.session.test.ts` proves this failure answers 503, but only
+    // this goes through the mount in `app.ts` with a real session store on top
+    // of a broken table, which is the shape the outage actually has.
+    //
+    // What it is guarding against is a cascade, not a wrong number. Behind the
+    // office's NAT this key is the whole building, so before the refund fifteen
+    // people retrying — which the message tells them to do — reached the
+    // hundred, and then nobody could log in until the quarter-hour window
+    // expired, with the database already back.
+    await loginAccountIpLimiter.resetKey(claveCuenta("isaias"));
+    sesionCreate.mockRejectedValue(new Error("pool agotado"));
+
+    const res = await request(app)
+      .post("/api/login")
+      .set("X-Forwarded-For", DESDE)
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+    await settled();
+
+    expect(res.status).toBe(503);
+    expect(await hits(loginIpLimiter, CLAVE_IP)).toBe(0);
+    expect(await hits(loginAccountIpLimiter, claveCuenta("isaias"))).toBe(0);
+  });
+
+  it("spends nothing on the new door's 500 either", async () => {
+    // The same outage on `POST /api/auth/login`, where `handler()` turns the
+    // rejection into a 500 rather than a 503. Both doors share one pair of
+    // buckets — `auth.routes.ts` mounts the very same middleware — so a rule
+    // that covered only the 503 would have left the door the new frontend uses
+    // charging for outages.
+    await loginAccountIpLimiter.resetKey(claveCuenta("isaias"));
+    sesionCreate.mockRejectedValue(new Error("pool agotado"));
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .set("X-Forwarded-For", DESDE)
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+    await settled();
+
+    expect(res.status).toBe(500);
+    expect(await hits(loginIpLimiter, CLAVE_IP)).toBe(0);
+    expect(await hits(loginAccountIpLimiter, claveCuenta("isaias"))).toBe(0);
+  });
+
+  // The other direction — that exempting this server's failures did not make a
+  // guess cheaper — is pinned in `loginLimiters.test.ts` and not here: over the
+  // whole 4xx range on `costsNothing` itself, and on the real mount by "puts a
+  // POST through both buckets", which uses an empty password so it is refused
+  // before anything is looked up. The version of that test which belonged here
+  // reached the wrong-password branch of `verifyCredentials`, and that branch
+  // calls `UsuarioModel.increment` — not one of the four query methods this file
+  // replaces, so it really did send an UPDATE to whatever `.env` points at.
 });

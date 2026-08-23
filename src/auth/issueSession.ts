@@ -45,13 +45,15 @@ export async function issueSession(req: Request, res: Response, id_usuario: numb
  * and nothing removes the first for seven days. The frontend does call `POST
  * /auth/logout` now — when this was written it did not, and this comment used
  * to say so — so a row is revoked from that side whenever somebody presses the
- * button. That is not most of the time: closing the tab revokes nothing, and
- * the call itself is fire-and-forget with its failure swallowed
- * (`SesionProvider.tsx`), so an abandoned row per login is still the normal
- * outcome rather than the exception. Twenty people entering one to three times
- * a day, against sessions that live seven days, is on the order of seven to
- * twenty live rows per account, **every one of them with the same
- * `user_agent` and the same IP address**.
+ * button. That is not most of the time: closing the tab revokes nothing, and a
+ * logout the network lost is not retried on its own. `SesionProvider.tsx` does
+ * announce that failure now — this comment used to say it was swallowed, and
+ * that stopped being true one commit later — but announcing is not revoking:
+ * the row stays live until a person acts on the notice. So an abandoned row per
+ * login is still the normal outcome rather than the exception. Twenty people
+ * entering one to three times a day, against sessions that live seven days, is
+ * on the order of seven to twenty live rows per account, **every one of them
+ * with the same `user_agent` and the same IP address**.
  *
  * Which lands squarely on this task's own deliverable. `GET /auth/sessions` is
  * the screen where somebody decides what to close, and it would show a column

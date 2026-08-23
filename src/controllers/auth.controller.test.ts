@@ -357,11 +357,14 @@ describe("GET /api/auth/me", () => {
   });
 
   it("says it does not know, rather than nothing at all, on the old bearer token", async () => {
-    // The frontend schedules its "session about to expire" warning off this
-    // field. A key that is simply missing reads, to `JSON.parse`, exactly
-    // like a key nobody remembered to send — which is precisely what would
-    // make the frontend treat a token-authenticated caller as already
-    // expired. `null` is the one answer that cannot be confused with a bug.
+    // Not because anything reads it: `web` takes the deadline off
+    // `SESSION_EXPIRES_HEADER`, and its `comprobarToken` drops this field on
+    // purpose. What is pinned here is the contract. A key that is simply
+    // missing reads, to `JSON.parse`, exactly like a key nobody remembered to
+    // send, so a client that did schedule a countdown off this body could not
+    // tell "there is nothing to count down" from a bug — and the shape of that
+    // mistake is treating a token-authenticated caller as already expired.
+    // `null` is the one answer that cannot be confused with either.
     const c = call(YO_CON_TOKEN_VIEJO);
     await me(c.req, c.res);
 

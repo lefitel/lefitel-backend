@@ -172,10 +172,16 @@ export const login = handler("login", async (req: Request, res: Response) => {
  * the rest of it.
  *
  * A caller on the old bearer token has no row behind it, so this answers
- * `null` and not an absent key: the frontend schedules a "your session is
- * about to expire" warning off this field, and a key that is simply missing is
- * indistinguishable from a bug — `null` says plainly "there is nothing to
- * count down".
+ * `null` and not an absent key. Not for the sake of a reader: nothing reads
+ * this field today — `web`'s `comprobarToken` drops it on purpose and takes the
+ * deadline off the header, for the reason in the paragraph above — and this
+ * comment used to claim the frontend scheduled its warning off it, which was
+ * true when it was written and false one commit later. What survives that is a
+ * contract decision, and it stands on its own: to `JSON.parse`, a key that is
+ * missing looks exactly like a key nobody remembered to send, so the first
+ * client to schedule a countdown off this body could not tell "there is nothing
+ * to count down" from a bug. `null` is the one answer that cannot be mistaken
+ * for either.
  */
 export const me = handler("me", async (req: Request, res: Response) => {
   const caller = callerOf(req);

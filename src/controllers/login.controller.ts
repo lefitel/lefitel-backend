@@ -112,11 +112,15 @@ export async function loginUsuario(req: Request, res: Response) {
      * **What this cannot do is lock anybody out**, which is what the old
      * comment was right to worry about. The per-account lockout counter only
      * moves inside `verifyCredentials` on a wrong password, so a database
-     * outage never touches it. The rate-limit buckets in `loginLimiters.ts`
-     * are a smaller matter and a real change: they count non-2xx answers, so
-     * ten of these from one machine against one account inside a quarter of an
-     * hour will start answering 429 instead. Waiting is the correct advice in
-     * both cases, and nothing persists past the window.
+     * outage never touches it. Neither do the rate-limit buckets in
+     * `loginLimiters.ts` — and that took a second change, because at first they
+     * did. They refund anything under 400, and since this 503 replaced a 200,
+     * an outage started charging every attempt to a bucket of a hundred that
+     * behind the office's NAT is one key for the whole building: the database
+     * coming back would have found nobody able to log in for another quarter of
+     * an hour, with nothing wrong any more. `costsNothing` refunds the 5xx
+     * range too now, so an outage costs nobody their budget; its comment has
+     * the reasoning, including why that cannot be turned into a free guess.
      */
     try {
       await issueSession(req, res, check.usuario.id);

@@ -9,10 +9,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 import type { RateLimitRequestHandler } from "express-rate-limit";
-import type { Request } from "express";
+import type { Request, Response } from "express";
 import app from "../app.js";
 import {
   accountBucketKey,
+  costsNothing,
   estaBloqueada,
   ipBucketKey,
   loginAccountIpLimiter,
@@ -160,6 +161,38 @@ describe("the key a bucket counts against", () => {
   });
 });
 
+describe("which answers come out of somebody's budget", () => {
+  const conStatus = (statusCode: number) => ({ statusCode }) as Response;
+
+  it("charges nothing for a 2xx or 3xx, and nothing for any 5xx", () => {
+    // The 5xx half is the fix. A 503 is `POST /api/login` unable to open a
+    // session and a 500 is the same failure through `auth.controller.ts`'s
+    // wrapper; both used to be charged, and the address bucket behind the
+    // office's NAT is one key for everybody, so a database outage spent the
+    // building's budget and then kept the building out for a quarter of an hour
+    // after the database came back.
+    for (const status of [200, 201, 204, 302, 399, 500, 502, 503, 504]) {
+      expect(costsNothing(fakeReq(DESDE), conStatus(status)), String(status)).toBe(true);
+    }
+  });
+
+  it("charges every 4xx, the limiter's own 429 included", () => {
+    // The half that has to keep charging, and the reason the range stops at
+    // 500 rather than exempting anything that is not a 2xx: a 400 is a wrong
+    // password, which is the only answer this bucket exists to make expensive.
+    // The 429 is the limiter answering that the budget is already spent — the
+    // caller's situation, not this server failing — so it stays on the tab,
+    // which is also what the library does by default.
+    //
+    // 399 above and 499 here are the two edges of the range, not statuses this
+    // route answers. They are in the lists because an off-by-one on either
+    // boundary is the way this predicate would be got wrong.
+    for (const status of [400, 401, 403, 404, 422, 429, 499]) {
+      expect(costsNothing(fakeReq(DESDE), conStatus(status)), String(status)).toBe(false);
+    }
+  });
+});
+
 describe("what each bucket spends", () => {
   beforeEach(async () => {
     // The buckets are module singletons shared with the real app, so the
@@ -185,6 +218,32 @@ describe("what each bucket spends", () => {
     await settled();
 
     expect(await hits(loginIpLimiter, CLAVE_IP)).toBe(0);
+  });
+
+  it("charges the address bucket nothing when the server is what failed", async () => {
+    // The cascade this closes, measured where it happened. Without the refund
+    // this reads 1, and a hundred of them from one office — fifteen people
+    // taking the "inténtelo de nuevo en unos minutos" at its word — leave
+    // nobody in the building able to log in until the window rolls over, with
+    // the ERP already healthy again.
+    const bare = appAround(loginIpLimiter, 503);
+    await post(bare, { user: "quienquiera" });
+    await settled();
+
+    expect(await hits(loginIpLimiter, CLAVE_IP)).toBe(0);
+  });
+
+  it("charges the account bucket nothing for the same failure", async () => {
+    // Both buckets, because the per-account one is the smaller half of the same
+    // cascade and the only one the previous round declared: ten of these would
+    // keep one person out for a quarter of an hour over an outage they had
+    // nothing to do with. 500 here and 503 above so each bucket is measured
+    // against a status one of the two doors really answers.
+    const bare = appAround(loginAccountIpLimiter, 500);
+    await post(bare, { user: "olegario" });
+    await settled();
+
+    expect(await hits(loginAccountIpLimiter, claveCuenta("olegario"))).toBe(0);
   });
 
   it("charges the account bucket under the username, however it was capitalised", async () => {
