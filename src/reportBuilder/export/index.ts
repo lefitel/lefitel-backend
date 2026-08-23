@@ -97,7 +97,7 @@ export class ExportTooLargeError extends Error {
       rows > MAX_EXPORT_ROWS
         ? `El reporte tiene ${es(rows)} filas y el máximo por archivo es ` +
           `${es(MAX_EXPORT_ROWS)}. Filtre el reporte antes de exportarlo.`
-        : `El reporte son ${es(rows)} filas × ${columns} columnas = ${es(cells)} celdas, ` +
+        : `El reporte tiene ${es(rows)} filas × ${columns} columnas = ${es(cells)} celdas, ` +
           `y el máximo por ${what} es ${es(cellLimit)}. Quite columnas o filtre filas.`,
     );
     this.name = "ExportTooLargeError";
@@ -115,10 +115,14 @@ export function exceedsExportLimits(rows: number, columns: number, format: Expor
  */
 export class ExportTooHeavyError extends Error {
   constructor(readonly bytes: number, readonly format: ExportFormat) {
-    const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    const mb = (n: number) =>
+      `${(n / (1024 * 1024)).toLocaleString("es-BO", {
+        minimumFractionDigits: 1, maximumFractionDigits: 1,
+      })} MB`;
     super(
-      `El ${format === "excel" ? "archivo" : "documento"} pesó ${mb(bytes)} y el máximo por ` +
-        `archivo es ${mb(MAX_EXPORT_BYTES)}. Quite columnas de texto largo o filtre filas.`,
+      `El ${format === "excel" ? "archivo" : "documento"} pesó ${mb(bytes)} y el peso ` +
+        `máximo por archivo es ${mb(MAX_EXPORT_BYTES)}. Quite columnas de texto largo ` +
+        `o filtre filas.`,
     );
     this.name = "ExportTooHeavyError";
   }
@@ -197,7 +201,9 @@ export async function buildExport(request: ExportRequest): Promise<ExportOutput>
   // states the rule and this call ignored it. "grupos" is less informative than
   // naming the entity, and it has the advantage of never being a lie — the
   // table underneath carries the detail.
-  const noun = (config.groupBy?.length ?? 0) > 0 ? "grupos" : rowNoun(config.root);
+  const noun = (config.groupBy?.length ?? 0) > 0
+    ? (result.rows.length === 1 ? "grupo" : "grupos")
+    : rowNoun(config.root, result.rows.length);
   const title = request.title.trim() || "Reporte";
   const subtitle = request.subtitle?.trim() || null;
 

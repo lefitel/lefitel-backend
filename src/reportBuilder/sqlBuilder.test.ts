@@ -1368,6 +1368,31 @@ describe("buildCountQuery checks what its comment says it checks", () => {
     expect(() => buildCountQuery(config, CLIENTE)).toThrow();
   });
 
+  it("carries the summary with the path, or it validates a different report", () => {
+    // Found by running the server rather than by a test, which is why this one
+    // exists: resolving the columns without their `agg` refused every report
+    // carrying "Nº de revisiones" — a path through a to-many relation is only
+    // legal *with* an aggregate. And it failed in the worst place: `runReport`
+    // asks for the count first, so the whole request died complaining about a
+    // column the user had summarised correctly, while `buildQuery` on its own
+    // accepted it. Every existing test drove buildQuery.
+    const config = {
+      root: "evento",
+      columns: [{ path: "id" }, { path: "revisiones", agg: "count" }],
+    } as unknown as ReportConfig;
+
+    expect(() => buildQuery(config, ADMIN)).not.toThrow();
+    expect(() => buildCountQuery(config, ADMIN)).not.toThrow();
+  });
+
+  it("accepts a field summarised through a to-many relation too", () => {
+    const config = {
+      root: "evento",
+      columns: [{ path: "revisiones.date", agg: "max" }],
+    } as unknown as ReportConfig;
+    expect(() => buildCountQuery(config, ADMIN)).not.toThrow();
+  });
+
   it("still counts rows, not columns: a valid column adds no join", () => {
     // Resolving a column must not leave a join behind, or a to-many path would
     // multiply the rows and the count would stop matching the table under it.

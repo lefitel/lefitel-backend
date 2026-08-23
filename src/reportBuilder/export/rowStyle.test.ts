@@ -98,6 +98,10 @@ describe("legendFor", () => {
   it("shows only what the report actually uses", () => {
     expect(legendFor(rowStyleKeys([state])).map((e) => e.label)).toEqual(["Resuelto"]);
     expect(legendFor(rowStyleKeys([criticality])).map((e) => e.label))
-      .toEqual(["Crítico", "Medio", "Leve"]);
+      // The ranges are part of the label: the indicator strip beside this
+      // legend counts levels 1 to 3 as críticos while only level 1 carries the
+      // darkest tint, so an unqualified "Crítico" had one definition colouring
+      // and another counting, in the same header band.
+      .toEqual(["Crítico (1-3)", "Medio (4-6)", "Leve (7-9)"]);
   });
 });

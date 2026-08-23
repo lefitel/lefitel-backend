@@ -315,7 +315,12 @@ function buildToManyAggregate(
 
   if (!fieldName) {
     throw new ReportConfigError(
-      `El resumen "${agg}" sobre "${relation.label}" necesita indicar un campo.`,
+      // Not the raw key: this printed `El resumen "sum" sobre "Revisiones"`,
+      // where the control that offers it says «Suma». And it asked for
+      // something the screen has no way to give — a field inside the relation —
+      // so it says what can actually be done instead.
+      `El resumen «${AGG_LABEL[agg]}» no se puede aplicar a «${relation.label}»` +
+      ` desde aquí. Use el conteo, o cambie el nivel de detalle del reporte.`,
     );
   }
 
@@ -331,7 +336,9 @@ function buildToManyAggregate(
   return {
     sql: `(SELECT ${fn}(s.${quote(field.column)}) FROM ${quote(target.table)} s ${where})`,
     kind: agg === "count" ? "number" : field.kind,
-    label: `${field.label} (${agg})`,
+    // «Fecha de revisión (máximo)», not «(max)». This header travels into the
+    // result, the Excel and the PDF, beside a control that says «Máximo».
+    label: `${field.label} (${AGG_LABEL[agg]})`,
     selfAggregating: true,
     innerAgg: agg,
     // An average of integers is not an integer. Nothing filters on an aggregate
@@ -565,7 +572,7 @@ function isRealDay(text: string): boolean {
 }
 
 /** How long a single filter value may be. Longer than any real search term. */
-const MAX_FILTER_VALUE = 200;
+export const MAX_FILTER_VALUE = 200;
 
 /**
  * Refuses a value the column cannot hold, and returns the value that will bind.
@@ -804,7 +811,10 @@ function buildCondition(
     case "between": {
       if (!Array.isArray(value) || value.length !== 2) {
         throw new ReportConfigError(
-          `El filtro "entre" sobre "${resolved.label}" necesita dos valores.`,
+          // From the table, not typed: this was a third copy of the operator
+          // vocabulary, and the one place the user is told which operator they
+          // are being told about.
+          `El filtro «${OPERATOR_LABEL.between}» sobre «${resolved.label}» necesita dos valores.`,
         );
       }
       if (isDate) {
@@ -821,7 +831,7 @@ function buildCondition(
     case "in": {
       if (!Array.isArray(value) || value.length === 0) {
         throw new ReportConfigError(
-          `El filtro "en la lista" sobre "${resolved.label}" necesita al menos un valor.`,
+          `El filtro «${OPERATOR_LABEL.in}» sobre «${resolved.label}» necesita al menos un valor.`,
         );
       }
       return `${expr} = ANY(${bind(value)})`;
@@ -1289,7 +1299,13 @@ export function buildCountQuery(config: ReportConfig, viewer: Viewer): { sql: st
   // through a to-many LEFT JOIN.
   for (const column of config.columns ?? []) {
     if (!column || typeof column.path !== "string") continue;
-    resolvePath(rootEntity, column.path, new JoinPlan("t0"), viewer);
+    // The summary travels with the path, or this validates a different
+    // configuration from the one being run: a path through a to-many relation
+    // is only legal *with* an aggregate, so dropping it here refused every
+    // report carrying "Nº de revisiones" — through the count, which runs first
+    // inside runReport, so the whole request died with a message about a column
+    // the user had summarised correctly.
+    resolvePath(rootEntity, column.path, new JoinPlan("t0"), viewer, column.agg);
   }
 
   // Same guard as buildQuery, or the two disagree and the total stops matching

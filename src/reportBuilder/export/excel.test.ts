@@ -278,7 +278,7 @@ describe("buildExcel with photographs", () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as never);
 
-    expect(String(workbook.worksheets[0].getCell(2, 1).value)).toContain("SIN 2000 FOTOGRAFÍA");
+    expect(String(workbook.worksheets[0].getCell(2, 1).value)).toContain("SIN 2000 FOTOS");
   });
 
   it("writes the fallback when photographs were not requested at all", async () => {

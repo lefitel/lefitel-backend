@@ -37,8 +37,8 @@ describe("buildIndicators", () => {
 
     expect(indicators).toEqual([
       { label: "eventos", value: 3, tone: "neutral" },
-      { label: "resueltos", value: 2, tone: "good" },
-      { label: "pendientes", value: 1, tone: "warn" },
+      { label: "resueltos", one: "resuelto", value: 2, tone: "good" },
+      { label: "pendientes", one: "pendiente", value: 1, tone: "warn" },
     ]);
   });
 
@@ -65,7 +65,7 @@ describe("buildIndicators", () => {
     const indicators = buildIndicators([criticality], rows, "eventos");
 
     expect(CRITICAL_MAX_LEVEL).toBe(3);
-    expect(indicators.at(-1)).toEqual({ label: "críticos", value: 3, tone: "bad" });
+    expect(indicators.at(-1)).toEqual({ label: "críticos", one: "crítico", value: 3, tone: "bad" });
   });
 
   it("ignores criticality values that are not a level", () => {
@@ -126,5 +126,29 @@ describe("formatIndicators", () => {
 
   it("returns an empty string for an empty strip", () => {
     expect(formatIndicators([])).toBe("");
+  });
+});
+
+describe("one of something is not «1 eventos»", () => {
+  // The "1 filas" shape, in every exported file: the labels are fixed plurals
+  // and the value is prefixed verbatim, so a one-row report printed
+  // "1 eventos · 1 resueltos · 0 pendientes · 1 críticos" in the PDF band and
+  // the Excel strip. The screen gets this right two panels away.
+  it("uses the singular for a count of one, and the plural for zero", () => {
+    const text = formatIndicators([
+      { label: "eventos", one: "evento", value: 1, tone: "neutral" },
+      { label: "resueltos", one: "resuelto", value: 1, tone: "good" },
+      { label: "pendientes", one: "pendiente", value: 0, tone: "warn" },
+      { label: "críticos", one: "crítico", value: 1, tone: "bad" },
+    ]);
+    expect(text).toBe("1 evento  ·  1 resuelto  ·  0 pendientes  ·  1 crítico");
+  });
+
+  it("keeps the plural when there is no singular to use", () => {
+    // The row noun for an unknown root falls back to the entity label, which
+    // has no plural form to pair with — better a wrong "-s" than a guess that
+    // mangles the word.
+    const text = formatIndicators([{ label: "grupos", value: 1, tone: "neutral" }]);
+    expect(text).toBe("1 grupos");
   });
 });

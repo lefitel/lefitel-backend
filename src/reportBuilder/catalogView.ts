@@ -5,7 +5,7 @@
 
 import { catalog, MAX_DEPTH, MAX_ROWS } from "./catalog.js";
 import { AGGS_BY_KIND, OPERATORS_BY_KIND } from "./constraints.js";
-import { MAX_COLUMNS, MAX_CONDITIONS, MAX_SORTS } from "./sqlBuilder.js";
+import { MAX_COLUMNS, MAX_CONDITIONS, MAX_FILTER_VALUE, MAX_SORTS } from "./sqlBuilder.js";
 import type { AggFn, EntityDef, FieldKind, FieldSemantic, Operator } from "./types.js";
 import { isVisible, type Viewer } from "./viewer.js";
 
@@ -56,19 +56,28 @@ const ROW_MEANING: Record<string, string> = {
  * noun out of it would be guesswork. A grouped report changes what a row is, and
  * an indicator strip that says "eventos" over a list of tramos is a lie.
  */
-const ROW_NOUN: Record<string, string> = {
-  evento: "eventos",
-  poste: "postes",
-  revision: "revisiones",
-  eventoObs: "observaciones",
-  solucion: "soluciones",
-  ciudad: "ciudades",
-  usuario: "usuarios",
+const ROW_NOUN: Record<string, [one: string, many: string]> = {
+  evento: ["evento", "eventos"],
+  poste: ["poste", "postes"],
+  revision: ["revisión", "revisiones"],
+  eventoObs: ["observación", "observaciones"],
+  solucion: ["solución", "soluciones"],
+  ciudad: ["ciudad", "ciudades"],
+  usuario: ["usuario", "usuarios"],
 };
 
-/** Falls back to the entity label so a new root is never left unnamed. */
-export function rowNoun(root: string): string {
-  return ROW_NOUN[root] ?? (catalog.entities[root]?.label ?? root).toLowerCase();
+/**
+ * Falls back to the entity label so a new root is never left unnamed.
+ *
+ * Both numbers, because the indicator strip of every exported file prefixes this
+ * with a count and a one-row report used to read "1 eventos". The fallback
+ * cannot know a plural, so it repeats the label for both rather than guessing
+ * at an "-s".
+ */
+export function rowNoun(root: string, count?: number): string {
+  const pair = ROW_NOUN[root];
+  if (!pair) return (catalog.entities[root]?.label ?? root).toLowerCase();
+  return count === 1 ? pair[0] : pair[1];
 }
 
 function collect(
@@ -190,6 +199,15 @@ export interface CatalogLimits {
   maxSorts: number;
   maxRows: number;
   maxDepth: number;
+  /**
+   * Longest a filter value may be.
+   *
+   * Published because the client had no cap at all: the value box took any
+   * length, and the report was refused on the way out with a sentence naming a
+   * number the screen had never mentioned. Every other cap here is honoured
+   * before the request leaves; this one was not.
+   */
+  maxFilterValue: number;
 }
 
 /** Builds the full catalog view for a viewer, one entry per allowed root. */
@@ -222,6 +240,7 @@ export function buildCatalogView(viewer: Viewer): { roots: CatalogRootView[]; li
       maxSorts: MAX_SORTS,
       maxRows: MAX_ROWS,
       maxDepth: MAX_DEPTH,
+      maxFilterValue: MAX_FILTER_VALUE,
     },
   };
 }

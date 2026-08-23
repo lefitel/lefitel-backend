@@ -146,8 +146,14 @@ function handleError(error: unknown, res: Response) {
   const code = (error as { parent?: { code?: string } })?.parent?.code;
   if (code === QUERY_CANCELED) {
     return res.status(400).json({
+      // The count query runs first, in the same transaction and under the same
+      // statement_timeout, and buildCountQuery never looks at the columns — so
+      // when the timeout fires there, removing columns changes the SQL that
+      // expired not at all. Filtering is the lever that actually moves.
       message:
-        "La consulta tardó demasiado. Acote el rango de fechas o reduzca las columnas del reporte.",
+        "La consulta tardó demasiado. Añada o acote un filtro para que el reporte " +
+        "devuelva menos registros. Quitar columnas sólo ayuda si el reporte usa " +
+        "resúmenes o campos calculados.",
     });
   }
   if (isDataException(code)) {
@@ -603,7 +609,11 @@ export async function deleteReporte(req: Request, res: Response) {
       return deny(
         req, res, "DELETE_REPORTE_DENIED",
         `Intentó archivar el reporte #${row.id} de otra persona`,
-        "Solo el autor puede eliminar este reporte.",
+        // Not "solo el autor": the guard above lets a moderator through, so
+        // that sentence told the reader a false rule about the product. And
+        // this handler reports success as "Reporte archivado", so it says
+        // archivar here too.
+        "No tiene permiso para archivar reportes de otras personas.",
       );
     }
 

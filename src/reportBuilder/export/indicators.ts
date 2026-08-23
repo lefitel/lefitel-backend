@@ -11,6 +11,15 @@ export type IndicatorTone = "neutral" | "good" | "warn" | "bad";
 
 export interface Indicator {
   label: string;
+  /**
+   * The singular, for a report with exactly one of these.
+   *
+   * Absent on the row noun itself, which comes from `rowNoun()` as a plural and
+   * would need a second table in the catalog to have a singular. Present on the
+   * three this file writes, which is where "1 resueltos · 1 críticos" was
+   * reaching every exported file.
+   */
+  one?: string;
   value: number;
   tone: IndicatorTone;
 }
@@ -49,8 +58,10 @@ export function buildIndicators(
   if (stateKey !== undefined) {
     let resolved = 0;
     for (const row of rows) if (isTrue(row[stateKey])) resolved += 1;
-    indicators.push({ label: "resueltos", value: resolved, tone: "good" });
-    indicators.push({ label: "pendientes", value: rows.length - resolved, tone: "warn" });
+    indicators.push({ label: "resueltos", one: "resuelto", value: resolved, tone: "good" });
+    indicators.push({
+      label: "pendientes", one: "pendiente", value: rows.length - resolved, tone: "warn",
+    });
   }
 
   const criticalityKey = columns.find((column) => column.semantic === "criticality")?.key;
@@ -60,15 +71,24 @@ export function buildIndicators(
       const level = Number(row[criticalityKey]);
       if (Number.isInteger(level) && level >= 1 && level <= CRITICAL_MAX_LEVEL) critical += 1;
     }
-    indicators.push({ label: "críticos", value: critical, tone: "bad" });
+    indicators.push({ label: "críticos", one: "crítico", value: critical, tone: "bad" });
   }
 
   return indicators;
 }
 
-/** "1.376 eventos · 597 resueltos · 779 pendientes · 84 críticos" */
+/**
+ * "1.376 eventos · 597 resueltos · 779 pendientes · 84 críticos"
+ *
+ * And for a single row, "1 evento · 1 resuelto · 0 pendientes · 1 crítico".
+ * Every exported file used to carry the plural regardless — the "1 filas" shape
+ * that the screen gets right two panels away.
+ */
 export function formatIndicators(indicators: readonly Indicator[]): string {
   return indicators
-    .map((indicator) => `${indicator.value.toLocaleString("es-BO")} ${indicator.label}`)
+    .map((indicator) => {
+      const noun = indicator.value === 1 && indicator.one ? indicator.one : indicator.label;
+      return `${indicator.value.toLocaleString("es-BO")} ${noun}`;
+    })
     .join("  ·  ");
 }

@@ -345,7 +345,10 @@ const poste: EntityDef = {
     numEventos: {
       kind: "number",
       innerAgg: "count",
-      label: "Total de eventos",
+      // "Nº de …" like its two siblings on `evento`, not "Total de …": the same
+      // number had two names depending on which root you reached it from, and
+      // the server quoted whichever one the configuration happened to use.
+      label: "Nº de eventos",
       sql: (a) =>
         `(SELECT COUNT(*) FROM "${TABLE.evento}" ev` +
         ` WHERE ev."id_poste" = ${a}."id" AND ev."deletedAt" IS NULL)`,

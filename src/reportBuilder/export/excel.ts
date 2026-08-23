@@ -145,10 +145,11 @@ export async function buildExcel(input: ExcelInput): Promise<Buffer> {
   // the file not being on this server.
   const warnings = [
     photos && photos.skipped > 0
-      ? `SIN ${photos.skipped} FOTOGRAFÍA(S): se alcanzó el límite por archivo`
+      ? `SIN ${photos.skipped} FOTO${photos.skipped === 1 ? "" : "S"}: ` +
+        `se alcanzó el máximo de fotos por archivo`
       : null,
     photos && photos.failed > 0
-      ? `SIN ${photos.failed} FOTOGRAFÍA(S): no se pudieron leer`
+      ? `SIN ${photos.failed} FOTO${photos.failed === 1 ? "" : "S"}: no se pudo leer el archivo`
       : null,
   ].filter(Boolean);
 

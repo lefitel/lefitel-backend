@@ -33,15 +33,24 @@ export const KIND_LABEL: Record<FieldKind, string> = {
   image: "imagen",
 };
 
+/**
+ * The operator names the user reads, and the only set of them.
+ *
+ * These used to be a second vocabulary: the dropdown said "está entre" and the
+ * error about it said "entre", for eight of the eleven operators. Two names for
+ * one thing in the one place the product is explaining itself. The forms here
+ * are now the ones the picker shows, so an error can quote an operator and the
+ * reader can find it.
+ */
 export const OPERATOR_LABEL: Record<Operator, string> = {
-  eq: "igual a",
-  neq: "distinto de",
-  gt: "mayor que",
-  gte: "mayor o igual que",
-  lt: "menor que",
-  lte: "menor o igual que",
-  between: "entre",
-  in: "en la lista",
+  eq: "es igual a",
+  neq: "es distinto de",
+  gt: "es mayor que",
+  gte: "es mayor o igual que",
+  lt: "es menor que",
+  lte: "es menor o igual que",
+  between: "está entre",
+  in: "está en la lista",
   like: "contiene",
   isnull: "está vacío",
   notnull: "tiene valor",

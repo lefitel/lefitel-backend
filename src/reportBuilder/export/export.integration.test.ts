@@ -202,7 +202,7 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
     await book.xlsx.load(output.buffer as unknown as ArrayBuffer);
     const subtitle = String(book.worksheets[0].getCell(2, 1).text);
 
-    if (failed > 0) expect(subtitle).toContain(`SIN ${failed} FOTOGRAFÍA(S)`);
+    if (failed > 0) expect(subtitle).toContain(`SIN ${failed} FOTO${failed === 1 ? "" : "S"}`);
     else expect(subtitle).not.toContain("no se encontraron");
   });
 
@@ -351,10 +351,15 @@ describe("what an export refuses, and when it gives up", () => {
     expect(exceedsExportWeight(MAX_EXPORT_BYTES + 1)).toBe(true);
     expect(exceedsExportWeight(Math.round(32.9 * 1024 * 1024))).toBe(true);
 
-    // And the message names the two numbers and the lever, like its sibling.
+    // And the message names the two numbers and the lever, like its sibling —
+    // with a comma, because this sentence is Spanish and every other number in
+    // these files goes through es-BO. "25.0 MB" read as a thousands separator.
     const message = new ExportTooHeavyError(Math.round(32.9 * 1024 * 1024), "pdf").message;
-    expect(message).toContain("32.9 MB");
-    expect(message).toContain("25.0 MB");
+    expect(message).toContain("32,9 MB");
+    expect(message).toContain("25,0 MB");
     expect(message).toMatch(/texto largo|filtre/);
+    // And it says *which* maximum: "el máximo por archivo" named three
+    // different limits across this file — rows, weight and photographs.
+    expect(message).toContain("peso máximo por archivo");
   });
 });

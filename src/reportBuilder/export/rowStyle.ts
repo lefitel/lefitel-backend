@@ -85,9 +85,9 @@ export function legendFor(keys: RowStyleKeys): { hex: string; label: string }[] 
   const legend: { hex: string; label: string }[] = [];
   if (keys.stateKey !== undefined) legend.push({ hex: RESOLVED_HEX, label: "Resuelto" });
   if (keys.criticalityKey !== undefined) {
-    legend.push({ hex: CRITICALITY_HEX[1], label: "Crítico" });
-    legend.push({ hex: CRITICALITY_HEX[4], label: "Medio" });
-    legend.push({ hex: CRITICALITY_HEX[9], label: "Leve" });
+    legend.push({ hex: CRITICALITY_HEX[1], label: "Crítico (1-3)" });
+    legend.push({ hex: CRITICALITY_HEX[4], label: "Medio (4-6)" });
+    legend.push({ hex: CRITICALITY_HEX[9], label: "Leve (7-9)" });
   }
   return legend;
 }
