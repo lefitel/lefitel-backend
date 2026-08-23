@@ -1,16 +1,32 @@
-// The front door's credential net.
+// `verifyCredentials` — the front door's credential net.
 //
 // The rules about whitespace here are two different decisions that look like
 // one, and getting them backwards is a classic: a username is a name for a row
 // and its edges do not matter, a password is a secret and every character in it
 // does. This file exists so nobody "tidies up" the second one.
 //
-// It went in through `loginUsuario`, the old `POST /api/login`'s own handler,
-// until that handler was retired. The old address is now mounted on
-// `auth.controller.ts`'s `login`, so the tests below go in through that — the
-// same function, reached by the same URL, and every one of these decisions
-// lives underneath it in `verifyCredentials` rather than in either handler.
-// `comprobarToken` at the bottom is what is left of this file's own controller.
+// **Why it is named after `credentials.ts` and not after a controller.** It was
+// `controllers/login.controller.test.ts` for as long as there was a
+// `login.controller.ts` to test: these assertions went in through
+// `loginUsuario`, that file's own handler for `POST /api/login`. Two plans later
+// the handler was merged into `auth.controller.ts`'s `login` and the controller
+// was deleted, and the name had stopped describing anything — every decision
+// asserted below lives in `verifyCredentials`, which had no test file of its
+// own while its 32 cases sat under the name of a file that no longer existed.
+//
+// **Why it still calls the handler rather than `verifyCredentials` directly.**
+// Because `login` is that function's only caller, and going in through it
+// asserts the mapping as well as the rule: a lockout that `verifyCredentials`
+// reports correctly and the handler answers 200 to is not a lockout. The status
+// codes below are the handler's; everything they are checking is underneath it.
+// Calling the function directly would trade that for nothing — there is no
+// second caller for the two to disagree about.
+//
+// The overlap with `controllers/auth.controller.test.ts` is deliberate and
+// small: three of its cases (a locked account, a wrong password, an empty body)
+// travel this same real `verifyCredentials`, and they are there to pin that the
+// controller reuses this and has not grown a copy. The exhaustive version is
+// here.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
@@ -38,13 +54,14 @@ vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },
 }));
-// `verify` only. `sign` was on this mock until the login stopped signing, and
-// leaving it would have been a stub for a call that no longer exists — worse,
-// it would quietly absorb somebody putting `jwt.sign` back. Without it, that
-// change reaches the real library.
-vi.mock("jsonwebtoken", () => ({
-  default: { verify: vi.fn() },
-}));
+// `jsonwebtoken` is deliberately **not** mocked, and the absence is a tripwire
+// rather than an omission — the same one `login.session.test.ts` sets. The mock
+// was `{ verify }` while `comprobarToken` was tested from this file; it lost
+// `sign` when the login stopped signing, and lost the rest when the verifier was
+// retired. Nothing on this path touches the library now, so there is nothing to
+// stub: put a `jwt.sign` or a `jwt.verify` back into the login and it runs
+// against the real module and whatever `JWT_SECRET` this environment has,
+// instead of quietly meeting a stub that absorbs it.
 vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }));
 // Opening the session cookie is not what this file is about, and it cannot be
 // left real: `issueSession` reaches `sesion.model.ts`, which calls
@@ -52,23 +69,22 @@ vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }))
 // has no such method, so the whole suite would fail to load before running a
 // single assertion. `authenticate.test.ts` mocks the session store for the same
 // reason. What the login does with the cookie is asserted in
-// `login.session.test.ts`, where `issueSession` is real.
-vi.mock("../auth/issueSession.js", () => ({ issueSession: vi.fn() }));
+// `controllers/login.session.test.ts`, where `issueSession` is real.
+vi.mock("./issueSession.js", () => ({ issueSession: vi.fn() }));
 // The store as well, and mocking `issueSession` above is not enough to avoid it:
 // `auth.controller.ts` imports these three names for its *other* five
 // endpoints, none of which this file calls, and that import alone is what pulls
 // `sesion.model.ts` and its `UsuarioModel.hasMany` in. Without this the whole
 // suite fails to load with "UsuarioModel.hasMany is not a function", which is
 // exactly the failure the note above predicts and the reason it is written down.
-vi.mock("../auth/sessionStore.js", () => ({
+vi.mock("./sessionStore.js", () => ({
   listSessionsOf: vi.fn(),
   revokeAllSessionsOf: vi.fn(),
   revokeSessionOf: vi.fn(),
 }));
 
-const { comprobarToken } = await import("./login.controller.js");
 // The handler both `POST /api/login` and `POST /api/auth/login` are mounted on.
-const { login } = await import("./auth.controller.js");
+const { login } = await import("../controllers/auth.controller.js");
 
 /** A stored account whose password is whatever the test says it is. */
 function storedUser(user = "isaias") {
@@ -633,70 +649,5 @@ describe("account lockout", () => {
 
     expect(c.status).toBe(200);
     expect(update).not.toHaveBeenCalled();
-  });
-});
-
-describe("comprobarToken", () => {
-  /** A request bearing the old JWT, and the response it gets back. */
-  function tokenCall(authorization?: string) {
-    const res = {
-      statusCode: 0,
-      body: undefined as unknown,
-      status(code: number) {
-        this.statusCode = code;
-        return this;
-      },
-      json(payload: unknown) {
-        this.body = payload;
-        return this;
-      },
-      sendStatus(code: number) {
-        this.statusCode = code;
-        return this;
-      },
-    };
-    return {
-      req: { headers: authorization ? { authorization } : {} } as unknown as Request,
-      res: res as unknown as Response,
-      get status() {
-        return res.statusCode;
-      },
-      get message() {
-        return (res.body as { message?: string } | undefined)?.message;
-      },
-    };
-  }
-
-  it("keeps a database error's own words out of the response to a request bearing a valid legacy token", async () => {
-    // Reached only once `jwt.verify` has already accepted the token — a
-    // weaker gate than `authenticate` (no session row, no revocation check),
-    // but not "sin autenticar" either. What used to leak here is the same
-    // shape as the login's own `handler()`: whatever the database says,
-    // verbatim, in the response body.
-    const jwt = (await import("jsonwebtoken")).default;
-    let pending: Promise<void> | undefined;
-    // Cast rather than go through `vi.mocked`'s real, multi-overload
-    // `jwt.verify` type: the mock only ever needs the three-argument shape
-    // this controller actually calls, with an async callback rather than the
-    // real (synchronous) `VerifyCallback`.
-    const verifyMock = jwt.verify as unknown as {
-      mockImplementation(
-        fn: (token: unknown, secret: unknown, cb: (err: unknown, decoded: unknown) => Promise<void>) => void,
-      ): void;
-    };
-    verifyMock.mockImplementation((_token, _secret, cb) => {
-      pending = cb(null, { id: 1 });
-    });
-    const dbError = new Error('column "id_rol" does not exist');
-    findOne.mockRejectedValue(dbError);
-
-    const c = tokenCall("Bearer un-token-firmado");
-    comprobarToken(c.req, c.res);
-    await pending;
-
-    expect(c.status).toBe(500);
-    expect(c.message).not.toBe(dbError.message);
-    expect(c.message).not.toContain("id_rol");
-    expect(c.message).not.toContain("column");
   });
 });

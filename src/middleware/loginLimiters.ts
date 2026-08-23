@@ -22,7 +22,7 @@ import {
  * identity.
  *
  * This lower-cases on top of trimming, which is *more* normalisation than
- * `login.controller.ts`'s own lookup does — that one only trims. The extra
+ * `verifyCredentials`'s own lookup does — that one only trims. The extra
  * step is deliberate here: usernames are unique case-insensitively (there is
  * a unique index on `lower("user")`), so "Isaias" and "isaias" are the same
  * account and must share one budget, not two. Without it, capitalising a
@@ -174,10 +174,14 @@ const loginBuckets: readonly RateLimitRequestHandler[] = [loginIpLimiter, loginA
  * it runs, which is what let `loginLimiters.test.ts` put a request through the
  * real mount and then read each bucket's counter to see what it charged.
  *
- * The POST guard is not a detail. `GET /api/login` is `comprobarToken`, which
- * the client calls on every page load to find out whether its token is still
- * good — counting those would spend an entire office's failure budget on people
- * who are already logged in.
+ * The POST guard is not a detail, and its reason has changed rather than gone
+ * away. It was written for `GET /api/login`, the JWT verifier the client called
+ * on every page load: counting those spent an entire office's failure budget on
+ * people who were already logged in. That address is retired, and what is behind
+ * this mount for every other method now is Express's 404 — which is worse to
+ * count, not better. A budget shared by a whole office behind one NAT address
+ * could be emptied by anybody sending GETs to a URL that does not exist, and
+ * nobody in the building could log in until the window expired.
  */
 export function loginRateLimit(req: Request, res: Response, next: NextFunction) {
   if (req.method !== "POST") return next();

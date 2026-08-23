@@ -40,25 +40,6 @@ export async function getPermisos(_req: Request, res: Response) {
   }
 }
 
-/**
- * What the caller may do, for the interface to draw itself from.
- *
- * The client used to carry its own copy of the matrix and a role frozen into the
- * token at login, so a permission taken away stayed in effect on that machine
- * until the person logged out. This is how the screen finds out it changed.
- */
-export async function getMisPermisos(req: Request, res: Response) {
-  try {
-    res.status(200).json({
-      id_rol: req.user?.id_rol ?? null,
-      permisos: await permissionsFor(req.user?.id_rol),
-    });
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : "Error desconocido";
-    return res.status(500).json({ message: msg });
-  }
-}
-
 /** One cell as the request names it, once it has been checked. */
 interface Change {
   modulo: string;

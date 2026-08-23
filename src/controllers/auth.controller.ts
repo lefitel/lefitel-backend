@@ -14,12 +14,13 @@
 // lockout, because a successful login looks identical with and without it.
 //
 // There used to be a second copy of the whole endpoint. `POST /api/login` had
-// its own handler in `login.controller.ts` — same checks, same body minus a
-// JWT, its own 503 — and the two were kept in step by hand for the length of
-// the migration. That handler is gone: the old address is now mounted on
-// `login` below, so there is one implementation behind both URLs and nothing
-// left to keep in step. See `login.routes.ts` for what still answers there and
-// when it can go.
+// its own handler in `controllers/login.controller.ts` — same checks, same body
+// minus a JWT, its own 503 — and the two were kept in step by hand for the
+// length of the migration. That handler is gone, and so is the file: what was
+// left of it after the merge was a JWT verifier behind `GET /api/login`, and
+// that went too. The old address is now mounted on `login` below, so there is
+// one implementation behind both URLs and nothing left to keep in step. See
+// `login.routes.ts` for what still answers there and when it can go.
 
 import type { Request, Response } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";

@@ -1,6 +1,7 @@
 // Whether this username and this password are good, and nothing else.
 //
-// This is the whole of `loginUsuario`'s old body except the HTTP: the uniform
+// This is the whole of the old `POST /api/login` handler's body except the
+// HTTP: the uniform
 // message, the filler hash that levels the timings, the per-account lockout
 // with its atomic counter, the cost re-hash, and the case-folded lookup. Seven
 // tasks of an earlier plan went into those, and every one of them is a decision
@@ -172,7 +173,7 @@ export async function verifyCredentials(input: {
      * corrupt row, something written by hand — where `compare` returns false
      * in microseconds. Same hole, wider.
      *
-     * `login.controller.test.ts` fails if this is deleted.
+     * `credentials.test.ts`, beside this file, fails if this is deleted.
      */
     if ((bcryptCostOf(data.pass) ?? 0) < BCRYPT_COST) {
       await bcryptjs.compare(pass, await fillerHash());

@@ -292,7 +292,7 @@ export const CREDENCIALES_INCOMPLETAS = "Usuario y contraseña son obligatorios.
  * `hashSync` call pays one bcrypt round (~250ms) every time this file is
  * imported, and it is imported from `src/index.ts`, so that cost would leak
  * into every test suite that pulls in the app. Second, `bcryptjs` in
- * `login.controller.test.ts` is mocked with only `compare` and `hash` — no
+ * `auth/credentials.test.ts` is mocked with only `compare` and `hash` — no
  * `hashSync` — so a module-level `hashSync` call would throw at import time
  * there.
  *

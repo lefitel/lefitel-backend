@@ -43,6 +43,24 @@ const CABECERA_CLIENTE = "x-osefi-client";
 const CABECERA_ROL = "x-osefi-role";
 const CABECERA_VENCIMIENTO = "x-osefi-session-expires";
 
+/**
+ * Any request at all, which is the whole requirement of most of this file.
+ *
+ * Every assertion below that uses this is about a header `helmet` or `cors` puts
+ * on *every* response, so which route answers is beside the point — and that is
+ * worth naming, because for two plans this was `GET /api/login`. When that
+ * route was retired these seven requests started getting a 404, and all seven
+ * stayed green: the middleware runs ahead of the router, so a 404 carries the
+ * same headers a 200 does. Nothing was wrong, but the file read as though the
+ * login endpoint mattered here, and it never did.
+ *
+ * `GET /api/auth/me` instead of a made-up path, deliberately: it is a route
+ * that really is mounted, so the response travels the full chain — global
+ * middleware, mount, router, `authenticate` — and answers 401 rather than being
+ * turned back by Express's fallback. The status is never asserted.
+ */
+const CUALQUIER_RUTA = "/api/auth/me";
+
 describe("security headers", () => {
   // The origin this process is really configured with, read the way `app.ts`
   // reads it instead of written out: these assertions are about the wiring, and a
@@ -50,17 +68,17 @@ describe("security headers", () => {
   const ORIGEN = allowedOrigins(process.env.CORS_ORIGIN, process.env.NODE_ENV)[0];
 
   it("does not announce what it is running", async () => {
-    const res = await request(app).get("/api/login");
+    const res = await request(app).get(CUALQUIER_RUTA);
     expect(res.headers["x-powered-by"]).toBeUndefined();
   });
 
   it("refuses to be framed", async () => {
-    const res = await request(app).get("/api/login");
+    const res = await request(app).get(CUALQUIER_RUTA);
     expect(res.headers["x-frame-options"]).toBe("SAMEORIGIN");
   });
 
   it("does not sniff content types", async () => {
-    const res = await request(app).get("/api/login");
+    const res = await request(app).get(CUALQUIER_RUTA);
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
@@ -70,7 +88,7 @@ describe("security headers", () => {
     // to helmet's own much shorter default — and the tests would stay green.
     // `includeSubDomains` is the half that is easiest to lose and the half that
     // covers api.osefi.net.
-    const res = await request(app).get("/api/login");
+    const res = await request(app).get(CUALQUIER_RUTA);
     expect(res.headers["strict-transport-security"]).toBe(
       `max-age=${HSTS_MAX_AGE_SECONDS}; includeSubDomains`,
     );
@@ -84,7 +102,7 @@ describe("security headers", () => {
     // throws away, `authenticate` never sees one, and six tasks of session work
     // are code that cannot run in production. curl applies no CORS at all: it
     // would have answered 200 with a `Set-Cookie` in hand the whole time.
-    const res = await request(app).get("/api/login");
+    const res = await request(app).get(CUALQUIER_RUTA);
     expect(res.headers["access-control-allow-credentials"]).toBe("true");
   });
 
@@ -151,7 +169,7 @@ describe("security headers", () => {
     // still arrives in every assertion in this file. The list decides only
     // what a real browser lets the page's JavaScript read — which is why it
     // has to be pinned here rather than caught by any request-level test.
-    const res = await request(app).get("/api/login");
+    const res = await request(app).get(CUALQUIER_RUTA);
     expect(res.headers["access-control-expose-headers"]).toBe(
       ["Content-Disposition", CABECERA_ROL, CABECERA_VENCIMIENTO].join(","),
     );
@@ -204,7 +222,7 @@ describe("security headers", () => {
     // helmet's default is `same-origin`, which would make every <img> in the
     // application fail: the page is served from www.osefi.net and the files
     // from api.osefi.net. Nothing on the server would report an error.
-    const res = await request(app).get("/api/login");
+    const res = await request(app).get(CUALQUIER_RUTA);
     expect(res.headers["cross-origin-resource-policy"]).toBe("cross-origin");
   });
 });

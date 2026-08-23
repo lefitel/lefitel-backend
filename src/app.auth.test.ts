@@ -672,3 +672,78 @@ describe("what a database outage costs the office's login budget", () => {
   // calls `UsuarioModel.increment` — not one of the four query methods this file
   // replaces, so it really did send an UPDATE to whatever `.env` points at.
 });
+
+/**
+ * The two reads the old front door left behind, and why the assertion is 404.
+ *
+ * `GET /api/login` verified a signed JWT off the `Authorization` header and
+ * answered with the account's role and permissions — a second copy of what
+ * `authenticate` does, with no session row behind it and nothing that could
+ * revoke it. `GET /api/permisos/mias` answered with the caller's own permission
+ * matrix. Both were replaced by `GET /api/auth/me`, which sends the account and
+ * the matrix in one answer off the session cookie, and `web` stopped calling
+ * either of them two plans ago.
+ *
+ * **404 and not 401, and the difference is the whole point.** A 401 says "I do
+ * not know who you are", which invites a caller to try again with a better
+ * credential; a 404 says "there is nothing at this address", which is the truth.
+ * Getting that wrong is not hypothetical here: `authenticate` is mounted in
+ * front of `permisoRoutes` in `app.ts`, so an *anonymous* request to
+ * `/api/permisos/mias` answers 401 whether the route exists or not — a test
+ * written without a credential would have passed identically before and after
+ * the removal and asserted nothing at all.
+ *
+ * So both requests below carry a working session cookie, and each is paired
+ * with a live address on the very same mount. Through `supertest` rather than by
+ * calling a handler, because there is no handler left to call: what is under
+ * test is the routing table, and the only thing that can see a routing table is
+ * a request.
+ */
+describe("the two reads the old frontend stopped calling", () => {
+  it("has nothing at GET /api/login, on a mount that still serves POST", async () => {
+    const res = await request(app).get("/api/login").set("Cookie", COOKIE);
+    expect(res.status).toBe(404);
+
+    // `not.toBe(401)` is deliberately *not* written beside that line: `toBe(404)`
+    // already excludes every other status, so a second assertion there could
+    // never fail on its own and would only look like extra cover. What 401 needs
+    // instead is a case that can really produce one, which is the two below.
+
+    // The credential was good, so the 404 above cannot be read as a refusal.
+    const me = await request(app).get("/api/auth/me").set("Cookie", COOKIE);
+    expect(me.status).toBe(200);
+
+    // And the mount is still there. Without this the test would also pass if
+    // somebody deleted `app.use("/api/login", ...)` outright, which would take
+    // `POST /api/login` down with it — the address a cached bundle still logs in
+    // through, and the reason that one was kept when this one went.
+    const post = await request(app)
+      .post("/api/login")
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+    expect(post.status).toBe(200);
+  });
+
+  it("has nothing at GET /api/permisos/mias, and 401 there without a cookie", async () => {
+    const res = await request(app).get("/api/permisos/mias").set("Cookie", COOKIE);
+    expect(res.status).toBe(404);
+
+    // The half that makes the line above mean anything, and the reason this test
+    // carries a cookie at all. `authenticate` is mounted in front of
+    // `permisoRoutes` in `app.ts`, so an anonymous request to this path answers
+    // 401 whether the route exists or not — measured, not assumed: a version of
+    // this test written without a cookie asserted 404 and got 401, and would
+    // have gone green identically before and after the removal. Asserting the
+    // 401 keeps that premise from being quietly withdrawn: take `authenticate`
+    // off that mount and this line fails, and the 404 above stops proving what
+    // it claims to.
+    const anonima = await request(app).get("/api/permisos/mias");
+    expect(anonima.status).toBe(401);
+
+    // The sibling read on the same router, with the same cookie: 403, because
+    // `can` is mocked false in this file and the route asks for `roles.ver`. That
+    // is what separates "this address is gone" from "this whole router stopped
+    // being mounted", which would answer 404 here too.
+    const matriz = await request(app).get("/api/permisos/").set("Cookie", COOKIE);
+    expect(matriz.status).toBe(403);
+  });
+});

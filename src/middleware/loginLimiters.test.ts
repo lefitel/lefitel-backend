@@ -289,9 +289,9 @@ describe("the chain the real login endpoint is mounted behind", () => {
     // was an anonymous arrow written at the mount: dropping either bucket from
     // it changed nothing any test could see.
     //
-    // An empty password is refused by `loginUsuario` before it looks anything
-    // up, so this needs no database — and a 400 is a failure, which is what
-    // these buckets count.
+    // An empty password is refused by `verifyCredentials` before it looks
+    // anything up, so this needs no database — and a 400 is a failure, which is
+    // what these buckets count.
     await request(app)
       .post("/api/login")
       .set("X-Forwarded-For", DESDE)
@@ -302,9 +302,14 @@ describe("the chain the real login endpoint is mounted behind", () => {
     expect(await hits(loginAccountIpLimiter, claveCuenta("nicolasa"))).toBe(1);
   });
 
-  it("spends nothing on a GET, which is how the client checks its token", async () => {
-    // `GET /api/login` is `comprobarToken`, asked on every page load. Counting
-    // those would spend an office's failure budget on people already logged in.
+  it("spends nothing on a GET, which is a 404 on this mount and used to be a read", async () => {
+    // Written when `GET /api/login` was the JWT verifier the client asked on
+    // every page load, and kept now that the address answers 404, because the
+    // reason got stronger: an office behind one NAT address shares this budget,
+    // and if 404s counted, anyone could empty it with GETs to a URL that does
+    // not exist and nobody in the building could log in until the window closed.
+    // The status is not asserted — `app.auth.test.ts` owns the 404 — only that
+    // whatever this answers costs nothing.
     await request(app).get("/api/login").set("X-Forwarded-For", DESDE);
     await settled();
 

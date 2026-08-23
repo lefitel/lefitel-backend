@@ -1,14 +1,32 @@
 // What the login does with the session: rotate, open, hand over the cookie —
 // and hand over nothing else.
 //
-// The three files around this one divide the endpoint up, and the division is
-// deliberate. `login.controller.test.ts` is the credential net — the uniform
+// Three files test one `login`, and the division is deliberate rather than
+// historical. `auth/credentials.test.ts` is the credential net — the uniform
 // message, the levelled timings, the lockout — with the session mocked away so
 // it keeps testing one thing. `auth.controller.test.ts` is the six session
-// endpoints and what each one refuses. This file is the wiring between the
-// login and the session: `issueSession` is **real** here, so the rotation of a
-// session the browser was already holding is asserted through the code that
-// actually does it, which is coverage no other file has.
+// endpoints and what each one refuses. This file is the wiring between the login
+// and the session.
+//
+// **The overlap with `auth.controller.test.ts`, named rather than left to be
+// discovered.** Four of the assertions below have a twin in that file's `POST
+// /api/auth/login` block: no credential in the body, an httpOnly cookie, the 503
+// when the session cannot be opened, and nothing opened on a wrong password.
+// Both files reach the same handler with `issueSession` real and the store
+// mocked, so those four really are asserted twice.
+//
+// **Why they were not merged anyway.** What only exists here is the rotation:
+// the three tests that a login closes the session row this browser was already
+// holding, and that it revokes nothing when the cookie it was sent is already
+// dead. There is no `issueSession.test.ts`, so those three are the only coverage
+// of `rotateOut` in the repository — and they need `findLiveSession` and
+// `revokeSessionOf` as readable spies, which `auth.controller.test.ts` also has.
+// So the merge was possible and it was still declined: the file it would have to
+// go into already covers six endpoints in seven hundred lines, and folding a
+// seventh concern into it buys four fewer duplicated assertions at the price of
+// the one place where "what the login does to the session" is a subject with a
+// name. The four are cheap; the rotation is not. If this file is ever emptied,
+// those three tests are what has to survive the move.
 //
 // It used to be about `POST /api/login` specifically, which had its own handler
 // signing a JWT into the body beside the cookie. That handler is retired; the
@@ -76,7 +94,7 @@ vi.mock("../utils/logger.js", () => ({
   log: () => ({ warn, error, info: vi.fn(), debug: vi.fn() }),
 }));
 
-// `login`, not the retired `loginUsuario`: `POST /api/login` and `POST
+// `login`, not the retired handler this file used to import: `POST /api/login` and `POST
 // /api/auth/login` are both mounted on this one function now — see
 // `login.routes.ts`.
 const { login } = await import("./auth.controller.js");

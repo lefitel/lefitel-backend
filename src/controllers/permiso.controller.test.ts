@@ -40,7 +40,7 @@ vi.mock("../permissions/store.js", () => ({
   allPermissions: () => allPermissions(),
 }));
 
-const { getPermisos, getMisPermisos, putPermisos } = await import("./permiso.controller.js");
+const { getPermisos, putPermisos } = await import("./permiso.controller.js");
 const { MODULES, ACTIONS, emptyPermissions } = await import("../permissions/matrix.js");
 
 const ADMIN = 1;
@@ -101,18 +101,12 @@ describe("reading the matrix", () => {
     expect((c.payload.acciones as { key: string }[]).map((a) => a.key)).toEqual([...ACTIONS]);
   });
 
-  it("reports only the caller's own permissions on the personal route", async () => {
-    const mine = emptyPermissions();
-    mine.eventos.ver = true;
-    permissionsFor.mockResolvedValue(mine);
-
-    const c = call({ id: 5, id_rol: COORDINADOR });
-    await getMisPermisos(c.req, c.res);
-
-    expect(c.status).toBe(200);
-    expect(permissionsFor).toHaveBeenCalledWith(COORDINADOR);
-    expect(c.payload.id_rol).toBe(COORDINADOR);
-  });
+  // `getMisPermisos` was asserted here — "reports only the caller's own
+  // permissions on the personal route" — until `GET /api/permisos/mias` was
+  // retired and the handler went with it. Nothing called that route: the matrix
+  // travels in `GET /api/auth/me`'s answer now, and what pins *that* is
+  // `auth.controller.test.ts`'s "reads the role from the database and not from
+  // the credential". The test is not missing, it moved with the endpoint.
 });
 
 describe("saving", () => {

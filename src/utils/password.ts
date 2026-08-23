@@ -31,7 +31,7 @@ const COMUNES = new Set([
  * counted either way, since trimming only touches the two ends.
  *
  * What gets hashed and stored is a separate matter, and is never trimmed —
- * see login.controller.ts's own rule that a password is a secret and every
+ * see auth/credentials.ts's own rule that a password is a secret and every
  * character in it counts. Trimming what is stored would silently accept a
  * shorter secret than the one chosen and would break any account whose
  * password legitimately starts or ends with a space; this function only
