@@ -74,12 +74,17 @@ const level = process.env.LOG_LEVEL ?? (underTest ? "silent" : "info");
 /**
  * Values that must never reach a log file.
  *
- * The sliding session re-issues a JWT on every response through the
- * `x-new-token` header, so an unredacted response log would leave a working
- * credential on disk for every request the server has ever answered. Passwords
- * arrive in bodies on three endpoints. Both are replaced with `[oculto]` before
- * anything is written, by the logger itself rather than by remembering at each
- * call site.
+ * Session cookies travel on `set-cookie`, the legacy bearer token still arrives
+ * on `authorization`, and passwords arrive in bodies on three endpoints. All of
+ * them are replaced with `[oculto]` before anything is written, by the logger
+ * itself rather than by remembering at each call site.
+ *
+ * `x-new-token` stays on the list even though nothing emits it any more: the
+ * server used to re-sign a JWT onto that header on every response, and
+ * `ROLE_HEADER` replaced it. Redaction is not where a dead name gets cleaned
+ * up — the cost of a stale entry is one string compared per response, and the
+ * cost of removing one that turns out to be live is a working credential on
+ * disk for every request the server has ever answered.
  */
 export const REDACT_CENSOR = "[oculto]";
 

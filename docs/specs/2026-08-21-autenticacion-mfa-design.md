@@ -753,12 +753,20 @@ solo queda un `LOGIN` normal.
 
 ### Antes de desplegar
 
-- **Una segunda cuenta de rescate con `id_rol = 1` literal**, su passkey en un
-  aparato que se queda en la oficina y sus diez códigos **impresos** en un cajón.
-  Ojo: `App.tsx:87-92` cablea `<RoleRoute roles={[1]} />` para `/app/seguridad`,
-  así que una cuenta con un rol nuevo que tenga los permisos correctos pasaría
-  todas las puertas del servidor y **el router de React la echaría** de la única
-  pantalla donde administraría usuarios.
+- **Una segunda cuenta de rescate**, su passkey en un aparato que se queda en la
+  oficina y sus diez códigos **impresos** en un cajón.
+
+  Esta advertencia decía que hacía falta `id_rol = 1` literal, porque
+  `App.tsx` cableaba un `RoleRoute roles={[1]}` para `/app/seguridad` y una cuenta
+  con un rol nuevo habría pasado todas las puertas del servidor para que **el
+  router de React la echara** de la única pantalla donde administraría usuarios.
+
+  **Ese riesgo ya no existe.** `RoleRoute` se retiró; hoy esa pantalla va detrás de
+  `<ModuleRoute modulo="seguridad" />`, que pregunta por el permiso y no por el id
+  del rol. Lo que hay que asegurar en su lugar es más simple y menos frágil: que el
+  rol de la cuenta de rescate tenga concedido el módulo `seguridad` en la matriz de
+  permisos. Un id de rol cableado en el router era exactamente la clase de cosa que
+  deja a alguien fuera de su propio sistema de rescate.
 - **Probar el rescate desde el móvil** (consola web de Coolify), no desde el
   portátil, y dejar apuntado cómo se entra.
 - **Regla de prueba:** el primer usuario que pase por el flujo completo es uno de
@@ -971,6 +979,61 @@ SELECT DISTINCT id_rol FROM permisos
   WHERE id_rol NOT IN (SELECT id_rol FROM permisos WHERE modulo='eventos' AND accion='ver' AND permitido);
 ```
 
+### No ejecutes el conjunto de tests en la máquina de despliegue
+
+`src/database/migrate.test.ts` corre contra la base a la que apunte el `.env` del
+momento — con un `skipIf` que lo salta si no hay base alcanzable, así que allí donde
+sí la hay, corre. Y hace `CREATE TABLE` y `DROP TABLE`.
+
+**El daño real es pequeño y conviene no exagerarlo:** la tabla es una de borrador con
+nombre propio, `SequelizeMetaNormaliseTest`, nunca el registro de migraciones — su
+propio comentario explica que confundirlas haría que umzug repitiera todas las
+migraciones jamás aplicadas. El peor caso es una tabla huérfana de nombre raro en
+producción, no una pérdida de datos.
+
+Aun así, **el conjunto se ejecuta en desarrollo, no donde vive la base de
+producción**. Y hay dos cosas más que saber de él:
+
+- **No es hermético.** Sin base alcanzable da 730 pasados, 36 saltados y **un fallo**:
+  `export.integration.test.ts` tiene un test fuera de su propio `skipIf`. Un rojo ahí
+  no significa que algo esté roto.
+- **Un test puede escribir de verdad, y ya pasó el 23.** Un test que entraba por la
+  rama de contraseña incorrecta llamó a `UsuarioModel.increment`, que no está entre los
+  métodos que el arnés sustituye, y salieron unos cinco `UPDATE` reales sobre el
+  contador de intentos fallidos de un usuario de la copia local. No se escribió el
+  bloqueo, y un login correcto pone ese contador a cero solo. El test se retiró y quedó
+  un comentario en su sitio explicando la trampa. La lección es la que importa: **el
+  arnés sustituye una lista de métodos, no el acceso a la base**, así que un camino
+  nuevo que use un método que no esté en la lista sale a la base de verdad.
+
+### La detección de cambio de rol se rompe entre el Plan 1 y el Plan 2B
+
+Esto se descubrió revisando el Plan 2B y **no estaba previsto**. El backend dejó
+de re-firmar el JWT en cada respuesta, así que ya no emite `x-new-token` desde
+ningún sitio. Y el frontend seguía leyendo esa cabecera para enterarse de que a
+alguien le habían cambiado el rol.
+
+El resultado, en cristiano: **si a una persona le cambias el rol mientras tiene
+el ERP abierto, su pantalla no se entera hasta que recargue.** Antes se enteraba
+sola. No aparece ningún error: simplemente sigue viendo los botones de su rol
+anterior, que solo pueden devolver 403 — el servidor rechaza, porque él sí lee
+el rol de la base de datos en cada petición.
+
+La cabecera que la sustituye es `x-osefi-role` (`config/security.ts`), la emiten
+las dos ramas de `authenticate`, y **la lee el frontend a partir de la última
+tarea del Plan 2B**. Consecuencia de despliegue:
+
+> **El Plan 1 no se despliega sin la última tarea del Plan 2B.** Desplegar solo
+> el backend degrada esa función en silencio, y el silencio es lo peligroso:
+> nadie abre un parte porque nada parece roto.
+
+Y una nota de método, porque volverá a pasar: `exposedHeaders` en `app.ts`
+siguió listando `x-new-token` mucho después de que nadie la emitiera. Una
+cabecera en esa lista no prueba que exista — la lista solo dice qué puede leer
+el JavaScript de la página, y `supertest` no la aplica, así que ningún test de
+integración nota la diferencia. Lo único que lo caza es el test que fija la
+lista por igualdad.
+
 ### Mientras el token antiguo siga valiendo: si roban una cuenta, se archiva
 
 Esto hay que tenerlo escrito antes de necesitarlo, porque es contraintuitivo.
@@ -985,6 +1048,22 @@ desarchiva y se le pone una contraseña nueva.
 
 Deja de hacer falta cuando el Plan 2C retire el camino viejo. Hasta entonces, la
 respuesta a «me han robado la cuenta» es archivar, no cambiar la contraseña.
+
+### Deuda declarada, para que no se descubra dos veces
+
+- **`error.message` en el cuerpo de la respuesta, en unos veinte controladores.**
+  Los tres alcanzables sin sesión están cerrados (`loginUsuario`, `comprobarToken`
+  y el `catch` exterior del login); el resto va **detrás de `authenticate`**, así
+  que quien los provoca ya ha entrado. Sigue siendo información del interior que
+  nadie necesita — nombres de tabla y de columna de Postgres — pero es otra escala
+  de trabajo y no entra en este arco.
+- **`GET /api/permisos/mias`** ya no lo llama nadie. Queda declarado en el docstring
+  de su ruta en vez de retirado, porque retirarlo obliga a tocar un test que estaba
+  en manos de otro trabajo en curso.
+- **Un cambio de permisos de un rol no llega a quien tiene el ERP abierto.** El
+  frontend compara ids de rol, no permisos, así que conceder un módulo a un rol no
+  se nota hasta que la persona recarga. No es una regresión: el mecanismo anterior
+  tenía el mismo punto ciego.
 
 ## 12. Riesgos
 

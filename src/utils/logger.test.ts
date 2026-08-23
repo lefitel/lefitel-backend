@@ -1,7 +1,7 @@
 // What must never appear in a log line.
 //
-// The sliding session hands out a fresh JWT on the `x-new-token` header of every
-// response, and three endpoints take passwords in the body. A log is a file that
+// Session cookies travel on `set-cookie`, the legacy bearer token on
+// `authorization`, and three endpoints take passwords in the body. A log is a file that
 // gets copied, shipped to a log service, and read by whoever is on call — so a
 // credential written into one is a credential leaked, quietly and durably.
 //

@@ -107,7 +107,7 @@ Hoy el frontend programa el aviso de «tu sesión vence en cinco minutos» y el 
 
 **Interfaces:**
 - Consumes: `findLiveSession` de `src/auth/sessionStore.ts`, que ya devuelve `expires_at`.
-- Produces: `GET /api/auth/me` responde, además de lo que ya responde, **cuándo caduca esta sesión** en un campo nuevo. El nombre lo eliges tú; el frontend lo consume en la tarea 6.
+- Produces: `GET /api/auth/me` responde, además de lo que ya responde, **cuándo caduca esta sesión** en un campo nuevo. El nombre lo eliges tú; el frontend lo consume en la tarea 5.
 
 - [ ] **Step 1: Decidir la forma, y hay una decisión real que tomar**
 
@@ -200,7 +200,7 @@ Su `Authorization` es la clave de OpenRouteService. No es la sesión, no va por 
 - [ ] **Step 3: Dos cosas que hay que comprobar y no son mecánicas**
 
 - **`Upload.api.ts` manda `multipart/form-data`.** Comprueba que al quitar el objeto de cabeceras no se lleva por delante el `Content-Type` que esa llamada necesita.
-- **`comprobarToken` en `Login.api.ts:42-60`** recibe el token y lo manda en la cabecera. Esa función es el arranque de sesión y **se sustituye en la tarea 6**. Aquí déjala compilando de la forma más simple que puedas y anota que la tarea 6 la reemplaza.
+- **`comprobarToken` en `Login.api.ts:42-60`** recibe el token y lo manda en la cabecera. Esa función es el arranque de sesión y **se sustituye en la tarea 5**. Aquí déjala compilando de la forma más simple que puedas y anota que la tarea 5 la reemplaza.
 
 - [ ] **Step 4: Verificar, y aquí el typecheck vale más que los tests**
 
@@ -216,89 +216,163 @@ Commit en `web`.
 
 ---
 
-## Task 4: El contexto pierde el token y el enrutado deja de mirarlo
+## Task 4: El enrutado deja de mirar el token
 
-Es la tarea que hace que el resto compile, y hay que hacerla en un orden concreto o nada compila a mitad.
+Esta tarea cambia **cómo se decide si hay sesión**. No borra el campo `token` del tipo: lo borra
+la Tarea 7, cuando ya nadie lo lea. El por qué está en el Step 3.
 
 **Files:**
-- Modify: `web/src/interfaces/interfaces.ts:3-12` (`SesionInterface`)
+- Modify: `web/src/interfaces/interfaces.ts:3-12` (`SesionInterface`) — añadir, no quitar
 - Modify: `web/src/App.tsx:37,44` (el gate)
-- Modify: `web/src/context/SesionContext.ts` si hace falta
-- Modify: los 5 ficheros de test que rellenan `token: "t"` para que el tipo cuadre
+- Modify: `web/src/pages/LoginPage.tsx:79` (quien pone el estado tras entrar)
+- Modify: `web/src/context/SesionProvider.tsx` (el estado inicial, el logout, y el arranque)
 
 **Interfaces:**
-- Produces: `SesionInterface` sin `token`, con un booleano que diga si hay sesión. El nombre lo eliges tú; los 50 ficheros que importan el contexto lo van a leer.
+- Produces: `SesionInterface` con un booleano explícito que diga si hay sesión. El nombre lo
+  eliges tú; el gate y la Tarea 5 lo van a leer. El campo `token` **sigue en el tipo** y sigue
+  funcionando igual que hoy.
 
 - [ ] **Step 1: La decisión de forma, que es lo importante de esta tarea**
 
-Hoy «hay sesión» se decide con `sesion.token !== ""` en `App.tsx:37` y `:44`. Es un centinela: una cadena vacía significa «no autenticado».
+Hoy «hay sesión» se decide con `sesion.token !== ""` en `App.tsx:37` y `:44`. Es un centinela:
+una cadena vacía significa «no autenticado».
 
-Con la cookie **el navegador no puede saber si hay sesión sin preguntar al servidor**. Así que el estado tiene que venir de la respuesta de `/auth/me`, y el gate tiene que distinguir **tres** estados y no dos: comprobando, autenticado, y no autenticado. El `loading` que ya existe cubre el primero — comprueba que lo hace bien en los dos gates, porque si `autenticado` arranca en `false` y `loading` no lo tapa, **el primer render manda a todo el mundo a `/login`** antes de que la respuesta llegue.
+Con la cookie **el navegador no puede saber si hay sesión sin preguntar al servidor**. Así que el
+estado pasa a ser un booleano explícito, y el gate tiene que distinguir **tres** estados y no
+dos: comprobando, autenticado, y no autenticado. El `loading` que ya existe cubre el primero —
+comprueba que lo hace bien en los dos gates, porque si el booleano arranca en `false` y `loading`
+no lo tapa, **el primer render manda a todo el mundo a `/login`** antes de que la respuesta
+llegue.
 
 Ese es el fallo más probable de toda esta tarea. **Ponle test.**
 
-- [ ] **Step 2: El orden que compila**
+- [ ] **Step 2: Quién pone el booleano a `true`**
 
-Los 5 ficheros de test que hoy rellenan `token: "t"` o `token: "t0"` para que el tipo esté completo dejarán de compilar en cuanto quites el campo. Arréglalos en el mismo commit: son valores arbitrarios que nunca se decodifican, así que quitarlos no cambia lo que ningún test mide. **La excepción es `SesionProvider.test.tsx`**, que sí fabrica un JWT decodificable — ese se rehace en la tarea 7, así que aquí solo hazlo compilar.
+Los dos sitios que hoy meten el token en el estado:
 
-- [ ] **Step 3: Romper a propósito y verificar**
+- `LoginPage.tsx:79` — `setSesion(responde.usuario as SesionInterface)`. **Ojo con ese `as`:**
+  acepta cualquier forma, así que si te limitas a añadir el campo al tipo, el booleano se queda
+  en `undefined` y **nadie puede entrar nunca**, con el typecheck a cero. Hay que ponerlo
+  explícitamente aquí.
+- `SesionProvider.tsx:151` — el arranque, tras `comprobarToken`. La Tarea 5 cambiará **de dónde**
+  viene esa confirmación (pasará a `/auth/me`), no la forma. Deja la forma bien puesta ahora.
 
-Rompe: haz que el gate ignore el estado de carga; invierte el booleano; deja que `PublicRoutes` y `PrivateRoutes` usen criterios distintos. Los tres deben caer.
+Y a `false`: el estado inicial (`:39`) y el `logout()` (`:97`).
+
+- [ ] **Step 3: El orden, y por qué este es**
+
+`SesionProvider.tsx` usa `sesion.token` en seis sitios, y tres son de tareas posteriores: los
+temporizadores que decodifican el JWT (`:100-124`, Tarea 7), el arranque que lo lee de
+`localStorage` (`:145-160`, Tareas 5 y 6) y el interceptor de `x-new-token` (`:190,214-215`,
+Tarea 7). **Por eso el campo no se borra aquí:** quitarlo obligaría a hacer las cuatro tareas de
+una vez, y perderíamos la revisión por trozos del fichero más delicado del frontend.
+
+Los ficheros de test que rellenan `token: "t"` **no se tocan** en esta tarea: el campo sigue
+existiendo, así que siguen compilando.
+
+- [ ] **Step 4: La condición de aceptación NO es el typecheck**
+
+Es un grep. Cuando la Tarea 7 borre el campo, el compilador **no** señalará los sitios que
+quedan: `as unknown as SesionInterface`, `as never` y un literal sin anotación de tipo aceptan
+campos que ya no existen. De los cinco ficheros de test que rellenan `token`, el typecheck solo
+caza uno (`AppSidebar.test.tsx:12`, el único anotado). Para esta tarea:
 
 ```bash
-cd web && npm run lint && npm run typecheck && npm test
+cd web
+grep -rn 'sesion\.token' src          # solo SesionProvider.tsx (tareas 5-7)
+grep -rn '\.token !== ""\|\.token === ""' src   # vacío: el centinela ya no decide nada
+npm run lint && npm run typecheck && npm test
 ```
 
-Commit en `web`.
+- [ ] **Step 5: Romper a propósito y verificar**
 
----
-
-## Task 5: Fuera el `localStorage`
-
-**Files:**
-- Modify: `web/src/pages/LoginPage.tsx:78`
-- Modify: `web/src/context/SesionProvider.tsx` (líneas 95, 145, 157, 160, 189)
-
-- [ ] **Step 1: Los seis sitios**
-
-Escritura en `LoginPage.tsx:78` tras el login, y en `SesionProvider.tsx:189` dentro del interceptor. Lectura en `SesionProvider.tsx:145` (el arranque). Borrado en `:95` (el logout) y `:157,160` (las dos ramas del arranque cuando el token no vale).
-
-**No toques** las otras claves de `localStorage`: `osefi-seen-release` (`useSeenRelease.ts`), `osefi-theme` (`theme-provider.tsx`) y `sidebar_width` (`ui/sidebar.tsx`). No son de sesión.
-
-- [ ] **Step 2: Y una cosa que sí hay que conservar**
-
-El `logout()` ya llama al servidor y borra la cookie del lado del navegador. Al quitar el `removeItem`, **comprueba que sigue habiendo algo que limpie el estado local** — si no, la interfaz se queda creyendo que hay sesión hasta que algo devuelva 401. Ponle test.
-
-- [ ] **Step 3: Romper a propósito y verificar**
-
-Rompe: deja el `setItem` del login. Debe caer un test que afirme que el navegador ya no guarda nada de sesión.
+Rompe: haz que el gate ignore el estado de carga; invierte el booleano; deja que `PublicRoutes` y
+`PrivateRoutes` usen criterios distintos; quita el booleano de `LoginPage.tsx`. Los cuatro deben
+caer — y si el último no cae, es que falta el test que prueba que entrar funciona.
 
 Commit en `web`.
 
 ---
 
-## Task 6: El arranque de sesión, desde `/auth/me`
+## Task 5: El arranque de sesión, y fuera el `localStorage`
 
-Hoy, al recargar la página, el frontend lee el token de `localStorage` y llama a `GET /api/login` con él (`SesionProvider.tsx:144-162`). Sin token, la pregunta cambia: **«¿tengo sesión?», y la respuesta la da la cookie que el navegador manda sola.**
+**Esta tarea absorbe la que era la Tarea 6.** Eran la misma pieza y separarlas dejaba la
+aplicación rota entre las dos: quitar la lectura del `localStorage` sin poner `/auth/me` en su
+sitio deja el arranque sin ninguna fuente de verdad, y todo el mundo acabaría en `/login` al
+recargar. La Tarea 6 ya no existe; la 7 sigue siendo la 7.
+
+Hoy, al recargar la página, el frontend lee el token de `localStorage` y pregunta al servidor
+con él. Sin token, la pregunta cambia: **«¿tengo sesión?», y la respuesta la da la cookie que el
+navegador manda solo.**
 
 **Files:**
-- Modify: `web/src/context/SesionProvider.tsx:144-162`
+- Modify: `web/src/context/SesionProvider.tsx` (el arranque, el `logout()`, y el `setItem` del interceptor)
 - Modify: `web/src/api/Login.api.ts` (sustituir `comprobarToken`)
+- Modify: `web/src/pages/LoginPage.tsx` (el `setItem` de después de entrar)
 
-- [ ] **Step 1: La forma**
+- [ ] **Step 1: El guardián que hay que quitar, y por qué es urgente**
 
-Llama a `GET /api/auth/me`, que el Plan 2A creó y que la tarea 1 amplió con el vencimiento. Con la cookie puesta responde 200 y quién eres; sin ella, 401.
+`SesionProvider.tsx:145-146` es hoy esto:
+
+```js
+const stored = localStorage.getItem("token");
+if (!stored) { setLoading(false); return; }
+```
+
+**Sin token en `localStorage` no se pregunta al servidor.** Eso tenía sentido cuando el token era
+la credencial. Ahora la credencial es la cookie, y **la cookie es invisible para el JavaScript**:
+la única forma de saber si hay sesión es preguntar.
+
+Y es una bomba con fecha. El día que el servidor deje de devolver un JWT al entrar — que es
+exactamente lo que hará el Plan 2C — `LoginPage.tsx:78` guardará una cadena vacía,
+`!stored` será verdadero, y **todo el mundo perderá la sesión al recargar**, con la cookie
+válida en el navegador. Nadie lo notaría en desarrollo, porque en desarrollo el `localStorage`
+ya tiene un token de antes.
+
+**Se pregunta siempre.** Sin guardián.
+
+- [ ] **Step 2: La forma**
+
+Llama a `GET /api/auth/me`, que el Plan 2A creó y que la tarea 1 amplió con el vencimiento. Con
+la cookie puesta responde 200 y quién eres; sin ella, 401.
 
 **Tres cosas que no puedes hacer mal:**
-- **El `loading` tiene que cubrir toda la llamada.** Si se pone en `false` antes de la respuesta, el gate de la tarea 3 manda a todo el mundo a `/login` durante un instante. Es el mismo fallo que la tarea 3, por la otra punta.
-- **Un 401 en el arranque no es un error, es la respuesta.** Significa «no hay sesión»: estado anónimo y a la pantalla de acceso, sin toast de error ni nada que parezca que algo se rompió.
-- **El interceptor global también ve esta petición.** Un 401 aquí dispararía `logout()` — que ahora hace red. Comprueba qué pasa y si hace falta excluirla, como ya se excluye la de logout. **Este es el punto de esta tarea donde más fácil es meter un bucle.**
+- **El `loading` tiene que cubrir toda la llamada.** Si se pone en `false` antes de la respuesta,
+  las puertas de la Tarea 4 mandan a todo el mundo a `/login` durante un instante. Es el mismo
+  fallo que la Tarea 4, por la otra punta.
+- **Un 401 en el arranque no es un error, es la respuesta.** Significa «no hay sesión»: estado
+  anónimo y a la pantalla de acceso, sin toast de error ni nada que parezca que algo se rompió.
+- **El interceptor global también ve esta petición.** Un 401 aquí dispararía `logout()` — que
+  ahora hace red. Comprueba qué pasa y si hace falta excluirla, como ya se excluye la de logout.
+  **Este es el punto de la tarea donde más fácil es meter un bucle.**
 
-- [ ] **Step 2: Test, romper a propósito, verificar**
+- [ ] **Step 3: Los seis sitios del `localStorage`**
 
-Cubre: 200 reconstruye la sesión; 401 deja estado anónimo sin ruido; y `loading` es `true` hasta que la respuesta llega.
+Escritura en `LoginPage.tsx:78` tras el login, y en `SesionProvider.tsx:190` dentro del
+interceptor. Lectura en `:145` (el arranque). Borrado en `:95` (el logout) y `:158,161` (las dos
+ramas del arranque cuando el token no vale).
 
-Rompe: pon `loading` en `false` antes del `await`; trata el 401 como error; quita la exclusión del interceptor si la añadiste. Los tres deben caer.
+**No toques** las otras claves de `localStorage`: `osefi-seen-release` (`useSeenRelease.ts`),
+`osefi-theme` (`theme-provider.tsx`) y `sidebar_width` (`ui/sidebar.tsx`). No son de sesión.
+
+Y una cosa que sí hay que conservar: el `logout()` ya llama al servidor y ya borra la cookie. Al
+quitar el `removeItem`, **comprueba que sigue habiendo algo que limpie el estado local** — si no,
+la interfaz se queda creyendo que hay sesión hasta que algo devuelva 401.
+
+- [ ] **Step 4: Test, romper a propósito, verificar**
+
+Cubre: 200 reconstruye la sesión; 401 deja estado anónimo sin ruido; `loading` es `true` hasta
+que la respuesta llega; y **el arranque pregunta al servidor aunque el `localStorage` esté
+vacío** — este último es el que protege contra la bomba del Step 1, y hoy no existe.
+
+Rompe: pon `loading` en `false` antes del `await`; trata el 401 como error; devuelve el guardián
+de `localStorage`; deja el `setItem` del login. Los cuatro deben caer.
+
+```bash
+cd web
+grep -rn 'localStorage' src | grep -i token   # solo el test de la tarea 7, si queda
+npm run lint && npm run typecheck && npm test
+```
 
 Commit en `web`.
 
@@ -314,7 +388,13 @@ La última, y la que toca el fichero más delicado del frontend.
 
 - [ ] **Step 1: Los temporizadores, desde el vencimiento que da el servidor**
 
-Borra `readToken` y `getTokenExp` (`:12-24`): decodifican un JWT que ya no existe. `scheduleExpiry` (`:100-119`) pasa a tomar el vencimiento que `/auth/me` devuelve.
+Borra `readToken` y `getTokenExp` (`:12-24`): decodifican un JWT que ya no existe.
+
+**Y aquí se borra el campo `token` de `SesionInterface`** (`interfaces.ts`), que la Tarea 4 dejó
+vivo a propósito porque estos temporizadores y el interceptor lo seguían leyendo. Cuando lo
+quites, **el typecheck no te va a señalar todos los sitios**: los cinco ficheros de test que lo
+rellenan usan `as unknown as SesionInterface`, `as never` o un literal sin anotar, y solo uno
+(`AppSidebar.test.tsx:12`) está anotado y falla. Busca los otros cuatro con grep. `scheduleExpiry` (`:100-119`) pasa a tomar el vencimiento que `/auth/me` devuelve, que la tarea 5 ya trae.
 
 **Y hay un detalle que el Plan 2A resolvió y hay que aprovechar:** la sesión **desliza**. Cada petición que cruza el umbral empuja el vencimiento y **reemite la cookie**. Así que el aviso de «vence en cinco minutos» programado al cargar la página puede quedar obsoleto: si la persona sigue trabajando, su sesión se ha ido renovando y el aviso saltaría cuando ya no toca.
 
@@ -362,10 +442,10 @@ Commit en `web`.
 
 | Requisito del §7 | Tarea |
 |---|---|
-| `SesionProvider` sin `localStorage`, sin decodificar el JWT, sin el interceptor de `x-new-token` | 5, 6, 7 |
+| `SesionProvider` sin `localStorage`, sin decodificar el JWT, sin el interceptor de `x-new-token` | 5, 7 |
 | `axios` con `withCredentials` | **Ya hecho** en el Plan 2A |
-| El gate de enrutado sin el token | 3 |
-| Las 92 cabeceras y las 106 firmas | 4 |
+| El gate de enrutado sin el token | 4 |
+| Las 92 cabeceras y las 106 firmas | 3 |
 | `exposedHeaders` conserva `Content-Disposition` | **Ya hecho**; la tarea 2 añade una cabecera más |
 | CSRF con cabecera propia | **Ya hecho** en el Plan 2A |
 | `timeout` en las llamadas de autenticación | **Sin cubrir** — es del Plan 4, con el MFA |
@@ -373,11 +453,11 @@ Commit en `web`.
 
 ## Riesgos
 
-**El fallo más probable es el primer render.** Si `autenticado` arranca en `false` y `loading` no lo tapa, todo el mundo ve un parpadeo de la pantalla de acceso antes de entrar — o peor, acaba en `/login` con sesión válida. Aparece en la tarea 3 y en la tarea 6, por las dos puntas, y las dos lo prueban.
+**El fallo más probable es el primer render.** Si `autenticado` arranca en `false` y `loading` no lo tapa, todo el mundo ve un parpadeo de la pantalla de acceso antes de entrar — o peor, acaba en `/login` con sesión válida. Aparece en la tarea 4 y en la tarea 5, por las dos puntas, y las dos lo prueban.
 
-**El interceptor puede morderse la cola otra vez.** Ya pasó en el Plan 2A: `logout()` hace red, y un 401 en esa petición volvía al mismo interceptor. La tarea 6 añade otra petición que también puede dar 401 en el arranque. Es el sitio donde hay que pensar dos veces.
+**El interceptor puede morderse la cola otra vez.** Ya pasó en el Plan 2A: `logout()` hace red, y un 401 en esa petición volvía al mismo interceptor. La tarea 5 añade otra petición que también puede dar 401 en el arranque. Es el sitio donde hay que pensar dos veces.
 
-**213 referencias son 213 oportunidades de olvidar una.** El typecheck las caza todas, y por eso la tarea 4 lo pone como condición de aceptación en vez de fiarse de los tests.
+**213 referencias son 213 oportunidades de olvidar una, y el typecheck NO las caza todas.** Caza un argumento de más al instante, pero un `as unknown as X`, un `as never` o un literal sin anotación de tipo aceptan campos que ya no existen — y una cabecera `Authorization` sobrante no la ve nadie: se comprobó dejando una a propósito en `Rol.api.ts` y el typecheck y los 236 tests siguieron en verde. Por eso la condición de aceptación de estas tareas es un **grep pegado en el informe**, no el typecheck.
 
 **El aviso de expiración puede mentir**, porque la sesión desliza y el aviso se programa una vez. Un aviso que salta cuando no toca es peor que no tenerlo: enseña a la gente a ignorarlo.
 
