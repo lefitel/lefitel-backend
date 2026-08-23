@@ -929,6 +929,37 @@ FROM usuarios WHERE "deletedAt" IS NULL AND email IS NOT NULL
 GROUP BY 1 HAVING count(*) > 1;
 ```
 
+### 🔴 Rota `JWT_SECRET`. Es lo primero, y no depende de nada más
+
+Esto se descubrió inventariando el camino antiguo para retirarlo, el 23 de agosto,
+y es lo más grave que ha salido de todo este trabajo.
+
+**El secreto con el que se firman los tokens de sesión antiguos es una sola palabra
+de once letras minúsculas, con forma de nombre propio.** No es una contraseña
+débil: es una palabra de diccionario. Un ataque con una lista de nombres y
+apellidos la encuentra en minutos.
+
+**Y su valor estuvo escrito en claro en `docs/ESTADO-GENERADOR.md`**, que está en
+git. Se ha retirado del fichero, pero **sigue en el historial** — cualquiera con
+acceso al repositorio lo tiene con un `git log -S`. Sacarlo del historial exige
+reescribirlo, que es destructivo en un repositorio con varias ramas y varias
+sesiones trabajando, así que **esa decisión es de Isaias y nadie más la toma**.
+
+Lo que significa, en concreto: quien tenga ese secreto puede **firmar un token
+válido para cualquier usuario, incluido un administrador**. Y mientras el camino
+antiguo siga aceptándose, ese token entra por la puerta que **ninguna revocación
+alcanza** — ni cambiar la contraseña, ni «cerrar todas mis sesiones». Solo archivar
+la cuenta, y hay que saber a quién archivar.
+
+**Rotarla es gratis y no espera a nada.** El frontend nuevo ya no usa el token para
+nada, así que cambiar el valor en Coolify no echa a nadie que esté en el camino de
+la cookie. Lo único que invalida son los tokens antiguos que quedaran vivos — que
+es exactamente lo que se quiere. Una cadena aleatoria larga, no una palabra.
+
+Orden recomendado: **rota primero, despliega después.** Si se rota antes del Plan
+2B, cualquiera que siguiera en el camino antiguo tendría que volver a entrar, y no
+hay nada malo en eso.
+
 ### El despliegue del cimiento de sesión, que tiene reglas propias
 
 Esto sale de haber implementado el Plan 2A y no estaba previsto al escribir el

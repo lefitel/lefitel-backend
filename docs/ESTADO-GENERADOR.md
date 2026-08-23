@@ -246,7 +246,10 @@ exportación no cancela nada en el servidor: sigue construyendo y reteniendo el
 hueco único.
 
 *Deuda anterior, sigue en pie:* en `api/.env` hay una **credencial de producción
-viva** — rotarla; `JWT_SECRET` es `isaiahsalah`; las fotos se sirven sin autenticar
+viva** — rotarla; **`JWT_SECRET` es una sola palabra en minúsculas con forma de
+nombre propio, y su valor estuvo escrito aquí en claro y sigue en el historial de
+git** (ver el aviso de rotación en la sección 11 del diseño de autenticación); las
+fotos se sirven sin autenticar
 para las etiquetas `<img>` —la exportación ya no las pide por ahí—; y
 `reportGeneral.ts` y `reportTramo.ts` siguen generándose en el navegador con el
 logo sin comprimir.
