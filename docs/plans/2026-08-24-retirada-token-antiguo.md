@@ -82,10 +82,13 @@ externo de rutas y no tiene nada que ver.
 `login.controller.ts:135` es el **único** sitio del repo que firma un JWT. La
 constante de la clave está en `:9`.
 
-El campo `token` desaparece del cuerpo de la respuesta. **El frontend no lo lee**:
-`LoginPage.tsx` hace `setSesion({ ...(responde.usuario as SesionInterface),
-autenticado: true })` y ese `as` acepta que el campo no venga. Compruébalo antes de
-tocar, no lo des por hecho.
+El campo `token` desaparece del cuerpo de la respuesta y **el frontend no lo lee**,
+pero por un camino distinto del que este brief decía en su primera versión: el que lo
+leía era `web/src/api/Login.api.ts`, que lo desestructuraba para tirarlo antes de que
+llegara al estado de React. El `as` de `LoginPage.tsx` existe y acepta que el campo no
+venga, pero **si el lector hubiera sido esa pantalla, un `as` no habría bastado** — un
+cast no impide que un valor llegue, solo que el compilador se queje. Compruébalo en el
+disco antes de tocar.
 
 - [ ] **Step 2: Y decidir qué queda de `POST /api/login`**
 
@@ -263,6 +266,60 @@ en un sitio donde no debería estar. Dilo así.
 **Y una cosa que no se decide en este plan:** sacarlo del historial exige reescribirlo,
 y eso es destructivo en un repositorio con varias ramas y varias sesiones trabajando a
 la vez. **Esa decisión es de Isaias.** El plan la nombra y no la toma.
+
+---
+
+## Task 7: El login deja de usarse para comprobar una contraseña
+
+Esto no estaba en el plan. Salió al ejecutar la Tarea 2 y está en producción hoy.
+
+`web/src/pages/menu/usuario/UsuarioDetallePage.tsx:111` — para cambiar tu propio
+nombre de usuario, la pantalla te pide tu contraseña actual «para confirmar». Y para
+comprobarla **llama al login entero**.
+
+**Files:**
+- Add: un endpoint que compruebe una contraseña sin emitir nada
+- Modify: `web/src/pages/menu/usuario/UsuarioDetallePage.tsx`
+- Modify: `web/src/api/Login.api.ts` (o donde vaya el cliente del endpoint nuevo)
+
+- [ ] **Step 1: Los cuatro efectos, y el peor no es el evidente**
+
+1. **Abre una sesión nueva**, así que la rotación al entrar **revoca la que el
+   navegador tenía**. Editar tu nombre te cambia la sesión por debajo.
+2. **Escribe «Inició sesión» en la bitácora.** Un registro de entrada que no
+   ocurrió, en el mismo sitio donde se audita quién entra y cuándo.
+3. **Una contraseña mal escrita cuenta como intento fallido de login.** Así que
+   equivocarte unas veces al cambiarte el nombre **te bloquea tu propia cuenta**, y el
+   mensaje que ves dice «Contraseña incorrecta» sin avisarte de que te estás
+   bloqueando.
+4. Y el que da más miedo: la comprobación funciona **por accidente**. El código mira
+   `auth.status === 500`, y el servidor contesta **400** a una contraseña mala. Lo que
+   salva el caso es que el cliente aplana cualquier respuesta no-2xx a 500 — está
+   documentado y es deliberado, pero significa que **el día que alguien haga que un
+   400 llegue como 400, la confirmación deja de confirmar** y el cambio de nombre
+   procede con la contraseña equivocada. Sin que nada se ponga rojo.
+
+- [ ] **Step 2: Qué hace falta**
+
+Un endpoint que responda «esta contraseña es la tuya, sí o no» y **no emita nada**:
+ni cookie, ni fila de sesión, ni entrada en la bitácora de entradas.
+
+Tres cosas que sí tiene que conservar, porque son de `verifyCredentials` y existen por
+buenas razones:
+- **El mensaje uniforme y el tiempo uniforme.** Hay un hash de relleno en cada camino
+  que falla, para que no se pueda averiguar si un usuario existe midiendo lo que tarda.
+- **El contador de intentos fallidos**, pero pensado para este caso: aquí el que falla
+  ya está autenticado y solo se está confirmando a sí mismo, así que fallar no debería
+  bloquearle la cuenta. Decide y escribe el por qué.
+- **Va detrás de `authenticate`.** Solo tiene sentido para quien ya entró.
+
+- [ ] **Step 3: Romper a propósito**
+
+Rompe: haz que el endpoint devuelva «correcta» siempre. Debe caer un test. Y rompe la
+comprobación del cliente para que acepte cualquier respuesta: debe caer otro, porque
+el punto 4 de arriba existe precisamente por no tener ese test.
+
+Commits en los dos repos.
 
 ---
 
