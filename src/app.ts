@@ -125,22 +125,31 @@ app.use(
      * dropped from the list rather than honoured.
      */
     credentials: true,
-    // x-new-token is not a CORS-safelisted response header, so without this the
-    // browser cannot read it and the sliding session never renews: the server
-    // was re-signing a JWT on every request and throwing it away.
+    // A response header that is not CORS-safelisted still crosses the wire —
+    // api.osefi.net and www.osefi.net are different origins — but the
+    // frontend's own JavaScript is refused permission to read it unless it is
+    // named here, and that refusal is invisible in a `curl` transcript and in
+    // the network tab's raw response alike. `ROLE_HEADER` is set by
+    // `authenticate` on every authenticated response (see
+    // `middleware/authenticate.ts`) and read by the frontend to notice a role
+    // that changed mid-session; `Content-Disposition` is what lets it read an
+    // exported file's real name instead of saving everything as "download".
     //
-    // ROLE_HEADER is the same lesson, applied on purpose this time:
-    // `authenticate` sets it on every authenticated response (see
-    // `middleware/authenticate.ts`), and without it here the header still
-    // crosses the wire — api.osefi.net and www.osefi.net are different
-    // origins — but the frontend's own JavaScript is refused permission to
-    // read it, which is invisible in a `curl` transcript and in the network
-    // tab's raw response alike. Nothing in this array is safe to delete
-    // without checking who reads it first: `app.security.test.ts` pins the
-    // whole list by equality rather than by "contains", because dropping an
-    // entry — not the array losing all meaning — is the realistic way this
-    // breaks.
-    exposedHeaders: ["x-new-token", "Content-Disposition", ROLE_HEADER],
+    // `x-new-token` used to head this list and is gone from it. The server
+    // stopped re-signing a JWT per request, so nothing emits that header any
+    // more, and read permission for a header nobody sends is worse than
+    // useless: it tells the next person the mechanism is still there. That
+    // mechanism is what `ROLE_HEADER` replaced — see its comment in
+    // `config/security.ts`.
+    //
+    // Nothing left in this array is safe to delete without checking who reads
+    // it first: `app.security.test.ts` pins the whole list by equality rather
+    // than by "contains", because dropping an entry — not the array losing all
+    // meaning — is the realistic way this breaks. What that test cannot see is
+    // the effect: `supertest` does not apply
+    // `Access-Control-Expose-Headers`, so this list governs only whether a
+    // real browser's JavaScript may read the header, never whether it travels.
+    exposedHeaders: ["Content-Disposition", ROLE_HEADER],
   }),
 );
 

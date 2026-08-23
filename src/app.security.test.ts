@@ -96,15 +96,26 @@ describe("security headers", () => {
     // reason — `Content-Disposition` is what lets the frontend read an
     // exported file's real name instead of downloading everything as
     // "download" (see `web/src/api/generador.api.test.ts`'s comment for the
-    // failure from the frontend's side), and `ROLE_HEADER` is this task's own
-    // reason the array exists to be checked at all: a header can cross the
-    // wire and still be invisible to the page's JavaScript if it is not
-    // named here — the exact way `x-new-token` used to be thrown away before
-    // this array was written to expose it. Equality is what notices any of
-    // the three going missing.
+    // failure from the frontend's side), and `ROLE_HEADER` is how the
+    // frontend notices a role that changed mid-session: a header can cross
+    // the wire and still be invisible to the page's JavaScript if it is not
+    // named here, which is the exact way `x-new-token` used to be thrown away
+    // before this array existed.
+    //
+    // Two entries now, not three. `x-new-token` came out when the last thing
+    // that emitted it went: nothing signs a per-request JWT any more, so
+    // exposing that name only advertised a mechanism that had stopped
+    // existing. Equality is also what notices somebody putting it back.
+    //
+    // And what this test does *not* prove, so nobody reads more into a green
+    // run than is there: `supertest` never applies
+    // `Access-Control-Expose-Headers`, so a header dropped from this list
+    // still arrives in every assertion in this file. The list decides only
+    // what a real browser lets the page's JavaScript read — which is why it
+    // has to be pinned here rather than caught by any request-level test.
     const res = await request(app).get("/api/login");
     expect(res.headers["access-control-expose-headers"]).toBe(
-      ["x-new-token", "Content-Disposition", ROLE_HEADER].join(","),
+      ["Content-Disposition", ROLE_HEADER].join(","),
     );
   });
 
