@@ -7,17 +7,19 @@
 // that looks removable from the outside — which is exactly why there must be
 // one copy of it.
 //
-// It was extracted because there are two front doors now: `POST /api/login`,
-// which still hands out a JWT, and `POST /api/auth/login`, which hands out a
-// session cookie. Copying this into the second one would have worked on the
-// first day and drifted by the third: the likeliest thing to be left behind is
-// the lockout, because it is the only part with no visible effect on a
-// successful login.
+// It was extracted when there were two front doors: the old `POST /api/login`,
+// which handed out a JWT, and `POST /api/auth/login`, which hands out a session
+// cookie. Copying this into the second one would have worked on the first day
+// and drifted by the third — the likeliest thing to be left behind is the
+// lockout, because it is the only part with no visible effect on a successful
+// login. The two doors have since been merged onto one handler, so this has one
+// caller again; the reasoning is what keeps it a separate function rather than
+// being folded back into it, because the next endpoint that needs to check a
+// password is the second copy this exists to prevent.
 //
-// It returns a result rather than writing a response, so the two callers decide
-// their own status codes and neither can accidentally answer differently from
-// the other about *why* a login failed. There is only one "why" here on
-// purpose.
+// It returns a result rather than writing a response, so its caller decides its
+// own status codes and cannot accidentally say something different about *why* a
+// login failed. There is only one "why" here on purpose.
 
 import bcryptjs from "bcryptjs";
 import { UsuarioModel } from "../models/usuario.model.js";

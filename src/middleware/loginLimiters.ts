@@ -72,10 +72,10 @@ export function accountBucketKey(req: Request): string {
  * 5xx is this server being wrong, and an outage here is nobody's failed
  * attempt.
  *
- * **What it fixes.** `POST /api/login` used to answer a session it could not
- * open with 200 and a JWT, which `skipSuccessfulRequests` refunded; it now
- * answers 503, and `POST /api/auth/login` answers 500 for the same failure
- * through its `handler()` wrapper. Both of those had started charging. The
+ * **What it fixes.** The login used to answer a session it could not open with
+ * 200 and a JWT, which `skipSuccessfulRequests` refunded; it now answers 503 on
+ * both of its addresses, since both are mounted on the same handler. That had
+ * started charging, and a 500 from anything else in the handler still does. The
  * address bucket is keyed by `ipKeyGenerator(req.ip)`, which behind the
  * office's NAT is one key for everybody, so a database outage during the
  * morning login rush spent a shared budget of a hundred on people who did

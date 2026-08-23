@@ -165,9 +165,9 @@ describe("which answers come out of somebody's budget", () => {
   const conStatus = (statusCode: number) => ({ statusCode }) as Response;
 
   it("charges nothing for a 2xx or 3xx, and nothing for any 5xx", () => {
-    // The 5xx half is the fix. A 503 is `POST /api/login` unable to open a
-    // session and a 500 is the same failure through `auth.controller.ts`'s
-    // wrapper; both used to be charged, and the address bucket behind the
+    // The 5xx half is the fix. A 503 is the login unable to open a session, on
+    // either of its two addresses; a 500 is anything else in the handler
+    // failing. Both used to be charged, and the address bucket behind the
     // office's NAT is one key for everybody, so a database outage spent the
     // building's budget and then kept the building out for a quarter of an hour
     // after the database came back.

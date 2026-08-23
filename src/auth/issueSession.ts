@@ -8,9 +8,13 @@
 // a 401 on the very next request; and forgetting the first one is what left the
 // sessions screen unreadable (see `rotateOut` below).
 //
-// Both doors call this: `POST /api/auth/login`, where it is the whole point,
-// and `POST /api/login`, where it rides along beside the JWT so that everybody
-// who logs in through the current frontend is migrated without noticing.
+// One caller, on two addresses: `auth.controller.ts`'s `login`, which both
+// `POST /api/auth/login` and the old `POST /api/login` are mounted on. It used
+// to have a second caller — the old door's own handler, where this rode along
+// beside a signed JWT so that everybody logging in through the frontend of the
+// day was migrated onto a session without noticing. That migration is done and
+// that handler is gone; the cookie this opens is now the only credential either
+// address hands out.
 
 import type { Request, Response } from "express";
 import { createSession, findLiveSession, revokeSessionOf } from "./sessionStore.js";

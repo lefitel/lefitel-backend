@@ -205,6 +205,60 @@ describe("logging in, through the real stack", () => {
     expect(JSON.stringify(res.body)).not.toContain("token");
     expect(res.body.permisos).toEqual(permisos);
   });
+
+  it("hands out no credential in the body on the old address either", async () => {
+    /**
+     * The address the current frontend posts to, through the mount that
+     * actually serves it — and the test this task exists for.
+     *
+     * `POST /api/login` used to answer with a signed seven-day JWT nested
+     * inside `usuario`. That token had no session row behind it, so nothing
+     * could revoke it: neither a password change nor "cerrar todas mis
+     * sesiones" reached it, and it stayed a working credential until it
+     * expired. It also sat where any script on the page could read it. Both
+     * facts are why `jwt.sign` is gone from the repository.
+     *
+     * Asserted through `supertest` rather than by calling the handler,
+     * because the handler is no longer the thing that could go wrong: it is
+     * shared with `POST /api/auth/login` and pinned by the test above. What
+     * this address can still get wrong is its **wiring** — `login.routes.ts`
+     * pointing back at a handler that signs, or a well-meant "compatibility"
+     * shim putting the field back for a frontend that has not needed it in
+     * two plans. Only a request through the real mount sees that.
+     *
+     * The two bodies are compared field for field rather than each being
+     * checked for the absence of a token. "No token here" is the assertion
+     * this project has repeatedly watched pass against broken code; "the same
+     * answer, whichever address you use" is the property actually meant, and
+     * it fails for a shim that adds anything at all.
+     */
+    const vieja = await request(app)
+      .post("/api/login")
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+
+    expect(vieja.status).toBe(200);
+    // The cookie is the credential, on this address as much as the other.
+    const setCookie = (vieja.headers["set-cookie"] as unknown as string[])?.join("; ") ?? "";
+    expect(setCookie).toContain(`${SESSION_COOKIE_NAME}=`);
+    expect(setCookie).toMatch(/HttpOnly/i);
+
+    expect(vieja.body.usuario).not.toHaveProperty("token");
+    expect(Object.keys(vieja.body).sort()).toEqual(["message", "permisos", "usuario"]);
+    for (const palabra of ["token", "jwt", "bearer"]) {
+      expect(JSON.stringify(vieja.body).toLowerCase(), palabra).not.toContain(palabra);
+    }
+    // And it really did log somebody in, rather than passing every line above
+    // by answering an empty object.
+    expect(vieja.body.usuario).toMatchObject({ id: YO, id_rol: MI_ROL, user: "isaias" });
+    expect(vieja.body.permisos).toEqual(permisos);
+
+    const nueva = await request(app)
+      .post("/api/auth/login")
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+
+    expect(nueva.status).toBe(vieja.status);
+    expect(nueva.body).toEqual(vieja.body);
+  });
 });
 
 describe("who the cookie says I am", () => {
@@ -583,12 +637,18 @@ describe("what a database outage costs the office's login budget", () => {
     expect(await hits(loginAccountIpLimiter, claveCuenta("isaias"))).toBe(0);
   });
 
-  it("spends nothing on the new door's 500 either", async () => {
-    // The same outage on `POST /api/auth/login`, where `handler()` turns the
-    // rejection into a 500 rather than a 503. Both doors share one pair of
-    // buckets — `auth.routes.ts` mounts the very same middleware — so a rule
-    // that covered only the 503 would have left the door the new frontend uses
-    // charging for outages.
+  it("spends nothing on the new address either, which answers the same 503", async () => {
+    // The same outage on `POST /api/auth/login`. Both addresses share one pair
+    // of buckets — `auth.routes.ts` mounts the very same middleware — so a rule
+    // that covered only one of them would have left the other charging for
+    // outages.
+    //
+    // They also answer the same status now, which they did not before this
+    // task: this address gave 500, because `handler()` turned the rejection
+    // into one, and the old address gave 503 from a catch of its own. Merging
+    // the two onto one handler kept the 503. Asserting it *here*, on the real
+    // mount, is what makes the refund rule and the status one fact rather than
+    // two that happen to agree.
     await loginAccountIpLimiter.resetKey(claveCuenta("isaias"));
     sesionCreate.mockRejectedValue(new Error("pool agotado"));
 
@@ -598,7 +658,7 @@ describe("what a database outage costs the office's login budget", () => {
       .send({ user: "isaias", pass: "una-clave-de-prueba" });
     await settled();
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
     expect(await hits(loginIpLimiter, CLAVE_IP)).toBe(0);
     expect(await hits(loginAccountIpLimiter, claveCuenta("isaias"))).toBe(0);
   });

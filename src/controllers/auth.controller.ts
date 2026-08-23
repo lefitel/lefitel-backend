@@ -7,12 +7,19 @@
 // — `DELETE /sessions/:id` — combines it with `req.user.id` in the same query
 // rather than trusting it.
 //
-// What is *not* here: the credential check itself. Both this file's `login` and
-// the old `POST /api/login` call `verifyCredentials`, which holds the uniform
-// message, the levelled timings, the account lockout and the cost re-hash. Two
-// copies of that would have drifted, and the part most likely to be left out of
-// the second copy is the lockout, because a successful login looks identical
-// with and without it.
+// What is *not* here: the credential check itself. `login` calls
+// `verifyCredentials`, which holds the uniform message, the levelled timings,
+// the account lockout and the cost re-hash. Two copies of that would have
+// drifted, and the part most likely to be left out of the second copy is the
+// lockout, because a successful login looks identical with and without it.
+//
+// There used to be a second copy of the whole endpoint. `POST /api/login` had
+// its own handler in `login.controller.ts` — same checks, same body minus a
+// JWT, its own 503 — and the two were kept in step by hand for the length of
+// the migration. That handler is gone: the old address is now mounted on
+// `login` below, so there is one implementation behind both URLs and nothing
+// left to keep in step. See `login.routes.ts` for what still answers there and
+// when it can go.
 
 import type { Request, Response } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
@@ -31,6 +38,29 @@ import { log } from "../utils/logger.js";
 const authLog = log("auth");
 
 const ERROR_INESPERADO = "Ocurrió un error al procesar la petición.";
+/**
+ * What somebody is told when their password was right and the server still
+ * could not let them in.
+ *
+ * Deliberately not beside `CREDENCIALES_INVALIDAS` and
+ * `CREDENCIALES_INCOMPLETAS` in `config/security.ts`, and the line is worth
+ * drawing: those two are a pair about the *credential*, kept together precisely
+ * so nobody rewords one without seeing the other and leaks which usernames
+ * exist. This says nothing about the account — it is about this server, right
+ * now — so it belongs to the endpoint.
+ *
+ * "In a few minutes" is the whole point of the wording: the two ways to get
+ * here are an exhausted connection pool and a locked `sesiones` table, and both
+ * pass. Retyping the password will not help and the person needs to be told
+ * that rather than left to conclude they have forgotten it.
+ *
+ * It arrived on the old `POST /api/login` first and moved here when the two
+ * doors were merged, because the alternative was losing it: `handler()` below
+ * turns every rejection into a 500, and a 500 tells the person nothing they can
+ * act on.
+ */
+const SESION_NO_DISPONIBLE =
+  "No se pudo iniciar la sesión en este momento. Inténtelo de nuevo en unos minutos.";
 /** Twin of the message in `authenticate.ts`; both mean the row is gone. */
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
 /**
@@ -104,22 +134,24 @@ function callerOf(
 }
 
 /**
- * `POST /api/auth/login` — the new front door.
+ * The front door. `POST /api/auth/login`, and `POST /api/login` too — the old
+ * address is mounted on this same function, so there is one login in the API
+ * however it is addressed.
  *
- * The difference from `POST /api/login` is the whole plan in one line: the
- * credential goes back as an httpOnly cookie and **not** in the body. A token
- * in the body is a token in JavaScript's reach, which is a token any script on
- * the page can read and one that nothing can revoke.
+ * What it does that the retired handler did not: the credential goes back as an
+ * httpOnly cookie and **only** as a cookie. The old one signed a seven-day JWT
+ * and put it in the body as well, which is a credential in JavaScript's reach —
+ * readable by any script on the page — and one that no revocation reaches,
+ * because the browser keeps its own copy and the server has no row to close.
+ * That is the defect the whole arc exists to remove.
  *
- * The body still carries the user and their permissions, exactly as the old
- * endpoint does minus the token, so the first screen after logging in is
- * already right instead of flashing everything and then hiding what this role
- * cannot reach.
+ * The body carries the user and their permissions and nothing else, so the
+ * first screen after logging in is already right instead of flashing everything
+ * and then hiding what this role cannot reach.
  *
- * A bad credential is 400 and not 401, matching the old door. A 401 from the
- * login endpoint itself is the status every frontend interceptor reads as
- * "session expired, go to the login screen" — from the login screen, that is a
- * loop.
+ * A bad credential is 400 and not 401. A 401 from the login endpoint itself is
+ * the status every frontend interceptor reads as "session expired, go to the
+ * login screen" — from the login screen, that is a loop.
  */
 export const login = handler("login", async (req: Request, res: Response) => {
   const check = await verifyCredentials({
@@ -131,10 +163,41 @@ export const login = handler("login", async (req: Request, res: Response) => {
     return res.status(400).json({ message: check.message });
   }
 
-  // Not best-effort here, unlike the old door: without a session there is no
-  // credential at all, so a failure to open one has to fail the login rather
-  // than answer 200 to a browser that would then be refused everywhere.
-  await issueSession(req, res, check.usuario.id);
+  /**
+   * A session this endpoint cannot open is a login it cannot grant. There is
+   * no credential other than the cookie, so a 200 without one tells the
+   * browser "Bienvenido", navigates the person into the ERP, gets 401 on the
+   * first request for data, and puts them back on the login form with nothing
+   * on screen to explain it — identically on every retry, because what is
+   * broken is the database and not anything they typed.
+   *
+   * **Caught here rather than left to `handler()`, and that is the whole point
+   * of the try/catch below.** The wrapper would turn the rejection into a 500 and
+   * `ERROR_INESPERADO`, which says "something is wrong with the software" when
+   * the truth is "a dependency is down, come back shortly". 503 is what this
+   * is, and the sentence reaches the screen: `web`'s `Login.api.ts` reads
+   * `data.message` off any non-2xx answer and hands it to the form. This is
+   * the half the retired `POST /api/login` handler got right, kept on the way
+   * through rather than dropped — losing it would have made the merge a
+   * regression for the one failure a person can actually do something about.
+   *
+   * **What this cannot do is lock anybody out.** The per-account lockout
+   * counter only moves inside `verifyCredentials` on a wrong password, so a
+   * database outage never touches it. Neither do the rate-limit buckets:
+   * `costsNothing` in `loginLimiters.ts` refunds the whole 5xx range, so an
+   * outage during the morning rush does not spend a budget that behind the
+   * office's NAT is one key for the entire building. Its comment has the
+   * reasoning, including why that cannot be turned into a free guess.
+   */
+  try {
+    await issueSession(req, res, check.usuario.id);
+  } catch (err) {
+    authLog.error(
+      { err, id_usuario: check.usuario.id },
+      "no se pudo abrir la sesión de cookie: se rechaza el login, porque la cookie es la única credencial",
+    );
+    return res.status(503).json({ message: SESION_NO_DISPONIBLE });
+  }
 
   const permisos = await permissionsFor(check.usuario.id_rol);
   // Last, not first. Written before the session existed, this line would claim

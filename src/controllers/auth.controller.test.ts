@@ -268,29 +268,45 @@ describe("POST /api/auth/login", () => {
     expect(c.raw.cookie).not.toHaveBeenCalled();
   });
 
-  it("fails the login when the session cannot be opened", async () => {
-    // The opposite of `POST /api/login`, and deliberately so: here the session
-    // *is* the credential, so answering 200 without one would hand the browser
-    // a login that every other route refuses.
+  it("fails the login, with 503 and something to say, when the session cannot be opened", async () => {
+    // The session *is* the credential, so answering 200 without one would hand
+    // the browser a login that every other route refuses.
+    //
+    // 503 rather than the 500 `handler()` would have produced. This endpoint
+    // answered 500 until the two doors were merged onto it: the retired `POST
+    // /api/login` had a catch of its own around `issueSession` and this did
+    // not, so the better answer to the one login failure a person can act on
+    // lived on the door being retired. It came across with the merge. Pinned
+    // here **and** in `login.session.test.ts` on purpose, because a rejection
+    // is the easiest thing in the file to hand back to the wrapper by accident.
     createSession.mockRejectedValue(new Error("pool agotado"));
     const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
     await login(c.req, c.res);
 
-    expect(c.status).toBe(500);
+    expect(c.status).toBe(503);
+    // Both sentences written out by hand rather than imported, so that
+    // rewording either one has to argue with a test — the same reason the
+    // header names are literals in `app.security.test.ts`. The second is the
+    // one the wrapper would have produced, and it is the assertion that
+    // catches a 503 carrying the wrong words.
+    expect(c.message).toBe(
+      "No se pudo iniciar la sesión en este momento. Inténtelo de nuevo en unos minutos.",
+    );
+    expect(c.message).not.toBe("Ocurrió un error al procesar la petición.");
     expect(c.raw.cookie).not.toHaveBeenCalled();
   });
 
-  it("does not write a LOGIN line for a login that answered 500", async () => {
+  it("does not write a LOGIN line for a login that failed to open a session", async () => {
     // The line used to be written the moment the password checked out, from
     // inside `verifyCredentials`. So a request that then failed to open a
-    // session answered 500 while the bitacora said that person had logged in —
-    // and the bitacora is read precisely to find out what happened.
+    // session was refused while the bitácora said that person had logged in —
+    // and the bitácora is read precisely to find out what happened.
     const { logAction } = await import("../utils/logAction.js");
     createSession.mockRejectedValue(new Error("pool agotado"));
     const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
     await login(c.req, c.res);
 
-    expect(c.status).toBe(500);
+    expect(c.status).toBe(503);
     expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: "LOGIN" }));
   });
 

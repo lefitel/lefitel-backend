@@ -1,9 +1,16 @@
-// The front door.
+// The front door's credential net.
 //
 // The rules about whitespace here are two different decisions that look like
 // one, and getting them backwards is a classic: a username is a name for a row
 // and its edges do not matter, a password is a secret and every character in it
 // does. This file exists so nobody "tidies up" the second one.
+//
+// It went in through `loginUsuario`, the old `POST /api/login`'s own handler,
+// until that handler was retired. The old address is now mounted on
+// `auth.controller.ts`'s `login`, so the tests below go in through that — the
+// same function, reached by the same URL, and every one of these decisions
+// lives underneath it in `verifyCredentials` rather than in either handler.
+// `comprobarToken` at the bottom is what is left of this file's own controller.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
@@ -31,8 +38,12 @@ vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },
 }));
+// `verify` only. `sign` was on this mock until the login stopped signing, and
+// leaving it would have been a stub for a call that no longer exists — worse,
+// it would quietly absorb somebody putting `jwt.sign` back. Without it, that
+// change reaches the real library.
 vi.mock("jsonwebtoken", () => ({
-  default: { sign: () => "un.token.firmado", verify: vi.fn() },
+  default: { verify: vi.fn() },
 }));
 vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }));
 // Opening the session cookie is not what this file is about, and it cannot be
@@ -40,11 +51,24 @@ vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }))
 // `UsuarioModel.hasMany` while it is being imported — on the stub above, which
 // has no such method, so the whole suite would fail to load before running a
 // single assertion. `authenticate.test.ts` mocks the session store for the same
-// reason. What the old login now does with the cookie is asserted in
-// `login.session.test.ts`; nothing else in this file changed.
+// reason. What the login does with the cookie is asserted in
+// `login.session.test.ts`, where `issueSession` is real.
 vi.mock("../auth/issueSession.js", () => ({ issueSession: vi.fn() }));
+// The store as well, and mocking `issueSession` above is not enough to avoid it:
+// `auth.controller.ts` imports these three names for its *other* five
+// endpoints, none of which this file calls, and that import alone is what pulls
+// `sesion.model.ts` and its `UsuarioModel.hasMany` in. Without this the whole
+// suite fails to load with "UsuarioModel.hasMany is not a function", which is
+// exactly the failure the note above predicts and the reason it is written down.
+vi.mock("../auth/sessionStore.js", () => ({
+  listSessionsOf: vi.fn(),
+  revokeAllSessionsOf: vi.fn(),
+  revokeSessionOf: vi.fn(),
+}));
 
-const { loginUsuario, comprobarToken } = await import("./login.controller.js");
+const { comprobarToken } = await import("./login.controller.js");
+// The handler both `POST /api/login` and `POST /api/auth/login` are mounted on.
+const { login } = await import("./auth.controller.js");
 
 /** A stored account whose password is whatever the test says it is. */
 function storedUser(user = "isaias") {
@@ -69,6 +93,9 @@ function call(body: unknown) {
   const res = {
     statusCode: 0,
     body: undefined as unknown,
+    // `handler()` in `auth.controller.ts` reads this before writing its 500, so
+    // the stub carries it rather than leaving it undefined by luck.
+    headersSent: false,
     status(code: number) {
       this.statusCode = code;
       return this;
@@ -118,7 +145,7 @@ describe("the username", () => {
     // admits, and the answer was "usuario inexistente" with nothing on screen
     // explaining why.
     const c = call({ user: "  isaias  ", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(searchedFor()).toBe("isaias");
     expect(c.status).toBe(200);
@@ -129,7 +156,7 @@ describe("the username", () => {
     // than trimming them would lock him out.
     findOne.mockResolvedValue(storedUser("Omar Mita"));
     const c = call({ user: " Omar Mita ", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     // Lower-cased by the lookup, so "omar mita" — with the space still in it,
     // which is the part this test is about.
@@ -149,7 +176,7 @@ describe("the username", () => {
     // lower-case name as already taken.
     findOne.mockResolvedValue(storedUser("Omar Mita"));
     const c = call({ user: "omar mita", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(searchedWith()).toMatchObject({ ...looksCaseFolded, logic: "omar mita" });
     expect(c.status).toBe(200);
@@ -163,7 +190,7 @@ describe("the username", () => {
       vi.clearAllMocks();
       findOne.mockResolvedValue(storedUser("Omar Mita"));
       const c = call({ user: typed, pass: "secreta" });
-      await loginUsuario(c.req, c.res);
+      await login(c.req, c.res);
 
       expect(searchedFor(), typed).toBe("omar mita");
       expect(c.status, typed).toBe(200);
@@ -172,7 +199,7 @@ describe("the username", () => {
 
   it("is refused when it is nothing but spaces", async () => {
     const c = call({ user: "     ", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(400);
     expect(findOne).not.toHaveBeenCalled();
@@ -184,7 +211,7 @@ describe("the username", () => {
     for (const user of [{ ne: null }, ["isaias"], 7, null, undefined]) {
       vi.clearAllMocks();
       const c = call({ user, pass: "secreta" });
-      await loginUsuario(c.req, c.res);
+      await login(c.req, c.res);
 
       expect(c.status, JSON.stringify(user)).toBe(400);
       expect(findOne, JSON.stringify(user)).not.toHaveBeenCalled();
@@ -198,7 +225,7 @@ describe("the password", () => {
     // secret than the one chosen and shrink what an attacker has to guess.
     const bcryptjs = (await import("bcryptjs")).default;
     const c = call({ user: "isaias", pass: "  con espacios  " });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(bcryptjs.compare).toHaveBeenCalledWith("  con espacios  ", "$2a$08$hash");
   });
@@ -208,14 +235,14 @@ describe("the password", () => {
     // to send it; if one arrives it is compared, not trimmed into "".
     const bcryptjs = (await import("bcryptjs")).default;
     const c = call({ user: "isaias", pass: "   " });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(bcryptjs.compare).toHaveBeenCalledWith("   ", "$2a$08$hash");
   });
 
   it("is refused when it is empty", async () => {
     const c = call({ user: "isaias", pass: "" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(400);
     expect(findOne).not.toHaveBeenCalled();
@@ -223,7 +250,7 @@ describe("the password", () => {
 
   it("is refused when it is not a string at all", async () => {
     const c = call({ user: "isaias", pass: { ne: null } });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(400);
     expect(findOne).not.toHaveBeenCalled();
@@ -233,7 +260,7 @@ describe("the password", () => {
 describe("what comes back", () => {
   it("never includes the stored hash", async () => {
     const c = call({ user: "isaias", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(200);
     expect(JSON.stringify(c.res)).not.toContain("$2a$08$hash");
@@ -247,12 +274,12 @@ describe("what comes back", () => {
 
     findOne.mockResolvedValue(null);
     const unknown = call({ user: "nadie", pass: "x" });
-    await loginUsuario(unknown.req, unknown.res);
+    await login(unknown.req, unknown.res);
 
     findOne.mockResolvedValue(storedUser());
     vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
     const wrong = call({ user: "isaias", pass: "x" });
-    await loginUsuario(wrong.req, wrong.res);
+    await login(wrong.req, wrong.res);
 
     expect(unknown.status).toBe(400);
     expect(wrong.status).toBe(400);
@@ -272,7 +299,7 @@ describe("what comes back", () => {
 
     findOne.mockResolvedValue(null);
     const c = call({ user: "nadie", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
   });
@@ -286,7 +313,7 @@ describe("what comes back", () => {
     vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
 
     const c = call({ user: "isaias", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(200);
     expect(bcryptjs.hash).toHaveBeenCalledWith("secreta", 12);
@@ -304,7 +331,7 @@ describe("what comes back", () => {
     findOne.mockResolvedValue(user);
 
     const c = call({ user: "isaias", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(200);
     expect(bcryptjs.hash).toHaveBeenCalledWith("secreta", 12);
@@ -322,7 +349,7 @@ describe("what comes back", () => {
     findOne.mockResolvedValue(user);
 
     const c = call({ user: "isaias", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(200);
     expect(bcryptjs.hash).not.toHaveBeenCalled();
@@ -352,7 +379,7 @@ describe("what a failure costs", () => {
     findOne.mockResolvedValue(storedUser()); // stored at cost 8, like every real row
 
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(400);
     expect(bcryptjs.compare).toHaveBeenCalledWith("x", "$2a$08$hash");
@@ -374,7 +401,7 @@ describe("what a failure costs", () => {
     findOne.mockResolvedValue(user);
 
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(400);
     expect(bcryptjs.compare).toHaveBeenCalledTimes(1);
@@ -392,7 +419,7 @@ describe("what a failure costs", () => {
     findOne.mockResolvedValue(user);
 
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(400);
     expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
@@ -410,12 +437,12 @@ describe("account lockout", () => {
     locked.dataValues.locked_until = new Date(Date.now() + 60_000);
     findOne.mockResolvedValue(locked);
     const lockedCall = call({ user: "isaias", pass: "x" });
-    await loginUsuario(lockedCall.req, lockedCall.res);
+    await login(lockedCall.req, lockedCall.res);
 
     findOne.mockResolvedValue(storedUser());
     vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
     const wrong = call({ user: "isaias", pass: "x" });
-    await loginUsuario(wrong.req, wrong.res);
+    await login(wrong.req, wrong.res);
 
     expect(lockedCall.status).toBe(400);
     expect(lockedCall.message).toBe(CREDENCIALES_INVALIDAS);
@@ -434,7 +461,7 @@ describe("account lockout", () => {
     locked.dataValues.locked_until = new Date(Date.now() + 60_000);
     findOne.mockResolvedValue(locked);
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(bcryptjs.compare).toHaveBeenCalledWith("x", "hashed");
     expect(bcryptjs.compare).not.toHaveBeenCalledWith("x", locked.dataValues.pass);
@@ -447,7 +474,7 @@ describe("account lockout", () => {
     locked.dataValues.locked_until = new Date(Date.now() + 60_000);
     findOne.mockResolvedValue(locked);
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(update).not.toHaveBeenCalled();
   });
@@ -464,7 +491,7 @@ describe("account lockout", () => {
     findOne.mockResolvedValueOnce(user).mockResolvedValueOnce({ dataValues: { failed_attempts: 3 } });
 
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: 1 } });
     // Below the threshold, there is nothing to lock, so no `update` call at
@@ -483,7 +510,7 @@ describe("account lockout", () => {
       .mockResolvedValueOnce({ dataValues: { failed_attempts: LOCKOUT_AFTER_FAILURES } });
 
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: 1 } });
     expect(update).toHaveBeenCalledTimes(1);
@@ -511,7 +538,7 @@ describe("account lockout", () => {
       .mockResolvedValueOnce({ dataValues: { failed_attempts: LOCKOUT_AFTER_FAILURES } });
 
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -537,7 +564,7 @@ describe("account lockout", () => {
     findOne.mockResolvedValueOnce(user).mockResolvedValueOnce({ dataValues: { failed_attempts: 2 } });
 
     const c = call({ user: "isaias", pass: "x" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: "LOGIN_FAILED" }));
     expect(logAction).not.toHaveBeenCalledWith(
@@ -564,7 +591,7 @@ describe("account lockout", () => {
 
     const a = call({ user: "isaias", pass: "x" });
     const b = call({ user: "isaias", pass: "y" });
-    await Promise.all([loginUsuario(a.req, a.res), loginUsuario(b.req, b.res)]);
+    await Promise.all([login(a.req, a.res), login(b.req, b.res)]);
 
     expect(increment).toHaveBeenCalledTimes(2);
     expect(increment).toHaveBeenNthCalledWith(1, "failed_attempts", { where: { id: 1 } });
@@ -584,7 +611,7 @@ describe("account lockout", () => {
     findOne.mockResolvedValue(user);
 
     const c = call({ user: "isaias", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(200);
     expect(update).toHaveBeenCalledWith({ failed_attempts: 0, locked_until: null }, { where: { id: 1 } });
@@ -602,7 +629,7 @@ describe("account lockout", () => {
     clean.dataValues.pass = "$2a$12$hash";
     findOne.mockResolvedValue(clean);
     const c = call({ user: "isaias", pass: "secreta" });
-    await loginUsuario(c.req, c.res);
+    await login(c.req, c.res);
 
     expect(c.status).toBe(200);
     expect(update).not.toHaveBeenCalled();
@@ -644,7 +671,7 @@ describe("comprobarToken", () => {
     // Reached only once `jwt.verify` has already accepted the token — a
     // weaker gate than `authenticate` (no session row, no revocation check),
     // but not "sin autenticar" either. What used to leak here is the same
-    // shape as `loginUsuario`'s outer catch: whatever the database says,
+    // shape as the login's own `handler()`: whatever the database says,
     // verbatim, in the response body.
     const jwt = (await import("jsonwebtoken")).default;
     let pending: Promise<void> | undefined;
