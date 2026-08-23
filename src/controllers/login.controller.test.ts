@@ -31,7 +31,9 @@ vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },
 }));
-vi.mock("jsonwebtoken", () => ({ default: { sign: () => "un.token.firmado" } }));
+vi.mock("jsonwebtoken", () => ({
+  default: { sign: () => "un.token.firmado", verify: vi.fn() },
+}));
 vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }));
 // Opening the session cookie is not what this file is about, and it cannot be
 // left real: `issueSession` reaches `sesion.model.ts`, which calls
@@ -42,7 +44,7 @@ vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }))
 // `login.session.test.ts`; nothing else in this file changed.
 vi.mock("../auth/issueSession.js", () => ({ issueSession: vi.fn() }));
 
-const { loginUsuario } = await import("./login.controller.js");
+const { loginUsuario, comprobarToken } = await import("./login.controller.js");
 
 /** A stored account whose password is whatever the test says it is. */
 function storedUser(user = "isaias") {
@@ -604,5 +606,70 @@ describe("account lockout", () => {
 
     expect(c.status).toBe(200);
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("comprobarToken", () => {
+  /** A request bearing the old JWT, and the response it gets back. */
+  function tokenCall(authorization?: string) {
+    const res = {
+      statusCode: 0,
+      body: undefined as unknown,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload: unknown) {
+        this.body = payload;
+        return this;
+      },
+      sendStatus(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+    };
+    return {
+      req: { headers: authorization ? { authorization } : {} } as unknown as Request,
+      res: res as unknown as Response,
+      get status() {
+        return res.statusCode;
+      },
+      get message() {
+        return (res.body as { message?: string } | undefined)?.message;
+      },
+    };
+  }
+
+  it("keeps a database error's own words out of the response to a request bearing a valid legacy token", async () => {
+    // Reached only once `jwt.verify` has already accepted the token — a
+    // weaker gate than `authenticate` (no session row, no revocation check),
+    // but not "sin autenticar" either. What used to leak here is the same
+    // shape as `loginUsuario`'s outer catch: whatever the database says,
+    // verbatim, in the response body.
+    const jwt = (await import("jsonwebtoken")).default;
+    let pending: Promise<void> | undefined;
+    // Cast rather than go through `vi.mocked`'s real, multi-overload
+    // `jwt.verify` type: the mock only ever needs the three-argument shape
+    // this controller actually calls, with an async callback rather than the
+    // real (synchronous) `VerifyCallback`.
+    const verifyMock = jwt.verify as unknown as {
+      mockImplementation(
+        fn: (token: unknown, secret: unknown, cb: (err: unknown, decoded: unknown) => Promise<void>) => void,
+      ): void;
+    };
+    verifyMock.mockImplementation((_token, _secret, cb) => {
+      pending = cb(null, { id: 1 });
+    });
+    const dbError = new Error('column "id_rol" does not exist');
+    findOne.mockRejectedValue(dbError);
+
+    const c = tokenCall("Bearer un-token-firmado");
+    comprobarToken(c.req, c.res);
+    await pending;
+
+    expect(c.status).toBe(500);
+    expect(c.message).not.toBe(dbError.message);
+    expect(c.message).not.toContain("id_rol");
+    expect(c.message).not.toContain("column");
   });
 });

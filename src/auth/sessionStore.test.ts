@@ -386,6 +386,27 @@ describe("listSessionsOf", () => {
     expect(options.order).toEqual([["last_used_at", "DESC"]]);
   });
 
+  it("requires the session not to have passed the thirty-day absolute ceiling, same as findLiveSession", async () => {
+    // `findLiveSession` puts three conditions in its own query rather than
+    // checking them afterwards, precisely because a second query answering
+    // the same "is this session still good for anything" is where one of
+    // them gets forgotten on a later edit. This one did: a session already
+    // past its absolute ceiling — dead by `findLiveSession`'s own rule, so it
+    // cannot be used to get in — still showed up here as connected, which is
+    // the profile screen's whole reason to exist: it is where somebody who
+    // lost a laptop checks whether the risk is still open.
+    findAll.mockResolvedValue([]);
+    await listSessionsOf(7);
+    const [options] = findAll.mock.calls[0] as [{ where: Record<string, unknown> }];
+    expect(options.where).toHaveProperty("created_at");
+    const clause = options.where.created_at;
+    expect(opsOf(clause)).toContain(Op.gt);
+    const cutoff = boundOf(clause, Op.gt) as Date;
+    const dias = (Date.now() - cutoff.getTime()) / 86_400_000;
+    expect(dias).toBeGreaterThan(SESSION_ABSOLUTE_DAYS - 0.01);
+    expect(dias).toBeLessThan(SESSION_ABSOLUTE_DAYS + 0.01);
+  });
+
   it("never hands the token hash to whatever renders this list", async () => {
     // This list is what the profile screen turns into a res.json. Nothing
     // can be done with a SHA-256 of a 256-bit token, but the module's whole

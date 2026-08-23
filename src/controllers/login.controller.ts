@@ -29,6 +29,22 @@ const SESION_NO_DISPONIBLE =
   "No se pudo iniciar la sesión en este momento. Inténtelo de nuevo en unos minutos.";
 
 /**
+ * What every other unexpected failure in this file answers with — the same
+ * wording `authenticate.ts` and `auth.controller.ts`'s `handler()` already
+ * use for the same situation, kept as its own local constant here rather
+ * than imported, exactly as those two do.
+ *
+ * Both handlers below used to answer with `error.message` instead: whatever
+ * the database driver said, verbatim, in the body of a response to a caller
+ * who has not authenticated. A Postgres error names its own tables and
+ * columns, which is half of what somebody probing this endpoint for an
+ * injection needs to know, handed over for free by a request that only had
+ * to be malformed or badly timed. The real error still goes to the log —
+ * this is only what crosses the wire.
+ */
+const ERROR_INESPERADO = "Ocurrió un error al procesar la petición.";
+
+/**
  * `POST /api/login` — the door the current frontend still uses.
  *
  * What used to be two hundred lines of credential checking is now one call to
@@ -122,9 +138,9 @@ export async function loginUsuario(req: Request, res: Response) {
     // 500 still left "Inició sesión" in the bitácora.
     logLogin(check.usuario, req.ip ?? null);
     res.status(200).json({ usuario: { ...check.usuario, token }, permisos, message: "Login exitoso" });
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : "Error desconocido";
-    return res.status(500).json({ usuario: {}, message: msg });
+  } catch (err) {
+    loginLog.error({ err }, "fallo inesperado en POST /api/login, antes de que hubiera credencial");
+    return res.status(500).json({ usuario: {}, message: ERROR_INESPERADO });
   }
 }
 
@@ -167,9 +183,9 @@ export function comprobarToken(req: Request, res: Response) {
         image: usuario.image,
         permisos: await permissionsFor(usuario.id_rol),
       });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : "Error desconocido";
-      return res.status(500).json({ message: msg });
+    } catch (err) {
+      loginLog.error({ err }, "fallo inesperado en GET /api/login (comprobarToken)");
+      return res.status(500).json({ message: ERROR_INESPERADO });
     }
   });
 }

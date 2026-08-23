@@ -249,6 +249,35 @@ describe("the old login, once the credential is good", () => {
     expect(revokeSessionOf).not.toHaveBeenCalled();
   });
 
+  it("keeps a database error's own words out of the response to a caller who has not logged in", async () => {
+    // The outer catch runs on anything unexpected before the session and the
+    // JWT exist — here, `verifyCredentials`'s own lookup failing, which by its
+    // own comment "throws nothing of its own" and lets a database failure
+    // propagate. Whoever is on the other end of `POST /api/login` has typed
+    // nothing that could be wrong yet, so a Postgres error naming a table or a
+    // column must not become the sentence this endpoint answers with — that
+    // is half of what an injection attempt needs to know, handed to it for
+    // free by a request that only had to be malformed or badly timed.
+    const dbError = new Error(
+      'null value in column "pass" of relation "usuarios" violates not-null constraint',
+    );
+    findOne.mockRejectedValue(dbError);
+
+    const c = call({ user: "isaias", pass: "secreta" });
+    await loginUsuario(c.req, c.res);
+
+    expect(c.status).toBe(500);
+    // Not merely "does not contain the word column" — the exact old failure
+    // mode was handing back `error.message` verbatim, so the test that would
+    // survive that regression is one comparing against the real message.
+    expect(c.payload?.message).not.toBe(dbError.message);
+    expect(c.payload?.message).not.toContain("usuarios");
+    expect(c.payload?.message).not.toContain("column");
+    // The detail is not thrown away, only kept off the wire: it still has to
+    // reach whoever can act on a database outage.
+    expect(error).toHaveBeenCalled();
+  });
+
   it("opens nothing when the credential is wrong", async () => {
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);

@@ -245,10 +245,24 @@ export async function revokeAllSessionsOf(
  * `res.json`, and the whole point of this module is that the hash never
  * leaves the database — an unreachable `attributes` bug later should not be
  * the first thing standing in the way of that.
+ *
+ * The same three conditions as `findLiveSession` — revoked, expired, and past
+ * the absolute ceiling — for the same reason: this is a second query
+ * deciding the same question, "is this session still good for anything", and
+ * the ceiling is exactly the condition a later edit forgets. Without it, a
+ * device already refused by `findLiveSession` still showed up here as
+ * connected — the one place a person checks after losing a laptop, telling
+ * them a risk is still open when it no longer is, or the other way round.
  */
 export async function listSessionsOf(id_usuario: number): Promise<Omit<ISesion, "token_hash">[]> {
+  const now = new Date();
   const rows = await SesionModel.findAll({
-    where: { id_usuario, revoked_at: null, expires_at: { [Op.gt]: new Date() } },
+    where: {
+      id_usuario,
+      revoked_at: null,
+      expires_at: { [Op.gt]: now },
+      created_at: { [Op.gt]: new Date(now.getTime() - SESSION_ABSOLUTE_DAYS * DAY_MS) },
+    },
     attributes: { exclude: ["token_hash"] },
     order: [["last_used_at", "DESC"]],
   });
