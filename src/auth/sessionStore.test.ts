@@ -343,11 +343,17 @@ describe("revoking", () => {
 
   it("revokes everything when the session to spare is undefined", async () => {
     // The branch that matters most, and the one that fails silently if it is
-    // written as `if ("except" in options)`. A request that arrived on the old
-    // bearer token has no session row, so callers pass `undefined` straight
-    // through; written that way the clause becomes `id != NULL`, which is never
-    // true in SQL, so the update would match **nothing** and a password change
-    // would revoke no sessions at all — while answering 200.
+    // written as `if ("except" in options)`: the clause becomes `id != NULL`,
+    // which is never true in SQL, so the update would match **nothing** and a
+    // password change would revoke no sessions at all — while answering 200.
+    //
+    // `undefined` really does arrive. `changePassword` passes `isSelf ?
+    // loggedUser.id_sesion : undefined`, so every administrator resetting
+    // somebody else's password takes this branch, and `deleteUsuario` passes no
+    // options at all. It used to arrive by accident too — a request on the old
+    // bearer token had no session row, so `req.user.id_sesion` was itself
+    // `undefined` and callers passed it straight through — and that credential
+    // is retired, which is why the deliberate callers are named here instead.
     update.mockResolvedValue([4]);
     for (const options of [{}, { except: undefined }, { except: "" }]) {
       update.mockClear();

@@ -1,5 +1,4 @@
 import type { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { findLiveSession, touchSession, slidingExpiry, cappedByCeiling } from "../auth/sessionStore.js";
 import { readSessionCookie, setSessionCookie } from "../auth/sessionCookie.js";
@@ -12,21 +11,28 @@ const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
 const ERROR_INESPERADO = "Ocurrió un error al procesar la petición.";
 
 /**
- * Who the caller is, from either credential.
+ * Who the caller is. One credential: the session cookie.
  *
- * Two paths on purpose, and only for as long as the transition lasts. The
- * backend deploys on one platform and the frontend on another, so they cannot
- * change at the same instant: without a period where both credentials work,
- * there is a window in which one side is new and the other old and nobody can
- * get in at all.
+ * **This is where revocation became real.** Until this task there was a second
+ * door — a signed JWT read off the `Authorization` header and verified here,
+ * with no session row behind it. A credential with no row is a credential
+ * nothing can take back: not a logout, not "cerrar todas mis sesiones", not a
+ * password change, not archiving the account. It kept working until it expired,
+ * up to a week later. Every other piece of session work in this arc built the
+ * row that makes revocation possible; deleting that door is what makes the row
+ * the only way in.
  *
- * The cookie is checked first and **there is no falling back from it**. A
- * cookie that fails is a failure, not an invitation to try the other door —
- * otherwise anyone who could forge a bearer token would bypass revocation by
- * sending a broken cookie alongside it.
+ * So `Authorization` is now an ordinary header this middleware does not read.
+ * A request carrying one and no cookie has no credential at all and gets 401 —
+ * not because its token is bad, but because nothing looks at it.
  *
- * The bearer path logs every use, so the day it is retired the decision rests
- * on a number instead of a guess.
+ * **If a second credential is ever added here, the rule the old one obeyed
+ * still applies.** The cookie was read first and there was no falling back from
+ * it: a cookie that fails is a failure, not an invitation to try the other
+ * door, because otherwise anyone who could forge the other credential would
+ * bypass revocation by sending a broken cookie alongside it. With one door
+ * there is nothing to fall back to and the rule has nothing left to govern —
+ * which is exactly why it is written down instead of left to be rediscovered.
  *
  * The whole body is one try/catch, not just the session lookup. This runs in
  * front of every protected route in the API, and Express 4 does not catch a
@@ -38,22 +44,15 @@ const ERROR_INESPERADO = "Ocurrió un error al procesar la petición.";
 export async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const cookieToken = readSessionCookie(req);
-    if (cookieToken) {
-      await authenticateBySession(cookieToken, req, res, next);
+    if (!cookieToken) {
+      // 401, not 403: unauthenticated, not forbidden. The client uses the
+      // difference to decide whether to end the session, and a 403 over a single
+      // resource must not throw somebody out of the application.
+      res.status(401).json({ message: SESION_EXPIRADA });
       return;
     }
 
-    const authHeader = req.headers["authorization"];
-    const bearer = authHeader && authHeader.split(" ")[1];
-    if (bearer) {
-      await authenticateByLegacyToken(bearer, req, res, next);
-      return;
-    }
-
-    // 401, not 403: unauthenticated, not forbidden. The client uses the
-    // difference to decide whether to end the session, and a 403 over a single
-    // resource must not throw somebody out of the application.
-    res.status(401).json({ message: SESION_EXPIRADA });
+    await authenticateBySession(cookieToken, req, res, next);
   } catch (err) {
     authLog.warn({ err }, "fallo inesperado al autenticar la petición");
     if (!res.headersSent) {
@@ -135,8 +134,11 @@ async function authenticateBySession(
    * that answer carries the new deadline too.
    *
    * See `SESSION_EXPIRES_HEADER` for the format and for why its absence has
-   * to mean "no news", never "expired": the bearer path below sets no such
-   * header because there is no row behind it to expire.
+   * to mean "no news", never "expired". Nothing in this file can now answer
+   * 2xx without setting it — every authenticated request comes through the
+   * lines above — so the only way a client sees it missing is a proxy that
+   * dropped a header it did not recognise, and treating that as "expired"
+   * would log somebody out of a live session for a header they never got.
    */
   res.setHeader(SESSION_EXPIRES_HEADER, expiresAt.toISOString());
 
@@ -163,62 +165,16 @@ async function authenticateBySession(
   // free value for a second `SesionModel.findOne` on every call — cheap for an
   // endpoint that only runs once per page load, but still a database round
   // trip this data does not need when the value is already sitting in memory.
-  // Optional for the same reason `id_sesion` already is: a request
-  // authenticated by the old bearer token has no row, and therefore nothing
-  // to report an expiry from.
+  //
+  // Both fields are **required** on `req.user` (`app.ts`), and this line is the
+  // only thing that fills them in. They were optional because the old bearer
+  // path reached `next()` without a session row, so half of `req.user` was
+  // absent and six places in `auth.controller.ts` had to ask whether it was
+  // there. That path is gone: an authenticated request has a row by
+  // construction, and the type says so, so those questions cannot be asked
+  // again.
   req.user = { id: usuario.id, id_rol: usuario.id_rol, id_sesion: sesion.id, expires_at: expiresAt };
   next();
-}
-
-/**
- * The old path: a signed token with no row behind it.
- *
- * Kept only until the frontend stops sending it, and logged every time so that
- * retiring it is a measurement rather than a bet. Note what it cannot do: a
- * token on this path cannot be revoked, which is the entire defect this plan
- * exists to fix. Every request through here is the old hole, still open.
- *
- * `jwt.verify` takes a callback rather than returning a promise, so the
- * lookup inside it is wrapped in its own promise: without that, a rejection
- * from `currentUser` would happen inside a plain callback, outside anything
- * `authenticate`'s try/catch can see, and the request would hang exactly the
- * way the async-middleware defect did.
- */
-function authenticateByLegacyToken(
-  token: string,
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    jwt.verify(token, process.env.JWT_SECRET as string, (err, payload) => {
-      if (err) {
-        res.status(401).json({ message: SESION_EXPIRADA });
-        resolve();
-        return;
-      }
-      const claims = payload as { id: number };
-      currentUser(claims.id)
-        .then((usuario) => {
-          if (!usuario) {
-            res.status(401).json({ message: CUENTA_INACTIVA });
-            resolve();
-            return;
-          }
-          authLog.info({ id_usuario: usuario.id, ruta: req.originalUrl }, "petición autenticada con el token antiguo");
-          // Same header, same source — `usuario.id_rol` off `currentUser`'s
-          // database read, never `claims.id_rol` off the token. Skipping this
-          // on the old path is the failure the task exists to avoid: the
-          // warning would only work for whichever half of the transition
-          // happened to be on the cookie already.
-          res.setHeader(ROLE_HEADER, String(usuario.id_rol));
-          req.user = { id: usuario.id, id_rol: usuario.id_rol };
-          next();
-          resolve();
-        })
-        .catch(reject);
-    });
-  });
 }
 
 /**

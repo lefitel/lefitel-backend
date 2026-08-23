@@ -1,4 +1,5 @@
-// What a cookie-authenticated write has to prove, and what a bearer one does not.
+// What a cookie-authenticated write has to prove, and what an `Authorization`
+// header no longer buys.
 //
 // **`curl` cannot verify any of this, and that is why this file exists.** curl
 // does not implement CORS: it sends whatever headers it is told to and reads
@@ -20,6 +21,7 @@
 import { describe, expect, it } from "vitest";
 import express from "express";
 import cookieParser from "cookie-parser";
+import jwt from "jsonwebtoken";
 import request from "supertest";
 
 import { requireSameOrigin } from "./csrf.js";
@@ -174,6 +176,41 @@ describe("a write authenticated by cookie", () => {
     }
   });
 
+  it("is still refused with an Authorization header attached, from any origin that is not ours", async () => {
+    // The direction that is a hole if it is ever got wrong, and it had no test of
+    // its own until this task. `csrf.ts` keys on the cookie and on nothing else;
+    // the tempting alternative is "a cookie and no `Authorization`", which reads
+    // as equivalent and is not. That header costs nothing to send and now
+    // authenticates nothing, so a forged cross-site form could carry one purely
+    // to be waved through — while the request underneath still arrives with the
+    // victim's cookie, which `authenticate` accepts.
+    //
+    // Our own header is attached as well, so the only thing that can be
+    // answering 403 is the origin check.
+    for (const ajeno of AJENOS) {
+      const res = await request(guarded())
+        .post("/x")
+        .set("Cookie", COOKIE)
+        .set("Authorization", "Bearer un-jwt-cualquiera")
+        .set("Origin", ajeno)
+        .set(CSRF_CLIENT_HEADER, CLIENTE);
+
+      expect(res.status, ajeno).toBe(403);
+    }
+
+    // The other half of "changes nothing": from our own origin it goes through
+    // exactly as it would without the header. Together these two say the header
+    // is ignored, rather than punished.
+    const nuestro = await request(guarded())
+      .post("/x")
+      .set("Cookie", COOKIE)
+      .set("Authorization", "Bearer un-jwt-cualquiera")
+      .set("Origin", NUESTRO)
+      .set(CSRF_CLIENT_HEADER, CLIENTE);
+
+    expect(nuestro.status).toBe(200);
+  });
+
   it("leaves the cookie alone on an origin refusal, unlike a header refusal", async () => {
     // `evil.osefi.net` is same-site, so `SameSite=Lax` does not stop it from
     // carrying this cookie — it is exactly the kind of request that could try to
@@ -225,16 +262,14 @@ describe("everything else is left alone", () => {
     }
   });
 
-  it("does not touch a write authenticated by the old bearer token", async () => {
-    // The assertion that pins the coexistence, and the one that fails the moment
-    // somebody decides the header should be required of everybody. Requiring it
-    // there would refuse every write the current frontend makes — it sends a
-    // bearer token and no header of its own — and being able to deploy the two
-    // repositories on different days is the entire reason both credentials work.
-    //
-    // Safe because nothing makes a browser send `Authorization` on its own: a
-    // page on another site cannot produce this request at all, which is why the
-    // hostile origin below is not a hole either.
+  it("does not touch a write that carries an Authorization header and no cookie", async () => {
+    // Same case as the test above — no cookie, nothing of the victim's to abuse
+    // — and kept as its own test because this request used to be authenticated.
+    // It was the old bearer credential, and this test asserted the guard let it
+    // past *because* it was one. It gets past for the opposite reason now: there
+    // is no credential here at all, and the request dies at `authenticate` a
+    // moment later. That half is unprovable on this probe, which mounts no
+    // `authenticate`, and is pinned on the real app further down.
     for (const ajeno of AJENOS) {
       const res = await request(guarded())
         .post("/x")
@@ -383,12 +418,56 @@ describe("mounted on the assembled app", () => {
     expect(setCookie.some((c) => c.startsWith(`${SESSION_COOKIE_NAME}=;`))).toBe(true);
   });
 
-  it("leaves the bearer path alone on a real route", async () => {
+  it("leaves nothing open on a real route for a properly signed bearer token", async () => {
+    /**
+     * This assertion is one of the two tripwires for the whole plan, and it
+     * used to assert the opposite thing under the name "leaves the bearer path
+     * alone": that this guard did not interfere with a request the old
+     * `authenticate` would then let in. The status it expected was already 401,
+     * because `un-jwt-cualquiera` is not a JWT and the old verifier refused it
+     * — so restoring the bearer path would have left this test green. That is
+     * exactly the trap the Plan 1 all-digit UUIDs fell into: a right assertion
+     * over an input that exercises nothing.
+     *
+     * So the token is **signed for real**, with the key this app is actually
+     * configured with — `process.env.JWT_SECRET`, read here rather than written
+     * out, so it is the same string a re-added `jwt.verify` would use. Bring
+     * that path back and this request authenticates and reaches the route,
+     * which answers something other than 401.
+     *
+     * `/api/ciudad` on purpose: an ordinary router with nothing to do with
+     * sessions, mounted with `authenticate` in front of the whole thing, which
+     * is how every router in this app but `/api/auth` is mounted.
+     *
+     * 401 and not 403 also says the guard itself stayed out of the way: this
+     * request carries no cookie, so it is none of the guard's business, and a
+     * 403 here would mean the header had started being treated as a credential
+     * by `csrf.ts` instead of being ignored by it.
+     *
+     * **The status alone is not enough, and this was measured rather than
+     * reasoned about.** With the bearer path put back deliberately, this request
+     * still answered 401 — and the sentence was "Su cuenta ya no está activa".
+     * The token had verified, the path had run, and `UsuarioModel.findByPk`
+     * simply found no account 7, because unlike `app.auth.test.ts` this file
+     * mocks no models. So a bare `toBe(401)` here passed with the hole fully
+     * reopened: the same trap as the Plan 1 all-digit UUIDs, one layer down.
+     * `authenticate` has exactly two refusals and they say different things —
+     * "Su sesión expiró" means no credential was read at all, and "Su cuenta ya
+     * no está activa" means one *was* read and an account was looked up. Only
+     * the first is this test's claim. The sentence is written out rather than
+     * imported: it is not exported, and an expectation built from the constant
+     * it checks moves with a rename — the same argument this repository makes
+     * for the header names.
+     */
+    const token = jwt.sign({ id: 7, id_rol: 2 }, process.env.JWT_SECRET as string);
+    expect(jwt.verify(token, process.env.JWT_SECRET as string)).toMatchObject({ id: 7 });
+
     const res = await request(app)
       .post("/api/ciudad")
-      .set("Authorization", "Bearer un-jwt-cualquiera");
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(401);
+    expect(res.body.message).toBe("Su sesión expiró. Vuelva a iniciar sesión.");
   });
 
   it("refuses an origin that exists only in a wider list, not in the one cors() was given", async () => {

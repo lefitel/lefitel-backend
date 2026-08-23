@@ -1,26 +1,47 @@
 // Who gets in.
 //
-// Two credentials during the transition: the cookie, and the old bearer token.
-// The order matters and the fallback matters, but what matters most is what
-// happens when a session has been revoked — that is the entire reason this
-// middleware is being rewritten.
+// One credential: the session cookie. What matters most is what happens when a
+// session has been revoked — that is the entire reason this middleware was
+// rewritten — and, since this task, what happens to a request that carries an
+// `Authorization` header instead. It is refused, because nothing reads it.
+//
+// A whole `describe` block lived here titled "with the old bearer token, during
+// the transition", and its five tests all asserted that a signed JWT with no
+// session row behind it got in. They are gone rather than inverted: what they
+// pinned was the hole. What replaced them is one test at the bottom of this file
+// and two through the real stack — see "the header that no longer opens
+// anything" below for which, and why the unit-level one cannot be the tripwire
+// on its own.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
+
+/**
+ * A signing key for this file, put in the environment on purpose.
+ *
+ * The one test below that sends an `Authorization` header has to send a token
+ * that would really verify — a malformed one answers 401 for the wrong reason
+ * and proves nothing at all. `authenticate` no longer reads `JWT_SECRET`, so
+ * nothing here depends on the value; what matters is that the token below is
+ * signed with the same string a re-added `jwt.verify(token,
+ * process.env.JWT_SECRET)` would check it against. Set here rather than read
+ * from `.env`, because this file mocks the models and so never loads `dotenv`:
+ * `process.env.JWT_SECRET` is genuinely `undefined` in this worker, and signing
+ * with `undefined` throws.
+ */
+process.env.JWT_SECRET = "la-clave-que-el-verificador-usaria";
 
 const findLiveSession = vi.fn();
 const touchSession = vi.fn();
 const slidingExpiry = vi.fn();
 const cappedByCeiling = vi.fn();
 const findByPk = vi.fn();
-const jwtVerify = vi.fn();
-// Fixed, reachable mocks — not a fresh `vi.fn()` handed out on every `log(...)`
+// A fixed, reachable mock — not a fresh `vi.fn()` handed out on every `log(...)`
 // call. `authenticate.ts` calls `log("auth")` exactly once at module load, so
 // this is the one object every log line in the module goes through, and tests
-// can assert on it. A mock that returns a new, unreachable function each call
-// would let the bearer path's log line (or the touch-failure warning) be
-// deleted without any test noticing.
-const authInfo = vi.fn();
+// can assert on it. A mock that returned a new, unreachable function each call
+// would let the touch-failure warning be deleted without any test noticing.
 const authWarn = vi.fn();
 
 // `slidingExpiry`'s own arithmetic — the idle window, the absolute cap, the
@@ -37,17 +58,26 @@ vi.mock("../auth/sessionStore.js", () => ({
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: { findByPk: (...a: unknown[]) => findByPk(...a) },
 }));
-vi.mock("jsonwebtoken", () => ({
-  default: { verify: (...a: unknown[]) => jwtVerify(...a) },
-}));
-vi.mock("../utils/logger.js", () => ({ log: () => ({ info: authInfo, warn: authWarn }) }));
+// `jsonwebtoken` is deliberately **not** mocked, and the absence is a tripwire
+// rather than an omission — the same one `auth/credentials.test.ts` and
+// `controllers/login.session.test.ts` carry. There was a `vi.mock` here
+// returning a fake `verify`, and while it existed a re-added bearer path would
+// have run against a stub that answers whatever the last test told it to. With
+// the real library in place, a re-added `jwt.verify` verifies for real.
+
+vi.mock("../utils/logger.js", () => ({ log: () => ({ info: vi.fn(), warn: authWarn }) }));
 
 const { authenticate } = await import("./authenticate.js");
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
 const { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER, SESSION_EXPIRES_HEADER } =
   await import("../config/security.js");
 
-function call(opts: { cookie?: string; bearer?: string } = {}) {
+/**
+ * `authorization` sets the header verbatim, and it is still called that rather
+ * than `bearer`: the point of every remaining use is that this is an ordinary
+ * request header the middleware does not read, not a credential of any kind.
+ */
+function call(opts: { cookie?: string; authorization?: string } = {}) {
   const res = {
     statusCode: 0,
     body: undefined as unknown,
@@ -64,7 +94,7 @@ function call(opts: { cookie?: string; bearer?: string } = {}) {
   };
   const req = {
     cookies: opts.cookie ? { [SESSION_COOKIE_NAME]: opts.cookie } : {},
-    headers: opts.bearer ? { authorization: `Bearer ${opts.bearer}` } : {},
+    headers: opts.authorization ? { authorization: opts.authorization } : {},
     ip: "::1",
   } as unknown as Request;
   const next = vi.fn() as unknown as NextFunction;
@@ -296,87 +326,37 @@ describe("with a session cookie", () => {
     await vi.waitFor(() => expect(authWarn).toHaveBeenCalled());
   });
 
-  it("never consults the old bearer path when a cookie is present", async () => {
+  it("stays a failure when the cookie fails, whatever else the request carries", async () => {
+    // A cookie that fails is a failure, and this used to be the test that no
+    // fallback happened: it asserted `jwt.verify` was never reached, because
+    // falling back would have let anyone who could forge a JWT bypass revocation
+    // by sending a broken cookie alongside it. There is nothing left to fall back
+    // to, so what it pins now is that a second credential cannot be smuggled in
+    // by the request itself — the answer to a dead cookie is 401 and no second
+    // lookup of any kind, whatever headers came with it.
     findLiveSession.mockResolvedValue(null);
-    const c = call({ cookie: "malo", bearer: "un.jwt.valido" });
+    const c = call({ cookie: "revocado", authorization: "Bearer un.jwt.valido" });
     await authenticate(c.req, c.res, c.next);
 
-    // A cookie that fails is a failure. Falling back would let anyone who can
-    // forge a JWT bypass revocation by also sending a broken cookie.
-    expect(jwtVerify).not.toHaveBeenCalled();
-    expect(c.status).toBe(401);
-  });
-});
-
-describe("with the old bearer token, during the transition", () => {
-  it("still lets it through, with the role the database has and not the one the token carries", async () => {
-    // The JWT payload says id_rol: 1; the mocked database (see the top-level
-    // beforeEach) says 2. Only the database's answer may end up on req.user —
-    // reading the token's own id_rol instead would look like a harmless
-    // optimisation (it saves the lookup the cookie path already pays for) and
-    // would silently bring back the exact bug this rewrite exists to close:
-    // a demoted or archived account keeps acting on a week-old JWT.
-    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
-    const c = call({ bearer: "un.jwt.valido" });
-    await authenticate(c.req, c.res, c.next);
-
-    expect(c.next).toHaveBeenCalled();
-    expect(c.req.user).toEqual({ id: 7, id_rol: 2 });
-  });
-
-  it("leaves id_sesion empty, because there is no row for it", async () => {
-    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
-    const c = call({ bearer: "t" });
-    await authenticate(c.req, c.res, c.next);
-    expect(c.req.user?.id_sesion).toBeUndefined();
-  });
-
-  it("turns away someone whose account was archived since the token was issued", async () => {
-    // The cookie path has its own test for this. The bearer path runs the
-    // identical `!usuario` check through a different function
-    // (`authenticateByLegacyToken`), reached through a `jwt.verify` callback
-    // rather than a plain `await` — nothing proves it independently unless a
-    // test exercises this path with a null lookup.
-    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
-    findByPk.mockResolvedValue(null);
-    const c = call({ bearer: "t" });
-    await authenticate(c.req, c.res, c.next);
     expect(c.status).toBe(401);
     expect(c.next).not.toHaveBeenCalled();
-  });
-
-  it("rejects an invalid one", async () => {
-    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown) => void) => cb(new Error("bad")));
-    const c = call({ bearer: "malo" });
-    await authenticate(c.req, c.res, c.next);
-    expect(c.status).toBe(401);
-    expect(c.next).not.toHaveBeenCalled();
-  });
-
-  it("logs every use of the old path, without the token itself ending up in the log", async () => {
-    // This line is the count the retirement plan reads: the day it can show
-    // zero uses in a week is the day the old path can be deleted. Losing it
-    // silently would make that decision a guess again.
-    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
-    const c = call({ bearer: "un.jwt.secreto" });
-    await authenticate(c.req, c.res, c.next);
-
-    expect(authInfo).toHaveBeenCalledWith(
-      expect.objectContaining({ id_usuario: 7 }),
-      expect.any(String),
-    );
-    expect(JSON.stringify(authInfo.mock.calls[0])).not.toContain("un.jwt.secreto");
+    // `findLiveSession` ran once, for the cookie. Nothing looked up a user, which
+    // is what any second path would have to do to let somebody in.
+    expect(findLiveSession).toHaveBeenCalledTimes(1);
+    expect(findByPk).not.toHaveBeenCalled();
   });
 });
 
 describe("the current-role header", () => {
   // Task 2's whole point: the frontend used to notice a role change by
   // decoding `id_rol` out of a re-signed JWT (`x-new-token`, now dead — see
-  // `app.ts`). This header replaces that mechanism, so it has to survive on
-  // both credentials or the notice only works for half the transition, and
-  // it has to come from the database or a demoted account keeps its old
-  // buttons for as long as the token lives — precisely the defect the rest of
-  // this file exists to close for `req.user.id_rol`.
+  // `app.ts`). This header replaces that mechanism, and it has to come from the
+  // database or a demoted account keeps its old buttons for as long as its
+  // credential lives — precisely the defect the rest of this file exists to
+  // close for `req.user.id_rol`. There was a second test here, for the same
+  // header on the bearer path: the mechanism had to work on both credentials or
+  // it warned only half the users through the transition. There is one
+  // credential now.
 
   it("is set on the cookie path, from the database", async () => {
     findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
@@ -387,19 +367,6 @@ describe("the current-role header", () => {
     expect(c.headers[ROLE_HEADER]).toBe("4");
   });
 
-  it("is set on the old bearer path too, and from the database rather than the token", async () => {
-    // The token's own claim says id_rol 1; the database (mocked here, distinct
-    // on purpose) says 9. Only a header reading 9 proves this was not quietly
-    // read off the credential — a value of 1 would mean the header brought
-    // back exactly the bug `req.user.id_rol` is proven, a few tests up, not
-    // to have.
-    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
-    findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 9 } });
-    const c = call({ bearer: "un.jwt.valido" });
-    await authenticate(c.req, c.res, c.next);
-
-    expect(c.headers[ROLE_HEADER]).toBe("9");
-  });
 });
 
 describe("with nothing at all", () => {
@@ -410,6 +377,66 @@ describe("with nothing at all", () => {
     await authenticate(c.req, c.res, c.next);
     expect(c.status).toBe(401);
     expect(c.next).not.toHaveBeenCalled();
+  });
+});
+
+describe("the header that no longer opens anything", () => {
+  /**
+   * The test this whole plan was for, at the level the code lives on.
+   *
+   * The token is **signed for real**, with the key a re-added verifier would
+   * check it against (see the top of this file). That is the difference between
+   * this test and a test that proves nothing: `Bearer no-es-un-jwt` would answer
+   * 401 for being malformed, and would go on answering 401 with the old path
+   * fully restored. A token that verifies makes the 401 mean "nothing read this
+   * header", which is the claim.
+   *
+   * **This one alone is not the tripwire, and saying so is the point.** Bring
+   * the bearer branch back and it would call `jwt.verify(token,
+   * process.env.JWT_SECRET)` — the value this file sets itself, so verification
+   * succeeds, `findByPk` answers with the user from the top-level `beforeEach`,
+   * and `next()` runs: this test goes red. But it goes red only because the key
+   * lines up, and a future edit that moves the secret out of this file would
+   * quietly turn it back into a test of nothing. The two that cannot be
+   * defeated that way go through the real Express stack with the real
+   * configured key: "an Authorization header opens nothing" in
+   * `app.auth.test.ts`, and "leaves nothing open on a real route" in
+   * `csrf.test.ts`.
+   */
+  it("refuses a properly signed token when there is no cookie", async () => {
+    const token = jwt.sign({ id: 7, id_rol: 1 }, process.env.JWT_SECRET as string);
+    // Signed, not merely long: verifying it here is what stops this test from
+    // passing on a string that could never have got in anyway.
+    expect(jwt.verify(token, process.env.JWT_SECRET as string)).toMatchObject({ id: 7 });
+
+    const c = call({ authorization: `Bearer ${token}` });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.status).toBe(401);
+    expect(c.next).not.toHaveBeenCalled();
+    expect(c.req.user).toBeUndefined();
+    // Nothing was looked up, which is the shape of "no credential was read"
+    // rather than "a credential was read and rejected". The two are worth
+    // separating even here: on the real app, with no account behind the token,
+    // a restored bearer path answers 401 as well — with the other of this
+    // middleware's two sentences. See `csrf.test.ts` for the version of this
+    // test that got caught by exactly that.
+    expect(findLiveSession).not.toHaveBeenCalled();
+    expect(findByPk).not.toHaveBeenCalled();
+    expect((c.res as unknown as { body: { message: string } }).body.message)
+      .toBe("Su sesión expiró. Vuelva a iniciar sesión.");
+  });
+
+  it("does not leak the role header to a caller it refused", async () => {
+    // `ROLE_HEADER` used to be set on the bearer path too, from the database.
+    // A refused request must not carry it: it is a fact about an authenticated
+    // caller, and this one is not authenticated.
+    const token = jwt.sign({ id: 7, id_rol: 1 }, process.env.JWT_SECRET as string);
+    const c = call({ authorization: `Bearer ${token}` });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.headers[ROLE_HEADER]).toBeUndefined();
+    expect(c.headers[SESSION_EXPIRES_HEADER]).toBeUndefined();
   });
 });
 
@@ -432,16 +459,6 @@ describe("when the backend itself is unwell", () => {
     findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
     findByPk.mockRejectedValue(new Error("pool agotado"));
     const c = call({ cookie: "t" });
-    await authenticate(c.req, c.res, c.next);
-
-    expect(c.status).toBe(500);
-    expect(c.next).not.toHaveBeenCalled();
-  });
-
-  it("answers 500 instead of hanging when the user lookup throws, bearer path", async () => {
-    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
-    findByPk.mockRejectedValue(new Error("pool agotado"));
-    const c = call({ bearer: "un.jwt.valido" });
     await authenticate(c.req, c.res, c.next);
 
     expect(c.status).toBe(500);

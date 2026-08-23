@@ -30,13 +30,14 @@ const router = Router();
  * not comparable. If this 404s, that person cannot log in at all and no
  * interceptor can help them: there is no session to expire and nothing on
  * screen but a failed request. With the address alive they log in, get a
- * working cookie, and the only thing their stale bundle loses is what Task 4
- * was always going to take from it. The GET had no such argument — a stale
- * bundle calling it was already relying on the bearer token Task 4 removes, so
- * keeping the address bought nothing.
+ * working cookie, and the only thing their stale bundle lost was the bearer
+ * token — which Task 4 has since taken from it anyway, so what a stale bundle
+ * gets from this address now is the same session cookie a current one gets. The
+ * GET had no such argument: a stale bundle calling it was already relying on
+ * that bearer token, so keeping the address bought nothing.
  *
  * **When it can go.** `web` no longer calls it — `Login.api.ts` posts to
- * `/api/auth/login` — so the condition is the same measurement Task 1 makes for
+ * `/api/auth/login` — so the condition is the same measurement Task 1 made for
  * the bearer token: count the requests reaching this route in the Coolify logs
  * (`httpLogger` writes a line per request) over a full working day after the
  * frontend that stopped calling it has shipped. Zero means nothing points here,

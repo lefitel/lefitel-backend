@@ -187,7 +187,10 @@ export const CSRF_CLIENT_HEADER = "x-osefi-client";
 
 /**
  * The header that carries the caller's current role, on every authenticated
- * response, cookie or old bearer token alike.
+ * response. There is one kind of authenticated response now — the session
+ * cookie is the only credential — and this used to say "cookie or old bearer
+ * token alike", which was the whole difficulty: the mechanism it replaces had
+ * to work on both halves of a transition or it warned only half the users.
  *
  * `authenticate` already reads the role from the database on every request —
  * it has to, to notice a demotion or an archived account — so putting it on
@@ -230,12 +233,15 @@ export const ROLE_HEADER = "x-osefi-role";
  * to a deadline the server has already moved: it warns and logs somebody out
  * with the session perfectly alive, which is the failure this is here to stop.
  *
- * **Absent means "nothing to say", never "it expires now".** A request that
- * arrived on the old bearer token has no session row and therefore no expiry
- * to report — the same case `/auth/me` answers with `expires_at: null` — and a
- * proxy that drops headers it does not recognise produces the same absence.
+ * **Absent means "nothing to say", never "it expires now".** `authenticate`
+ * sets this on every request it lets through, so the server itself no longer
+ * has a case with nothing to report — it used to, for a request on the old
+ * bearer token, which had no session row and which `/auth/me` answered with
+ * `expires_at: null`. What remains is the wire: a proxy that drops headers it
+ * does not recognise produces exactly the same absence, and a reader that took
+ * that for "expired" would end a live session over a header it never received.
  * So a reader keeps whatever deadline it already had when this is missing, and
- * reschedules only on a value it actually received.
+ * reschedules only on a value it actually got.
  *
  * Like `ROLE_HEADER`, this is a response detail and not a secret, and the name
  * has to be in `app.ts`'s `exposedHeaders` for a browser to let the page's own

@@ -1,11 +1,14 @@
 // CSRF: the two things a cookie-authenticated write has to prove.
 //
-// With `Authorization: Bearer` there was nothing here to defend. A browser never
+// Why this file exists at all is the switch from a header to a cookie. With
+// `Authorization: Bearer` there was nothing here to defend: a browser never
 // attaches that header on its own, so a page on somebody else's site could make
 // this API answer but never make it answer *as somebody*. A cookie is attached
 // automatically, which is the whole convenience of it and the whole problem:
 // evil.example can put a form on a page, and the victim's browser submits it
-// with the victim's session.
+// with the victim's session. The cookie is now the only credential this API
+// accepts, so every authenticated write in the product is a write this guard
+// has to cover.
 //
 // Two barriers, and neither is the other's spare:
 //
@@ -33,20 +36,22 @@
 // standing, which is why neither is written here as the other's backup.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// **The rule that lets both credentials live at once.** This runs only on a
-// request that carries a session cookie. A request authenticated by the old
-// bearer token does not need it: nothing makes a browser send `Authorization` by
-// itself, so there is nothing for another site to trigger. Demanding the header
-// from everything would refuse every write the current frontend makes, since it
-// sends no header of its own — and being able to deploy the two halves on
-// different days is the entire reason the two credentials coexist.
+// **Keyed on the cookie, and on nothing else.** This runs only on a request that
+// carries a session cookie, and a write without one is waved through because
+// there is nothing of the victim's for another site to abuse — `authenticate`
+// refuses it a moment later anyway, for having no credential at all.
 //
-// Keyed on the cookie, and not on "a cookie and no bearer", which looks
-// equivalent and is not. `authenticate` reads the cookie first and never falls
-// back, so a request carrying both *is* a cookie-authenticated request; a rule
-// that waved it through would protect nothing from the day the frontend sends
-// both — which is the day this lands, because the frontend attaches a bearer
-// token to every call it makes.
+// That rule was written when a second credential existed, and the version of it
+// that was rejected is worth keeping written down: keying on "a cookie and no
+// `Authorization` header" looks equivalent and is not. A request carrying both
+// was a cookie-authenticated request — `authenticate` read the cookie first and
+// never fell back — so a rule that waved it through would have protected
+// nothing from an attacker who simply attached a meaningless `Authorization`
+// header to the forged form. `Authorization` no longer authenticates anything,
+// which makes that bypass cheaper rather than dearer to attempt: the header is
+// now free to send and means nothing, so nothing about this decision may ever
+// look at it. `csrf.test.ts` pins both halves — a cookie write is still guarded
+// with the header present, and a header alone still opens nothing.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // **The login is not an exception, and it used to be justified as one.** The

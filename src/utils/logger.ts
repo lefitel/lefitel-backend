@@ -79,6 +79,14 @@ const level = process.env.LOG_LEVEL ?? (underTest ? "silent" : "info");
  * them are replaced with `[oculto]` before anything is written, by the logger
  * itself rather than by remembering at each call site.
  *
+ * `authorization` stays on the list although nothing authenticates by it any
+ * more — `authenticate` stopped reading the header at all. The reasoning is the
+ * same as `x-new-token`'s below, and worth separating from it: that header
+ * nobody *sends*, while this one a stale frontend bundle sends on every request
+ * it makes, carrying a JWT that is still a real signed token now that this
+ * server ignores it. A token in a log file is a token leaked whether or not
+ * this API would honour it.
+ *
  * `x-new-token` stays on the list even though nothing emits it any more: the
  * server used to re-sign a JWT onto that header on every response, and
  * `ROLE_HEADER` replaced it. Redaction is not where a dead name gets cleaned

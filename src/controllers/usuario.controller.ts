@@ -450,11 +450,13 @@ export async function updateUserPass(req: Request, res: Response) {
      * anything, and their own session id would not be among that person's rows
      * anyway.
      *
-     * `id_sesion` is `undefined` on a request that arrived with the old bearer
-     * token, and `revokeAllSessionsOf` reads that as "spare nothing": there is
-     * no row to spare, the JWT keeps working until it expires, and every real
-     * session of that account is closed. Answering that case by sparing an
-     * unknown id would revoke nothing at all.
+     * `undefined` is what goes in whenever the account being changed is not the
+     * caller's own, and `revokeAllSessionsOf` reads that as "spare nothing" —
+     * see the truthiness note there for why writing that check the obvious way
+     * would silently revoke nothing at all. The caller's own `id_sesion` is
+     * always a real id: every authenticated request has a session row behind it
+     * since the old bearer token was retired, so the ternary above is the only
+     * thing that can produce the `undefined`.
      *
      * Both writes in one transaction, for the same reason `deleteUsuario` uses
      * one, and the failure it prevents is nastier than it looks. Saved outside a

@@ -1,10 +1,28 @@
 import express, { Request, Response, NextFunction } from "express";
 
+/**
+ * Who `authenticate` decided the caller is, for everything mounted behind it.
+ *
+ * `user` itself is optional — a request that never reached `authenticate`, or
+ * was refused by it, has none — but **its four fields are not**. `id_sesion`
+ * and `expires_at` used to be optional too, and the reason was written down in
+ * `sessionStore.ts`: a request authenticated by the old bearer token reached a
+ * controller with no session row, so there was nothing to fill them with. That
+ * credential is gone (`middleware/authenticate.ts`), so an authenticated
+ * request now has a row by construction and these two are always there.
+ *
+ * The difference is not cosmetic. While they were optional, `auth.controller.ts`
+ * had to ask in six places whether the caller had a row — including a
+ * `logout` that answered 400 instead of logging anybody out, and a
+ * `logout-all` whose message told the caller their own browser was still
+ * inside. Those were reachable branches of a security endpoint; making the
+ * fields required is what makes them unwritable rather than merely unused.
+ */
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      user?: { id: number; id_rol: number; id_sesion?: string; expires_at?: Date };
+      user?: { id: number; id_rol: number; id_sesion: string; expires_at: Date };
     }
   }
 }

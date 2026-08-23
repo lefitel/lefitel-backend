@@ -64,16 +64,6 @@ const SESION_NO_DISPONIBLE =
   "No se pudo iniciar la sesión en este momento. Inténtelo de nuevo en unos minutos.";
 /** Twin of the message in `authenticate.ts`; both mean the row is gone. */
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
-/**
- * What a request authenticated by the old JWT is told when it asks for
- * something only a session row can answer.
- *
- * It is a 400 and not a 500: there is nothing broken here. A bearer token has
- * no row behind it, which is legitimate for as long as the transition lasts,
- * and the way out is to log in again — which is what this says.
- */
-const SIN_FILA_DE_SESION =
-  "Esta sesión es del sistema anterior y no se puede cerrar desde aquí. Vuelva a iniciar sesión.";
 /** One answer for "not yours", "never existed" and "already closed". */
 const SESION_NO_ENCONTRADA = "Esa sesión no existe o ya se cerró.";
 
@@ -127,10 +117,16 @@ function handler(name: string, fn: (req: Request, res: Response) => Promise<unkn
  * `if (loggedUser && …)`, which *skips* the check when there is no session
  * instead of refusing — unreachable behind `authenticate`, and still the wrong
  * shape. A guard that only works because another guard ran is not a guard.
+ *
+ * The shape is taken from `Request["user"]` rather than written out again, and
+ * that is not tidiness. Written out, this signature was the one place where the
+ * two session fields stayed optional after `app.ts` made them required — every
+ * handler below reads the caller through here, so a hand-copied type would go
+ * on offering `id_sesion` as possibly-absent and keep every dead branch in this
+ * file compiling. Derived, there is one declaration to change instead of two
+ * that can disagree.
  */
-function callerOf(
-  req: Request,
-): { id: number; id_rol: number; id_sesion?: string; expires_at?: Date } | null {
+function callerOf(req: Request): NonNullable<Request["user"]> | null {
   return req.user ?? null;
 }
 
@@ -235,17 +231,14 @@ export const login = handler("login", async (req: Request, res: Response) => {
  * answer to the first question a page asks on load, in the same round trip as
  * the rest of it.
  *
- * A caller on the old bearer token has no row behind it, so this answers
- * `null` and not an absent key. Not for the sake of a reader: nothing reads
- * this field today — `web`'s `comprobarToken` drops it on purpose and takes the
- * deadline off the header, for the reason in the paragraph above — and this
- * comment used to claim the frontend scheduled its warning off it, which was
- * true when it was written and false one commit later. What survives that is a
- * contract decision, and it stands on its own: to `JSON.parse`, a key that is
- * missing looks exactly like a key nobody remembered to send, so the first
- * client to schedule a countdown off this body could not tell "there is nothing
- * to count down" from a bug. `null` is the one answer that cannot be mistaken
- * for either.
+ * It is always a date, and until this task it was not. A caller on the old
+ * bearer token had no row behind it, so the field was written
+ * `caller.expires_at ?? null` and this endpoint had a documented `null` answer
+ * meaning "there is nothing to count down". No such caller can exist now —
+ * `authenticate` lets nothing through but a live session row — so that `null`
+ * was not merely unused, it was unreachable, and it went with the branch that
+ * produced it. A client still handling `null` here loses nothing; one that never
+ * did was already right.
  */
 export const me = handler("me", async (req: Request, res: Response) => {
   const caller = callerOf(req);
@@ -262,7 +255,7 @@ export const me = handler("me", async (req: Request, res: Response) => {
   return res.status(200).json({
     usuario,
     permisos: await permissionsFor(usuario.id_rol),
-    expires_at: caller.expires_at ?? null,
+    expires_at: caller.expires_at,
   });
 });
 
@@ -283,13 +276,6 @@ export const logout = handler("logout", async (req: Request, res: Response) => {
   const caller = callerOf(req);
   if (!caller) return res.sendStatus(401);
 
-  // No row to revoke: this request arrived with the old bearer token. Saying so
-  // is better than pretending it worked, because a JWT stays valid either way
-  // and only logging in again produces something revocable.
-  if (!caller.id_sesion) {
-    return res.status(400).json({ message: SIN_FILA_DE_SESION });
-  }
-
   // `revokeSessionOf` and not a revoke-by-id: the owner is in scope here, so
   // there is no reason for this call to be the one place in the codebase that
   // closes a session without saying whose it is.
@@ -303,10 +289,12 @@ export const logout = handler("logout", async (req: Request, res: Response) => {
  * `POST /api/auth/logout-all` — end every session I have.
  *
  * The button for "I lost my laptop", and the one thing the JWT could never do.
- * It works on the old path too: revocation is by user id, so a request that
- * arrived with a bearer token still closes every session row that account has
- * — its own token stays valid until it expires, which is the hole this plan
- * documents rather than the one it can close today.
+ * Now it does it completely: every live row of the account is revoked, the
+ * caller's own among them, because the caller's credential *is* a row. While
+ * the bearer token existed this endpoint had a second answer for a caller with
+ * no row — "se cerraron sus sesiones, pero este navegador seguirá dentro" — and
+ * that sentence was an honest description of the hole. There is no such caller
+ * left, so there is no such sentence.
  */
 export const logoutAll = handler("logoutAll", async (req: Request, res: Response) => {
   const caller = callerOf(req);
@@ -314,21 +302,14 @@ export const logoutAll = handler("logoutAll", async (req: Request, res: Response
 
   const cerradas = await revokeAllSessionsOf(caller.id);
   clearSessionCookie(res);
-  logAction({ id_usuario: caller.id, action: "LOGOUT_ALL", entity: "Usuario", entity_id: caller.id, detail: `Cerró todas sus sesiones (${cerradas})`, metadata: { sesiones_revocadas: cerradas, tenia_fila: Boolean(caller.id_sesion) }, severity: 'warning', ip_address: req.ip ?? null });
-  /**
-   * Two messages, because on the old path the first one would be a lie.
-   *
-   * A caller who arrived with a bearer token has no session row, so nothing
-   * that was just revoked was theirs — and their own credential cannot be
-   * revoked at all. "Se cerraron todas sus sesiones" while the caller is still
-   * inside is the kind of reassurance somebody acts on: you press this button
-   * because you think a token has been stolen, and you need to be told plainly
-   * that this browser is the one exception and what to do about it.
-   */
-  const message = caller.id_sesion
-    ? "Se cerraron todas sus sesiones."
-    : "Se cerraron sus sesiones. Este navegador seguirá dentro porque entró con el sistema anterior: vuelva a iniciar sesión para cerrarlo también.";
-  return res.status(200).json({ message, cerradas });
+  // `tenia_fila` used to ride along in this metadata, recording whether the
+  // caller had a session row at all. Every caller has one, so it recorded a
+  // constant — and a constant in an audit trail is worse than nothing, because
+  // the next person reading the bitácora takes it for a distinction that was
+  // once measured.
+  logAction({ id_usuario: caller.id, action: "LOGOUT_ALL", entity: "Usuario", entity_id: caller.id, detail: `Cerró todas sus sesiones (${cerradas})`, metadata: { sesiones_revocadas: cerradas }, severity: 'warning', ip_address: req.ip ?? null });
+  // One sentence, and it is true without qualification for the first time.
+  return res.status(200).json({ message: "Se cerraron todas sus sesiones.", cerradas });
 });
 
 /**
@@ -340,9 +321,11 @@ export const logoutAll = handler("logoutAll", async (req: Request, res: Response
  * publish all three the day the migration runs.
  *
  * `actual` is what the screen needs to say "this device" and to warn before
- * closing the session doing the asking. A request on the old bearer path has no
- * session row, so nothing is marked current — that is honest and needs no error:
- * the list of sessions is still exactly right.
+ * closing the session doing the asking. Exactly one row of a non-empty list
+ * carries it now: the caller's credential is a session row, so it is one of the
+ * rows being listed. It used to be possible for none of them to be marked — a
+ * request on the old bearer path had no row to be — and a screen written around
+ * that case is written around a caller that no longer exists.
  */
 export const sessions = handler("sessions", async (req: Request, res: Response) => {
   const caller = callerOf(req);

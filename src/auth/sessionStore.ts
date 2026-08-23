@@ -212,13 +212,19 @@ export async function revokeSessionOf(id_usuario: number, id: string): Promise<b
  * else's password, archiving an account, `POST /api/auth/logout-all` — passes
  * nothing and ends them all.
  *
- * The truthiness check is load-bearing, not sloppiness. A request that arrived
- * on the old JWT path has no session row, so `req.user.id_sesion` is
- * `undefined`, and callers pass it straight through. Written as `if ("except"
- * in options)` the clause would become `id != NULL`, which in SQL is never
- * true, so the update would match **nothing** and the password change would
- * revoke no sessions at all — the failure this whole function exists to
+ * The truthiness check is load-bearing, not sloppiness. Written as `if
+ * ("except" in options)` the clause would become `id != NULL`, which in SQL is
+ * never true, so the update would match **nothing** and the password change
+ * would revoke no sessions at all — the failure this whole function exists to
  * prevent, arriving silently. Undefined and empty mean "spare nothing".
+ *
+ * `undefined` really does arrive, so that is not a defensive hypothetical:
+ * `changePassword` passes `isSelf ? loggedUser.id_sesion : undefined`, so every
+ * administrator resetting somebody else's password takes this branch, and
+ * `deleteUsuario` passes no options at all. What used to reach it *by accident*
+ * was a request on the old JWT path, which had no session row and therefore an
+ * `undefined` `req.user.id_sesion`; that credential is retired and
+ * `req.user.id_sesion` is now always a real id.
  *
  * `transaction` is here for `deleteUsuario`, which archives an account and ends
  * its sessions and must not be able to do one without the other.

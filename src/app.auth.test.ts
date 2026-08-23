@@ -21,6 +21,7 @@
 // in it.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import jwt from "jsonwebtoken";
 import request from "supertest";
 
 const permisos = { seguridad: { ver: true, crear: false } };
@@ -392,6 +393,84 @@ describe("who the cookie says I am", () => {
     // `osefi_session=j:1` arrives as the number 1, not a string.
     const res = await request(app).get("/api/auth/me").set("Cookie", `${SESSION_COOKIE_NAME}=j:1`);
     expect(res.status).toBe(401);
+  });
+});
+
+describe("the credential that is no longer one", () => {
+  /**
+   * The tripwire for the whole plan, through the whole stack.
+   *
+   * Until this task `authenticate` had a second door: no cookie and an
+   * `Authorization: Bearer` header meant "verify this JWT and let the account
+   * in". A token verified that way has no session row behind it, so nothing
+   * could revoke it — not `logout`, not `logout-all`, not a password change,
+   * not archiving the account. Every other task in this arc built the row;
+   * closing that door is what makes the row the only way in, and these two
+   * tests are what fail if it is ever reopened.
+   *
+   * **The token is signed for real, with this app's own configured key.** That
+   * is the difference between a test and a decoration. `Bearer no-es-un-jwt`
+   * answers 401 too — for being malformed — and would go on answering 401 with
+   * the old path fully restored, which is exactly the Plan 1 trap where a UUID
+   * of nothing but digits made the lower-casing step untestable. `JWT_SECRET`
+   * is read from the environment rather than written out here, so it is the
+   * same string a re-added `jwt.verify(token, process.env.JWT_SECRET)` would
+   * check the signature against. The mocked `UsuarioModel.findByPk` answers
+   * with account 7, so a restored path would find the account, set the role
+   * header and answer 200.
+   */
+  const firmado = () => {
+    const secret = process.env.JWT_SECRET as string;
+    // Not a formality: with no `.env` this would be `undefined`, `jwt.sign`
+    // would throw, and the two tests below would fail for a reason that has
+    // nothing to do with what they are about.
+    expect(secret, "JWT_SECRET tiene que estar configurado para que este test pruebe algo").toBeTruthy();
+    const token = jwt.sign({ id: YO, id_rol: MI_ROL }, secret);
+    expect(jwt.verify(token, secret)).toMatchObject({ id: YO });
+    return token;
+  };
+
+  it("opens nothing at GET /api/auth/me", async () => {
+    const res = await request(app).get("/api/auth/me").set("Authorization", `Bearer ${firmado()}`);
+
+    expect(res.status).toBe(401);
+    // No role header and no expiry header: both are set by `authenticate` on a
+    // request it let through, so their absence is the same fact as the 401 seen
+    // from the browser's side, and a restored bearer path would set both.
+    expect(res.headers[CABECERA_ROL]).toBeUndefined();
+    expect(res.headers[CABECERA_VENCIMIENTO]).toBeUndefined();
+    // Nothing was even looked up. This is what separates "no credential was
+    // read" from "a credential was read and refused", and it is what the old
+    // path could not have satisfied: it queried the account named in the token.
+    expect(usuarioFindByPk).not.toHaveBeenCalled();
+    expect(sesionFindOne).not.toHaveBeenCalled();
+
+    // The premise, measured rather than assumed: the same address answers 200
+    // to the credential that still works, so the 401 above is about the header
+    // and not about this endpoint being broken.
+    const conCookie = await request(app).get("/api/auth/me").set("Cookie", COOKIE);
+    expect(conCookie.status).toBe(200);
+  });
+
+  it("opens nothing at POST /api/auth/logout-all, the endpoint this arc exists for", async () => {
+    // The sharpest version of the same test. `logout-all` revokes by user id, so
+    // the old path could reach it: a request on a bearer token really did close
+    // every session row of that account — while its own credential went on
+    // working, which is the hole this plan documents. It cannot reach it now.
+    //
+    // A write, so it also passes through `requireSameOrigin` with no cookie and
+    // no `Origin`: 401 and not 403 says the CSRF guard stayed out of the way and
+    // `authenticate` is what refused this, which is the correct division of
+    // labour for a request that carries no cookie at all.
+    const res = await request(app)
+      .post("/api/auth/logout-all")
+      .set("Authorization", `Bearer ${firmado()}`);
+
+    expect(res.status).toBe(401);
+    // And the thing that matters more than the status: no session of anybody's
+    // was touched. A revocation reached by an unrevocable credential is the
+    // exact shape of the defect.
+    expect(sesionUpdate).not.toHaveBeenCalled();
   });
 });
 

@@ -112,9 +112,17 @@ function storedUser(overrides: Record<string, unknown> = {}) {
  * a hypothetical: every handler is asserted below to refuse in that case rather
  * than carry on, because a guard that only works because another guard ran is
  * not a guard — the same lesson `usuario.controller.test.ts` was written for.
+ *
+ * The type comes from `Request["user"]` and is not written out again, which is
+ * what makes an impossible caller impossible here too. Written out, it had
+ * `id_sesion?` and `expires_at?` and went on accepting a caller with neither
+ * long after `app.ts` made them required — and four tests in this file were
+ * about exactly that caller, the one who arrived on the old bearer token with no
+ * session row. Those four are gone with the credential; deriving the type is
+ * what stops a fifth being written.
  */
 function call(
-  user: { id: number; id_rol: number; id_sesion?: string; expires_at?: Date } | undefined,
+  user: NonNullable<Request["user"]> | undefined,
   { params = {}, body = {} }: { params?: Record<string, string>; body?: unknown } = {},
 ) {
   const res = {
@@ -159,9 +167,17 @@ function call(
   };
 }
 
-const YO_CON_SESION = { id: YO, id_rol: MI_ROL, id_sesion: MI_SESION };
-/** A caller who arrived with the old bearer token: no session row behind them. */
-const YO_CON_TOKEN_VIEJO = { id: YO, id_rol: MI_ROL };
+/**
+ * The only shape of caller there is: `authenticate` fills all four fields in or
+ * answers 401.
+ *
+ * `expires_at` is on it now, and was not before. It could be left off while the
+ * field was optional, so most of this file was exercising handlers with a
+ * `req.user` the middleware cannot actually produce — harmless for the handlers
+ * that ignore the field, and the reason `me` had a test for an answer no caller
+ * could ever receive.
+ */
+const YO_CON_SESION = { id: YO, id_rol: MI_ROL, id_sesion: MI_SESION, expires_at: CADUCA };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -331,8 +347,12 @@ describe("GET /api/auth/me", () => {
     // photograph taken the day the person logged in: somebody moved to another
     // role kept the old buttons for the rest of the week, because the interface
     // draws itself from this answer.
+    //
+    // `id_rol: 99` is the credential's claim and 1 is the database's, so only
+    // reading the database passes. Spelt out rather than using `YO_CON_SESION`
+    // for that reason alone.
     findByPk.mockResolvedValue(storedUser({ id_rol: 1 }));
-    const c = call({ id: YO, id_rol: 99, id_sesion: MI_SESION });
+    const c = call({ ...YO_CON_SESION, id_rol: 99 });
     await me(c.req, c.res);
 
     expect(c.status).toBe(200);
@@ -372,21 +392,34 @@ describe("GET /api/auth/me", () => {
     expect(c.payload?.expires_at).toEqual(SESION_EXPIRA);
   });
 
-  it("says it does not know, rather than nothing at all, on the old bearer token", async () => {
-    // Not because anything reads it: `web` takes the deadline off
-    // `SESSION_EXPIRES_HEADER`, and its `comprobarToken` drops this field on
-    // purpose. What is pinned here is the contract. A key that is simply
-    // missing reads, to `JSON.parse`, exactly like a key nobody remembered to
-    // send, so a client that did schedule a countdown off this body could not
-    // tell "there is nothing to count down" from a bug — and the shape of that
-    // mistake is treating a token-authenticated caller as already expired.
-    // `null` is the one answer that cannot be confused with either.
-    const c = call(YO_CON_TOKEN_VIEJO);
+  it("always answers with a date, never with null", async () => {
+    /**
+     * What is left of the test this replaces, and why it could not simply stay.
+     *
+     * It was called "says it does not know, rather than nothing at all, on the
+     * old bearer token", and it pinned `expires_at: null` for a caller with no
+     * session row: to `JSON.parse` an absent key reads exactly like a key
+     * nobody remembered to send, so `null` was the one answer a client could
+     * not mistake for a bug. The reasoning was sound and its subject is gone —
+     * `authenticate` lets nothing through without a live row, so there is no
+     * caller left to receive the `null`, and the `?? null` that produced it
+     * went with the branch. Keeping the test would have meant building a caller
+     * by cast that the middleware cannot produce, and asserting what the
+     * handler does with impossible input is how a test starts defending a shape
+     * instead of a behaviour.
+     *
+     * What is worth keeping is the half that is still checkable: whatever this
+     * endpoint answers, the key is present and it is a date. That is what a
+     * client schedules its countdown off, and re-introducing a nullable field
+     * here would be a silent change to a contract two repositories share.
+     */
+    const c = call(YO_CON_SESION);
     await me(c.req, c.res);
 
     expect(c.status).toBe(200);
     expect(c.payload).toHaveProperty("expires_at");
-    expect(c.payload?.expires_at).toBeNull();
+    expect(c.payload?.expires_at).toEqual(CADUCA);
+    expect(c.payload?.expires_at).not.toBeNull();
   });
 });
 
@@ -421,18 +454,6 @@ describe("POST /api/auth/logout", () => {
     expect(options).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/" });
   });
 
-  it("says to log in again when the request arrived on the old token", async () => {
-    // No session row to revoke, and saying so beats pretending it worked: the
-    // JWT stays valid either way, and only logging in again produces something
-    // revocable. A 400 and not a 500 — nothing here is broken.
-    const c = call(YO_CON_TOKEN_VIEJO);
-    await logout(c.req, c.res);
-
-    expect(c.status).toBe(400);
-    expect(c.message).toMatch(/vuelva a iniciar sesión/i);
-    expect(revokeSessionOf).not.toHaveBeenCalled();
-    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
-  });
 });
 
 describe("POST /api/auth/logout-all", () => {
@@ -449,26 +470,20 @@ describe("POST /api/auth/logout-all", () => {
     expect(c.raw.clearCookie).toHaveBeenCalled();
   });
 
-  it("works on the old token path, and says what really happened", async () => {
-    // Revocation is by user id, so there is nothing this needs a session row
-    // for. But the caller's own bearer token cannot be revoked at all, so the
-    // usual "se cerraron todas sus sesiones" would be a lie — told to somebody
-    // who pressed this button because they believe a credential was stolen.
-    // They are told plainly that this browser is the exception, and what to do.
-    const c = call(YO_CON_TOKEN_VIEJO);
-    await logoutAll(c.req, c.res);
-
-    expect(c.status).toBe(200);
-    expect(revokeAllSessionsOf).toHaveBeenCalledWith(YO);
-    expect(c.message).toMatch(/seguirá dentro/i);
-    expect(c.message).toMatch(/vuelva a iniciar sesión/i);
-  });
-
-  it("says the plain thing when the caller did have a session row", async () => {
+  it("says the plain thing, and there is no longer a second thing to say", async () => {
+    // This endpoint used to answer one of two sentences. A caller who arrived on
+    // the old bearer token had no row of their own to revoke and no way to
+    // revoke their credential at all, so they were told plainly that this
+    // browser was the exception — "se cerraron sus sesiones, pero este navegador
+    // seguirá dentro" — which was the honest description of the hole. The caller
+    // is gone and so is the sentence, and the test that pinned it went with
+    // them. Asserted by equality rather than by a regular expression, because
+    // what is being pinned is that there is exactly one answer.
     const c = call(YO_CON_SESION);
     await logoutAll(c.req, c.res);
 
     expect(c.message).toBe("Se cerraron todas sus sesiones.");
+    expect(c.message).not.toMatch(/seguirá dentro/i);
   });
 
   it("never revokes anybody else's, whatever the request says", async () => {
@@ -502,18 +517,6 @@ describe("GET /api/auth/sessions", () => {
     expect(lista.find((s) => s.id === OTRA_SESION)?.actual).toBe(false);
   });
 
-  it("marks nothing as current when the request arrived on the old token", async () => {
-    // Honest and needs no error: the list of sessions is still exactly right,
-    // there simply is no row for this request to be one of.
-    listSessionsOf.mockResolvedValue([
-      { id: MI_SESION, user_agent: "Chrome", ip_address: "1.2.3.4", created_at: CADUCA, last_used_at: CADUCA, expires_at: CADUCA, revoked_at: null, id_usuario: YO },
-    ]);
-    const c = call(YO_CON_TOKEN_VIEJO);
-    await sessions(c.req, c.res);
-
-    expect(c.status).toBe(200);
-    expect((c.payload?.sesiones as { actual: boolean }[])[0].actual).toBe(false);
-  });
 
   it("publishes the seven fields it means to and not whatever the table grows", async () => {
     // `listSessionsOf` already leaves out `token_hash`, but this table is going

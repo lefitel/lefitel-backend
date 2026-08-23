@@ -71,7 +71,31 @@ const ADMIN = 1;
 const TECNICO = 3;
 const SELF = 7;
 const OTHER = 99;
+/**
+ * The session id every caller below gets unless a test names its own, and it is
+ * deliberately not the `MI_SESION` the password tests assert against: a test
+ * that expects `except: MI_SESION` while relying on this default is a test whose
+ * premise slipped, and it should fail rather than pass by coincidence.
+ */
+const SESION_POR_DEFECTO = "eeeeeeee-11cd-4111-8111-eeeeeeeeeeee";
 
+/**
+ * A request, with a `req.user` shaped the way `authenticate` really produces one.
+ *
+ * `id_sesion` and `expires_at` are filled in for every caller, and *cannot* be
+ * left out — which is new. `req.user` declares them required (`app.ts`) now that
+ * the credential which arrived without a session row, the old bearer token, is
+ * retired; while they were optional this helper cheerfully built a caller with
+ * neither, and one test below was about exactly that caller — a self password
+ * change whose `id_sesion` was `undefined`, asserting the store was told to
+ * spare nothing. It went with the credential. Filling the fields in here is what
+ * stops the next one being written, and it costs nothing: a test that needs a
+ * particular session id still passes one, and no test can pass none.
+ *
+ * The rest of the shape stays loose on purpose. This file is about permissions
+ * and the IDOR guards, and none of those handlers reads a field beyond `id` and
+ * `id_rol`.
+ */
 function call(
   user: { id: number; id_rol: number; id_sesion?: string } | undefined,
   { params = {}, body = {} }: { params?: Record<string, unknown>; body?: unknown } = {},
@@ -96,7 +120,12 @@ function call(
     },
   };
   return {
-    req: { user, params, body, ip: "::1" } as unknown as Request,
+    req: {
+      user: user && { id_sesion: SESION_POR_DEFECTO, expires_at: new Date("2027-03-14T00:00:00.000Z"), ...user },
+      params,
+      body,
+      ip: "::1",
+    } as unknown as Request,
     res: res as unknown as Response,
     get status() {
       return res.statusCode;
@@ -991,32 +1020,18 @@ describe("a new password ends the old sessions", () => {
     expect(stored.save).toHaveBeenCalledWith({ transaction: TRANSACCION });
   });
 
-  it("ends every one of them when the request arrived on the old token", async () => {
-    // A request authenticated by the old JWT has no session row, so there is
-    // nothing to spare: everything real gets closed and the person comes back
-    // in. `undefined` reaching the store as "spare nothing" is what makes this
-    // work — see `sessionStore.test.ts`, where writing that check the obvious
-    // way revokes nothing at all.
-    const stored = storedUser();
-    findOne.mockResolvedValue(stored.model);
-
-    const c = call(
-      { id: SELF, id_rol: TECNICO },
-      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
-    );
-    await updateUserPass(c.req, c.res);
-
-    expect(c.status).toBe(200);
-    expect(revokeAllSessionsOf).toHaveBeenCalledWith(SELF, {
-      except: undefined,
-      transaction: TRANSACCION,
-    });
-  });
-
   it("spares nothing when an administrator resets somebody else's", async () => {
     // The case the whole thing is for. Sparing anything here would be sparing a
     // session of the person being reset, chosen by an id belonging to the
     // administrator doing the resetting.
+    //
+    // The only remaining way `undefined` reaches the store as "spare nothing",
+    // and therefore the only cover left for that branch — see
+    // `sessionStore.test.ts` for why writing the check the obvious way would
+    // revoke nothing at all. There used to be a second: a request on the old
+    // bearer token had no session row, so a caller changing their *own*
+    // password could arrive with `id_sesion` undefined too. That caller cannot
+    // exist now, and the test for it is gone.
     const stored = storedUser();
     findOne.mockResolvedValue(stored.model);
 
