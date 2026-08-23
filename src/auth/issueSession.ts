@@ -42,11 +42,15 @@ export async function issueSession(req: Request, res: Response, id_usuario: numb
  * End the session this browser was already holding, before opening the next.
  *
  * Without this, logging in twice from the same browser leaves two live rows,
- * and nothing ever removes the first. That is not a corner case: the frontend
- * as it stands today never calls `logout` — it drops the JWT and reloads — so
- * no row is ever revoked from that side at all. Twenty people entering one to
- * three times a day, against sessions that live seven days, is on the order of
- * seven to twenty live rows per account, **every one of them with the same
+ * and nothing removes the first for seven days. The frontend does call `POST
+ * /auth/logout` now — when this was written it did not, and this comment used
+ * to say so — so a row is revoked from that side whenever somebody presses the
+ * button. That is not most of the time: closing the tab revokes nothing, and
+ * the call itself is fire-and-forget with its failure swallowed
+ * (`SesionProvider.tsx`), so an abandoned row per login is still the normal
+ * outcome rather than the exception. Twenty people entering one to three times
+ * a day, against sessions that live seven days, is on the order of seven to
+ * twenty live rows per account, **every one of them with the same
  * `user_agent` and the same IP address**.
  *
  * Which lands squarely on this task's own deliverable. `GET /auth/sessions` is

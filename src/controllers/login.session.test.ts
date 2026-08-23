@@ -4,7 +4,8 @@
 // levelled timings, the lockout — and it deliberately mocks the session away so
 // that it keeps testing one thing. This file is the other half: that `POST
 // /api/login` writes a session row and hands over the cookie *as well as* the
-// JWT, and that failing to do so does not cost anybody their login.
+// JWT, and that failing to do so refuses the login rather than answering 200
+// with a credential nothing reads.
 //
 // Why that pairing matters: it is what makes the migration gradual instead of a
 // deployment where the frontend and the backend have to switch in the same
@@ -50,9 +51,15 @@ vi.mock("bcryptjs", () => ({
 }));
 vi.mock("jsonwebtoken", () => ({ default: { sign: () => "un.token.firmado" } }));
 vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }));
+// Reachable mocks, not fresh `vi.fn()`s handed out per `log(...)` call.
+// `login.controller.ts` calls `log("auth")` once at module load, so these are
+// the objects every line in the module goes through and a test can assert on
+// them — which is what lets the session-failure test below prove the failure
+// was written down and not swallowed.
 const warn = vi.fn();
+const error = vi.fn();
 vi.mock("../utils/logger.js", () => ({
-  log: () => ({ warn, info: vi.fn(), error: vi.fn(), debug: vi.fn() }),
+  log: () => ({ warn, error, info: vi.fn(), debug: vi.fn() }),
 }));
 
 const { loginUsuario } = await import("./login.controller.js");
@@ -161,26 +168,49 @@ describe("the old login, once the credential is good", () => {
     expect(c.payload?.usuario?.token).toBe("un.token.firmado");
   });
 
-  it("lets the login through when the session cannot be opened", async () => {
-    // Deliberate, and the opposite of what `POST /api/auth/login` does. Here the
-    // JWT is the credential this endpoint promises and it works with or without
-    // a session row, so a database hiccup must not turn a correct password into
-    // a failed login over a feature nobody is using yet. It is logged, because
-    // silence would let the migration quietly stop happening.
+  it("refuses the login, with something to say, when the session cannot be opened", async () => {
+    // This test used to assert the opposite — 200 with the JWT — and the
+    // comment defending it was true when it was written: the token was a
+    // working credential, so a database hiccup had no business turning a
+    // correct password into a failed login. It stopped being true when the
+    // frontend started discarding the token on arrival. A 200 with no cookie
+    // is now a 200 with no credential: the person is told "Bienvenido",
+    // navigated into the ERP, 401'd on the first request for data and put back
+    // on the login form, with nothing on screen to explain it, on every
+    // attempt.
+    //
+    // So: no 200, no cookie, and a sentence the login form can show. The
+    // message is written out by hand rather than imported from the controller,
+    // because an expectation built from the source it is checking moves with
+    // the change — the same reason the two shared header names are literals in
+    // `app.security.test.ts`. Here the cost of that is one edit if the wording
+    // ever changes, which is the point: the wording is what a person reads.
     createSession.mockRejectedValue(new Error("pool agotado"));
 
     const c = call({ user: "isaias", pass: "secreta" });
     await loginUsuario(c.req, c.res);
 
-    expect(c.status).toBe(200);
-    expect(c.payload?.usuario?.token).toBe("un.token.firmado");
-    expect(warn).toHaveBeenCalled();
+    expect(c.status).toBe(503);
+    expect(c.payload?.message).toBe(
+      "No se pudo iniciar la sesión en este momento. Inténtelo de nuevo en unos minutos.",
+    );
+    // No half-login: nothing that could be mistaken for a credential, and no
+    // cookie either. `issueSession` sets the cookie only after `createSession`
+    // resolves, so this also pins the ordering — a cookie set from a token that
+    // was never stored is a 401 on the very next request.
+    expect(c.payload?.usuario).toBeUndefined();
+    expect(c.cookieCall).toBeUndefined();
+    // Written down at error level, not warn: this is an outage, and the log is
+    // the only place it is visible to anyone who could fix it.
+    expect(error).toHaveBeenCalled();
   });
 
   it("closes the session this browser was already holding", async () => {
-    // The frontend as it stands never calls `logout` — it drops the JWT and
-    // reloads — so nothing revokes a row from that side, ever. Without rotating
-    // here, twenty people entering one to three times a day against seven-day
+    // The frontend does call `logout` now, but only when somebody presses the
+    // button: closing the tab revokes nothing, and the call is fire-and-forget
+    // with its failure swallowed, so an abandoned row per login is still the
+    // normal case rather than the exception. Without rotating here, twenty
+    // people entering one to three times a day against seven-day
     // sessions leaves seven to twenty live rows per account, every one of them
     // with the same user_agent and the same IP. `GET /auth/sessions`, the screen
     // where somebody decides what to close, would be a column of identical

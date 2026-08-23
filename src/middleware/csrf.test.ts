@@ -117,10 +117,11 @@ describe("a write authenticated by cookie", () => {
 
   it("clears the session cookie on a header refusal, so a retry is not refused again", async () => {
     // A proxy that eats the custom header locks a returning user out of every
-    // write, login included — and the frontend's logout never calls the server,
-    // so nothing else would ever discard this cookie. Taking it back here means
-    // the very next request, whichever route it hits, arrives with none and
-    // reaches the route instead of being refused a second time.
+    // write, login included — and logging out is no escape, because the
+    // frontend's `POST /auth/logout` is a cookie-carrying write itself and
+    // arrives at this same guard without the same header. Taking the cookie
+    // back here means the very next request, whichever route it hits, arrives
+    // with none and reaches the route instead of being refused a second time.
     const res = await request(guarded())
       .post("/x")
       .set("Cookie", COOKIE)
@@ -374,9 +375,10 @@ describe("mounted on the assembled app", () => {
 
     expect(sinCabecera.status).toBe(403);
     // The lockout this guards against: without this, a browser stuck with a
-    // header a proxy keeps stripping could never log back in either, because
-    // the frontend's logout never calls the server and nothing else would ever
-    // take this cookie back.
+    // header a proxy keeps stripping could never log back in either. The
+    // frontend's `POST /auth/logout` is not the way out — it is a
+    // cookie-carrying write too, so it is refused by this very guard — and
+    // nothing else would ever take this cookie back.
     const setCookie = (sinCabecera.headers["set-cookie"] ?? []) as string[];
     expect(setCookie.some((c) => c.startsWith(`${SESSION_COOKIE_NAME}=;`))).toBe(true);
   });

@@ -41,6 +41,7 @@ const {
   listSessionsOf,
   purgeExpiredSessions,
   slidingExpiry,
+  cappedByCeiling,
 } = await import("./sessionStore.js");
 const { hashSessionToken } = await import("./sessionToken.js");
 const {
@@ -238,13 +239,51 @@ describe("slidingExpiry", () => {
 describe("touchSession", () => {
   it("pushes the idle expiry forward from the moment it was used", async () => {
     const at = new Date();
-    await touchSession("una-id", at);
+    const createdAt = new Date(at.getTime() - 2 * 86_400_000);
+    await touchSession("una-id", at, createdAt);
     const [values, options] = update.mock.calls[0] as [Record<string, unknown>, { where: Record<string, unknown> }];
     expect(values.last_used_at).toBe(at);
     expect(options.where).toMatchObject({ id: "una-id" });
     const dias = ((values.expires_at as Date).getTime() - at.getTime()) / 86_400_000;
     expect(dias).toBeGreaterThan(SESSION_IDLE_DAYS - 0.01);
     expect(dias).toBeLessThan(SESSION_IDLE_DAYS + 0.01);
+  });
+
+  it("writes the ceiling, not seven more days, on a session near the end of its life", async () => {
+    // This is why `createdAt` is a parameter at all. It used to write a bare
+    // `at + SESSION_IDLE_DAYS`, so a session used every day claimed an
+    // `expires_at` past the day `findLiveSession` starts refusing it — by up to
+    // a week from day twenty-three onwards. The row could never be used with
+    // that value, but it is *read*: `GET /auth/sessions` prints it on the
+    // profile screen, and `authenticate` hands it to the browser as a deadline
+    // to count down to, so the countdown ran days past the truth and the
+    // five-minute warning never fired.
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const at = new Date(createdAt.getTime() + 27 * 86_400_000);
+    const techo = new Date(createdAt.getTime() + SESSION_ABSOLUTE_DAYS * 86_400_000);
+    await touchSession("una-id", at, createdAt);
+    const [values] = update.mock.calls[0] as [Record<string, unknown>];
+    // Day 34 is what seven idle days from day 27 would be. Day 30 is the answer.
+    expect(values.expires_at).toEqual(techo);
+  });
+});
+
+describe("cappedByCeiling", () => {
+  it("leaves a candidate that lands before the ceiling alone", () => {
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const pronto = new Date(createdAt.getTime() + 3 * 86_400_000);
+    expect(cappedByCeiling(createdAt, pronto)).toEqual(pronto);
+  });
+
+  it("cuts a candidate that overshoots it back to the ceiling", () => {
+    // The case `authenticate` needs it for, which `slidingExpiry` cannot cover:
+    // an `expires_at` this process did not write. Rows touched before the cap
+    // existed carry an uncapped value for up to thirty days after the deploy
+    // that added it, and the client must not be told that value.
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const techo = new Date(createdAt.getTime() + SESSION_ABSOLUTE_DAYS * 86_400_000);
+    const demasiado = new Date(techo.getTime() + 6 * 86_400_000);
+    expect(cappedByCeiling(createdAt, demasiado)).toEqual(techo);
   });
 });
 

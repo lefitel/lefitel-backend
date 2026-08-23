@@ -105,6 +105,28 @@ export async function findLiveSession(
 }
 
 /**
+ * `candidate`, or the day this session stops being honoured whatever happens,
+ * whichever comes first.
+ *
+ * The ceiling is `SESSION_ABSOLUTE_DAYS` from the session's own `createdAt`,
+ * and it is the second of the two conditions `findLiveSession` puts in its
+ * query. So anything that tells a browser, a cookie or a response header when
+ * a session dies has to go through here: without it the answer can be later
+ * than the moment the server itself will start refusing the row, and every
+ * countdown built on that answer is counting to the wrong instant.
+ *
+ * Exported because two different candidates need capping. `slidingExpiry`
+ * below caps the idle window it is about to write; `authenticate` caps the
+ * `expires_at` a row *already* holds, which it did not write and cannot
+ * assume was capped — rows touched before this cap existed are uncapped for
+ * up to thirty days after this deploys.
+ */
+export function cappedByCeiling(createdAt: Date, candidate: Date): Date {
+  const ceiling = createdAt.getTime() + SESSION_ABSOLUTE_DAYS * DAY_MS;
+  return new Date(Math.min(candidate.getTime(), ceiling));
+}
+
+/**
  * How far a cookie may say a session is good for, measured from `at`.
  *
  * The idle window pushed forward from `at`, capped at the absolute ceiling
@@ -115,15 +137,32 @@ export async function findLiveSession(
  * three days before the browser noticed.
  */
 export function slidingExpiry(createdAt: Date, at: Date): Date {
-  const idle = at.getTime() + SESSION_IDLE_DAYS * DAY_MS;
-  const ceiling = createdAt.getTime() + SESSION_ABSOLUTE_DAYS * DAY_MS;
-  return new Date(Math.min(idle, ceiling));
+  return cappedByCeiling(createdAt, new Date(at.getTime() + SESSION_IDLE_DAYS * DAY_MS));
 }
 
-/** Push the idle expiry back, and record that the session was used. */
-export async function touchSession(id: string, at: Date): Promise<void> {
+/**
+ * Push the idle expiry back, and record that the session was used.
+ *
+ * `createdAt` is a parameter rather than something this function could do
+ * without, and that is the fix for a real defect: this used to write a bare
+ * `at + SESSION_IDLE_DAYS` with no ceiling applied, so from day twenty-three
+ * of a session that is used every day the row claimed an `expires_at` later
+ * than the day `findLiveSession` starts refusing it — by up to a full week.
+ * Nothing could be got in with that row (`findLiveSession` checks the ceiling
+ * against `created_at` separately, so the session never actually outlived its
+ * thirty days), but the value is *read*: `GET /api/auth/sessions` renders it
+ * on the profile screen, and `purgeExpiredSessions` carries a whole branch to
+ * compensate for rows whose `expires_at` outran the ceiling.
+ *
+ * Taking `createdAt` and going through `slidingExpiry` means no caller can
+ * write an uncapped expiry here again, which taking the finished date as a
+ * parameter would not prevent. `authenticate` computes the same value for the
+ * cookie and the response header from the same two arguments, and
+ * `slidingExpiry` is pure, so all three carry the same instant.
+ */
+export async function touchSession(id: string, at: Date, createdAt: Date): Promise<void> {
   await SesionModel.update(
-    { last_used_at: at, expires_at: new Date(at.getTime() + SESSION_IDLE_DAYS * DAY_MS) },
+    { last_used_at: at, expires_at: slidingExpiry(createdAt, at) },
     { where: { id } },
   );
 }

@@ -11,6 +11,7 @@ import type { Request, Response, NextFunction } from "express";
 const findLiveSession = vi.fn();
 const touchSession = vi.fn();
 const slidingExpiry = vi.fn();
+const cappedByCeiling = vi.fn();
 const findByPk = vi.fn();
 const jwtVerify = vi.fn();
 // Fixed, reachable mocks — not a fresh `vi.fn()` handed out on every `log(...)`
@@ -31,6 +32,7 @@ vi.mock("../auth/sessionStore.js", () => ({
   findLiveSession: (...a: unknown[]) => findLiveSession(...a),
   touchSession: (...a: unknown[]) => touchSession(...a),
   slidingExpiry: (...a: unknown[]) => slidingExpiry(...a),
+  cappedByCeiling: (...a: unknown[]) => cappedByCeiling(...a),
 }));
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: { findByPk: (...a: unknown[]) => findByPk(...a) },
@@ -42,7 +44,8 @@ vi.mock("../utils/logger.js", () => ({ log: () => ({ info: authInfo, warn: authW
 
 const { authenticate } = await import("./authenticate.js");
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
-const { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER } = await import("../config/security.js");
+const { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER, SESSION_EXPIRES_HEADER } =
+  await import("../config/security.js");
 
 function call(opts: { cookie?: string; bearer?: string } = {}) {
   const res = {
@@ -80,6 +83,12 @@ beforeEach(() => {
   findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 2 } });
   touchSession.mockResolvedValue(undefined);
   slidingExpiry.mockReturnValue(new Date(0));
+  // Stands in for the real cap the same way `slidingExpiry` above stands in for
+  // the real slide: with the thirty-day ceiling still far off, capping a
+  // candidate returns the candidate, which is the situation every test here but
+  // the two about the cap is in. The arithmetic itself belongs to
+  // `sessionStore.test.ts`, against the real function.
+  cappedByCeiling.mockImplementation((_createdAt: Date, candidate: Date) => candidate);
 });
 
 describe("with a session cookie", () => {
@@ -171,7 +180,10 @@ describe("with a session cookie", () => {
       });
       const c = call({ cookie: "t" });
       await authenticate(c.req, c.res, c.next);
-      expect(touchSession).toHaveBeenCalledWith("s1", NOW);
+      // Three arguments, and the third is not decoration: `touchSession`
+      // derives the expiry it writes from `created_at`, which is what stops it
+      // writing a value past the ceiling the way it used to.
+      expect(touchSession).toHaveBeenCalledWith("s1", NOW, new Date(NOW.getTime() - 2 * 86_400_000));
     });
 
     it("reissues the cookie itself once the throttle window has passed", async () => {
@@ -201,6 +213,65 @@ describe("with a session cookie", () => {
       expect(c.cookieCalls[0].name).toBe(SESSION_COOKIE_NAME);
       expect(c.cookieCalls[0].value).toBe("el-token");
       expect(c.cookieCalls[0].options.expires).toBe(capped);
+      // The same instant on the header and on `req.user`, from the same
+      // variable. Three destinations computed separately drift the day one of
+      // them is edited; this is what makes them one value.
+      expect(c.headers[SESSION_EXPIRES_HEADER]).toBe(capped.toISOString());
+      expect(c.req.user?.expires_at).toBe(capped);
+    });
+
+    it("reports the window the touch just opened, not the one the row still says", async () => {
+      // The failure this replaced, measured on the other side: `req.user` used
+      // to carry `sesion.expires_at` — the value read *before* the touch. So
+      // somebody returning after a week with ten minutes left on the row was
+      // given another seven days by the server and told "ten minutes" by it.
+      // Five minutes later their browser warned them, five after that it logged
+      // them out, and the session was alive the whole time — taking whatever
+      // form they had open with it. The error is bounded by how long they
+      // stayed away, not by the throttle.
+      const nuevo = new Date("2026-01-08T00:00:00.000Z");
+      slidingExpiry.mockReturnValue(nuevo);
+      findLiveSession.mockResolvedValue({
+        id: "s1", id_usuario: 7,
+        created_at: new Date(NOW.getTime() - 2 * 86_400_000),
+        expires_at: new Date(NOW.getTime() + 10 * 60_000),
+        last_used_at: new Date(NOW.getTime() - (THROTTLE_MS + 1_000)),
+      });
+      const c = call({ cookie: "t" });
+      await authenticate(c.req, c.res, c.next);
+
+      expect(c.headers[SESSION_EXPIRES_HEADER]).toBe(nuevo.toISOString());
+      expect(c.req.user?.expires_at).toBe(nuevo);
+      // And the row's own value is never what is reported, even though it is
+      // the one `findLiveSession` handed over.
+      expect(c.headers[SESSION_EXPIRES_HEADER]).not.toBe(
+        new Date(NOW.getTime() + 10 * 60_000).toISOString(),
+      );
+    });
+
+    it("caps the row's own expiry against the ceiling when nothing is touched", async () => {
+      // Inside the throttle the row keeps the `expires_at` it already has, and
+      // that value cannot be passed on as it stands: `touchSession` wrote it
+      // without a ceiling until this change, so rows from before the deploy
+      // claim up to a week more than `findLiveSession` will honour. The cap is
+      // the same rule the query enforces, applied on the way out.
+      const createdAt = new Date(NOW.getTime() - 29 * 86_400_000);
+      const filaDice = new Date(NOW.getTime() + 5 * 86_400_000);
+      const techo = new Date(NOW.getTime() + 86_400_000);
+      cappedByCeiling.mockReturnValue(techo);
+      findLiveSession.mockResolvedValue({
+        id: "s1", id_usuario: 7,
+        created_at: createdAt,
+        expires_at: filaDice,
+        last_used_at: new Date(NOW.getTime() - 1_000),
+      });
+      const c = call({ cookie: "t" });
+      await authenticate(c.req, c.res, c.next);
+
+      expect(touchSession).not.toHaveBeenCalled();
+      expect(cappedByCeiling).toHaveBeenCalledWith(createdAt, filaDice);
+      expect(c.headers[SESSION_EXPIRES_HEADER]).toBe(techo.toISOString());
+      expect(c.req.user?.expires_at).toBe(techo);
     });
   });
 

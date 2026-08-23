@@ -157,13 +157,25 @@ export const login = handler("login", async (req: Request, res: Response) => {
  * plan adds `email`, `mfa_grace_until` and `webauthn_challenge` to these
  * tables; an exclusion list publishes every one of them the day it lands.
  *
- * `expires_at` comes straight off `req.user`, set by `authenticate` from the
- * same session row it already looked up — see the comment there for why that
- * beats asking the database again here. A caller on the old bearer token has
- * no row behind it, so this answers `null` and not an absent key: the
- * frontend schedules a "your session is about to expire" warning off this
- * field, and a key that is simply missing is indistinguishable from a bug —
- * `null` says plainly "there is nothing to count down".
+ * `expires_at` comes straight off `req.user`, where `authenticate` put the
+ * session's *effective* expiry — the row's own value, pushed forward if this
+ * request was the one that renewed it, and never later than thirty days from
+ * `created_at` whatever the row says. Not the raw column: see the comment
+ * there for both reasons, and for why taking it off `req.user` beats asking
+ * the database again here.
+ *
+ * The same value also arrives on every authenticated response as
+ * `SESSION_EXPIRES_HEADER`, which is what a client should prefer — this body
+ * only reaches it on the 2xx of this one endpoint, while the server renews the
+ * session on any authenticated request. This field stays because it is the
+ * answer to the first question a page asks on load, in the same round trip as
+ * the rest of it.
+ *
+ * A caller on the old bearer token has no row behind it, so this answers
+ * `null` and not an absent key: the frontend schedules a "your session is
+ * about to expire" warning off this field, and a key that is simply missing is
+ * indistinguishable from a bug — `null` says plainly "there is nothing to
+ * count down".
  */
 export const me = handler("me", async (req: Request, res: Response) => {
   const caller = callerOf(req);

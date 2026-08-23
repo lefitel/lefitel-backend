@@ -36,7 +36,21 @@ vi.mock("bcryptjs", () => ({
 
 const app = (await import("./app.js")).default;
 const { SESSION_COOKIE_NAME } = await import("./auth/sessionCookie.js");
-const { allowedOrigins, CSRF_CLIENT_HEADER, ROLE_HEADER } = await import("./config/security.js");
+const { allowedOrigins, CSRF_CLIENT_HEADER, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_DAYS, SESSION_TOUCH_THROTTLE_MINUTES } =
+  await import("./config/security.js");
+
+/**
+ * The two response header names the frontend hard-codes, written out here.
+ *
+ * Not `ROLE_HEADER` and `SESSION_EXPIRES_HEADER` imported from the config, and
+ * that is deliberate — see the same literals and the longer reasoning in
+ * `app.security.test.ts`. In short: an expectation built from the constant it
+ * is checking moves with a rename, so it can only ever catch a deletion, and
+ * renaming `ROLE_HEADER` used to leave every test in both repositories green
+ * while the browser silently stopped noticing role changes.
+ */
+const CABECERA_ROL = "x-osefi-role";
+const CABECERA_VENCIMIENTO = "x-osefi-session-expires";
 const { hashSessionToken } = await import("./auth/sessionToken.js");
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { SesionModel } = await import("./models/sesion.model.js");
@@ -95,10 +109,21 @@ const ORIGIN_NUESTRO = DEL_FRONTEND.Origin as string;
  * row actually has — and not a date some handler computed on its own.
  */
 let SESION_EXPIRA_FILA: Date;
+/**
+ * When the session was opened, which is what the absolute ceiling is measured
+ * from. Recent on purpose: `authenticate` now reports the *effective* expiry —
+ * the row's own, never later than `created_at` plus `SESSION_ABSOLUTE_DAYS` —
+ * so a session created moments ago is the case where the two coincide and
+ * `SESION_EXPIRA_FILA` is the answer. The tests that need them to differ move
+ * this back themselves.
+ */
+let SESION_CREADA: Date;
+const DIA_MS = 86_400_000;
 
 beforeEach(() => {
   vi.clearAllMocks();
-  SESION_EXPIRA_FILA = new Date(Date.now() + 86_400_000);
+  SESION_EXPIRA_FILA = new Date(Date.now() + DIA_MS);
+  SESION_CREADA = new Date();
   // A live session belonging to YO. `last_used_at` is now on purpose: the touch
   // is throttled, so a fresh timestamp keeps `touchSession` from firing and
   // adding an UPDATE that the assertions below would read as theirs.
@@ -106,6 +131,7 @@ beforeEach(() => {
     dataValues: {
       id: MI_SESION,
       id_usuario: YO,
+      created_at: SESION_CREADA,
       expires_at: SESION_EXPIRA_FILA,
       last_used_at: new Date(),
     },
@@ -206,8 +232,104 @@ describe("who the cookie says I am", () => {
     expect(res.body.expires_at).toBe(SESION_EXPIRA_FILA.toISOString());
     // Same proof for the role header: set by authenticate, and only readable
     // by the browser because app.ts's exposedHeaders names it — a unit test
-    // with a fake `res.setHeader` cannot see either half of that.
-    expect(res.headers[ROLE_HEADER]).toBe(String(MI_ROL));
+    // with a fake `res.setHeader` cannot see either half of that. The name is
+    // the hand-written literal, not the constant: see its comment at the top.
+    expect(res.headers[CABECERA_ROL]).toBe(String(MI_ROL));
+    // And the expiry, on the header as well as in the body, in the format the
+    // other repository parses with `new Date(...)`.
+    expect(res.headers[CABECERA_VENCIMIENTO]).toBe(SESION_EXPIRA_FILA.toISOString());
+  });
+
+  it("puts the expiry on an answer that has no body to carry it", async () => {
+    // The reason this is a header at all. The server slides a session on any
+    // authenticated request, not only on the ones that answer 200 with JSON a
+    // client can read — so a client that learns the deadline from `/auth/me`
+    // alone spends the rest of the day counting down to an instant that has
+    // already moved. `authenticate` is middleware, so this rides on whatever
+    // the route underneath answers: here a 404 from a path with no route.
+    //
+    // Not a path under `/api/auth`, and the difference is the point of picking
+    // this one: that router mounts no `authenticate` of its own — `POST
+    // /auth/login` cannot ask for a credential it is there to produce — so each
+    // of its routes declares the middleware itself and a path that matches none
+    // of them never authenticates at all. `/api/permisos` is mounted the
+    // ordinary way, with `authenticate` in front of the whole router, which is
+    // how every other router in this app is mounted and therefore what this has
+    // to be true of.
+    const res = await request(app).get("/api/permisos/no-existe").set("Cookie", COOKIE);
+
+    expect(res.status).toBe(404);
+    expect(res.headers[CABECERA_VENCIMIENTO]).toBe(SESION_EXPIRA_FILA.toISOString());
+  });
+
+  it("never promises a day past the thirty-day ceiling the query enforces", async () => {
+    // The production case, measured. `touchSession` used to write a bare
+    // `now + SESSION_IDLE_DAYS` with no ceiling, so from day twenty-three of a
+    // session used every day the row's `expires_at` runs ahead of the day
+    // `findLiveSession` starts refusing it — by up to a week. Somebody who
+    // uses the ERP daily and never logs out then loses the session mid-morning
+    // on day thirty with **no five-minute warning at all**, because the page
+    // believed it had days left, and whatever form was open goes with it.
+    //
+    // A row in exactly that state: opened twenty-nine days ago, claiming five
+    // more days, used a moment ago so nothing is touched. The ceiling is
+    // tomorrow, and tomorrow is what the client has to be told.
+    const creada = new Date(Date.now() - 29 * DIA_MS);
+    const techo = new Date(creada.getTime() + SESSION_ABSOLUTE_DAYS * DIA_MS);
+    sesionFindOne.mockResolvedValue({
+      dataValues: {
+        id: MI_SESION,
+        id_usuario: YO,
+        created_at: creada,
+        expires_at: new Date(Date.now() + 5 * DIA_MS),
+        last_used_at: new Date(),
+      },
+    } as never);
+
+    const res = await request(app).get("/api/auth/me").set("Cookie", COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.headers[CABECERA_VENCIMIENTO]).toBe(techo.toISOString());
+    expect(res.body.expires_at).toBe(techo.toISOString());
+  });
+
+  it("reports the window this request just opened, not the one it found", async () => {
+    // The other half of the same defect, and the one that throws somebody out
+    // of a live session. `authenticate` used to copy the `expires_at`
+    // `findLiveSession` had read — the value from *before* the touch this very
+    // request performs. Somebody who used the ERP last Monday and opens it the
+    // next Monday with ten minutes left on the row is given another seven days
+    // by the server and told "ten minutes" by it: five minutes later the
+    // warning fires, five after that the timer logs them out, and the session
+    // was alive the whole time. The error is not bounded by the throttle — it
+    // is bounded by how long the person stayed away.
+    const creada = new Date(Date.now() - 7 * DIA_MS);
+    const usadaHaceMucho = new Date(Date.now() - (SESSION_TOUCH_THROTTLE_MINUTES + 1) * 60_000);
+    sesionFindOne.mockResolvedValue({
+      dataValues: {
+        id: MI_SESION,
+        id_usuario: YO,
+        created_at: creada,
+        expires_at: new Date(Date.now() + 10 * 60_000),
+        last_used_at: usadaHaceMucho,
+      },
+    } as never);
+
+    const res = await request(app).get("/api/auth/me").set("Cookie", COOKIE);
+
+    expect(res.status).toBe(200);
+    // Seven days from now, give or take the milliseconds this request took.
+    const prometido = new Date(res.headers[CABECERA_VENCIMIENTO] as string).getTime();
+    const esperado = Date.now() + SESSION_IDLE_DAYS * DIA_MS;
+    expect(Math.abs(prometido - esperado)).toBeLessThan(5_000);
+    // One value, four destinations: the header, the body, the row that was just
+    // written, and the cookie the browser is handed back. Computed separately
+    // they drift the day one of them is edited.
+    expect(res.body.expires_at).toBe(new Date(prometido).toISOString());
+    const escrito = (sesionUpdate.mock.calls[0]?.[0] as { expires_at?: Date }).expires_at;
+    expect(escrito?.toISOString()).toBe(new Date(prometido).toISOString());
+    const setCookie = (res.headers["set-cookie"] as unknown as string[]).join("; ");
+    expect(setCookie).toContain(new Date(prometido).toUTCString());
   });
 
   it("refuses, rather than 500s, a cookie cookie-parser has parsed as JSON", async () => {
@@ -295,10 +417,11 @@ describe("closing sessions, through the real stack", () => {
 describe("logging in twice from the same browser", () => {
   it("closes the row the browser was already holding before opening the next", async () => {
     // Through the real stack, so the cookie really travels and the real
-    // `findLiveSession` really hashes it. Without this rotation the current
-    // frontend — which never calls logout — leaves one live row per login
-    // forever, all with the same user_agent and IP, which is what would make
-    // `GET /auth/sessions` useless as a screen.
+    // `findLiveSession` really hashes it. Without this rotation, every login
+    // that was not preceded by somebody pressing the logout button — closing
+    // the tab, or a logout request that failed and was swallowed — leaves one
+    // more live row for a week, all with the same user_agent and IP, which is
+    // what would make `GET /auth/sessions` useless as a screen.
     const res = await request(app)
       .post("/api/auth/login")
       .set("Cookie", COOKIE)

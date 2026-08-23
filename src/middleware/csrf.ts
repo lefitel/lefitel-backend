@@ -168,12 +168,19 @@ export function requireSameOrigin(allowed: readonly string[]): RequestHandler {
  * recognise" — both of which drop the custom header, not the `Origin` a
  * browser sets itself. When that happens to a browser that already holds a
  * cookie, every write 403s, *including the login that would replace the
- * cookie with a working one*. The frontend's logout is client-only
- * (`SesionProvider.tsx` clears `localStorage` and never calls the server), so
- * nothing in the application could ever discard that cookie, and "reload the
- * page" — the only advice this response gives — does nothing: the same
- * cookie comes back on the retry and is refused again. A user in this state
- * was stuck until they cleared cookies by hand.
+ * cookie with a working one*.
+ *
+ * The obvious escape is logging out, and it is not one. The frontend does now
+ * call `POST /api/auth/logout` (`SesionProvider.tsx`) — it did not when this
+ * was first written, and the reason given here used to be that it never did —
+ * but that call is itself a cookie-carrying write, so it arrives at this same
+ * guard missing the same header and is refused with the same 403 as
+ * everything else. The change of premise makes this decision *more*
+ * necessary, not less: there is no request the application can make that
+ * discards this cookie, and "reload the page" — the only advice this response
+ * gives — does nothing, because the same cookie comes back on the retry and
+ * is refused again. A user in this state was stuck until they cleared cookies
+ * by hand.
  *
  * Two ways to close it were on the table. One: carve out `POST /api/login`
  * from the header requirement, leaving only the `Origin` check on it. Two:

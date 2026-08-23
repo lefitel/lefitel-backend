@@ -1,9 +1,9 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { UsuarioModel } from "../models/usuario.model.js";
-import { findLiveSession, touchSession, slidingExpiry } from "../auth/sessionStore.js";
+import { findLiveSession, touchSession, slidingExpiry, cappedByCeiling } from "../auth/sessionStore.js";
 import { readSessionCookie, setSessionCookie } from "../auth/sessionCookie.js";
-import { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER } from "../config/security.js";
+import { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER, SESSION_EXPIRES_HEADER } from "../config/security.js";
 import { log } from "../utils/logger.js";
 
 const authLog = log("auth");
@@ -95,8 +95,55 @@ async function authenticateBySession(
   // on a single row.
   const staleAfterMs = SESSION_TOUCH_THROTTLE_MINUTES * 60_000;
   const now = new Date();
-  if (now.getTime() - new Date(sesion.last_used_at).getTime() > staleAfterMs) {
-    touchSession(sesion.id, now).catch((err) =>
+  const createdAt = new Date(sesion.created_at);
+  const slides = now.getTime() - new Date(sesion.last_used_at).getTime() > staleAfterMs;
+
+  /**
+   * When this session actually stops working — the one value the cookie, the
+   * response header and `req.user` all carry, computed once here.
+   *
+   * Two branches because the row is only rewritten when the throttle lets it
+   * be, and the answer has to describe the row as it will be *after* this
+   * request, not as `findLiveSession` found it:
+   *
+   * - Sliding: this request is the touch, so the row is about to say
+   *   `slidingExpiry(createdAt, now)` and so does everything below.
+   *   Reporting `sesion.expires_at` here instead is what made somebody who
+   *   came back with ten minutes left on the row learn a ten-minute window
+   *   while the server had just given them another seven days — their
+   *   browser then warned them and logged them out of a perfectly live
+   *   session, taking whatever form was open with it.
+   * - Not sliding: the row keeps the `expires_at` it already had, but capped,
+   *   because that column was written without a ceiling until now and rows
+   *   from before this deploy claim up to a week more than `findLiveSession`
+   *   will honour. `cappedByCeiling` is the same rule the query enforces.
+   */
+  const expiresAt = slides
+    ? slidingExpiry(createdAt, now)
+    : cappedByCeiling(createdAt, new Date(sesion.expires_at));
+
+  /**
+   * Every authenticated response says when the session dies, not only the
+   * ones a client can read a body from.
+   *
+   * This is the point of putting it in a header at all: the server slides a
+   * session on *any* authenticated request, so a client that only learns the
+   * new deadline from `GET /auth/me` — or only from responses that answered
+   * 2xx — spends the rest of the day counting down to an instant that has
+   * already moved. A 422 from a failed validation renews the session just as
+   * much as a successful read does, and this runs before any controller, so
+   * that answer carries the new deadline too.
+   *
+   * See `SESSION_EXPIRES_HEADER` for the format and for why its absence has
+   * to mean "no news", never "expired": the bearer path below sets no such
+   * header because there is no row behind it to expire.
+   */
+  res.setHeader(SESSION_EXPIRES_HEADER, expiresAt.toISOString());
+
+  if (slides) {
+    // `createdAt` goes to the store as well, so the row is written with the
+    // ceiling applied rather than a bare seven days — see `touchSession`.
+    touchSession(sesion.id, now, createdAt).catch((err) =>
       authLog.warn({ err }, "no se pudo actualizar el último uso de la sesión"),
     );
 
@@ -105,25 +152,21 @@ async function authenticateBySession(
     // "seven days of inactivity" this design promises is actually "seven
     // days since login" — a hard ceiling nobody chose. Reissued here, on the
     // same throttle as the database write above, so this is one `Set-Cookie`
-    // header per throttle window rather than one per request. Capped at the
-    // absolute ceiling measured from this session's own `created_at`, so a
-    // session touched regularly still cannot slide the cookie past the day
-    // the row itself stops being honoured.
-    setSessionCookie(res, token, slidingExpiry(new Date(sesion.created_at), now));
+    // header per throttle window rather than one per request.
+    setSessionCookie(res, token, expiresAt);
   }
 
   // `expires_at` rides along on `req.user` rather than being looked up again
-  // inside `/auth/me`, and doing it this way costs nothing extra: this
-  // function already has `sesion.expires_at` in hand from the
-  // `findLiveSession` call above, so handing it to `req.user` is a field copy,
-  // not a query. Querying again from the controller would trade that free
-  // value for a second `SesionModel.findOne` on every call — cheap for an
+  // inside `/auth/me`, and doing it this way costs nothing extra: the value is
+  // the one already computed above, so handing it to `req.user` is a field
+  // copy, not a query. Querying again from the controller would trade that
+  // free value for a second `SesionModel.findOne` on every call — cheap for an
   // endpoint that only runs once per page load, but still a database round
   // trip this data does not need when the value is already sitting in memory.
   // Optional for the same reason `id_sesion` already is: a request
   // authenticated by the old bearer token has no row, and therefore nothing
   // to report an expiry from.
-  req.user = { id: usuario.id, id_rol: usuario.id_rol, id_sesion: sesion.id, expires_at: sesion.expires_at };
+  req.user = { id: usuario.id, id_rol: usuario.id_rol, id_sesion: sesion.id, expires_at: expiresAt };
   next();
 }
 

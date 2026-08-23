@@ -210,6 +210,40 @@ export const CSRF_CLIENT_HEADER = "x-osefi-client";
 export const ROLE_HEADER = "x-osefi-role";
 
 /**
+ * The header that carries the moment this session really stops working, on
+ * every response `authenticate` let through on a session cookie.
+ *
+ * **Format: ISO 8601 in UTC**, i.e. what `Date.prototype.toISOString()`
+ * produces — `2026-09-01T00:00:00.000Z`. That is the shape `GET /api/auth/me`
+ * already puts in its body, because JSON serialises a `Date` this way, and
+ * that is the whole reason for the choice over epoch milliseconds: the
+ * frontend already parses one of these with `new Date(...)`, so one format
+ * means one parser on that side and no way for the header and the body to
+ * disagree about what a bare number meant. It also reads as a date in a `curl`
+ * transcript, which a millisecond count does not.
+ *
+ * **Why a header and not just the body of `/auth/me`.** The server slides a
+ * session on *any* authenticated request, and `authenticate` is middleware, so
+ * this is set before a controller runs and rides on every authenticated
+ * response — the 422 of a failed validation included. A client that learns the
+ * expiry only from bodies it can parse, or only from 2xx answers, counts down
+ * to a deadline the server has already moved: it warns and logs somebody out
+ * with the session perfectly alive, which is the failure this is here to stop.
+ *
+ * **Absent means "nothing to say", never "it expires now".** A request that
+ * arrived on the old bearer token has no session row and therefore no expiry
+ * to report — the same case `/auth/me` answers with `expires_at: null` — and a
+ * proxy that drops headers it does not recognise produces the same absence.
+ * So a reader keeps whatever deadline it already had when this is missing, and
+ * reschedules only on a value it actually received.
+ *
+ * Like `ROLE_HEADER`, this is a response detail and not a secret, and the name
+ * has to be in `app.ts`'s `exposedHeaders` for a browser to let the page's own
+ * JavaScript read it at all.
+ */
+export const SESSION_EXPIRES_HEADER = "x-osefi-session-expires";
+
+/**
  * What a write refused by the origin check is told.
  *
  * The same sentence for both halves of the check, deliberately. For a real

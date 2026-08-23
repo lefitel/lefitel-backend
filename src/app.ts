@@ -15,7 +15,7 @@ import { httpLogger } from "./middleware/httpLogger.js";
 import { authenticate } from "./middleware/authenticate.js";
 import { loginRateLimit } from "./middleware/loginLimiters.js";
 import { requireSameOrigin } from "./middleware/csrf.js";
-import { allowedOrigins, HSTS_MAX_AGE_SECONDS, ROLE_HEADER } from "./config/security.js";
+import { allowedOrigins, HSTS_MAX_AGE_SECONDS, ROLE_HEADER, SESSION_EXPIRES_HEADER } from "./config/security.js";
 
 // Import routes
 import uploadRoutes from "./routes/upload.routes.js";
@@ -132,8 +132,12 @@ app.use(
     // the network tab's raw response alike. `ROLE_HEADER` is set by
     // `authenticate` on every authenticated response (see
     // `middleware/authenticate.ts`) and read by the frontend to notice a role
-    // that changed mid-session; `Content-Disposition` is what lets it read an
-    // exported file's real name instead of saving everything as "download".
+    // that changed mid-session; `SESSION_EXPIRES_HEADER` is set on those same
+    // responses and is what the browser's expiry countdown is armed from —
+    // unreadable to the page's script, that countdown runs for the life of the
+    // tab on whatever `GET /auth/me` said when it opened, and ends a session
+    // the server has since renewed; `Content-Disposition` is what lets it read
+    // an exported file's real name instead of saving everything as "download".
     //
     // `x-new-token` used to head this list and is gone from it. The server
     // stopped re-signing a JWT per request, so nothing emits that header any
@@ -149,7 +153,7 @@ app.use(
     // the effect: `supertest` does not apply
     // `Access-Control-Expose-Headers`, so this list governs only whether a
     // real browser's JavaScript may read the header, never whether it travels.
-    exposedHeaders: ["Content-Disposition", ROLE_HEADER],
+    exposedHeaders: ["Content-Disposition", ROLE_HEADER, SESSION_EXPIRES_HEADER],
   }),
 );
 
