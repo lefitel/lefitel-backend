@@ -36,7 +36,7 @@ vi.mock("bcryptjs", () => ({
 
 const app = (await import("./app.js")).default;
 const { SESSION_COOKIE_NAME } = await import("./auth/sessionCookie.js");
-const { allowedOrigins, CSRF_CLIENT_HEADER } = await import("./config/security.js");
+const { allowedOrigins, CSRF_CLIENT_HEADER, ROLE_HEADER } = await import("./config/security.js");
 const { hashSessionToken } = await import("./auth/sessionToken.js");
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { SesionModel } = await import("./models/sesion.model.js");
@@ -89,8 +89,16 @@ const DEL_FRONTEND = {
  */
 const ORIGIN_NUESTRO = DEL_FRONTEND.Origin as string;
 
+/**
+ * The live session's own `expires_at`, captured rather than inlined so a test
+ * can assert `GET /api/auth/me` answers with this exact value — the one the
+ * row actually has — and not a date some handler computed on its own.
+ */
+let SESION_EXPIRA_FILA: Date;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  SESION_EXPIRA_FILA = new Date(Date.now() + 86_400_000);
   // A live session belonging to YO. `last_used_at` is now on purpose: the touch
   // is throttled, so a fresh timestamp keeps `touchSession` from firing and
   // adding an UPDATE that the assertions below would read as theirs.
@@ -98,7 +106,7 @@ beforeEach(() => {
     dataValues: {
       id: MI_SESION,
       id_usuario: YO,
-      expires_at: new Date(Date.now() + 86_400_000),
+      expires_at: SESION_EXPIRA_FILA,
       last_used_at: new Date(),
     },
   } as never);
@@ -190,6 +198,16 @@ describe("who the cookie says I am", () => {
     expect(res.status).toBe(200);
     expect(res.body.usuario).toMatchObject({ id: YO, id_rol: MI_ROL, user: "isaias" });
     expect(res.body.permisos).toEqual(permisos);
+    // Through the real stack, not the hand-built req/res of
+    // auth.controller.test.ts: this is what proves authenticate really hands
+    // this session's own expires_at to req.user, over the real middleware
+    // chain, and that `me` really forwards it rather than the wiring silently
+    // dropping it somewhere in between.
+    expect(res.body.expires_at).toBe(SESION_EXPIRA_FILA.toISOString());
+    // Same proof for the role header: set by authenticate, and only readable
+    // by the browser because app.ts's exposedHeaders names it — a unit test
+    // with a fake `res.setHeader` cannot see either half of that.
+    expect(res.headers[ROLE_HEADER]).toBe(String(MI_ROL));
   });
 
   it("refuses, rather than 500s, a cookie cookie-parser has parsed as JSON", async () => {
