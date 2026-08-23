@@ -97,7 +97,9 @@ function handler(name: string, fn: (req: Request, res: Response) => Promise<unkn
  * instead of refusing — unreachable behind `authenticate`, and still the wrong
  * shape. A guard that only works because another guard ran is not a guard.
  */
-function callerOf(req: Request): { id: number; id_rol: number; id_sesion?: string } | null {
+function callerOf(
+  req: Request,
+): { id: number; id_rol: number; id_sesion?: string; expires_at?: Date } | null {
   return req.user ?? null;
 }
 
@@ -154,6 +156,14 @@ export const login = handler("login", async (req: Request, res: Response) => {
  * The attributes are listed one by one rather than excluding `pass`. The next
  * plan adds `email`, `mfa_grace_until` and `webauthn_challenge` to these
  * tables; an exclusion list publishes every one of them the day it lands.
+ *
+ * `expires_at` comes straight off `req.user`, set by `authenticate` from the
+ * same session row it already looked up — see the comment there for why that
+ * beats asking the database again here. A caller on the old bearer token has
+ * no row behind it, so this answers `null` and not an absent key: the
+ * frontend schedules a "your session is about to expire" warning off this
+ * field, and a key that is simply missing is indistinguishable from a bug —
+ * `null` says plainly "there is nothing to count down".
  */
 export const me = handler("me", async (req: Request, res: Response) => {
   const caller = callerOf(req);
@@ -167,7 +177,11 @@ export const me = handler("me", async (req: Request, res: Response) => {
   if (!found) return res.status(401).json({ message: CUENTA_INACTIVA });
 
   const usuario = found.dataValues;
-  return res.status(200).json({ usuario, permisos: await permissionsFor(usuario.id_rol) });
+  return res.status(200).json({
+    usuario,
+    permisos: await permissionsFor(usuario.id_rol),
+    expires_at: caller.expires_at ?? null,
+  });
 });
 
 /**

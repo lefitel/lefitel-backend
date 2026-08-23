@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import request from "supertest";
 import app from "./app.js";
-import { allowedOrigins, CSRF_CLIENT_HEADER, HSTS_MAX_AGE_SECONDS } from "./config/security.js";
+import { allowedOrigins, CSRF_CLIENT_HEADER, HSTS_MAX_AGE_SECONDS, ROLE_HEADER } from "./config/security.js";
 
 describe("security headers", () => {
   // The origin this process is really configured with, read the way `app.ts`
@@ -87,6 +87,25 @@ describe("security headers", () => {
 
       expect(res.headers["access-control-allow-origin"], ajeno).toBeUndefined();
     }
+  });
+
+  it("exposes exactly these response headers — no more, no fewer", async () => {
+    // Nothing else in this repository fixes what `exposedHeaders` holds.
+    // `toContain` would not catch the realistic failure here, which is
+    // someone deleting an entry while editing the array for an unrelated
+    // reason — `Content-Disposition` is what lets the frontend read an
+    // exported file's real name instead of downloading everything as
+    // "download" (see `web/src/api/generador.api.test.ts`'s comment for the
+    // failure from the frontend's side), and `ROLE_HEADER` is this task's own
+    // reason the array exists to be checked at all: a header can cross the
+    // wire and still be invisible to the page's JavaScript if it is not
+    // named here — the exact way `x-new-token` used to be thrown away before
+    // this array was written to expose it. Equality is what notices any of
+    // the three going missing.
+    const res = await request(app).get("/api/login");
+    expect(res.headers["access-control-expose-headers"]).toBe(
+      ["x-new-token", "Content-Disposition", ROLE_HEADER].join(","),
+    );
   });
 
   it("lets another origin load the photographs", async () => {

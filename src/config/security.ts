@@ -186,6 +186,30 @@ export function allowedOrigins(raw: string | undefined, nodeEnv: string | undefi
 export const CSRF_CLIENT_HEADER = "x-osefi-client";
 
 /**
+ * The header that carries the caller's current role, on every authenticated
+ * response, cookie or old bearer token alike.
+ *
+ * `authenticate` already reads the role from the database on every request —
+ * it has to, to notice a demotion or an archived account — so putting it on
+ * a response header costs no query of its own; it is the same read the
+ * request already paid for, handed back instead of kept to itself.
+ *
+ * This is what replaces the `x-new-token` mechanism `app.ts` still has a
+ * comment about: the server used to re-sign a JWT on every request so the
+ * frontend could decode its `id_rol` and notice a role change. That re-signing
+ * is gone, so there is no token left to decode a role out of. A bare role id
+ * is a smaller thing to get wrong than a signed token, and it is honest about
+ * what it is for — noticing a change, not carrying a credential — whereas a
+ * JWT sitting in a header nobody reads for its expiry is a credential doing
+ * nothing, which is exactly what `x-new-token` had become.
+ *
+ * Like `CSRF_CLIENT_HEADER`, this is a response detail and not a secret, so
+ * there is nothing wrong with a script on the page reading it — the browser
+ * only needs the name in `app.ts`'s `exposedHeaders` to be allowed to.
+ */
+export const ROLE_HEADER = "x-osefi-role";
+
+/**
  * What a write refused by the origin check is told.
  *
  * The same sentence for both halves of the check, deliberately. For a real

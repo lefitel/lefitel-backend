@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { findLiveSession, touchSession, slidingExpiry } from "../auth/sessionStore.js";
 import { readSessionCookie, setSessionCookie } from "../auth/sessionCookie.js";
-import { SESSION_TOUCH_THROTTLE_MINUTES } from "../config/security.js";
+import { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER } from "../config/security.js";
 import { log } from "../utils/logger.js";
 
 const authLog = log("auth");
@@ -81,6 +81,14 @@ async function authenticateBySession(
     return;
   }
 
+  // From `usuario`, i.e. from `currentUser`'s database read, and not from
+  // anything the credential carries — see `ROLE_HEADER`'s comment for why
+  // that is the entire point. Set on every authenticated response rather than
+  // only when the role actually changed: the frontend has nothing to compare
+  // it against until it has seen at least one, and comparing is its job, not
+  // this middleware's.
+  res.setHeader(ROLE_HEADER, String(usuario.id_rol));
+
   // `last_used_at` is throttled. Writing it on every request turns every read
   // into a write, and one report export makes around two thousand sequential
   // requests: that would be two thousand UPDATEs and two thousand dead tuples
@@ -104,7 +112,18 @@ async function authenticateBySession(
     setSessionCookie(res, token, slidingExpiry(new Date(sesion.created_at), now));
   }
 
-  req.user = { id: usuario.id, id_rol: usuario.id_rol, id_sesion: sesion.id };
+  // `expires_at` rides along on `req.user` rather than being looked up again
+  // inside `/auth/me`, and doing it this way costs nothing extra: this
+  // function already has `sesion.expires_at` in hand from the
+  // `findLiveSession` call above, so handing it to `req.user` is a field copy,
+  // not a query. Querying again from the controller would trade that free
+  // value for a second `SesionModel.findOne` on every call — cheap for an
+  // endpoint that only runs once per page load, but still a database round
+  // trip this data does not need when the value is already sitting in memory.
+  // Optional for the same reason `id_sesion` already is: a request
+  // authenticated by the old bearer token has no row, and therefore nothing
+  // to report an expiry from.
+  req.user = { id: usuario.id, id_rol: usuario.id_rol, id_sesion: sesion.id, expires_at: sesion.expires_at };
   next();
 }
 
@@ -144,6 +163,12 @@ function authenticateByLegacyToken(
             return;
           }
           authLog.info({ id_usuario: usuario.id, ruta: req.originalUrl }, "petición autenticada con el token antiguo");
+          // Same header, same source — `usuario.id_rol` off `currentUser`'s
+          // database read, never `claims.id_rol` off the token. Skipping this
+          // on the old path is the failure the task exists to avoid: the
+          // warning would only work for whichever half of the transition
+          // happened to be on the cookie already.
+          res.setHeader(ROLE_HEADER, String(usuario.id_rol));
           req.user = { id: usuario.id, id_rol: usuario.id_rol };
           next();
           resolve();

@@ -4,7 +4,7 @@ declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      user?: { id: number; id_rol: number; id_sesion?: string };
+      user?: { id: number; id_rol: number; id_sesion?: string; expires_at?: Date };
     }
   }
 }
@@ -15,7 +15,7 @@ import { httpLogger } from "./middleware/httpLogger.js";
 import { authenticate } from "./middleware/authenticate.js";
 import { loginRateLimit } from "./middleware/loginLimiters.js";
 import { requireSameOrigin } from "./middleware/csrf.js";
-import { allowedOrigins, HSTS_MAX_AGE_SECONDS } from "./config/security.js";
+import { allowedOrigins, HSTS_MAX_AGE_SECONDS, ROLE_HEADER } from "./config/security.js";
 
 // Import routes
 import uploadRoutes from "./routes/upload.routes.js";
@@ -128,7 +128,19 @@ app.use(
     // x-new-token is not a CORS-safelisted response header, so without this the
     // browser cannot read it and the sliding session never renews: the server
     // was re-signing a JWT on every request and throwing it away.
-    exposedHeaders: ["x-new-token", "Content-Disposition"],
+    //
+    // ROLE_HEADER is the same lesson, applied on purpose this time:
+    // `authenticate` sets it on every authenticated response (see
+    // `middleware/authenticate.ts`), and without it here the header still
+    // crosses the wire — api.osefi.net and www.osefi.net are different
+    // origins — but the frontend's own JavaScript is refused permission to
+    // read it, which is invisible in a `curl` transcript and in the network
+    // tab's raw response alike. Nothing in this array is safe to delete
+    // without checking who reads it first: `app.security.test.ts` pins the
+    // whole list by equality rather than by "contains", because dropping an
+    // entry — not the array losing all meaning — is the realistic way this
+    // breaks.
+    exposedHeaders: ["x-new-token", "Content-Disposition", ROLE_HEADER],
   }),
 );
 

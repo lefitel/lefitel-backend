@@ -42,16 +42,18 @@ vi.mock("../utils/logger.js", () => ({ log: () => ({ info: authInfo, warn: authW
 
 const { authenticate } = await import("./authenticate.js");
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
-const { SESSION_TOUCH_THROTTLE_MINUTES } = await import("../config/security.js");
+const { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER } = await import("../config/security.js");
 
 function call(opts: { cookie?: string; bearer?: string } = {}) {
   const res = {
     statusCode: 0,
     body: undefined as unknown,
+    headers: {} as Record<string, string>,
     cookieCalls: [] as { name: string; value: string; options: Record<string, unknown> }[],
     status(c: number) { this.statusCode = c; return this; },
     json(p: unknown) { this.body = p; return this; },
     sendStatus(c: number) { this.statusCode = c; return this; },
+    setHeader(name: string, value: string) { this.headers[name] = value; return this; },
     cookie(name: string, value: string, options: Record<string, unknown>) {
       this.cookieCalls.push({ name, value, options });
       return this;
@@ -69,6 +71,7 @@ function call(opts: { cookie?: string; bearer?: string } = {}) {
     next,
     get status() { return res.statusCode; },
     get cookieCalls() { return res.cookieCalls; },
+    get headers() { return res.headers; },
   };
 }
 
@@ -292,6 +295,39 @@ describe("with the old bearer token, during the transition", () => {
       expect.any(String),
     );
     expect(JSON.stringify(authInfo.mock.calls[0])).not.toContain("un.jwt.secreto");
+  });
+});
+
+describe("the current-role header", () => {
+  // Task 2's whole point: the frontend used to notice a role change by
+  // decoding `id_rol` out of a re-signed JWT (`x-new-token`, now dead — see
+  // `app.ts`). This header replaces that mechanism, so it has to survive on
+  // both credentials or the notice only works for half the transition, and
+  // it has to come from the database or a demoted account keeps its old
+  // buttons for as long as the token lives — precisely the defect the rest of
+  // this file exists to close for `req.user.id_rol`.
+
+  it("is set on the cookie path, from the database", async () => {
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
+    findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 4 } });
+    const c = call({ cookie: "t" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.headers[ROLE_HEADER]).toBe("4");
+  });
+
+  it("is set on the old bearer path too, and from the database rather than the token", async () => {
+    // The token's own claim says id_rol 1; the database (mocked here, distinct
+    // on purpose) says 9. Only a header reading 9 proves this was not quietly
+    // read off the credential — a value of 1 would mean the header brought
+    // back exactly the bug `req.user.id_rol` is proven, a few tests up, not
+    // to have.
+    jwtVerify.mockImplementation((_t: unknown, _s: unknown, cb: (e: unknown, u: unknown) => void) => cb(null, { id: 7, id_rol: 1 }));
+    findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 9 } });
+    const c = call({ bearer: "un.jwt.valido" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.headers[ROLE_HEADER]).toBe("9");
   });
 });
 

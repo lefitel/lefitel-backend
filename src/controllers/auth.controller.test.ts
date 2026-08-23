@@ -81,6 +81,11 @@ const OTRA_SESION = "bbbbbbbb-22de-4222-8222-bbbbbbbbbbbb";
 const AJENA = "cccccccc-33ef-4333-8333-cccccccccccc";
 const TOKEN = "un-token-opaco-de-sesion";
 const CADUCA = new Date("2026-09-01T00:00:00.000Z");
+// Deliberately not `CADUCA`: a test pinning this value has to fail if `me`
+// starts computing its own date (`Date.now() + algo`) instead of reading the
+// one `authenticate` already put on `req.user`, and a coincidence with
+// another constant in this file would hide exactly that bug.
+const SESION_EXPIRA = new Date("2027-03-14T00:00:00.000Z");
 const PERMISOS = { seguridad: { ver: true } };
 
 function storedUser(overrides: Record<string, unknown> = {}) {
@@ -109,7 +114,7 @@ function storedUser(overrides: Record<string, unknown> = {}) {
  * not a guard — the same lesson `usuario.controller.test.ts` was written for.
  */
 function call(
-  user: { id: number; id_rol: number; id_sesion?: string } | undefined,
+  user: { id: number; id_rol: number; id_sesion?: string; expires_at?: Date } | undefined,
   { params = {}, body = {} }: { params?: Record<string, string>; body?: unknown } = {},
 ) {
   const res = {
@@ -337,6 +342,32 @@ describe("GET /api/auth/me", () => {
     await me(c.req, c.res);
 
     expect(c.status).toBe(401);
+  });
+
+  it("answers with this session's own expiry, not one computed in the handler", async () => {
+    // `SESION_EXPIRA` has nothing to do with "now" — it is here so that a
+    // handler which starts inventing its own date (`Date.now() + 7 days`,
+    // the cookie's own sliding expiry, anything computed) cannot happen to
+    // match it. Only reading `req.user.expires_at` verbatim passes.
+    const c = call({ id: YO, id_rol: MI_ROL, id_sesion: MI_SESION, expires_at: SESION_EXPIRA });
+    await me(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.payload?.expires_at).toEqual(SESION_EXPIRA);
+  });
+
+  it("says it does not know, rather than nothing at all, on the old bearer token", async () => {
+    // The frontend schedules its "session about to expire" warning off this
+    // field. A key that is simply missing reads, to `JSON.parse`, exactly
+    // like a key nobody remembered to send — which is precisely what would
+    // make the frontend treat a token-authenticated caller as already
+    // expired. `null` is the one answer that cannot be confused with a bug.
+    const c = call(YO_CON_TOKEN_VIEJO);
+    await me(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.payload).toHaveProperty("expires_at");
+    expect(c.payload?.expires_at).toBeNull();
   });
 });
 
