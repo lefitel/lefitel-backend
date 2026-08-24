@@ -1,13 +1,17 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+// The same import as the module under test, on purpose. sharp 0.35 ships both a
+// CommonJS and an ESM build, and `require`-ing one here while photos.ts imports
+// the other loads the native binding twice: `sharp.cache({ files: 0 })` then
+// applies to only one of them, and the copy that still caches descriptors holds
+// these fixtures open until the process exits, so the cleanup below fails with
+// EBUSY on Windows.
+import sharp from "sharp";
 import { loadPhotos, compressLogo, PHOTO_MAX_PX } from "./photos.js";
 
-const require = createRequire(import.meta.url);
-const sharp = require("sharp") as typeof import("sharp");
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 let directory: string;

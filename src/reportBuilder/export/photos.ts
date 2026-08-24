@@ -5,14 +5,9 @@
 // never a path, and the resolved location is checked to be inside the images
 // directory before anything is opened.
 
-import { createRequire } from "node:module";
 import { promises as fs } from "node:fs";
+import sharp from "sharp";
 import { IMAGES_DIR, resolveImagePath } from "../../utils/fileUtils.js";
-
-// sharp ships as CommonJS with a native binding; the default ESM interop hands
-// back the namespace rather than the callable.
-const require = createRequire(import.meta.url);
-const sharp = require("sharp") as typeof import("sharp");
 
 // libvips keeps up to a hundred of the files it has opened cached by descriptor.
 // A long-running server that reads thousands of distinct photographs holds those
