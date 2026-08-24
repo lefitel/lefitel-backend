@@ -960,6 +960,13 @@ Orden recomendado: **rota primero, despliega después.** Si se rota antes del Pl
 2B, cualquiera que siguiera en el camino antiguo tendría que volver a entrar, y no
 hay nada malo en eso.
 
+**Y qué cambia cuando el Plan 2C esté desplegado:** nadie firma ni verifica con esa
+clave, así que deja de ser una puerta y pasa a ser un secreto muerto en un sitio
+donde no debería estar. Sigue mereciendo salir del historial —un secreto expuesto
+que ya no abre nada hoy puede abrir algo el día que alguien reutilice el valor en
+otra parte— pero deja de ser urgente. Rotarla antes de ese despliegue sigue siendo
+lo correcto: es más barato que confiar en que el orden de despliegue salga bien.
+
 ### El despliegue del cimiento de sesión, que tiene reglas propias
 
 Esto sale de haber implementado el Plan 2A y no estaba previsto al escribir el
@@ -970,6 +977,14 @@ separado**, así que el orden importa y no es reversible:
 1. COOKIE_NAME=__Host-osefi_session y COOKIE_SECURE=true en Coolify.
    ANTES del código: el proceso se niega a arrancar sin ellas, y sin arrancar
    el contenedor entra en bucle de reinicio con el ERP entero caído.
+   Y conviene saber POR QUÉ se niega, porque no es por donde parece: la lista de
+   variables obligatorias solo se aplica cuando NODE_ENV vale exactamente
+   "production". Lo que cubre el caso de un despliegue sin NODE_ENV puesto es
+   otra cosa: COOKIE_SECURE falla cerrado (ausente se lee como true) y el nombre
+   por defecto no lleva el prefijo __Host-, así que la comprobación del arranque
+   mata el proceso igual. Verificado el 23 de agosto. No "optimices" ese default
+   pensando que la lista de obligatorias lo cubre: sin él, un despliegue sin
+   NODE_ENV emitiría la cookie de sesión sin Secure y sin nadie quejándose.
 2. Las dos consultas de roles contra producción (abajo).
 3. migrate:deploy. Si no corre, el login sigue funcionando por el camino viejo
    y NADIE se migra: el plan parece desplegado y no lo está. Comprobar que la
@@ -1037,6 +1052,26 @@ producción**. Y hay dos cosas más que saber de él:
   arnés sustituye una lista de métodos, no el acceso a la base**, así que un camino
   nuevo que use un método que no esté en la lista sale a la base de verdad.
 
+### El Plan 2C se despliega al revés que el 2B, y por una razón concreta
+
+El 2B tenía un orden rígido —backend primero, frontend después, sin vuelta atrás—
+porque el frontend nuevo mandando credenciales contra un backend que no las acepta
+rompe **todas** las peticiones. Eso se acabó en cuanto el 2B esté en producción: a
+partir de ahí las dos mitades ya se entienden.
+
+**Para el 2C conviene el orden inverso: `web` primero, o las dos a la vez.** El motivo
+es el cambio de nombre de usuario, que ahora exige la contraseña actual en el
+servidor:
+
+- `web` nuevo con `api` viejo: la pantalla pide la contraseña y la manda; el servidor
+  viejo la ignora. Funciona.
+- `api` nuevo con `web` viejo: la pantalla **no dibuja el campo** y el servidor
+  contesta 400 pidiéndolo. Quien tenga el bundle viejo en caché ve un error que **no
+  puede resolver** — no hay ninguna casilla donde escribir lo que le piden.
+
+No es una caída: el resto del ERP funciona y basta con recargar. Pero es un error sin
+salida en una pantalla, y evitarlo cuesta solo elegir el orden.
+
 ### La detección de cambio de rol se rompe entre el Plan 1 y el Plan 2B
 
 Esto se descubrió revisando el Plan 2B y **no estaba previsto**. El backend dejó
@@ -1065,20 +1100,29 @@ el JavaScript de la página, y `supertest` no la aplica, así que ningún test d
 integración nota la diferencia. Lo único que lo caza es el test que fija la
 lista por igualdad.
 
-### Mientras el token antiguo siga valiendo: si roban una cuenta, se archiva
+### Si roban una cuenta: «cerrar todas mis sesiones». Y por qué antes no valía
 
-Esto hay que tenerlo escrito antes de necesitarlo, porque es contraintuitivo.
-Durante la coexistencia —los planes 2A y 2B— un token antiguo robado **no lo
-alcanza ninguna revocación**: el atacante no manda cookie, así que su petición va
-por el camino viejo, que por definición no tiene fila que marcar. Ni cambiar la
+**Desde el Plan 2C esto ya funciona como cualquiera esperaría.** Si a alguien le
+roban la cuenta: se le cierran todas las sesiones y se le cambia la contraseña. El
+que tuviera la credencial queda fuera en la siguiente petición que haga.
+
+Queda escrito lo que había antes, porque hace falta para entender los commits de
+agosto y porque explica por qué este plan existía.
+
+**Durante la coexistencia —los planes 2A y 2B— un token antiguo robado no lo
+alcanzaba ninguna revocación.** El atacante no mandaba cookie, así que su petición
+iba por el camino viejo, que por definición no tenía fila que marcar. Ni cambiar la
 contraseña, ni «cerrar todas mis sesiones», ni nada.
 
-**Lo único que lo echa es archivar la cuenta**, porque entonces la consulta del
-usuario devuelve vacío en los dos caminos y la sesión muere en el acto. Luego se
-desarchiva y se le pone una contraseña nueva.
+Lo único que lo echaba era **archivar la cuenta**, porque entonces la consulta del
+usuario devolvía vacío en los dos caminos y la sesión moría en el acto. Luego se
+desarchivaba y se le ponía una contraseña nueva. Era contraintuitivo y por eso
+estaba escrito antes de necesitarlo.
 
-Deja de hacer falta cuando el Plan 2C retire el camino viejo. Hasta entonces, la
-respuesta a «me han robado la cuenta» es archivar, no cambiar la contraseña.
+Eso se acabó cuando el Plan 2C retiró el camino viejo: sin un segundo camino que
+autentique sin fila, **una sesión revocada es una sesión que no vuelve**. Es la
+única cosa de todo este arco que cambia lo que el sistema puede prometer; el resto
+lo construyó.
 
 ### Deuda declarada, para que no se descubra dos veces
 
@@ -1091,6 +1135,10 @@ respuesta a «me han robado la cuenta» es archivar, no cambiar la contraseña.
 - **`GET /api/permisos/mias`** ya no lo llama nadie. Queda declarado en el docstring
   de su ruta en vez de retirado, porque retirarlo obliga a tocar un test que estaba
   en manos de otro trabajo en curso.
+- **`PerfilPage` valida la contraseña nueva con seis caracteres y el servidor exige
+  doce.** Preexistente, y a tres líneas de lo que la Tarea 9 tocó. El servidor rechaza
+  correctamente, así que no entra ninguna contraseña débil; lo que pasa es que la
+  pantalla deja pulsar y el error llega del servidor en vez de avisar antes.
 - **Un cambio de permisos de un rol no llega a quien tiene el ERP abierto.** El
   frontend compara ids de rol, no permisos, así que conceder un módulo a un rol no
   se nota hasta que la persona recarga. No es una regresión: el mecanismo anterior

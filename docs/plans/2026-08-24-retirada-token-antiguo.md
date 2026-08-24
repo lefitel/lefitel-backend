@@ -323,6 +323,135 @@ Commits en los dos repos.
 
 ---
 
+## Task 8: La confirmación tiene que exigirla el servidor, no pedirla la pantalla
+
+Salió al terminar la Tarea 7 y la deja a medias, así que va detrás. **Está en
+producción hoy.**
+
+- [ ] **Step 1: Los dos agujeros, y su asimetría es lo que los delata**
+
+`updateUserName` (`src/controllers/usuario.controller.ts:339`) **no pide la contraseña
+actual**. Comprueba que eres tú o que puedes gestionar cuentas —la protección contra
+editar a otro está bien puesta— que el nombre es una cadena, y que no está en uso. Y
+cambia el nombre.
+
+`updateUserPass` (`:378`), justo debajo, **sí la pide**: `else if
+(!mayResetPasswords) return 400`, con el comentario «quien no pueda gestionar cuentas
+debe probar que sabe la actual».
+
+**Las dos operaciones valen lo mismo para poder entrar.** El nombre de usuario es la
+mitad de la credencial: si alguien te lo cambia, no entras — no porque no sepas la
+contraseña, sino porque no sabes con qué nombre pedirla.
+
+Y el segundo agujero es el que hace decorativo el trabajo de la Tarea 7:
+`web/src/pages/menu/PerfilPage.tsx:103` cambia el mismo nombre **sin pedir nada**,
+mientras `UsuarioDetallePage.tsx` sí lo pide. Misma operación, misma cuenta, dos
+pantallas. **Una confirmación que solo vive en el cliente es voluntaria por
+definición**: quien no quiera escribirla usa la otra pantalla.
+
+El caso concreto: un ordenador desatendido en la oficina, o el portátil compartido de
+campo. Quien se siente con la sesión abierta cambia el nombre de usuario y **echa al
+dueño de su propia cuenta sin saber su contraseña**. Se arregla —un administrador lo
+devuelve— pero mientras nadie entiende qué pasó.
+
+- [ ] **Step 2: Qué hacer**
+
+`updateUserName` exige la contraseña actual a quien no pueda gestionar cuentas,
+**igual que `updateUserPass`**. Reutiliza lo que ya existe: el comparador compartido de
+la Tarea 7, no una comparación nueva.
+
+Piensa qué haces con quien sí puede gestionar cuentas cambiándose el nombre **a sí
+mismo**: en `updateUserPass` esa persona puede omitirla, y ahí tiene sentido —está
+reseteando la contraseña de alguien que no puede entrar. Aquí no hay nadie a quien
+rescatar. Decide y escribe el por qué.
+
+Y las dos pantallas mandan la contraseña. La de `PerfilPage.tsx` tiene que pedirla,
+usando el endpoint de la Tarea 7 o mandándola directamente — decide cuál y por qué; no
+hagas las dos cosas.
+
+- [ ] **Step 3: Romper a propósito**
+
+Rompe: quita la exigencia del servidor. Debe caer un test que llame al endpoint **sin
+contraseña** y espere un rechazo — y que fije **el motivo**, no solo el número: ese
+endpoint ya contesta 400 a un nombre que no es cadena y 409 a uno en uso, así que un
+test que solo mire el número puede pasar por el camino equivocado. Ya ocurrió en la
+Tarea 4 de este plan, con un 401 que llegaba por otra razón.
+
+Y rompe la pantalla: que `PerfilPage` no mande la contraseña. Debe caer algo, y si
+sólo cae por el servidor, escribe el test del cliente también.
+
+Commits en los dos repos.
+
+---
+
+## Task 9: La exención de dar la contraseña actual vale para la de otro, nunca para la propia
+
+La encontró el implementador de la Tarea 8 al desviarse a propósito del modelo que
+mi brief le señalaba, y tenía razón: **es más grave que el agujero que esa tarea
+cerró.** Está en producción hoy.
+
+- [ ] **Step 1: La regla, y por qué su mitad buena tapa la mala**
+
+`updateUserPass` (`src/controllers/usuario.controller.ts:378`) hace esto:
+
+```js
+if (oldPass) { comparar y rechazar si no cuadra }
+else if (!mayResetPasswords) { return 400 "Debe proporcionar su contraseña actual." }
+```
+
+La mitad buena es real: quien no gestiona cuentas tiene que probar que sabe la
+actual. Y la exención tiene un motivo legítimo — un administrador restablece una
+contraseña **precisamente porque alguien no puede entrar**, así que exigirle la
+actual sería exigirle lo que nadie tiene.
+
+Pero la condición mira **el permiso, no a quién se le cambia**. Así que quien tenga
+`seguridad.editar` puede cambiar **su propia** contraseña sin dar la actual.
+
+**El caso concreto, y es el peor del arco:** un ordenador desatendido con la sesión
+de un administrador abierta. Quien se siente le cambia la contraseña sin saber la
+anterior, y como un cambio de contraseña **termina las sesiones viejas** —cosa que el
+Plan 1 arregló, y está bien que lo haga— el administrador queda fuera y el otro
+dentro, con una contraseña que solo él conoce. Es la cuenta entera, no un nombre de
+usuario molesto.
+
+Y la comparación con la Tarea 8 lo deja claro: allí el ataque te cambiaba el nombre y
+un administrador podía devolvértelo. Aquí **el atacante es el administrador**.
+
+- [ ] **Step 2: La asimetría que falta**
+
+La exención vale para cambiar la contraseña **de otro**, nunca la propia. Un
+administrador cambiándose la suya está en la misma posición que cualquiera: no hay
+nadie a quien rescatar, y tiene su contraseña actual porque acaba de entrar con ella.
+
+Es la misma decisión que la Tarea 8 tomó para el nombre de usuario, y el implementador
+la tomó **desviándose del modelo a propósito**. Aplícala aquí, donde el modelo estaba.
+
+- [ ] **Step 3: Lo que no hay que romper al arreglarlo**
+
+Tres cosas de esa función se ganaron con fallos reales y no se tocan:
+- **Un cambio de contraseña levanta el bloqueo de la cuenta en la misma escritura.** Sin
+  eso, el bloqueo no tenía salida: el contador solo se limpia con una entrada correcta,
+  y una entrada correcta es imposible mientras la cuenta esté bloqueada.
+- **Un cambio de contraseña termina las sesiones viejas.** Es lo que hace que cambiar la
+  contraseña sirva para algo cuando alguien más la sabe.
+- **La protección contra editar a otro** (que seas tú o tengas el permiso).
+
+- [ ] **Step 4: Romper a propósito**
+
+Rompe: deja que la exención mire solo el permiso. Debe caer un test que llame como un
+administrador **cambiándose su propia contraseña sin mandar la actual** y espere un
+rechazo, **fijando el motivo y no el número** — esa función ya contesta 400 a una
+contraseña que no cumple la política y 404 a una cuenta que no existe, así que un test
+que solo mire el número puede pasar por el camino equivocado. Ya ha ocurrido tres veces
+en este plan.
+
+Y comprueba que **sigue funcionando** lo que la exención existe para permitir: un
+administrador restableciendo la contraseña **de otra persona** sin mandar la actual.
+
+Commit en `api`. `web` solo si alguna pantalla dependía de poder omitirla.
+
+---
+
 ## Verificación final
 
 ```bash
