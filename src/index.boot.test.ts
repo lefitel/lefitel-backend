@@ -18,9 +18,14 @@ describe("required configuration", () => {
     expect(requiredEnv("development")).not.toContain("CORS_ORIGIN");
   });
 
-  it("always requires JWT_SECRET", () => {
-    expect(requiredEnv("production")).toContain("JWT_SECRET");
-    expect(requiredEnv("development")).toContain("JWT_SECRET");
+  it("no longer requires JWT_SECRET, in any environment", () => {
+    // There is nothing left to sign or verify: the session cookie is the
+    // only credential now. Requiring this variable after that would only
+    // force every environment to go on holding the weak secret this plan
+    // set out to retire — docs/specs/2026-08-21-autenticacion-mfa-design.md
+    // §11 is the write-up of why keeping it was the actual danger.
+    expect(requiredEnv("production")).not.toContain("JWT_SECRET");
+    expect(requiredEnv("development")).not.toContain("JWT_SECRET");
   });
 
   it("names COOKIE_NAME as required in production", () => {

@@ -74,13 +74,20 @@ export const HSTS_MAX_AGE_SECONDS = 63072000;
 
 /** Variables the process refuses to start without, by environment. */
 export function requiredEnv(nodeEnv: string | undefined): string[] {
-  const always = ["JWT_SECRET"];
+  // Nothing is required outside production any more. JWT_SECRET used to be
+  // the one exception, required everywhere because signing and verifying
+  // happened everywhere. With both gone — the session cookie is the only
+  // credential now — keeping it on this list would only force every
+  // environment to go on holding a secret nothing reads. See
+  // docs/specs/2026-08-21-autenticacion-mfa-design.md §11 for why that secret
+  // could not simply be left in place.
+  //
   // COOKIE_NAME should be `__Host-osefi_session` in production. This only
   // proves it was *set* — a deployment that sets it to something without
   // the `__Host-` prefix still boots, and this list has no way to catch
   // that. `index.ts` runs the value check separately, at boot, with
   // `cookieNameCarriesHostPrefix`.
-  return nodeEnv === "production" ? [...always, "CORS_ORIGIN", "COOKIE_NAME", "COOKIE_SECURE"] : always;
+  return nodeEnv === "production" ? ["CORS_ORIGIN", "COOKIE_NAME", "COOKIE_SECURE"] : [];
 }
 
 /**
@@ -96,7 +103,7 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
  * platform's auto-detected buildpack instead of this repo's Dockerfile, a
  * start command that overrides `CMD`, `node dist/index.js` run by hand) skips
  * `requiredEnv`'s production branch entirely: the process boots believing it
- * needs only `JWT_SECRET`, and this constant is exactly what `allowedOrigins`
+ * needs nothing at all, and this constant is exactly what `allowedOrigins`
  * used to fall back to — with `credentials: true` already applied to it, in
  * whatever unknown environment happened to be running. See `allowedOrigins`
  * for the fix, which no longer trusts "not literally production" to mean

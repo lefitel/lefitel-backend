@@ -33,9 +33,12 @@ const die = createShutdown({
 });
 
 /**
- * Without JWT_SECRET nothing can be signed or verified; without CORS_ORIGIN in
- * production the origin check would fall back to a value nobody chose. Either
- * way there is no point continuing.
+ * Nothing is required outside production any more — the session cookie is the
+ * only credential, and there is no key left to sign or verify. In production,
+ * a missing CORS_ORIGIN would let the origin check fall back to a value
+ * nobody chose, and a missing COOKIE_NAME or COOKIE_SECURE would let the
+ * session cookie fall back to defaults with no `__Host-` guarantee, silently.
+ * Either way there is no point continuing.
  *
  * `process.exit()` right here, rather than `die()`: this runs at the top of the
  * module, so merely setting the exit code would let everything below it —
