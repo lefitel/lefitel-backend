@@ -290,16 +290,17 @@ describe("what each bucket spends", () => {
 });
 
 /**
- * The budget for confirming your own password, which is the only limit that
- * endpoint has.
+ * The budget for confirming your own password, which is the only limit those two
+ * routes have.
  *
- * `POST /api/auth/confirm-password` deliberately does not move
- * `failed_attempts`: the account being asked about is the one already logged in,
- * so counting a typo there would let somebody renaming themselves lock
- * themselves out of the ERP. That decision is what makes this bucket
- * load-bearing rather than belt-and-braces — take it away and an authenticated
- * caller may compare passwords as often as the server will answer, which for
- * whoever has stolen a session is an oracle for the password behind it.
+ * Renaming your own account and changing your own password both compare a
+ * password and neither moves `failed_attempts`: the account being asked about is
+ * the one already logged in, so counting a typo there would let somebody
+ * renaming themselves lock themselves out of the ERP. That decision is what
+ * makes this bucket load-bearing rather than belt-and-braces — take it away and
+ * an authenticated caller may compare passwords as often as the server will
+ * answer, which for whoever has stolen a session is an oracle for the password
+ * behind it.
  *
  * Its key is the account and not the address, so the two tests worth having are
  * that the id is really what it reads, and that it reads it from `req.user` —
@@ -325,7 +326,7 @@ describe("the key the confirmation bucket counts against", () => {
   });
 
   it("does not put every caller in one bucket when there is no session", () => {
-    // Unreachable through the mount, where `authenticate` answers 401 first.
+    // Unreachable through either mount, where `authenticate` answers 401 first.
     // What it guards is somebody mounting this limiter without authentication
     // in front of it: the fallback is address-shaped, so the endpoint degrades
     // to one budget per network instead of one budget for the whole world —
@@ -343,6 +344,35 @@ describe("the key the confirmation bucket counts against", () => {
   });
 });
 
+/**
+ * What the confirmation bucket spends, and the rule is `confirmCostsNothing`:
+ * only a 401 costs.
+ *
+ * **This describe used to assert the opposite**, and the reason it changed is
+ * worth keeping rather than quietly replacing. It held two tests saying every
+ * answer costs the same, and the argument for them was real: `POST
+ * /api/auth/confirm-password` answered a wrong password with **200** and
+ * `{ correcta: false }`, on purpose, so that no client could mistake "wrong
+ * password" for "server broken". With the two answers deliberately wearing the
+ * same status, a refund rule that read the status would have handed back exactly
+ * the attempts the bucket exists to charge for — and worse, since
+ * `standardHeaders` is on, `RateLimit-Remaining` would have told a guesser which
+ * attempt was the right one through the very uniformity that was hiding it.
+ *
+ * That endpoint is retired. The two routes left on this bucket —
+ * `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id` — answer a wrong
+ * current password with **401 and nothing else**, and answer everything else
+ * with something that is not a 401. So the status already tells the caller what
+ * the header could, there is no uniformity left to leak through, and charging
+ * every request stopped buying anything. What it cost instead was the case the
+ * audit bet the deploy on: the *legitimate* work of changing your own password —
+ * told the new one needs twelve characters, trying again a character longer —
+ * spending the budget until the sixth attempt answered "Espere unos minutos" and
+ * closed the rename too.
+ *
+ * The tests below therefore pin both halves: the 401 still costs, and nothing
+ * else does. `app.auth.test.ts` holds the same rule through the real routes.
+ */
 describe("what the confirmation bucket spends", () => {
   const CLAVE_CUENTA = "pc:41";
   const conSesion = { id: 41, id_rol: 3, id_sesion: "s", expires_at: new Date() };
@@ -368,46 +398,95 @@ describe("what the confirmation bucket spends", () => {
     await passwordConfirmLimiter.resetKey(CLAVE_CUENTA);
   });
 
-  it("charges an answer of 200 with correcta:false, which is what a wrong password gets", async () => {
-    // The assertion that pins the absence of `skipSuccessfulRequests`, and the
-    // reason it cannot be copied from the login buckets: a wrong password on
-    // this endpoint answers **200**, on purpose, so a refund rule that reads
-    // the status would hand back exactly the attempts this bucket exists to
-    // charge for. Everything about the request below looks successful; it still
-    // costs one.
-    const bare = appConSesion(200, { correcta: false });
+  it("charges a 401, which is the one answer that says the password was not theirs", async () => {
+    // The half that keeps this a budget. Take it away and an authenticated
+    // caller may compare passwords as often as the server will answer, which for
+    // whoever has stolen a session is an oracle for the password behind it — and
+    // neither route moves `failed_attempts`, so there is no second limit to fall
+    // back on.
+    const bare = appConSesion(401, { message: "La contraseña actual suministrada no es correcta." });
     await post(bare, {});
     await settled();
 
     expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(1);
   });
 
-  it("charges a correct confirmation too, rather than telling the two apart", async () => {
-    // Both answers cost the same, which is the only rule that cannot be turned
-    // into information: a bucket that charged only the wrong ones would let a
-    // guesser read the counter — through the `RateLimit` headers this limiter
-    // sends — and learn which attempt was right without being told.
-    const bare = appConSesion(200, { correcta: true });
+  it("refunds a 200, so a rename or a password change that went through costs nothing", async () => {
+    const bare = appConSesion(200, { id: 41, user: "isalas" });
     await post(bare, {});
     await settled();
 
-    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(1);
+    // `0` and not `undefined`: the request really was counted and really was
+    // given back, which is what tells a refund apart from a limiter that was
+    // never on the route.
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(0);
   });
 
-  it("stops answering after PASSWORD_CONFIRM_LIMIT attempts", async () => {
-    const bare = appConSesion(200, { correcta: false });
+  it("refunds a 400, which is what a new password that fails the policy gets", async () => {
+    // The case that made the old rule hurt, and the one the audit bet the deploy
+    // on. Reaching this answer means the current password was already accepted,
+    // so the request cannot be a guess at it: whoever produced it knows the
+    // secret. Also the answer a frontend bundle from before this arc gets for
+    // every rename it sends, since it carries no current-password field at all.
+    const bare = appConSesion(400, { message: "La contraseña debe tener al menos 12 caracteres." });
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(0);
+  });
+
+  it("refunds a 500, because an outage is nobody's failed attempt", async () => {
+    // The same line `costsNothing` draws for the login buckets, and for the same
+    // reason: a 4xx is the caller being wrong, a 5xx is this server being wrong.
+    // A database that drops the row read behind these routes must not spend the
+    // budget of everybody who tried to use them while it was down.
+    const bare = appConSesion(500, { message: "Ocurrió un error al procesar la petición." });
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(0);
+  });
+
+  it("stops answering after PASSWORD_CONFIRM_LIMIT wrong passwords", async () => {
+    const bare = appConSesion(401, { message: "La contraseña actual suministrada no es correcta." });
     for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
       const res = await post(bare, {});
-      expect(res.status, `intento ${i + 1}`).toBe(200);
+      await settled();
+      expect(res.status, `intento ${i + 1}`).toBe(401);
     }
-    await settled();
 
     const cortado = await post(bare, {});
     expect(cortado.status).toBe(429);
-    // The refusal says to wait. It must not be readable as an answer about the
-    // password — the client requires `correcta === true` and gets neither.
-    expect(cortado.body).not.toHaveProperty("correcta");
+    // The refusal says to wait, and stops being an answer about the password —
+    // which is the property that makes a budget a budget rather than a slower
+    // oracle.
     expect(cortado.body.message).toMatch(/Espere/);
+    expect(cortado.body.message).not.toMatch(/contraseña actual/i);
+  });
+
+  it("does not let a refunded 429 hand the caller straight back in", async () => {
+    /**
+     * The edge the refund rule creates, measured rather than assumed. A 429 is
+     * not a 401, so it is refunded too — the counter falls back to the limit
+     * instead of climbing past it. What has to stay true is that falling back to
+     * the limit is not the same as falling below it: the window still has to
+     * expire.
+     *
+     * Without this, a rule that decremented one step too far would turn the
+     * budget into "one attempt every round trip, forever", which is not a limit
+     * at all.
+     */
+    const bare = appConSesion(401, { message: "La contraseña actual suministrada no es correcta." });
+    for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
+      await post(bare, {});
+      await settled();
+    }
+
+    for (const intento of [1, 2, 3]) {
+      const res = await post(bare, {});
+      await settled();
+      expect(res.status, `tras el corte, intento ${intento}`).toBe(429);
+    }
   });
 });
 

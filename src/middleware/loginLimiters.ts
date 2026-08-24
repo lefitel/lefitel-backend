@@ -3,11 +3,17 @@
 // Four budgets that do different jobs: the address bucket stops a flood, the
 // account bucket stops one machine grinding one name, the lockout arithmetic at
 // the bottom stops a guess spread across many addresses, and the confirmation
-// bucket stops a caller who is already logged in from using "prove it is you"
-// as a password oracle. The arithmetic of the third is the part that goes wrong
-// quietly — an escalation with no ceiling is a button for locking a colleague
-// out — and the fourth is the one whose absence would be invisible, since the
-// endpoint it guards deliberately charges nothing to the lockout.
+// bucket stops a caller who is already logged in from using "re-type your
+// password" as a password oracle. The arithmetic of the third is the part that
+// goes wrong quietly — an escalation with no ceiling is a button for locking a
+// colleague out — and the fourth is the one whose absence would be invisible,
+// since the routes it guards deliberately charge nothing to the lockout.
+//
+// The fourth is also the one that went wrong in the other direction, and the
+// reason `confirmCostsNothing` exists: it charged for every request, including
+// the ones that were somebody legitimately changing their own password and being
+// told the new one is too short. A budget that counts honest work runs out during
+// honest work.
 
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import type { RateLimitRequestHandler } from "express-rate-limit";
@@ -68,16 +74,17 @@ export function accountBucketKey(req: Request): string {
  * The key for confirming your own password, and it is the account — not the
  * address.
  *
- * `POST /api/auth/confirm-password` runs behind `authenticate`, so who is
- * asking is already known and comes off `req.user` rather than out of the body:
- * there is no username here to capitalise differently and buy a second bucket
- * with. Keying by account and not by address is what makes the budget follow
- * the thing being guessed at — somebody working through a stolen session's
- * password from a dozen addresses meets one bucket, not a dozen.
+ * Both routes behind this bucket run behind `authenticate` (mounted on
+ * `/api/usuario` in `app.ts`), so who is asking is already known and comes off
+ * `req.user` rather than out of the body: there is no username here to
+ * capitalise differently and buy a second bucket with. Keying by account and not
+ * by address is what makes the budget follow the thing being guessed at —
+ * somebody working through a stolen session's password from a dozen addresses
+ * meets one bucket, not a dozen.
  *
  * The fallback exists because a key generator that returns `undefined` would
  * put every caller in one bucket and lock the endpoint for everybody. It cannot
- * be reached through the mount in `auth.routes.ts` — `authenticate` answers 401
+ * be reached through either mount — `authenticate` answers 401
  * before this runs — so what it really guards is somebody mounting this limiter
  * somewhere it is not behind authentication, and it fails towards the
  * address-shaped budget rather than towards no budget at all. `ipKeyGenerator`
@@ -90,31 +97,88 @@ export function passwordConfirmKey(req: Request): string {
 }
 
 /**
- * The budget for re-typing your own password, and the only limit that endpoint
- * has.
+ * Whether an answer from a password-confirming route costs the caller anything.
  *
- * **No `skipSuccessfulRequests`, unlike both buckets above, and that is the
- * whole point of writing this as a third bucket instead of reusing one of
- * them.** `POST /api/auth/confirm-password` answers a wrong password with
- * **200** and `{ correcta: false }` — deliberately, so no client can mistake
- * "wrong password" for "server broken" by reading a status code — so a
- * refund rule based on the status would hand back exactly the attempts this
- * bucket exists to charge for. Every request counts here, right or wrong.
+ * `express-rate-limit` calls this option `requestWasSuccessful`; the honest name
+ * for what it decides is this one — see `costsNothing` below for the same note.
+ * Whatever this returns true for is refunded once the response has finished.
  *
- * What it costs: somebody who confirms correctly five times in a quarter of an
- * hour waits. Nobody renames themselves five times in a quarter of an hour, and
- * the answer they get says to wait rather than that their password is wrong.
+ * **Only the 401 costs, and the 401 is exactly "your current password is
+ * wrong".** On both routes this bucket now guards, that status has one producer
+ * and one meaning: the comparison ran and failed. Nothing else on either path
+ * answers 401 — `authenticate` does, but it runs at the mount in `app.ts`,
+ * before this middleware, so its refusals never reach the counter, and
+ * `requireSelfOrPermission` runs before it too.
  *
- * Why the endpoint needs a bucket of its own at all — rather than nothing, now
- * that a wrong answer there no longer touches `failed_attempts`: an
+ * **What this fixes, and it is the failure this whole bucket was most likely to
+ * produce in real use.** Every request used to count, right or wrong, and the
+ * charge happens before the handler evaluates anything — so the *legitimate*
+ * work of changing your own password was what emptied the budget. Somebody who
+ * types a new password of eight characters is told it needs twelve
+ * (`PASSWORD_MIN_LENGTH`; the profile screen still lets six through, which is
+ * the client's own bug and now a free one), tries nine, ten, eleven, mistypes
+ * their current password once along the way — and the sixth attempt is
+ * "Demasiados intentos. Espere unos minutos", for a quarter of an hour, on a
+ * bucket shared with the rename. A person doing nothing wrong, told to wait, by
+ * a limit whose whole stated premise was that nobody reaches five legitimately.
+ *
+ * The same applies to a cached frontend bundle from before this arc, which sends
+ * the rename with no `oldPass` at all: that is a 400, it can never succeed, and
+ * charging for it spent the budget of the very people the deploy window hurts.
+ *
+ * **Why it does not hand a guesser anything.** Probing means learning whether a
+ * password is right, and a guesser's requests are wrong almost every one — those
+ * are the 401s, and they all still cost. What is refunded is the answers that
+ * only arrive *after* the password was already right: the 400 for a new password
+ * that fails the policy, the 409 for a username already taken, the 200 of a
+ * change that went through. Somebody who can produce those knows the password
+ * already; giving them another free go at a secret they hold buys them nothing.
+ * So the effective budget against guessing is unchanged at
+ * `PASSWORD_CONFIRM_LIMIT` wrong passwords per `LOGIN_WINDOW_MS`, which is what
+ * the number was chosen for — and it now measures the same event the account
+ * lockout measures, at the same threshold, instead of measuring legitimate work.
+ *
+ * **The one thing that has to stay true**, written down because "somebody adds a
+ * case the enumeration does not cover" is the shape of half of this file's
+ * history: a route behind this bucket must answer a wrong current password with
+ * **401 and nothing else**. A door that reported one some other way — a 200
+ * carrying a boolean, say — would be refunded every guess. There was exactly
+ * such a door, `POST /api/auth/confirm-password`, and that is why this bucket
+ * could not have a refund rule until it was retired: it answered a wrong
+ * password with 200 on purpose, so no status-based rule could tell its two
+ * answers apart.
+ */
+export function confirmCostsNothing(_req: Request, res: Response): boolean {
+  return res.statusCode !== 401;
+}
+
+/**
+ * The budget for re-typing your own password, and the only limit those routes
+ * have.
+ *
+ * A third bucket rather than a reuse of either above, because it counts a
+ * different thing: not a flood and not a guess at a name, but a caller who is
+ * already inside putting passwords to an endpoint that compares them. See
+ * `confirmCostsNothing` for which answers it charges for and why the others are
+ * free.
+ *
+ * What it costs when it bites: somebody who gets their own current password
+ * wrong `PASSWORD_CONFIRM_LIMIT` times in a quarter of an hour waits, and the
+ * answer says to wait rather than that the password is wrong. That is the same
+ * threshold `LOCKOUT_AFTER_FAILURES` applies to the login, for the same event.
+ *
+ * Why these routes need a bucket at all — rather than nothing, given that a
+ * wrong answer there deliberately does not touch `failed_attempts`: an
  * authenticated endpoint that compares an unlimited number of passwords is a
- * password oracle for whoever already stole a session. The lockout cannot be
- * the answer (it would let anybody shut their own account out of the ERP by
+ * password oracle for whoever already stole a session. The lockout cannot be the
+ * answer (it would let anybody shut their own account out of the ERP by
  * mistyping while renaming themselves) so this is.
  */
 export const passwordConfirmLimiter = rateLimit({
   windowMs: LOGIN_WINDOW_MS,
   limit: PASSWORD_CONFIRM_LIMIT,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: confirmCostsNothing,
   keyGenerator: passwordConfirmKey,
   message: { message: "Demasiados intentos. Espere unos minutos antes de volver a confirmar." },
   standardHeaders: true,

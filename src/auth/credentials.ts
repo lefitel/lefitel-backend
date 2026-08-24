@@ -24,10 +24,15 @@
 // login itself, opening a session and spending a failed attempt to answer a
 // question about somebody already logged in. It shares `checkAgainstRow` with
 // the login rather than comparing a hash of its own, which is this file's whole
-// argument arriving on time: the second copy would have been the one without
-// the filler hash, or the one that never noticed a locked account.
+// argument arriving on time: the second copy would have been the one without the
+// filler hash, or the one that forgot to re-hash a password still stored at the
+// old cost.
 //
-// The two doors differ in exactly one thing and it has a name: `FailureCost`.
+// The two doors differ in exactly two things, and both have names:
+// `FailureCost` and `LockoutPolicy`. Sharing the implementation is only worth
+// anything while the differences stay arguments — the moment one of them is
+// answered by an `if` reading which caller this is, there are two doors again
+// with one of them written by accident.
 //
 // Both return a result rather than writing a response, so each caller decides
 // its own status codes and cannot accidentally say something different about
@@ -100,6 +105,40 @@ export type ResultadoCredenciales =
  *   `PASSWORD_CONFIRM_LIMIT`.
  */
 type FailureCost = "lockout" | "audit-only";
+
+/**
+ * Whether the per-account lockout is this door's business at all.
+ *
+ * The second named difference between the two doors, and it exists because
+ * getting it wrong shut somebody out of the one screen that could rescue them.
+ *
+ * - `"refuse"` — the login. While `locked_until` is in the future the answer is
+ *   "no" before anything is compared, filler hash included. That is the whole
+ *   point of a lockout: the account rests, and while it rests no password gets
+ *   it in. Answering differently — or faster — while locked would turn the
+ *   lockout into an oracle naming which accounts are shut.
+ * - `"ignore"` — confirming your own password on an endpoint reached with a live
+ *   session. The lockout counts *login* attempts, and `authenticate` does not
+ *   read it (deliberately), so somebody whose account was locked by another
+ *   machine grinding their username keeps working in the session they already
+ *   had. Every other authenticated endpoint answers them normally; refusing
+ *   *this* one would tell them their own correct password is wrong, spend the
+ *   `PASSWORD_CONFIRM_LIMIT` budget on the lie, and — since that budget is
+ *   shared with the password change — close the only self-service way out of
+ *   the lockout they are in. So the lockout is left to the door it belongs to.
+ *
+ * **The consequence of `"ignore"`, said out loud rather than discovered.** The
+ * success path below clears `failed_attempts` and `locked_until`, so a caller
+ * who confirms the *right* password while locked comes out unlocked. That is
+ * deliberate and it costs the correct password: `updateUserPass` already lifts a
+ * lockout on purpose for the same evidence, and whoever knows the password could
+ * wait out the fifteen-minute ceiling regardless. What used to make this
+ * uncomfortable was `POST /api/auth/confirm-password`, an endpoint that compared
+ * a password with no operation behind it — a pure side entrance onto the
+ * lockout. It is retired, so every door that reaches here now performs
+ * something.
+ */
+type LockoutPolicy = "refuse" | "ignore";
 
 /**
  * Whether the caller re-typed their own password correctly.
@@ -190,6 +229,7 @@ export async function verifyCredentials(input: {
     ip,
     typedAs: user,
     failure: "lockout",
+    lockout: "refuse",
   });
 }
 
@@ -199,14 +239,17 @@ export async function verifyCredentials(input: {
  * Two doors share it: the login, which found the row by the username somebody
  * typed, and `verifyOwnPassword`, which found it by the id of the session
  * already asking. What is identical between them is everything here — the
- * locked-account refusal, the comparison, the filler hash that levels the
- * timings, clearing the slate on success and re-hashing at the current cost.
- * What differs is one thing only, and it is named rather than implied:
- * `failure`.
+ * comparison, the filler hash that levels the timings, clearing the slate on
+ * success and re-hashing at the current cost. What differs is two things, and
+ * both are named rather than implied: `failure` and `lockout`.
  *
- * Written as one function taking a named policy rather than two functions with
+ * Written as one function taking named policies rather than two functions with
  * a copy each, for the reason at the top of this file: the part a second copy
- * loses is the part with no visible effect on a successful check.
+ * loses is the part with no visible effect on a successful check. And the two
+ * policies are arguments rather than one boolean called `isLogin`, because that
+ * name would answer "which caller is this" instead of "what should happen" —
+ * the next door would have to decide whether it counts as a login, which is a
+ * question about nothing.
  */
 async function checkAgainstRow(input: {
   /** The account row, as read from the database. */
@@ -223,13 +266,19 @@ async function checkAgainstRow(input: {
   typedAs: string;
   /** What a wrong password costs this account — see `FailureCost`. */
   failure: FailureCost;
+  /** Whether a resting account is refused here — see `LockoutPolicy`. */
+  lockout: LockoutPolicy;
 }): Promise<ResultadoCredenciales> {
-  const { row: data, pass, ip, typedAs: user, failure } = input;
+  const { row: data, pass, ip, typedAs: user, failure, lockout } = input;
 
-  // A locked account answers exactly like a wrong password, filler hash
-  // included. Answering differently — or faster — turns the lockout into the
-  // oracle the uniform message was meant to close.
-  if (estaBloqueada(data)) {
+  // On the login, a locked account answers exactly like a wrong password,
+  // filler hash included. Answering differently — or faster — turns the lockout
+  // into the oracle the uniform message was meant to close.
+  //
+  // On the confirmation door it is skipped entirely, and that is not a
+  // relaxation of this check: it is refusing to apply a *login* limit to a
+  // caller who is already inside. See `LockoutPolicy` for the case it broke.
+  if (lockout === "refuse" && estaBloqueada(data)) {
     await bcryptjs.compare(pass, await fillerHash());
     return { ok: false, message: CREDENCIALES_INVALIDAS };
   }
@@ -411,14 +460,24 @@ async function checkAgainstRow(input: {
  * handled: there is no name to probe with, and the only account this can be
  * asked about is the caller's own.
  *
- * **A locked account still refuses.** `checkAgainstRow` returns before it
- * compares anything while `locked_until` is in the future, so a locked account
- * gets `wrong-password` here even for the right password. Kept deliberately,
- * and the reason is on the other side: the success path clears
- * `failed_attempts` and `locked_until`, so letting a locked account through
- * this door would turn it into a way of lifting a lockout — a security control
- * undone by a side entrance. Refusing is the wrong sentence for that one
- * caller; letting them in would be the wrong behaviour for everybody.
+ * **A locked account is answered normally, and that is a fix.** This asked
+ * `checkAgainstRow` for the login's lockout policy until now, so while
+ * `locked_until` was in the future it returned `wrong-password` **for the right
+ * password**, before comparing anything. The reason given was that the success
+ * path clears `failed_attempts` and `locked_until`, so letting a locked account
+ * through would be a side entrance onto the lockout.
+ *
+ * That reasoning was answered on the other door and not here. `updateUserPass`
+ * compares its own hash precisely so that a locked account can change its
+ * password — `authenticate` does not read `locked_until`, so the session survives
+ * the lockout and changing the password is the way out — and `updateUserName`,
+ * the only caller left here, was wired to this door a commit earlier. So somebody
+ * whose account had been locked by another machine grinding their username was
+ * told their own correct password was wrong, five times, and the sixth answer was
+ * a 429 out of a budget shared with the password change: the rescue closed too.
+ *
+ * `lockout: "ignore"` is the whole fix, and `LockoutPolicy` carries the argument
+ * — including what it means that a correct confirmation now lifts the lockout.
  *
  * Throws nothing of its own; a database failure propagates, and the endpoint
  * turns it into a 500.
@@ -455,6 +514,7 @@ export async function verifyOwnPassword(input: {
     // username. It is what the bitácora line is addressed to.
     typedAs: found.dataValues.user,
     failure: "audit-only",
+    lockout: "ignore",
   });
 
   // The `usuario` and the sentence `checkAgainstRow` returns are deliberately

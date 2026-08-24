@@ -19,16 +19,19 @@ import { passwordConfirmLimiter } from "../middleware/loginLimiters.js";
 const router = Router();
 
 /**
- * Confirming your own password costs the same on these two routes as on
- * `POST /api/auth/confirm-password`, and out of the same bucket.
+ * Confirming your own password costs the same on these two routes, out of one
+ * bucket, and only when it was wrong.
  *
  * Both `updateUserName` and `updateUserPass` compare a password now, and an
  * authenticated endpoint that compares an unlimited number of them is a
  * password oracle for whoever already stole a session — the sentence
  * `passwordConfirmLimiter` exists for. Without this, closing the client-side
  * hole on the rename would have been a net loss: an attacker holding a stolen
- * session would simply guess against a route that counts nothing instead of
- * against the confirmation endpoint, which counts five per quarter of an hour.
+ * session would simply guess against a route that counts nothing.
+ *
+ * These are the only two routes on that bucket now. `POST
+ * /api/auth/confirm-password` was a third, and it is retired — see
+ * `auth.routes.ts`.
  *
  * **`updateUserPass` needed it more, and had it least.** It has compared
  * `oldPass` since long before this plan, with no bucket of any kind on the
@@ -45,21 +48,35 @@ const router = Router();
  *
  * **The same bucket, not one per route**, because it is the same secret being
  * guessed at by the same account. Separate buckets keyed the same way would
- * hand out fifteen attempts a quarter of an hour to anybody willing to
- * alternate three endpoints, which is what counting several doors onto one room
- * separately gets you.
+ * hand out ten attempts a quarter of an hour to anybody willing to alternate the
+ * two, which is what counting several doors onto one room separately gets you.
  *
- * Charged only when the request actually confirms a password, decided by
- * `requiresOwnPassword` — the very function both handlers branch on, so the
- * limit and the checks cannot drift apart. Two things follow from that. An
- * administrator renaming or resetting *other people's* accounts sends no
- * password and pays nothing: billing those would answer 429 to the sixth piece
- * of legitimate work in a quarter of an hour. And nobody can dodge the budget
- * by mis-spelling the password field, because what is measured is *whose*
- * account is being changed, not what the body happens to carry.
+ * **What keeps a stranger from emptying somebody else's allowance is this
+ * function, not where it is mounted.** Charged only when the request actually
+ * confirms a password, decided by `requiresOwnPassword` — the very function both
+ * handlers branch on, so the limit and the checks cannot drift apart. Three
+ * things follow. An administrator renaming or resetting *other people's*
+ * accounts sends no password and pays nothing: billing those would answer 429 to
+ * the sixth piece of legitimate work in a quarter of an hour. Nobody can dodge
+ * the budget by mis-spelling the password field, because what is measured is
+ * *whose* account is being changed, not what the body happens to carry. And a
+ * caller reaching for an account that is not theirs charges nothing at all — not
+ * their own bucket and not the target's — because the only bucket this could
+ * touch is the caller's own and it is not touched.
  *
- * After the permission guard, so a request that was never allowed through does
- * not spend anybody's attempts.
+ * **Mounted after the permission guard, and that order is on purpose even though
+ * nothing observable depends on it today.** The two conditions coincide:
+ * `requiresOwnPassword` is true exactly when the target is the caller, and
+ * `requireSelfOrPermission` always lets the caller through for their own record,
+ * so no request exists that the guard refuses and this would have charged. The
+ * order is asserted structurally in `app.auth.test.ts` rather than through a
+ * response, because that is the honest way to pin a property no response can
+ * show — and it is worth pinning: the day the charge condition widens (an
+ * administrator sending `oldPass` for somebody else, say, which the MFA plan's
+ * step-up could easily want), this order becomes the only thing between a
+ * stranger and a stranger's allowance. This comment used to claim the protection
+ * came from the order, and a test claimed to hold it while passing with the two
+ * swapped.
  */
 function chargeConfirmBudgetOnSelfChange(req: Request, res: Response, next: NextFunction) {
   if (!requiresOwnPassword(req)) return next();

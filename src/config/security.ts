@@ -65,17 +65,28 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
  *
  * A different budget from the two above and not a copy of them, because it is
  * the *only* thing standing between a stolen session and an unlimited password
- * oracle: `POST /api/auth/confirm-password` deliberately does not move the
- * per-account lockout — see `verifyOwnPassword` for why the caller confirming
- * themselves must not be able to lock themselves out — so this is the whole of
- * the limit there.
+ * oracle. Renaming your own account and changing your own password both compare
+ * a password, and neither moves the per-account lockout — see `verifyOwnPassword`
+ * for why a caller confirming their own password must not be able to lock
+ * themselves out — so this is the whole of the limit on both.
  *
- * Five, and the two sides of the number:
+ * **Five *wrong passwords*, not five requests, and the difference is the whole
+ * reason the number survives.** It used to be five requests: every call counted,
+ * charged before the handler evaluated anything, so a person changing their own
+ * password legitimately — new one too short, try again a character longer — spent
+ * the budget doing nothing wrong, and was told to wait on a bucket shared with
+ * the rename. The premise written here was "nobody legitimately reaches five in
+ * a quarter of an hour", and with a charge on every request that premise was
+ * simply false. `confirmCostsNothing` in `middleware/loginLimiters.ts` is what
+ * makes it true: only the answer that means "the password you typed is not
+ * yours" costs anything.
  *
- * - A person confirming a change to their own username needs one attempt, or
- *   two after a typo. Nobody legitimately reaches five in a quarter of an hour,
- *   and the answer when they do says to wait rather than that the password is
- *   wrong.
+ * So the two sides of the number are:
+ *
+ * - Five wrong attempts at your own current password in a quarter of an hour is
+ *   the same threshold `LOCKOUT_AFTER_FAILURES` puts on the login for the same
+ *   event, and the answer when it bites says to wait rather than that the
+ *   password is wrong.
  * - Five per quarter hour is twenty an hour against a bcrypt hash at
  *   `BCRYPT_COST` and a password of at least `PASSWORD_MIN_LENGTH` characters.
  *   That is not a search.
@@ -87,6 +98,13 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
  * bigger doors than this one; somebody who only holds the cookie gets twenty an
  * hour and leaves a `PASSWORD_CONFIRM_FAILED` line in the bitácora for every
  * one of them.
+ *
+ * **One bucket for both routes, deliberately** — see `usuario.routes.ts`. They
+ * are two doors onto one secret, and counting them separately would hand out ten
+ * attempts a quarter of an hour to anybody willing to alternate. Sharing is what
+ * made the old charge-everything rule hurt (a rename you could not perform
+ * because you had been fighting the password form) and the refund is what fixes
+ * that, rather than splitting the bucket and giving the guesser double.
  */
 export const PASSWORD_CONFIRM_LIMIT = 5;
 

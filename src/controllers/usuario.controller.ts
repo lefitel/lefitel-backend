@@ -459,19 +459,32 @@ export async function updateUserName(req: Request, res: Response) {
      * taken. It costs an early return on a request that was going to be a 409
      * anyway.
      *
-     * **`verifyOwnPassword` and not a `bcryptjs.compare` of its own.** It is
-     * word for word the question the confirmation endpoint asks — is this the
-     * password of the account already asking? — and it carries everything a
-     * fresh comparison here would have quietly lacked: the `checkAgainstRow`
-     * the login shares, the filler hash that levels the timings, the refusal to
-     * let a locked account through a side door that would clear its own
-     * lockout, and a `PASSWORD_CONFIRM_FAILED` line that records the failed
-     * attempt without forging a login nobody made.
+     * **`verifyOwnPassword` and not a `bcryptjs.compare` of its own.** It asks
+     * exactly the question this needs answered — is this the password of the
+     * account already asking? — and it carries what a fresh comparison here
+     * would have quietly lacked: the `checkAgainstRow` the login shares, the
+     * filler hash that levels the timings, and a `PASSWORD_CONFIRM_FAILED` line
+     * that records the failed attempt without forging a login nobody made. This
+     * is that function's only caller now, since the confirmation endpoint it was
+     * written alongside is retired.
+     *
+     * **It does not apply the lockout, and that took a defect to get right.**
+     * This paragraph used to list "the refusal to let a locked account through a
+     * side door that would clear its own lockout" among the things borrowed here,
+     * as though it were a benefit. It was the opposite. `authenticate` does not
+     * read `locked_until`, so somebody whose account was locked by another
+     * machine grinding their username keeps the session they already had and
+     * keeps working — and this screen told them their **correct** password was
+     * wrong, charged the shared budget for the lie, and at the fifth attempt
+     * answered 429 on the same bucket as the password change, which was their way
+     * out. `LockoutPolicy` in `auth/credentials.ts` is where that decision lives
+     * now, by name.
      *
      * It also, on purpose, does **not** touch `failed_attempts`: mistyping your
      * own password while renaming yourself must not be able to shut you out of
      * the ERP. That is why the budget against guessing lives on the route
-     * instead — see `usuario.routes.ts`.
+     * instead — see `usuario.routes.ts`, and note that the budget only charges
+     * for the 401 below, so a rename that fails for any other reason is free.
      *
      * The id comes from `req.user` and never from `:id`. They are equal here by
      * the check just made, and reading it off the session is what keeps that
@@ -569,26 +582,29 @@ export async function updateUserPass(req: Request, res: Response) {
      *
      * **`bcryptjs.compare` here, and not the shared `verifyOwnPassword` the
      * rename uses.** Two ways of comparing a password in one file needs a
-     * reason, and there is one: the shared door **refuses a locked account
-     * before it compares anything**, deliberately, so that confirming a
-     * password can never become a way of lifting a lockout. That is right for
-     * that door and wrong for this one, because here lifting the lockout is the
-     * *point* — see the write below. `authenticate` does not read
-     * `locked_until`, so the owner of an account somebody else locked by
-     * grinding its username keeps the session they already had, and changing
-     * their password is their way out. Routed through the shared door, that
-     * request would be told their current password is wrong while it was right,
-     * and the only self-service exit from a lockout would close.
+     * reason, and the reason has changed — which is worth saying, because the
+     * one written here first was the load-bearing one and it is gone.
      *
-     * The rest of what the shared door carries has nothing to do here either.
+     * It was the lockout. The shared door refused a resting account before it
+     * compared anything, and that is exactly wrong for this handler, where
+     * lifting the lockout is the *point* — see the write below. So this compared
+     * its own hash to stay out of the way of it. That refusal turned out to be
+     * wrong for the **rename** too, for the same reason and with worse
+     * consequences, and it is now a named policy rather than a fact about the
+     * shared door: see `LockoutPolicy` in `auth/credentials.ts`. Both doors leave
+     * the lockout to the login, so this handler could go through the shared one
+     * today without breaking the rescue.
+     *
+     * What keeps them separate now is only the wasted work, and it is enough to
+     * leave alone rather than enough to have chosen. The shared door reads the
+     * row again by id — this handler is holding it already, forty lines above.
      * Its filler hash levels the timing of a lookup *by username*, to stop
-     * enumeration; this row was found by an id off the session, there is no
-     * name in the request to probe with, and "no such account" was already
-     * answered as a 404 above. And its success path re-hashes at the current
-     * cost and clears the two lockout columns — both of which the write forty
-     * lines below is about to do anyway, inside a transaction, so borrowing
-     * them would buy a second bcrypt hash and two UPDATEs whose results are
-     * immediately overwritten.
+     * enumeration; there is no name in this request to probe with, and "no such
+     * account" was answered as a 404 above. And its success path re-hashes at
+     * the current cost and clears the two lockout columns — both of which the
+     * write below is about to do anyway, inside a transaction, so borrowing them
+     * would buy a second bcrypt (~250 ms on every password change) and two
+     * UPDATEs whose results are immediately overwritten.
      *
      * What is worth borrowing is the bitácora line, and it is taken: the same
      * action name `verifyOwnPassword` writes, so a run of failed confirmations

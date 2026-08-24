@@ -14,9 +14,8 @@
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
-import { loginRateLimit, passwordConfirmLimiter } from "../middleware/loginLimiters.js";
+import { loginRateLimit } from "../middleware/loginLimiters.js";
 import {
-  confirmPassword,
   endSession,
   login,
   logout,
@@ -43,27 +42,36 @@ const router = Router();
  */
 router.post("/login", loginRateLimit, login);
 
-/**
- * `POST /confirm-password` — "is this my password?", for a screen that needs to
- * be sure it is really you before it changes something.
- *
- * **`authenticate` first, then the bucket, and the order is load-bearing.**
- * `passwordConfirmLimiter` counts against the caller's account id, which only
- * exists on `req.user` after `authenticate` has run; mounted the other way
- * round it would key every caller the same and the first five attempts by
- * anybody would spend the budget for everybody. Written in this order the
- * budget also cannot be emptied by an unauthenticated stranger, because a
- * request with no session never reaches it.
- *
- * It is the endpoint that replaced "call the login and see if it works", which
- * is why it is on this router and not beside the profile routes: what it does is
- * check a credential, and this is the file where credentials are checked. See
- * `confirmPassword` in `auth.controller.ts` for what it deliberately does not
- * do — no cookie, no session row, no bitácora line saying somebody logged in —
- * and for why a wrong password is a 200 with `correcta: false` rather than a
- * 4xx.
- */
-router.post("/confirm-password", authenticate, passwordConfirmLimiter, confirmPassword);
+// `POST /confirm-password` used to sit here, and it is retired rather than
+// merely unused — which is the harder of the two things to do and the reason
+// this note stays.
+//
+// It answered "is this my password?" for a screen that wanted to be sure before
+// it changed something, and it existed because that screen used to ask the
+// question **by calling the login**. Replacing that was right. Asking *before*
+// the operation was not: the rule that settled it is the one the rename and the
+// password change both follow now — the credential that authorises an operation
+// travels in the request that performs it, so there is nothing in between for a
+// separate confirmation to protect. A `pass` in the body of the write is a gate;
+// a "yes" collected a moment earlier is a promise the next request does not have
+// to keep.
+//
+// The step-up the MFA design asks for reads the same way: see
+// `docs/specs/2026-08-21-autenticacion-mfa-design.md` §step-up, where the first
+// enrolment of a factor "exige reintroducir la contraseña" — i.e. `pass` on
+// `POST /auth/totp/setup`, not a confirmation call before it. Everything else on
+// that list is satisfied by `mfa_satisfied_at` and no password at all.
+//
+// What it cost while it was mounted: it was the only endpoint in the API that
+// compared a password with **no operation behind it**, any authenticated session
+// could reach it, and it drank from the same `pc:<id>` budget as the two doors
+// people actually use. It also forced that budget to charge every request right
+// or wrong, because it answered a wrong password with 200 — see
+// `passwordConfirmLimiter`, which can now refund the legitimate work it was
+// charging for.
+//
+// `verifyOwnPassword` in `auth/credentials.ts` is what stays: it has a real
+// caller in `updateUserName`, and `auth/verifyOwnPassword.test.ts` holds it.
 
 router.get("/me", authenticate, me);
 router.post("/logout", authenticate, logout);

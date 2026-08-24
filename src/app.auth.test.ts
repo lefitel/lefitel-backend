@@ -44,8 +44,29 @@ vi.mock("bcryptjs", () => ({
 
 const app = (await import("./app.js")).default;
 const { SESSION_COOKIE_NAME } = await import("./auth/sessionCookie.js");
-const { allowedOrigins, CSRF_CLIENT_HEADER, PASSWORD_CONFIRM_LIMIT, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_DAYS, SESSION_TOUCH_THROTTLE_MINUTES } =
+const { allowedOrigins, CSRF_CLIENT_HEADER, LOCKOUT_AFTER_FAILURES, PASSWORD_CONFIRM_LIMIT, PASSWORD_MIN_LENGTH, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_DAYS, SESSION_TOUCH_THROTTLE_MINUTES } =
   await import("./config/security.js");
+/**
+ * The two sentences the credential gates answer with, imported rather than
+ * retyped.
+ *
+ * Both routes below answer more than one 4xx, and this project has been caught
+ * four times by a test that read only the number: a 401 is also what
+ * `authenticate` says, and a 400 is what a username that is not a string gets.
+ * Pinning the sentence is what makes those tests fail for the right reason —
+ * and importing it, rather than writing the Spanish out, is deliberate here for
+ * the opposite reason to `CABECERA_ROL` below: this is a message shown to a
+ * person, not a wire format two repositories have to agree on byte for byte.
+ */
+const { CURRENT_PASSWORD_REQUIRED_MESSAGE, CURRENT_PASSWORD_WRONG_MESSAGE } = await import(
+  "./controllers/usuario.controller.js"
+);
+/**
+ * The `/api/usuario` router itself, for the one assertion that is about the
+ * mounted middleware chain rather than about a response. See "mounts the
+ * permission guard before the budget on both routes".
+ */
+const usuarioRouter = (await import("./routes/usuario.routes.js")).default;
 
 /**
  * The two response header names the frontend hard-codes, written out here.
@@ -676,237 +697,16 @@ describe("the session list", () => {
   });
 });
 
-describe("confirming your own password, through the real stack", () => {
-  /**
-   * The endpoint that replaced "call the login and see whether it works".
-   *
-   * What only a request through the mount can see is the wiring, and there are
-   * four wires here: `authenticate` in front of it (without which any stranger
-   * could ask), `requireSameOrigin` in front of that (without which any page on
-   * the internet could ask through somebody's browser), the rate limiter behind
-   * `authenticate` and not in front of it, and the absence of everything the old
-   * implementation emitted — a `Set-Cookie`, a session row, a bitácora line
-   * claiming somebody logged in.
-   */
-  const CLAVE = `pc:${YO}`;
-
-  /**
-   * The bucket is a module singleton shared with the real app, so each test
-   * starts with the caller's budget full. Without this the sixth request in
-   * this describe would be a 429 wherever it happened to fall.
-   */
-  beforeEach(async () => {
-    await passwordConfirmLimiter.resetKey(CLAVE);
-  });
-
-  it("is mounted, and refuses without a session cookie", async () => {
-    const res = await request(app).post("/api/auth/confirm-password").send({ pass: "x" });
-
-    // Not 404: the route exists. Not 500: nothing in the chain threw.
-    expect(res.status).toBe(401);
-    // Pinned on the reason and not only the number, because 401 is reachable
-    // from three places on this path — no cookie, a dead session, an archived
-    // account — and a test that reads the number alone passes for a route
-    // mounted without `authenticate` that happens to answer 401 for its own
-    // reasons. This is `authenticate`'s own sentence.
-    expect(res.body.message).toBe("Su sesión expiró. Vuelva a iniciar sesión.");
-    // And nothing was compared: no password check ran at all.
-    expect(usuarioFindByPk).not.toHaveBeenCalled();
-  });
-
-  it("refuses a cookie-carrying request that cannot show it came from our own frontend", async () => {
-    // Without this, a page on any other site could put somebody's password to
-    // this endpoint through their own browser — cookies and all — and read the
-    // answer off the response's timing or the count of failures in the bitácora.
-    // `requireSameOrigin` runs before the router, so the request never reaches
-    // the handler.
-    const res = await request(app)
-      .post("/api/auth/confirm-password")
-      .set("Cookie", COOKIE)
-      .send({ pass: "una-clave-de-prueba" });
-
-    expect(res.status).toBe(403);
-    expect(usuarioFindByPk).not.toHaveBeenCalled();
-  });
-
-  it("says yes without issuing anything: no cookie, no session row, no bitácora line", async () => {
-    const { logAction } = await import("./utils/logAction.js");
-    const bcryptjs = (await import("bcryptjs")).default;
-    /**
-     * A row carrying a hash, for this test only.
-     *
-     * The shared fixture in `beforeEach` has no `pass` — it is written for
-     * `authenticate`, which asks for two columns — and with `bcryptjs.compare`
-     * mocked to resolve true, this test would have said "correcta: true" while
-     * the endpoint compared against `undefined`. Which is the whole family of
-     * mistake this file exists to catch, so the hash is put back and the
-     * comparison itself is asserted below.
-     */
-    usuarioFindByPk.mockResolvedValue({
-      dataValues: {
-        id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
-        name: "Isaias", lastname: "Salas", image: null, failed_attempts: 0, locked_until: null,
-      },
-    } as never);
-
-    const res = await request(app)
-      .post("/api/auth/confirm-password")
-      .set("Cookie", COOKIE)
-      .set(DEL_FRONTEND)
-      .send({ pass: "una-clave-de-prueba" });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ correcta: true });
-    // The four effects of the old implementation, one assertion each.
-    //
-    // No `Set-Cookie` at all, and that is not luck: `beforeEach` gives the
-    // session a fresh `last_used_at`, so the sliding renewal is throttled off
-    // and the only thing that could set a cookie here is somebody opening a
-    // session. Which is the thing being asserted against.
-    expect(res.headers["set-cookie"]).toBeUndefined();
-    expect(sesionCreate).not.toHaveBeenCalled();
-    expect(logAction).not.toHaveBeenCalled();
-    // Read by the caller's own id, from the cookie's session, and not by
-    // anything in the body.
-    expect(usuarioFindByPk).toHaveBeenCalledWith(YO);
-    // And it really compared what arrived against what is stored, rather than
-    // answering yes off a row it never read a hash out of.
-    expect(bcryptjs.compare).toHaveBeenCalledWith("una-clave-de-prueba", "$2a$12$hash");
-  });
-
-  it("says no in the body, with a 200, and charges the account nothing", async () => {
-    /**
-     * The break-it test of this task: make the endpoint answer "correcta" always
-     * and this is what falls.
-     *
-     * It asserts the **field**, not the status, and that is deliberate — this
-     * endpoint answers 200 either way, so a status assertion would pass for both
-     * answers. The plan has already been caught by the other version of this
-     * mistake once, a `toBe(401)` that stayed green with a broken branch
-     * restored because something else on the path answered 401 too.
-     *
-     * `increment` is stubbed for this one case rather than left real. The
-     * wrong-password branch of the *login* calls it, which is why the comment at
-     * the end of this file says a test that reached that branch really did send
-     * an UPDATE to whatever `.env` points at; the confirmation branch must not
-     * call it at all, and stubbing it is what turns a regression to the lockout
-     * policy into the failed assertion below instead of a write against a real
-     * database.
-     */
-    const usuarioIncrement = vi.spyOn(UsuarioModel, "increment").mockResolvedValue([[], 0] as never);
-    const bcryptjs = (await import("bcryptjs")).default;
-    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
-    // With a hash on the row, for the reason spelled out in the test above: on
-    // the shared fixture the comparison would be against `undefined`, and then
-    // "correcta: false" would also be what a handler that never compares
-    // anything answers.
-    usuarioFindByPk.mockResolvedValue({
-      dataValues: {
-        id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
-        name: "Isaias", lastname: "Salas", image: null, failed_attempts: 0, locked_until: null,
-      },
-    } as never);
-    try {
-      const res = await request(app)
-        .post("/api/auth/confirm-password")
-        .set("Cookie", COOKIE)
-        .set(DEL_FRONTEND)
-        .send({ pass: "no-es-la-suya" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.correcta).toBe(false);
-      // Nothing about the account, and a sentence that does not mention a
-      // username the caller never sent.
-      expect(res.body.message).toBe("Esa no es su contraseña actual.");
-      // The "no" came out of a real comparison against the stored hash.
-      expect(bcryptjs.compare).toHaveBeenCalledWith("no-es-la-suya", "$2a$12$hash");
-      // The reason the whole endpoint exists: a typo while renaming yourself
-      // must not spend a failed login attempt, because five of them shut the
-      // account.
-      expect(usuarioIncrement).not.toHaveBeenCalled();
-    } finally {
-      usuarioIncrement.mockRestore();
-      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
-    }
-  });
-
-  it("runs out of attempts long before it becomes a way of guessing a password", async () => {
-    /**
-     * The limit that replaces the lockout on this door, on the real mount and
-     * against the real bucket.
-     *
-     * Somebody who has stolen a session cookie can ask this endpoint "is the
-     * password X?" as often as it will answer, and a wrong answer here costs the
-     * account nothing by design. `PASSWORD_CONFIRM_LIMIT` is therefore the whole
-     * of the limit, and it is keyed by the account rather than the address so
-     * that asking from twenty addresses is still one budget.
-     */
-    const bcryptjs = (await import("bcryptjs")).default;
-    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
-    try {
-      const attempt = () =>
-        request(app)
-          .post("/api/auth/confirm-password")
-          .set("Cookie", COOKIE)
-          .set(DEL_FRONTEND)
-          .send({ pass: "adivinando" });
-
-      for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
-        const res = await attempt();
-        expect(res.status, `intento ${i + 1}`).toBe(200);
-        expect(res.body.correcta, `intento ${i + 1}`).toBe(false);
-      }
-
-      const cortado = await attempt();
-      expect(cortado.status).toBe(429);
-      // And the refusal is not readable as an answer about the password. The
-      // client requires `correcta === true`, so a 429 stops it dead — but a
-      // body carrying `correcta: false` here would tell a guesser that this
-      // particular attempt was wrong, which is exactly what the budget is
-      // meant to stop them learning.
-      expect(cortado.body).not.toHaveProperty("correcta");
-
-      // The wrong password is what was charged for, not the answer's status: a
-      // correct one costs a token from the same bucket, which is why nothing
-      // here relies on `skipSuccessfulRequests`.
-      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
-      const aunCortado = await attempt();
-      expect(aunCortado.status).toBe(429);
-    } finally {
-      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
-    }
-  });
-
-  it("keeps one budget per account, not one for everybody", async () => {
-    // A key generator that ignored `req.user` — or fell back to a constant —
-    // would put the whole company in one bucket, and five attempts by one
-    // person would lock the endpoint for everyone. The key is read out of the
-    // bucket rather than inferred from a second caller's 200, because two
-    // accounts cannot easily be signed in at once through this harness.
-    await request(app)
-      .post("/api/auth/confirm-password")
-      .set("Cookie", COOKIE)
-      .set(DEL_FRONTEND)
-      .send({ pass: "una-clave-de-prueba" });
-
-    const mio = (await passwordConfirmLimiter.getKey(CLAVE)) as { totalHits?: number } | undefined;
-    expect(mio?.totalHits).toBe(1);
-    // Nothing landed in an address-shaped bucket, which is what the fallback in
-    // `passwordConfirmKey` would have produced had `req.user` not been read.
-    expect(await passwordConfirmLimiter.getKey("pc:ip:::ffff:127.0.0.1")).toBeUndefined();
-  });
-});
-
 /**
  * Renaming your own account and changing your own password are both gated on
- * your password, and both pay out of the same bucket as the confirmation
- * endpoint.
+ * your password, they pay out of one bucket, and the bucket charges for exactly
+ * one answer: the 401 that says the password was not theirs.
  *
  * Every part of that is a one-line mistake no unit test can see, because none
  * of it is in a handler. The gates themselves are pinned in
  * `usuario.controller.test.ts`; what is pinned here is the mount — that each
- * route really runs behind the budget, and that it is the budget the
- * confirmation endpoint already had rather than one more of them.
+ * route really runs behind the budget, that it is one budget and not one each,
+ * and which answers cost something.
  *
  * **Why they need a budget at all.** Both handlers compare a password, and a
  * wrong one deliberately does not move `failed_attempts` — so that mistyping
@@ -918,52 +718,175 @@ describe("confirming your own password, through the real stack", () => {
  * `oldPass` since long before this plan, with no bucket anywhere, and its
  * oracle is the cleaner one — a guess sent with a new password that fails the
  * policy comes back 401 when the guess is wrong and 400 when it is right.
+ *
+ * **And that 400 is why the refund exists.** It is also what somebody is told
+ * for typing a new password of eight characters, which is not a guess at
+ * anything — the comparison already said yes — so charging for it meant the
+ * legitimate work of changing your own password was what emptied the budget,
+ * and emptied the rename's with it. See `confirmCostsNothing`.
  */
-describe("changing your own credentials spends the budget for confirming a password", () => {
+describe("changing your own credentials spends the budget for a wrong password, and for nothing else", () => {
   const CLAVE_RENOMBRE = `pc:${YO}`;
+  const DEMASIADO_CORTA = `La contraseña debe tener al menos ${PASSWORD_MIN_LENGTH} caracteres.`;
+
+  /**
+   * express-rate-limit hands a refund back from the response's own `finish`
+   * handler, which is asynchronous: supertest resolves before it runs, so
+   * without one turn of the event loop every assertion below reads the charge
+   * that is about to be given back.
+   */
+  const settled = () => new Promise((resolve) => setImmediate(resolve));
+  const gastado = async () =>
+    ((await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)) as { totalHits?: number } | undefined)
+      ?.totalHits;
+
+  /**
+   * The account row with its password hash on it, which the shared fixture
+   * deliberately leaves off.
+   *
+   * `beforeEach` builds the row `authenticate` asks for — two columns — and both
+   * handlers here compare against `dataValues.pass`. Left as it is, every
+   * comparison below would run against `undefined` while `bcryptjs.compare` is
+   * mocked to say yes, which is the exact family of mistake this file exists to
+   * catch.
+   */
+  const conHash = (extra: Record<string, unknown> = {}) => ({
+    dataValues: {
+      id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
+      name: "Isaias", lastname: "Salas", image: null,
+      failed_attempts: 0, locked_until: null, ...extra,
+    },
+  });
+
+  /**
+   * The same row, writable the way a Sequelize instance is.
+   *
+   * Needed only by the tests that assert a change actually went through. The
+   * plain object above has no `set`, so a handler that reaches the write answers
+   * 500 — which is why the two administrator tests below assert by exclusion
+   * instead.
+   */
+  const escribible = (extra: Record<string, unknown> = {}) => {
+    const row = conHash(extra);
+    return {
+      dataValues: row.dataValues,
+      set: (patch: Record<string, unknown>) => Object.assign(row.dataValues, patch),
+      save: async () => undefined,
+      toJSON: () => ({ ...row.dataValues }),
+    };
+  };
 
   beforeEach(async () => {
     await passwordConfirmLimiter.resetKey(CLAVE_RENOMBRE);
+    await passwordConfirmLimiter.resetKey("pc:99");
+    usuarioFindByPk.mockResolvedValue(conHash() as never);
   });
 
-  it("charges the caller's account for a rename of their own", async () => {
-    const res = await request(app)
-      .put(`/api/usuario/username/${YO}`)
-      .set("Cookie", COOKIE)
-      .set(DEL_FRONTEND)
-      .send({ user: "isalas" });
+  it("charges the caller's account for a rename whose current password was wrong", async () => {
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    try {
+      const res = await request(app)
+        .put(`/api/usuario/username/${YO}`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "isalas", oldPass: "no-es-la-mia" });
+      await settled();
 
-    // Not 404 — the route exists. Not 403 — `requireSelfOrPermission` let an
-    // owner through. Not 500 — nothing in the chain threw. And 400 for the
-    // reason it should be: `can` is mocked false in this file, so the only
-    // thing left that can refuse this is the missing password.
-    expect(res.status).toBe(400);
-    // The reason, not the number: this route also answers 400 to a username
-    // that is not a string, and a test reading the status alone would pass for
-    // a route with no gate on it.
-    expect(res.body.message).toMatch(/contraseña actual/i);
+      // Not 404 — the route exists. Not 403 — `requireSelfOrPermission` let an
+      // owner through. Not 500 — nothing in the chain threw.
+      expect(res.status).toBe(401);
+      // The sentence and not the number, imported rather than retyped: 401 is
+      // also what `authenticate` answers, and a test reading the status alone
+      // would pass for a route whose gate had been deleted and whose cookie had
+      // simply stopped working.
+      expect(res.body.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
 
-    // The point of this test. `pc:7` is the confirmation endpoint's own key —
-    // the same bucket, so nobody gets ten attempts a quarter of an hour by
-    // alternating the two doors onto one secret.
-    const gastado = (await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)) as
-      | { totalHits?: number }
-      | undefined;
-    expect(gastado?.totalHits).toBe(1);
+      // The point of this test. `pc:7` is the one key both routes count against,
+      // so nobody gets ten attempts a quarter of an hour by alternating the two
+      // doors onto one secret.
+      expect(await gastado()).toBe(1);
+    } finally {
+      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    }
   });
 
-  it("charges nothing for a request the permission guard already refused", async () => {
-    // The budget is mounted after the guard on purpose: a stranger reaching for
-    // somebody else's account must not be able to empty that person's — or
-    // their own — allowance by being refused over and over.
+  it("charges the caller's account for a password change whose current password was wrong", async () => {
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    usuarioFindOne.mockResolvedValue(conHash() as never);
+    try {
+      const res = await request(app)
+        .put(`/api/usuario/userpass/${YO}`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ pass: "una-clave-de-prueba", oldPass: "no-es-la-mia" });
+      await settled();
+
+      expect(res.status).toBe(401);
+      expect(res.body.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
+      expect(await gastado()).toBe(1);
+    } finally {
+      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    }
+  });
+
+  it("counts the rename and the password change into one bucket, not one each", async () => {
+    // The assertion a second `rateLimit()` call would break, and nothing else
+    // would. Each `rateLimit()` builds a store of its own, so a per-route
+    // limiter — even one keyed identically — would leave each of these reading
+    // one hit, and anybody willing to alternate the two doors onto one secret
+    // would get ten attempts a quarter of an hour instead of five.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    usuarioFindOne.mockResolvedValue(conHash() as never);
+    try {
+      for (const url of [`/api/usuario/username/${YO}`, `/api/usuario/userpass/${YO}`]) {
+        const res = await request(app).put(url).set("Cookie", COOKIE).set(DEL_FRONTEND).send({
+          user: "isalas",
+          pass: "una-clave-de-prueba",
+          oldPass: "no-es-la-mia",
+        });
+        await settled();
+        // Both really reached the comparison, so the two hits below are two
+        // wrong passwords and not two of anything else.
+        expect(res.status, url).toBe(401);
+      }
+
+      expect(await gastado()).toBe(2);
+    } finally {
+      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    }
+  });
+
+  it("charges nothing for a request aimed at somebody else's account", async () => {
+    /**
+     * What provides this is `requiresOwnPassword`, and saying so is the whole
+     * point of the rewrite.
+     *
+     * This test used to be called "charges nothing for a request the permission
+     * guard already refused", and its comment credited the order of the mount:
+     * *"the budget is mounted after the guard on purpose"*. It passed with the
+     * two swapped — measured, 811 green — because the budget only charges when
+     * the target is the caller and the guard only refuses when it is not. The
+     * conditions are exactly complementary, so no response can tell the two
+     * orders apart. The order is still deliberate and it is pinned structurally,
+     * three tests below.
+     *
+     * `oldPass` is sent on purpose: a budget that keyed off the body carrying a
+     * password rather than off whose account is being changed would charge here.
+     */
     const res = await request(app)
       .put("/api/usuario/username/99")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
-      .send({ user: "isalas" });
+      .send({ user: "isalas", oldPass: "la-mia" });
+    await settled();
 
     expect(res.status).toBe(403);
-    expect(await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)).toBeUndefined();
+    // Neither the caller's bucket nor the target's.
+    expect(await gastado()).toBeUndefined();
+    expect(await passwordConfirmLimiter.getKey("pc:99")).toBeUndefined();
   });
 
   it("charges nothing when an administrator renames somebody else", async () => {
@@ -980,40 +903,17 @@ describe("changing your own credentials spends the budget for confirming a passw
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND)
         .send({ user: "isalas" });
+      await settled();
 
       expect(res.status).not.toBe(403);
       expect(res.status).not.toBe(400);
-      expect(await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)).toBeUndefined();
+      expect(await gastado()).toBeUndefined();
       // Nor did it land in anybody else's bucket, keyed by the target rather
       // than the caller.
       expect(await passwordConfirmLimiter.getKey("pc:99")).toBeUndefined();
     } finally {
       puede = false;
     }
-  });
-
-  it("charges the caller's account for a password change of their own", async () => {
-    const res = await request(app)
-      .put(`/api/usuario/userpass/${YO}`)
-      .set("Cookie", COOKIE)
-      .set(DEL_FRONTEND)
-      .send({ pass: "una-clave-de-prueba" });
-
-    // Not 404 — the route exists. Not 403 — `requireSelfOrPermission` let an
-    // owner through. Not 500 — nothing in the chain threw. And 400 for the
-    // reason it should be: the new password sent above passes the policy, and
-    // `can` is mocked false here, so the only thing left that can refuse this is
-    // the missing current password.
-    expect(res.status).toBe(400);
-    // The reason, not the number: this route also answers 400 to a new password
-    // that fails the policy, which is precisely how a test reading the status
-    // alone would pass for a route with no gate on it.
-    expect(res.body.message).toMatch(/contraseña actual/i);
-
-    const gastado = (await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)) as
-      | { totalHits?: number }
-      | undefined;
-    expect(gastado?.totalHits).toBe(1);
   });
 
   it("charges nothing when an administrator resets somebody else's password", async () => {
@@ -1023,7 +923,7 @@ describe("changing your own credentials spends the budget for confirming a passw
     // an hour.
     //
     // The status is asserted by exclusion rather than as a 200, for the reason
-    // the rename's twin gives: `usuarioFindOne` here resolves a plain object
+    // `escribible` above gives: `usuarioFindOne` here resolves a plain object
     // with no `set`, so the write itself cannot complete. What is under test is
     // the mount, and the mount runs before any of that.
     puede = true;
@@ -1033,33 +933,244 @@ describe("changing your own credentials spends the budget for confirming a passw
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND)
         .send({ pass: "una-clave-de-prueba" });
+      await settled();
 
       expect(res.status).not.toBe(403);
       expect(res.status).not.toBe(400);
-      expect(await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)).toBeUndefined();
+      expect(await gastado()).toBeUndefined();
       expect(await passwordConfirmLimiter.getKey("pc:99")).toBeUndefined();
     } finally {
       puede = false;
     }
   });
 
-  it("counts the rename and the password change into one bucket, not one each", async () => {
-    // The assertion a second `rateLimit()` call would break, and nothing else
-    // would. Each `rateLimit()` builds a store of its own, so a per-route
-    // limiter — even one keyed identically — would leave each of these reading
-    // one hit, and anybody willing to alternate the three doors onto one secret
-    // would get fifteen attempts a quarter of an hour instead of five.
-    for (const url of [`/api/usuario/username/${YO}`, `/api/usuario/userpass/${YO}`]) {
-      await request(app).put(url).set("Cookie", COOKIE).set(DEL_FRONTEND).send({
-        user: "isalas",
-        pass: "una-clave-de-prueba",
-      });
+  it("mounts the permission guard before the budget on both routes", () => {
+    /**
+     * A structural assertion, and deliberately so — see the long note on
+     * `chargeConfirmBudgetOnSelfChange` in `usuario.routes.ts`.
+     *
+     * The property is real and no response can show it: the guard refuses
+     * exactly the requests the budget does not charge for, so both orders answer
+     * identically to everything. Writing a request-shaped test for it is how the
+     * test three above came to claim the order while `requiresOwnPassword` was
+     * doing the work — the fifth assertion in this project to pass against the
+     * code it said it protected. Reading the mounted chain says what is actually
+     * being held.
+     *
+     * Worth holding because the day the charge condition widens, this order is
+     * the only thing between a stranger and a stranger's allowance. The MFA
+     * plan's step-up could easily want an administrator to send `oldPass` when
+     * acting on somebody else — and then a budget in front of the guard is a
+     * stranger emptying the target's bucket by being refused over and over.
+     */
+    type Capa = { route?: { path: string; stack: { name: string }[] } };
+    const rutas = (usuarioRouter as unknown as { stack: Capa[] }).stack
+      .filter((capa) => capa.route)
+      .map((capa) => ({ path: capa.route.path, chain: capa.route.stack.map((h) => h.name) }));
+
+    for (const path of ["/username/:id", "/userpass/:id"]) {
+      const ruta = rutas.find((r) => r.path === path);
+      expect(ruta, `${path} no está montada`).toBeDefined();
+      const chain = ruta.chain;
+      // Both present first. Without these two, the comparison below passes for a
+      // chain missing either name, because `indexOf` answers -1 and -1 is less
+      // than everything — which is precisely the shape of assertion this file's
+      // header is about.
+      expect(chain, path).toContain("requireSelfOrPermissionGate");
+      expect(chain, path).toContain("chargeConfirmBudgetOnSelfChange");
+      expect(
+        chain.indexOf("requireSelfOrPermissionGate"),
+        `${path}: ${chain.join(" -> ")}`,
+      ).toBeLessThan(chain.indexOf("chargeConfirmBudgetOnSelfChange"));
+    }
+  });
+
+  it("refunds the rename a cached frontend sends with no current password at all", async () => {
+    /**
+     * The deploy window this plan is most worried about, and it used to cost the
+     * people caught in it their budget.
+     *
+     * A bundle sitting in somebody's tab from before this arc renames without an
+     * `oldPass` field, because the field does not exist in it. Every one of those
+     * requests is a 400 it cannot satisfy — and charging for them spent the
+     * budget of exactly the people the transition hurts, then took the password
+     * change down with it, on the same bucket, for a quarter of an hour.
+     */
+    const res = await request(app)
+      .put(`/api/usuario/username/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ user: "isalas" });
+    await settled();
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+    // Charged and given back. `0` and not `undefined`: the bucket was touched,
+    // which is what proves the route is behind it and that the refund — not a
+    // missing mount — is why nothing was spent.
+    expect(await gastado()).toBe(0);
+  });
+
+  it("refunds a password change that only failed the new password's own policy", async () => {
+    // The case the auditor bet the deploy on. Omar changes his own password,
+    // types the current one correctly, and picks a new one of eight characters.
+    // The server wants twelve. Nothing in that request is a guess: the
+    // comparison already said yes, and the answer tells him so.
+    usuarioFindOne.mockResolvedValue(conHash() as never);
+
+    const res = await request(app)
+      .put(`/api/usuario/userpass/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ pass: "ochochar", oldPass: "la-mia" });
+    await settled();
+
+    expect(res.status).toBe(400);
+    // The reason, so this cannot be the other 400 on this route — the one for a
+    // missing current password, which is the test above.
+    expect(res.body.message).toBe(DEMASIADO_CORTA);
+    expect(await gastado()).toBe(0);
+  });
+
+  it("never runs out of budget on the password policy, however many times it refuses", async () => {
+    /**
+     * The premise `PASSWORD_CONFIRM_LIMIT` was calibrated on — "nobody
+     * legitimately reaches five in a quarter of an hour" — restored to being
+     * true.
+     *
+     * Reacting to "at least 12 characters" by adding one character at a time is
+     * the normal thing for a person to do, and with a charge on every request
+     * the sixth try answered "Demasiados intentos. Espere unos minutos" and
+     * closed the rename too. Two past the limit here, so a charging bucket would
+     * certainly have cut in.
+     */
+    usuarioFindOne.mockResolvedValue(conHash() as never);
+
+    for (let i = 0; i < PASSWORD_CONFIRM_LIMIT + 2; i++) {
+      const res = await request(app)
+        .put(`/api/usuario/userpass/${YO}`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ pass: `corta${i}`, oldPass: "la-mia" });
+      await settled();
+
+      // Still the policy talking, never the budget.
+      expect(res.status, `intento ${i + 1}`).toBe(400);
+      expect(res.body.message, `intento ${i + 1}`).toBe(DEMASIADO_CORTA);
     }
 
-    const gastado = (await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)) as
-      | { totalHits?: number }
-      | undefined;
-    expect(gastado?.totalHits).toBe(2);
+    expect(await gastado()).toBe(0);
+  });
+
+  it("runs out on wrong passwords, and then stops answering about the password at all", async () => {
+    /**
+     * The other side of the refund: the answers that do cost still add up, and
+     * the limit still arrives.
+     *
+     * Somebody who has stolen a session cookie can ask these routes "is the
+     * password X?" as often as they will answer, and a wrong answer costs the
+     * account nothing by design — no `failed_attempts`, no lockout. So this
+     * bucket is the whole of the limit, and it is keyed by account rather than
+     * address so that asking from twenty addresses is still one budget.
+     */
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const attempt = () =>
+      request(app)
+        .put(`/api/usuario/username/${YO}`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "isalas", oldPass: "adivinando" });
+    try {
+      for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
+        const res = await attempt();
+        await settled();
+        expect(res.status, `intento ${i + 1}`).toBe(401);
+        expect(res.body.message, `intento ${i + 1}`).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
+      }
+
+      const cortado = await attempt();
+      await settled();
+      expect(cortado.status).toBe(429);
+      // And the refusal is no longer readable as an answer about the password,
+      // which is the property that makes a budget a budget rather than a slower
+      // oracle.
+      expect(cortado.body.message).not.toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
+      expect(cortado.body.message).toMatch(/Demasiados intentos/i);
+
+      // And the 429 does not let the caller straight back in. It is refunded
+      // too — it is not a 401 — so the counter falls back to the limit rather
+      // than climbing past it; the next request has to cross it again, and does.
+      const otro = await attempt();
+      await settled();
+      expect(otro.status).toBe(429);
+    } finally {
+      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    }
+  });
+
+  it("keeps one budget per account, not one for everybody", async () => {
+    // A key generator that ignored `req.user` — or fell back to a constant —
+    // would put the whole company in one bucket, and five wrong passwords by one
+    // person would close the rename for everyone. The key is read out of the
+    // bucket rather than inferred from a second caller's answer, because two
+    // accounts cannot easily be signed in at once through this harness.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    try {
+      await request(app)
+        .put(`/api/usuario/username/${YO}`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "isalas", oldPass: "no-es-la-mia" });
+      await settled();
+
+      expect(await gastado()).toBe(1);
+      // Nothing landed in an address-shaped bucket, which is what the fallback
+      // in `passwordConfirmKey` would have produced had `req.user` not been read.
+      expect(await passwordConfirmLimiter.getKey("pc:ip:::ffff:127.0.0.1")).toBeUndefined();
+    } finally {
+      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    }
+  });
+
+  it("lets a locked account rename itself with its own password, which is the ERP it is still working in", async () => {
+    /**
+     * F1, end to end through the real stack, and the reason it is here rather
+     * than only beside `verifyOwnPassword`: the harm was never one function's
+     * answer, it was the answer plus the token plus the shared bucket.
+     *
+     * Somebody who knows Ana's username fails five times on the login form and
+     * her account rests for a quarter of an hour. `authenticate` does not read
+     * `locked_until` — deliberately — so the session she already had keeps
+     * working and she keeps using the ERP. She goes to rename herself and types
+     * her password correctly; the shared comparator refused a resting account
+     * before comparing anything, so she was told her password was wrong. Five
+     * times, one token each, and the sixth answer was a 429 that also closed the
+     * password change — the one screen that would have lifted the lockout.
+     *
+     * So: the rename goes through, and it costs her nothing.
+     */
+    usuarioFindByPk.mockResolvedValue(
+      conHash({
+        locked_until: new Date(Date.now() + 60_000),
+        failed_attempts: LOCKOUT_AFTER_FAILURES,
+      }) as never,
+    );
+    usuarioFindOne.mockResolvedValue(escribible() as never);
+
+    const res = await request(app)
+      .put(`/api/usuario/username/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ user: "isalas", oldPass: "la-mia" });
+    await settled();
+
+    // The change itself, not merely "not a 401": a 500 or a 409 would satisfy
+    // `not.toBe(401)` while leaving her exactly as stuck.
+    expect(res.status).toBe(200);
+    expect(res.body.user).toBe("isalas");
+    expect(await gastado()).toBe(0);
   });
 });
 
@@ -1174,7 +1285,43 @@ describe("what a database outage costs the office's login budget", () => {
  * test is the routing table, and the only thing that can see a routing table is
  * a request.
  */
-describe("the two reads the old frontend stopped calling", () => {
+describe("the addresses this arc retired", () => {
+  it("has nothing at POST /api/auth/confirm-password, on a router that still serves five", async () => {
+    /**
+     * The endpoint that replaced "call the login and see if it works", retired
+     * in turn because asking *before* an operation is the wrong shape: the
+     * credential that authorises a write belongs in the request that performs
+     * it, which is the rule the rename and the password change both follow. See
+     * `auth.routes.ts`.
+     *
+     * A cookie is carried on purpose, for the reason the `permisos/mias` test
+     * below spells out: `authenticate` is declared on every other route of this
+     * router, so an anonymous request here could answer 401 whether the route
+     * exists or not, and a 404 asserted without a credential would prove
+     * nothing.
+     */
+    const res = await request(app)
+      .post("/api/auth/confirm-password")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ pass: "una-clave-de-prueba" });
+    expect(res.status).toBe(404);
+
+    // The credential was good, so the 404 above cannot be read as a refusal.
+    const me = await request(app).get("/api/auth/me").set("Cookie", COOKIE);
+    expect(me.status).toBe(200);
+
+    // And the router is still mounted. Without this the test would pass just as
+    // well for somebody deleting `app.use("/api/auth", ...)` outright, which
+    // would take the session cookie's own door down with it.
+    const logout = await request(app)
+      .post("/api/auth/logout")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
+    expect(logout.status).toBe(200);
+  });
+
+
   it("has nothing at GET /api/login, on a mount that still serves POST", async () => {
     const res = await request(app).get("/api/login").set("Cookie", COOKIE);
     expect(res.status).toBe(404);

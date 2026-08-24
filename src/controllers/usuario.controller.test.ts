@@ -52,12 +52,13 @@ vi.mock("../models/rol.model.js", () => ({ RolModel: { findByPk: vi.fn() } }));
  * file worth arguing for.
  *
  * `updateUserName` confirms the caller's own password through
- * `verifyOwnPassword`, the same function `POST /api/auth/confirm-password`
- * calls. What that function *does* — the shared `checkAgainstRow`, the filler
- * hash, the locked-account refusal, the `PASSWORD_CONFIRM_FAILED` line, and
- * emphatically not touching `failed_attempts` — is pinned by
- * `credentials.test.ts` and `confirmPassword.test.ts`, and duplicating it here
- * would mean two places to update and one of them silently wrong.
+ * `verifyOwnPassword`, and is that function's only caller since
+ * `POST /api/auth/confirm-password` was retired. What the function *does* — the
+ * shared `checkAgainstRow`, the filler hash, the `PASSWORD_CONFIRM_FAILED` line,
+ * leaving the lockout to the login rather than refusing on it, and emphatically
+ * not touching `failed_attempts` — is pinned by `auth/verifyOwnPassword.test.ts`
+ * and `auth/credentials.test.ts`, and duplicating it here would mean two places
+ * to update and one of them silently wrong.
  *
  * What is under test here is only what this controller does with the answer:
  * which requests it asks about at all, and what it refuses with when the answer
