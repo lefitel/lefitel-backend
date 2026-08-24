@@ -8,7 +8,7 @@ import {
   getUsuario,
   searchUsuario,
   searchUsuario_user,
-  renameRequiresOwnPassword,
+  requiresOwnPassword,
   updateUserName,
   updateUserPass,
   updateUsuario,
@@ -19,41 +19,50 @@ import { passwordConfirmLimiter } from "../middleware/loginLimiters.js";
 const router = Router();
 
 /**
- * Confirming your own password costs the same here as on
+ * Confirming your own password costs the same on these two routes as on
  * `POST /api/auth/confirm-password`, and out of the same bucket.
  *
- * `updateUserName` compares a password now, and an authenticated endpoint that
- * compares an unlimited number of them is a password oracle for whoever already
- * stole a session — the sentence `passwordConfirmLimiter` exists for. Without
- * this, closing the client-side hole would have been a net loss: an attacker
- * holding a stolen session would simply guess against this route, which counts
- * nothing, instead of against the confirmation endpoint, which counts five per
- * quarter of an hour.
+ * Both `updateUserName` and `updateUserPass` compare a password now, and an
+ * authenticated endpoint that compares an unlimited number of them is a
+ * password oracle for whoever already stole a session — the sentence
+ * `passwordConfirmLimiter` exists for. Without this, closing the client-side
+ * hole on the rename would have been a net loss: an attacker holding a stolen
+ * session would simply guess against a route that counts nothing instead of
+ * against the confirmation endpoint, which counts five per quarter of an hour.
  *
- * The lockout cannot serve as that limit. A wrong password here deliberately
- * does not move `failed_attempts` — see the block in `updateUserName` — because
- * mistyping while renaming yourself must not be able to shut you out of the
- * ERP.
+ * **`updateUserPass` needed it more, and had it least.** It has compared
+ * `oldPass` since long before this plan, with no bucket of any kind on the
+ * route — and the oracle there is cleaner than a rename's, because a caller can
+ * send a guess with a new password that fails the policy and read the answer
+ * off the difference between 401 (wrong) and 400 (right, and the new one is too
+ * short). Unlimited, from one session, counting nothing anywhere. Mounting this
+ * closes a hole that predates the change it accompanies.
  *
- * **The same bucket, not a second one**, because it is the same secret being
- * guessed at by the same account. Two buckets keyed the same way would hand out
- * ten attempts a quarter of an hour to anybody willing to alternate endpoints,
- * which is what counting two doors onto one room separately gets you.
+ * The lockout cannot serve as that limit. A wrong password on either route
+ * deliberately does not move `failed_attempts` — see the blocks in the two
+ * handlers — because mistyping your own password while renaming or
+ * re-passwording yourself must not be able to shut you out of the ERP.
  *
- * Charged only when the rename actually confirms a password, decided by
- * `renameRequiresOwnPassword` — the very function the handler branches on, so
- * the limit and the check cannot drift apart. Two things follow from that.
- * An administrator renaming other people's accounts sends no password and pays
- * nothing: billing those would answer 429 to the sixth piece of legitimate work
- * in a quarter of an hour. And nobody can dodge the budget by mis-spelling the
- * password field, because what is measured is *whose* account is being renamed,
- * not what the body happens to carry.
+ * **The same bucket, not one per route**, because it is the same secret being
+ * guessed at by the same account. Separate buckets keyed the same way would
+ * hand out fifteen attempts a quarter of an hour to anybody willing to
+ * alternate three endpoints, which is what counting several doors onto one room
+ * separately gets you.
+ *
+ * Charged only when the request actually confirms a password, decided by
+ * `requiresOwnPassword` — the very function both handlers branch on, so the
+ * limit and the checks cannot drift apart. Two things follow from that. An
+ * administrator renaming or resetting *other people's* accounts sends no
+ * password and pays nothing: billing those would answer 429 to the sixth piece
+ * of legitimate work in a quarter of an hour. And nobody can dodge the budget
+ * by mis-spelling the password field, because what is measured is *whose*
+ * account is being changed, not what the body happens to carry.
  *
  * After the permission guard, so a request that was never allowed through does
  * not spend anybody's attempts.
  */
-function chargeConfirmBudgetOnSelfRename(req: Request, res: Response, next: NextFunction) {
-  if (!renameRequiresOwnPassword(req)) return next();
+function chargeConfirmBudgetOnSelfChange(req: Request, res: Response, next: NextFunction) {
+  if (!requiresOwnPassword(req)) return next();
   return passwordConfirmLimiter(req, res, next);
 }
 
@@ -86,9 +95,14 @@ router.put("/:id", requireSelfOrPermission("seguridad", "editar"), updateUsuario
 router.put(
   "/username/:id",
   requireSelfOrPermission("seguridad", "editar"),
-  chargeConfirmBudgetOnSelfRename,
+  chargeConfirmBudgetOnSelfChange,
   updateUserName,
 );
-router.put("/userpass/:id", requireSelfOrPermission("seguridad", "editar"), updateUserPass);
+router.put(
+  "/userpass/:id",
+  requireSelfOrPermission("seguridad", "editar"),
+  chargeConfirmBudgetOnSelfChange,
+  updateUserPass,
+);
 
 export default router;

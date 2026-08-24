@@ -71,35 +71,56 @@ export const CURRENT_PASSWORD_REQUIRED_MESSAGE = "Debe proporcionar su contrase�
 export const CURRENT_PASSWORD_WRONG_MESSAGE = "La contraseña actual suministrada no es correcta.";
 
 /**
- * Whether this rename has to prove the caller's password before it happens.
+ * Whether this credential change has to prove the caller's password first.
  *
- * True exactly when the account being renamed is the caller's own — and that is
- * the whole rule: **holding `seguridad.editar` does not lift it.**
+ * One rule for both of them — the rename below and the password change after it
+ * — because it is one decision and it was worth writing down once:
  *
- * `updateUserPass` does let that permission omit the current password, and
- * there it is right: an administrator resets a password precisely because
- * somebody cannot get in, so there is no current password for them to know.
- * Renaming *yourself* rescues nobody. There is no locked-out person on the
- * other side of it and no operational need it would serve, so the exemption
- * would buy nothing and give up the only thing this check is here for.
+ * > The exemption `seguridad.editar` grants is for **rescuing somebody else**.
+ * > It never applies to acting on your own account.
  *
- * And it would give it up in the worst place. What this closes is an unattended
- * machine with a live session: whoever sits down renames the account and locks
- * its owner out without ever learning the password. An administrator's
- * unattended machine is the same act with more reach — so exempting
- * administrators would leave the hole open exactly on the accounts where it
- * costs most.
+ * So this is true exactly when the account being changed is the caller's own,
+ * and **holding the permission does not lift it.**
  *
- * Renaming *somebody else* is not gated here. That is what `seguridad.editar`
- * authorises, and there is no password the caller could be expected to know:
- * the target's is unknown to them by design.
+ * **Why the exemption exists at all**, because it is legitimate and must keep
+ * working: an administrator resets a password precisely because somebody cannot
+ * get in. Demanding the current one there is demanding what nobody has — not
+ * the locked-out person, and certainly not the administrator helping them. Same
+ * for a rename of somebody else's account: the target's password is unknown to
+ * the caller by design.
+ *
+ * **Why it stops at your own account.** Renaming or re-passwording *yourself*
+ * rescues nobody. There is no locked-out person on the other side of it, no
+ * operational need it serves, and you hold your own current password because
+ * you logged in with it minutes ago — so the exemption buys nothing and gives
+ * up the only thing this check is here for.
+ *
+ * And it gives it up in the worst place. What this closes is an unattended
+ * machine with a live session: whoever sits down changes the credential and
+ * locks its owner out without ever learning the password. An administrator's
+ * unattended machine is the same act with more reach, so exempting
+ * administrators leaves the hole open exactly on the accounts where it costs
+ * most — which is how the condition came to be written against the *permission*
+ * instead of against *whose account it is*, and it read as prudence.
+ *
+ * A password change is the sharper of the two. A rename locks its owner out of
+ * a name an administrator can hand back; a password change ends every other
+ * session of that account in the same request, so the attacker stays in on the
+ * session already open and the owner cannot come back at all. **On a password
+ * change, the exemption made the administrator the attacker.**
  *
  * Exported because `usuario.routes.ts` needs the same answer to decide whether
  * a request pays into the password-confirmation budget. One function, so the
- * rate limit and the check can never disagree about which requests compare a
- * password.
+ * rate limit and the two handlers can never disagree about which requests
+ * compare a password.
+ *
+ * `Number(req.params.id)` and not the raw string, matching the "is this me"
+ * comparison the IDOR guard in each handler already makes. Two notions of
+ * "self" on one route is the drift worth ruling out here: the guard deciding
+ * ownership one way and the gate deciding it another is how a request slips
+ * through as somebody else's while being charged as your own.
  */
-export function renameRequiresOwnPassword(req: Request): boolean {
+export function requiresOwnPassword(req: Request): boolean {
   const target = Number(req.params?.id);
   return typeof req.user?.id === "number" && req.user.id === target;
 }
@@ -410,8 +431,12 @@ export async function updateUserName(req: Request, res: Response) {
      * Change somebody's username and they cannot log in — not because they have
      * forgotten their password, but because they no longer know what name to
      * offer it with. So this operation is worth what a password change is
-     * worth, and `updateUserPass` forty lines below has demanded the current
-     * password all along while this one demanded nothing whatsoever.
+     * worth, and `updateUserPass` below had demanded the current password of
+     * ordinary callers all along while this one demanded nothing whatsoever.
+     * (Of *ordinary* callers, and that qualifier turned out to matter: it
+     * exempted anybody who could manage accounts, their own password included.
+     * Same asymmetry, same fix, and it is one function now — see
+     * `requiresOwnPassword`.)
      *
      * The concrete case: an unattended machine in the office, or the shared
      * field laptop. Whoever sits down at a live session renames the account and
@@ -426,7 +451,7 @@ export async function updateUserName(req: Request, res: Response) {
      * screen, or `curl`. Which of the two is a real gate is settled entirely by
      * where the check runs, and that is here.
      *
-     * **Who has to pass it** is `renameRequiresOwnPassword` — the answer is not
+     * **Who has to pass it** is `requiresOwnPassword` — the answer is not
      * "whoever lacks a permission", and the reasoning is up there with it.
      *
      * **Before the collision check**, deliberately: a caller who has not proved
@@ -452,7 +477,7 @@ export async function updateUserName(req: Request, res: Response) {
      * the check just made, and reading it off the session is what keeps that
      * true if this block is ever moved.
      */
-    if (renameRequiresOwnPassword(req)) {
+    if (requiresOwnPassword(req)) {
       const oldPass = (req.body as { oldPass?: unknown } | undefined)?.oldPass;
       // Not a string is not a password, and an empty one is not a
       // confirmation — refused before the round trip, the same way
@@ -520,15 +545,86 @@ export async function updateUserPass(req: Request, res: Response) {
     });
     if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
 
-    // Validate oldPass
-    if (oldPass) {
-       const isMatch = await bcryptjs.compare(oldPass, TempUsuario.dataValues.pass);
-       if (!isMatch) {
-         return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
-       }
-    } else if (!mayResetPasswords) {
-        // Whoever cannot manage accounts must prove they know the current one
-       return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
+    /**
+     * Changing your own password proves it is you. The exemption is for
+     * changing somebody else's.
+     *
+     * **What this replaced, and it was the worst hole of this plan.** The
+     * condition read `if (oldPass) { compare } else if (!mayResetPasswords)
+     * { refuse }` — it looked at the *permission* and never at *whose account
+     * it is*. So anybody holding `seguridad.editar` could change **their own**
+     * password without knowing the current one. The unattended machine with an
+     * administrator's session open: whoever sits down sets a new password,
+     * their own session survives (`isSelf` spares it below) and every other
+     * session of that account ends in the same write — so the owner is locked
+     * out of their own account behind a password only the attacker knows. The
+     * revocation is right and stays; it is what makes this the whole account
+     * rather than an inconvenience.
+     *
+     * **Who has to pass it** is `requiresOwnPassword`, the same function the
+     * rename above branches on and the rate limit in `usuario.routes.ts` reads.
+     * The reasoning lives with it. Short version: an administrator resetting
+     * *somebody else's* password still sends nothing, because that is what the
+     * permission authorises and there is no password they could know.
+     *
+     * **`bcryptjs.compare` here, and not the shared `verifyOwnPassword` the
+     * rename uses.** Two ways of comparing a password in one file needs a
+     * reason, and there is one: the shared door **refuses a locked account
+     * before it compares anything**, deliberately, so that confirming a
+     * password can never become a way of lifting a lockout. That is right for
+     * that door and wrong for this one, because here lifting the lockout is the
+     * *point* — see the write below. `authenticate` does not read
+     * `locked_until`, so the owner of an account somebody else locked by
+     * grinding its username keeps the session they already had, and changing
+     * their password is their way out. Routed through the shared door, that
+     * request would be told their current password is wrong while it was right,
+     * and the only self-service exit from a lockout would close.
+     *
+     * The rest of what the shared door carries has nothing to do here either.
+     * Its filler hash levels the timing of a lookup *by username*, to stop
+     * enumeration; this row was found by an id off the session, there is no
+     * name in the request to probe with, and "no such account" was already
+     * answered as a 404 above. And its success path re-hashes at the current
+     * cost and clears the two lockout columns — both of which the write forty
+     * lines below is about to do anyway, inside a transaction, so borrowing
+     * them would buy a second bcrypt hash and two UPDATEs whose results are
+     * immediately overwritten.
+     *
+     * What is worth borrowing is the bitácora line, and it is taken: the same
+     * action name `verifyOwnPassword` writes, so a run of failed confirmations
+     * on one account reads as one event whichever door it arrived at. Without
+     * it the 429 from the budget below would have nothing behind it explaining
+     * why.
+     *
+     * A wrong password here does **not** move `failed_attempts`, matching the
+     * rename and for the same reason: mistyping your current password while
+     * changing it must not be able to shut you out of the ERP. What stops that
+     * from being an unlimited oracle is `passwordConfirmLimiter` on the route —
+     * which this endpoint had never had, while it was already comparing
+     * passwords with nothing counting them at all.
+     *
+     * An `oldPass` that arrives on a change to **somebody else's** account is
+     * ignored rather than compared, which is new. Compared, it was checked
+     * against the *target's* hash — an unlimited 401-or-not oracle against
+     * another person's password, for a caller who can reset it outright anyway
+     * and would learn the plaintext by guessing. Nothing is given up: the
+     * permission is what authorises that request, with or without a password on
+     * it.
+     */
+    if (requiresOwnPassword(req)) {
+      // Not a string is not a password and an empty one is not a confirmation,
+      // refused the same way the rename refuses them so the two cannot disagree
+      // about what counts as "sent nothing". The old `if (oldPass)` treated
+      // every falsy value as "did not send one" and fell through to the
+      // permission, which is the shape the hole above had.
+      if (typeof oldPass !== "string" || oldPass === "") {
+        return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
+      }
+      const isMatch = await bcryptjs.compare(oldPass, TempUsuario.dataValues.pass);
+      if (!isMatch) {
+        logAction({ id_usuario: loggedUser.id, action: "PASSWORD_CONFIRM_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: `Contraseña incorrecta al cambiar la contraseña de @${TempUsuario.dataValues.user}`, metadata: { user: TempUsuario.dataValues.user }, severity: 'warning', ip_address: req.ip ?? null });
+        return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
+      }
     }
 
     const motivo = validarPassword(pass ?? "");
@@ -660,8 +756,10 @@ export async function deleteUsuario(req: Request, res: Response) {
  *
  * `seguridad.editar`, the same permission a password reset needs: undoing a
  * lockout for somebody else is the same kind of act on the same kind of record.
- * Not `requireSelfOrPermission` — a locked-out person has no session to call it
- * with, and "unlock yourself" would not be a lockout.
+ * Not `requireSelfOrPermission` — a locked-out person usually has no session to
+ * call it with (`authenticate` does not read `locked_until`, so one opened
+ * before the lockout does survive), and "unlock yourself" would not be a
+ * lockout.
  *
  * The design this came from (`docs/specs/2026-08-21-autenticacion-mfa-design.md`,
  * §6) mitigates the same problem differently: the lockout would not apply to a

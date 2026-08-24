@@ -898,24 +898,28 @@ describe("confirming your own password, through the real stack", () => {
 });
 
 /**
- * Renaming your own account is gated on your password too, and it pays out of
- * the same bucket as the confirmation endpoint.
+ * Renaming your own account and changing your own password are both gated on
+ * your password, and both pay out of the same bucket as the confirmation
+ * endpoint.
  *
- * Both halves of that are one-line mistakes no unit test can see, because
- * neither is in a handler. The gate itself is pinned in
- * `usuario.controller.test.ts`; what is pinned here is the mount — that the
+ * Every part of that is a one-line mistake no unit test can see, because none
+ * of it is in a handler. The gates themselves are pinned in
+ * `usuario.controller.test.ts`; what is pinned here is the mount — that each
  * route really runs behind the budget, and that it is the budget the
- * confirmation endpoint already had rather than a second one.
+ * confirmation endpoint already had rather than one more of them.
  *
- * **Why it needs a budget at all.** `updateUserName` compares a password now,
- * and a wrong one there deliberately does not move `failed_attempts` — so that
- * mistyping while renaming yourself cannot shut you out of the ERP. Without
- * this mount the route would compare an unlimited number of passwords for
- * whoever already holds a stolen session, and closing the client-side hole
- * would have been a net loss: a guesser would simply switch from the endpoint
- * that counts five attempts a quarter of an hour to the one that counts none.
+ * **Why they need a budget at all.** Both handlers compare a password, and a
+ * wrong one deliberately does not move `failed_attempts` — so that mistyping
+ * while renaming or re-passwording yourself cannot shut you out of the ERP.
+ * Without these mounts the routes would compare an unlimited number of
+ * passwords for whoever already holds a stolen session.
+ *
+ * `PUT /usuario/userpass/:id` is the older sin of the two: it has compared
+ * `oldPass` since long before this plan, with no bucket anywhere, and its
+ * oracle is the cleaner one — a guess sent with a new password that fails the
+ * policy comes back 401 when the guess is wrong and 400 when it is right.
  */
-describe("renaming yourself spends the same budget as confirming a password", () => {
+describe("changing your own credentials spends the budget for confirming a password", () => {
   const CLAVE_RENOMBRE = `pc:${YO}`;
 
   beforeEach(async () => {
@@ -986,6 +990,76 @@ describe("renaming yourself spends the same budget as confirming a password", ()
     } finally {
       puede = false;
     }
+  });
+
+  it("charges the caller's account for a password change of their own", async () => {
+    const res = await request(app)
+      .put(`/api/usuario/userpass/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ pass: "una-clave-de-prueba" });
+
+    // Not 404 — the route exists. Not 403 — `requireSelfOrPermission` let an
+    // owner through. Not 500 — nothing in the chain threw. And 400 for the
+    // reason it should be: the new password sent above passes the policy, and
+    // `can` is mocked false here, so the only thing left that can refuse this is
+    // the missing current password.
+    expect(res.status).toBe(400);
+    // The reason, not the number: this route also answers 400 to a new password
+    // that fails the policy, which is precisely how a test reading the status
+    // alone would pass for a route with no gate on it.
+    expect(res.body.message).toMatch(/contraseña actual/i);
+
+    const gastado = (await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)) as
+      | { totalHits?: number }
+      | undefined;
+    expect(gastado?.totalHits).toBe(1);
+  });
+
+  it("charges nothing when an administrator resets somebody else's password", async () => {
+    // The false positive to avoid, same as the rename above: resetting another
+    // account sends no password and compares none, so billing it would answer
+    // 429 to the sixth piece of legitimate administrative work in a quarter of
+    // an hour.
+    //
+    // The status is asserted by exclusion rather than as a 200, for the reason
+    // the rename's twin gives: `usuarioFindOne` here resolves a plain object
+    // with no `set`, so the write itself cannot complete. What is under test is
+    // the mount, and the mount runs before any of that.
+    puede = true;
+    try {
+      const res = await request(app)
+        .put("/api/usuario/userpass/99")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ pass: "una-clave-de-prueba" });
+
+      expect(res.status).not.toBe(403);
+      expect(res.status).not.toBe(400);
+      expect(await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)).toBeUndefined();
+      expect(await passwordConfirmLimiter.getKey("pc:99")).toBeUndefined();
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("counts the rename and the password change into one bucket, not one each", async () => {
+    // The assertion a second `rateLimit()` call would break, and nothing else
+    // would. Each `rateLimit()` builds a store of its own, so a per-route
+    // limiter — even one keyed identically — would leave each of these reading
+    // one hit, and anybody willing to alternate the three doors onto one secret
+    // would get fifteen attempts a quarter of an hour instead of five.
+    for (const url of [`/api/usuario/username/${YO}`, `/api/usuario/userpass/${YO}`]) {
+      await request(app).put(url).set("Cookie", COOKIE).set(DEL_FRONTEND).send({
+        user: "isalas",
+        pass: "una-clave-de-prueba",
+      });
+    }
+
+    const gastado = (await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)) as
+      | { totalHits?: number }
+      | undefined;
+    expect(gastado?.totalHits).toBe(2);
   });
 });
 

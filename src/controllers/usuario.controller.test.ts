@@ -80,7 +80,7 @@ vi.mock("bcryptjs", () => ({
 const {
   CURRENT_PASSWORD_REQUIRED_MESSAGE,
   CURRENT_PASSWORD_WRONG_MESSAGE,
-  renameRequiresOwnPassword,
+  requiresOwnPassword,
   createUsuario,
   updateUsuario,
   updateUserName,
@@ -539,21 +539,95 @@ describe("what a creation request may set", () => {
   });
 });
 
-describe("changing a password", () => {
-  it("demands the current one from anybody who is not an administrator", async () => {
+/**
+ * Changing your own password proves it is you. The exemption is for changing
+ * somebody else's.
+ *
+ * **The hole these close, and it was the worst of this plan.** The condition
+ * read `if (oldPass) { compare } else if (!mayResetPasswords) { refuse }` — it
+ * looked at the *permission* and never at *whose account it is*. So anybody
+ * holding `seguridad.editar` could change **their own** password without
+ * knowing the current one. On the unattended machine with an administrator's
+ * session open, whoever sits down sets a new password, keeps the session that
+ * was already there (`isSelf` spares it) and ends every other session of that
+ * account in the same write. The owner does not get back in. A rename is
+ * repairable by an administrator; this is the account.
+ *
+ * **Every assertion here names the reason and not only the number.** This
+ * handler already answers 400 to a password that fails the policy and 404 to an
+ * account that is not there, so a test reading the status alone can pass
+ * straight through the wrong branch. It has happened three times in this plan —
+ * a `toBe(401)` that stayed green against broken code, a comparison against
+ * `undefined`, and a 404 the handler produced for its own unrelated reason. The
+ * two sentences are imported from the controller rather than typed out, so what
+ * is compared is the branch and not a copy of its text.
+ */
+describe("changing your own password proves it is you", () => {
+  it("demands the current one from somebody changing their own, and says which thing is missing", async () => {
     findOne.mockResolvedValue(storedUser().model);
 
     const c = call(
       { id: SELF, id_rol: TECNICO },
-      { params: { id: String(SELF) }, body: { pass: "nueva" } },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba" } },
     );
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(400);
-    expect(c.message).toMatch(/contraseña actual/i);
+    // The message and not the number: the new password sent above is a valid
+    // one precisely so that a 400 cannot be the policy talking.
+    expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
   });
 
-  it("refuses when the current one is wrong", async () => {
+  /**
+   * The break-it test of this task. Loosen the gate back to the permission and
+   * this request answers 200, having changed the password of a live
+   * administrator account with nothing but a session behind it.
+   */
+  it("demands it from an administrator changing their own, permission and all", async () => {
+    const stored = storedUser({ id: ADMIN });
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(ADMIN) }, body: { pass: "una-clave-de-prueba" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+    // And the account was left exactly as it was: no hash written, no sessions
+    // ended. A 400 that had already revoked something would be worse than a 200.
+    expect(stored.save).not.toHaveBeenCalled();
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty string and a non-string the same way, rather than comparing them", async () => {
+    // The old `if (oldPass)` treated every falsy value as "did not send one"
+    // and fell through to the permission — which is the shape of the hole
+    // itself. Refused before the comparison, the same way the rename refuses
+    // them, so the two cannot disagree about what "sent nothing" means.
+    const bcryptjs = (await import("bcryptjs")).default;
+    for (const oldPass of ["", 0, false, null, undefined, { pass: "x" }]) {
+      vi.clearAllMocks();
+      can.mockImplementation(async (rol: number) => rol === ADMIN);
+      const stored = storedUser();
+      findOne.mockResolvedValue(stored.model);
+
+      const c = call(
+        { id: SELF, id_rol: TECNICO },
+        { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass } },
+      );
+      await updateUserPass(c.req, c.res);
+
+      expect(c.status, JSON.stringify(oldPass)).toBe(400);
+      expect(c.message, JSON.stringify(oldPass)).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+      expect(bcryptjs.compare, JSON.stringify(oldPass)).not.toHaveBeenCalled();
+      expect(stored.save, JSON.stringify(oldPass)).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses when the current one is wrong, and writes the attempt down", async () => {
+    const { logAction } = await import("../utils/logAction.js");
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
     const stored = storedUser();
@@ -561,18 +635,34 @@ describe("changing a password", () => {
 
     const c = call(
       { id: SELF, id_rol: TECNICO },
-      { params: { id: String(SELF) }, body: { pass: "nueva", oldPass: "equivocada" } },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "equivocada" } },
     );
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(401);
+    expect(c.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
     expect(stored.save).not.toHaveBeenCalled();
+    // Compared against the stored hash of the row already in hand, not against
+    // whatever the body carried.
+    expect(bcryptjs.compare).toHaveBeenCalledWith("equivocada", "hash-viejo");
+    // A run of these on one account is somebody holding a session and guessing
+    // at the password behind it — the event worth finding in the bitácora, and
+    // the only thing that explains the 429 the budget will eventually answer.
+    // Same action name `verifyOwnPassword` writes, so both doors read as one
+    // event.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "PASSWORD_CONFIRM_FAILED", severity: "warning" }),
+    );
   });
 
-  it("lets an administrator reset one without knowing it", async () => {
-    // Deliberate: an administrator resets a password precisely because the user
-    // cannot supply the old one.
-    const stored = storedUser();
+  it("lets an administrator reset somebody else's without knowing it", async () => {
+    // The control, and the reason the rule is not "always". An administrator
+    // resets a password precisely because that person cannot get in, so there
+    // is no current one for either of them to supply. This is what the
+    // exemption exists for; it must keep working, and it is the one case that
+    // stays green when the gate is deleted.
+    const bcryptjs = (await import("bcryptjs")).default;
+    const stored = storedUser({ id: OTHER });
     findOne.mockResolvedValue(stored.model);
 
     const c = call(
@@ -583,6 +673,69 @@ describe("changing a password", () => {
 
     expect(c.status).toBe(200);
     expect(stored.save).toHaveBeenCalled();
+    // And nothing was compared, so no round trip and no oracle on a path where
+    // there is no password anybody could be expected to know.
+    expect(bcryptjs.compare).not.toHaveBeenCalled();
+  });
+
+  it("ignores an oldPass aimed at somebody else's account instead of comparing it", async () => {
+    // Compared, it was checked against the *target's* hash: an unlimited
+    // 401-or-not oracle against another person's password, for a caller who can
+    // reset it outright anyway and would come away with the plaintext. Nothing
+    // is given up by ignoring it — `seguridad.editar` is what authorises this
+    // request, with or without a password on it.
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    const stored = storedUser({ id: OTHER });
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(OTHER) }, body: { pass: "una-clave-de-prueba", oldPass: "adivinando" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(bcryptjs.compare).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The comparator decision, pinned — and it is the reason there are two ways
+   * of comparing a password in this controller.
+   *
+   * The rename uses `verifyOwnPassword`, which shares `checkAgainstRow` with
+   * the login. That door **refuses a locked account before it compares
+   * anything**, on purpose, so that confirming a password can never become a
+   * way of lifting a lockout. Right there, wrong here: lifting the lockout is
+   * what this write is *for*. `authenticate` does not read `locked_until`, so
+   * somebody whose account was locked by another person grinding their username
+   * still holds the session they had, and changing their password is their only
+   * way out. Through the shared door they would be told their current password
+   * is wrong while it was right, and that exit would close.
+   */
+  it("still lets a locked account change its own password, which is its way out", async () => {
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    const stored = storedUser({
+      failed_attempts: LOCKOUT_AFTER_FAILURES,
+      locked_until: new Date(Date.now() + 60_000),
+    });
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "la-mia" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(written(stored.set)).toEqual({ pass: "hashed", failed_attempts: 0, locked_until: null });
+    // Swap the comparison to `verifyOwnPassword` and this is what breaks: these
+    // two assertions are the decision, since the shared door is mocked in this
+    // file and would happily answer `ok` to a locked row it would refuse in
+    // production.
+    expect(verifyOwnPassword).not.toHaveBeenCalled();
+    expect(bcryptjs.compare).toHaveBeenCalledWith("la-mia", "hash-viejo");
   });
 
   it("stores a hash and never the password itself", async () => {
@@ -1170,7 +1323,10 @@ describe("archiving an account ends its sessions", () => {
  * checks.
  *
  * The hole these tests close: `updateUserName` demanded nothing at all, while
- * `updateUserPass` right beside it had always demanded the current password.
+ * `updateUserPass` right beside it had always demanded the current password of
+ * anybody who could not manage accounts — and, it turned out, of nobody who
+ * could, their own password included. That half is closed in "changing your own
+ * password proves it is you" above; both handlers read one rule now.
  * The two operations are worth the same — a username is half the credential, so
  * whoever changes yours locks you out of your own account without ever knowing
  * your password — and one screen asked for a password it then never sent while
@@ -1255,13 +1411,14 @@ describe("renaming your own account proves it is you", () => {
   });
 
   /**
-   * The decision this task had to make, pinned.
+   * The decision this task had to make, pinned — and the one `updateUserPass`
+   * has since been made to match.
    *
-   * `updateUserPass` lets `seguridad.editar` omit the current password, and
-   * there it is right: an administrator resets a password precisely because
-   * somebody cannot get in, so there is no current one for them to know.
-   * Renaming *yourself* rescues nobody, so the exemption buys nothing — and it
-   * would give up the check in the worst place, since an administrator's
+   * `seguridad.editar` may omit the current password when acting on *somebody
+   * else*, and there it is right: an administrator resets a password precisely
+   * because somebody cannot get in, so there is no current one for them to
+   * know. Acting on *yourself* rescues nobody, so the exemption buys nothing —
+   * and it would give up the check in the worst place, since an administrator's
    * unattended machine is the same attack with more reach.
    */
   it("demands it from an administrator renaming themselves, permission and all", async () => {
@@ -1336,37 +1493,39 @@ describe("renaming your own account proves it is you", () => {
 });
 
 /**
- * The rule on its own, because two things read it: the handler, and the
- * rate-limit mount in `usuario.routes.ts` which has to charge exactly the
- * requests that compare a password. One function so the two cannot drift.
+ * The rule on its own, because three things read it: both handlers that change
+ * a credential, and the rate-limit mount in `usuario.routes.ts` which has to
+ * charge exactly the requests that compare a password. One function so the
+ * three cannot drift — and one argument, since "the exemption is for rescuing
+ * somebody else" is the same sentence for a rename and for a password change.
  */
-describe("renameRequiresOwnPassword", () => {
+describe("requiresOwnPassword", () => {
   const req = (user: unknown, id: unknown) =>
-    ({ user, params: { id } }) as unknown as Parameters<typeof renameRequiresOwnPassword>[0];
+    ({ user, params: { id } }) as unknown as Parameters<typeof requiresOwnPassword>[0];
 
   it("is true for your own account", () => {
-    expect(renameRequiresOwnPassword(req({ id: SELF, id_rol: TECNICO }, String(SELF)))).toBe(true);
+    expect(requiresOwnPassword(req({ id: SELF, id_rol: TECNICO }, String(SELF)))).toBe(true);
   });
 
   it("is true for your own account even holding the permission", () => {
-    expect(renameRequiresOwnPassword(req({ id: ADMIN, id_rol: ADMIN }, String(ADMIN)))).toBe(true);
+    expect(requiresOwnPassword(req({ id: ADMIN, id_rol: ADMIN }, String(ADMIN)))).toBe(true);
   });
 
   it("is false for somebody else's", () => {
-    expect(renameRequiresOwnPassword(req({ id: ADMIN, id_rol: ADMIN }, String(OTHER)))).toBe(false);
+    expect(requiresOwnPassword(req({ id: ADMIN, id_rol: ADMIN }, String(OTHER)))).toBe(false);
   });
 
   it("is false with no session, rather than throwing", () => {
     // Not reachable through the real mount — `authenticate` answers 401 first —
     // but this runs as middleware, and a guard that throws where it should
     // return is a 500 on a path that had a correct answer available.
-    expect(renameRequiresOwnPassword(req(undefined, String(SELF)))).toBe(false);
+    expect(requiresOwnPassword(req(undefined, String(SELF)))).toBe(false);
   });
 
   it("is false for an id that is not a number", () => {
     // `Number("ana")` is NaN and NaN equals nothing, this id included. The
     // handler's own guard reaches the same verdict, so such a request is a 403
     // rather than an unpaid pass through the budget.
-    expect(renameRequiresOwnPassword(req({ id: SELF, id_rol: TECNICO }, "ana"))).toBe(false);
+    expect(requiresOwnPassword(req({ id: SELF, id_rol: TECNICO }, "ana"))).toBe(false);
   });
 });
