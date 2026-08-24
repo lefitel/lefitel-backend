@@ -25,9 +25,16 @@ import jwt from "jsonwebtoken";
 import request from "supertest";
 
 const permisos = { seguridad: { ver: true, crear: false } };
+/**
+ * What `can` answers. False for everything in this file — the caller is an
+ * ordinary account reaching its own records — and read through a variable
+ * rather than hard-coded so the one test that needs a permission holder can
+ * flip it and put it back.
+ */
+let puede = false;
 vi.mock("./permissions/store.js", () => ({
   permissionsFor: async () => permisos,
-  can: async () => false,
+  can: async () => puede,
   invalidatePermissions: vi.fn(),
 }));
 vi.mock("./utils/logAction.js", () => ({ logAction: vi.fn() }));
@@ -887,6 +894,98 @@ describe("confirming your own password, through the real stack", () => {
     // Nothing landed in an address-shaped bucket, which is what the fallback in
     // `passwordConfirmKey` would have produced had `req.user` not been read.
     expect(await passwordConfirmLimiter.getKey("pc:ip:::ffff:127.0.0.1")).toBeUndefined();
+  });
+});
+
+/**
+ * Renaming your own account is gated on your password too, and it pays out of
+ * the same bucket as the confirmation endpoint.
+ *
+ * Both halves of that are one-line mistakes no unit test can see, because
+ * neither is in a handler. The gate itself is pinned in
+ * `usuario.controller.test.ts`; what is pinned here is the mount — that the
+ * route really runs behind the budget, and that it is the budget the
+ * confirmation endpoint already had rather than a second one.
+ *
+ * **Why it needs a budget at all.** `updateUserName` compares a password now,
+ * and a wrong one there deliberately does not move `failed_attempts` — so that
+ * mistyping while renaming yourself cannot shut you out of the ERP. Without
+ * this mount the route would compare an unlimited number of passwords for
+ * whoever already holds a stolen session, and closing the client-side hole
+ * would have been a net loss: a guesser would simply switch from the endpoint
+ * that counts five attempts a quarter of an hour to the one that counts none.
+ */
+describe("renaming yourself spends the same budget as confirming a password", () => {
+  const CLAVE_RENOMBRE = `pc:${YO}`;
+
+  beforeEach(async () => {
+    await passwordConfirmLimiter.resetKey(CLAVE_RENOMBRE);
+  });
+
+  it("charges the caller's account for a rename of their own", async () => {
+    const res = await request(app)
+      .put(`/api/usuario/username/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ user: "isalas" });
+
+    // Not 404 — the route exists. Not 403 — `requireSelfOrPermission` let an
+    // owner through. Not 500 — nothing in the chain threw. And 400 for the
+    // reason it should be: `can` is mocked false in this file, so the only
+    // thing left that can refuse this is the missing password.
+    expect(res.status).toBe(400);
+    // The reason, not the number: this route also answers 400 to a username
+    // that is not a string, and a test reading the status alone would pass for
+    // a route with no gate on it.
+    expect(res.body.message).toMatch(/contraseña actual/i);
+
+    // The point of this test. `pc:7` is the confirmation endpoint's own key —
+    // the same bucket, so nobody gets ten attempts a quarter of an hour by
+    // alternating the two doors onto one secret.
+    const gastado = (await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)) as
+      | { totalHits?: number }
+      | undefined;
+    expect(gastado?.totalHits).toBe(1);
+  });
+
+  it("charges nothing for a request the permission guard already refused", async () => {
+    // The budget is mounted after the guard on purpose: a stranger reaching for
+    // somebody else's account must not be able to empty that person's — or
+    // their own — allowance by being refused over and over.
+    const res = await request(app)
+      .put("/api/usuario/username/99")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ user: "isalas" });
+
+    expect(res.status).toBe(403);
+    expect(await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)).toBeUndefined();
+  });
+
+  it("charges nothing when an administrator renames somebody else", async () => {
+    // The false positive this mount had to avoid. Renaming another account
+    // sends no password and compares none, so billing it would answer 429 to
+    // the sixth piece of legitimate administrative work in a quarter of an
+    // hour. `can` is mocked false for the rest of this file; here the caller
+    // holds the permission, so the guard passes on the permission and not on
+    // ownership.
+    puede = true;
+    try {
+      const res = await request(app)
+        .put("/api/usuario/username/99")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "isalas" });
+
+      expect(res.status).not.toBe(403);
+      expect(res.status).not.toBe(400);
+      expect(await passwordConfirmLimiter.getKey(CLAVE_RENOMBRE)).toBeUndefined();
+      // Nor did it land in anybody else's bucket, keyed by the target rather
+      // than the caller.
+      expect(await passwordConfirmLimiter.getKey("pc:99")).toBeUndefined();
+    } finally {
+      puede = false;
+    }
   });
 });
 

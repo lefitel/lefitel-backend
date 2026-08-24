@@ -4,6 +4,7 @@ import { sequelize } from "../database/sequelize.js";
 import { RolModel } from "../models/rol.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
+import { verifyOwnPassword } from "../auth/credentials.js";
 import bcryptjs from "bcryptjs";
 import { deleteImageFile } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
@@ -52,6 +53,56 @@ function requireUsernameString(user: unknown): user is string {
 }
 
 const USERNAME_NOT_STRING_MESSAGE = "El nombre de usuario debe ser un texto.";
+
+/**
+ * Shared text: the caller did not send their current password.
+ *
+ * Two handlers on this file answer it now, and they have to answer it with the
+ * same sentence — a rename and a password change are the same demand made of
+ * the same person, and wording them differently is how one of them ends up
+ * sounding optional. Exported so the tests can pin the *reason* rather than the
+ * number: this route already answers 400 to a username that is not a string,
+ * so a test asserting `toBe(400)` alone would pass through the wrong branch.
+ * That exact accident happened earlier in this plan with a 401.
+ */
+export const CURRENT_PASSWORD_REQUIRED_MESSAGE = "Debe proporcionar su contraseña actual.";
+
+/** Shared text: they sent one and it is not theirs. Same sentence on both routes. */
+export const CURRENT_PASSWORD_WRONG_MESSAGE = "La contraseña actual suministrada no es correcta.";
+
+/**
+ * Whether this rename has to prove the caller's password before it happens.
+ *
+ * True exactly when the account being renamed is the caller's own — and that is
+ * the whole rule: **holding `seguridad.editar` does not lift it.**
+ *
+ * `updateUserPass` does let that permission omit the current password, and
+ * there it is right: an administrator resets a password precisely because
+ * somebody cannot get in, so there is no current password for them to know.
+ * Renaming *yourself* rescues nobody. There is no locked-out person on the
+ * other side of it and no operational need it would serve, so the exemption
+ * would buy nothing and give up the only thing this check is here for.
+ *
+ * And it would give it up in the worst place. What this closes is an unattended
+ * machine with a live session: whoever sits down renames the account and locks
+ * its owner out without ever learning the password. An administrator's
+ * unattended machine is the same act with more reach — so exempting
+ * administrators would leave the hole open exactly on the accounts where it
+ * costs most.
+ *
+ * Renaming *somebody else* is not gated here. That is what `seguridad.editar`
+ * authorises, and there is no password the caller could be expected to know:
+ * the target's is unknown to them by design.
+ *
+ * Exported because `usuario.routes.ts` needs the same answer to decide whether
+ * a request pays into the password-confirmation budget. One function, so the
+ * rate limit and the check can never disagree about which requests compare a
+ * password.
+ */
+export function renameRequiresOwnPassword(req: Request): boolean {
+  const target = Number(req.params?.id);
+  return typeof req.user?.id === "number" && req.user.id === target;
+}
 
 /**
  * True for a Postgres unique-violation on `usuarios_user_uniq` specifically.
@@ -351,6 +402,83 @@ export async function updateUserName(req: Request, res: Response) {
       return res.status(400).json({ message: USERNAME_NOT_STRING_MESSAGE });
     }
 
+    /**
+     * Renaming yourself proves it is you, and it proves it before anything else
+     * happens.
+     *
+     * **Why a username is worth this at all.** It is half of the credential.
+     * Change somebody's username and they cannot log in — not because they have
+     * forgotten their password, but because they no longer know what name to
+     * offer it with. So this operation is worth what a password change is
+     * worth, and `updateUserPass` forty lines below has demanded the current
+     * password all along while this one demanded nothing whatsoever.
+     *
+     * The concrete case: an unattended machine in the office, or the shared
+     * field laptop. Whoever sits down at a live session renames the account and
+     * **locks its owner out of it without knowing the password**. It is
+     * repairable — an administrator hands the name back — but nobody
+     * understands what happened in the meantime.
+     *
+     * **Why here and not on the screen.** Both screens that rename an account
+     * asked for a password; one of them then sent the change without it, and
+     * the other never asked. A confirmation that lives only in the client is
+     * optional by definition: whoever does not want to type it uses the other
+     * screen, or `curl`. Which of the two is a real gate is settled entirely by
+     * where the check runs, and that is here.
+     *
+     * **Who has to pass it** is `renameRequiresOwnPassword` — the answer is not
+     * "whoever lacks a permission", and the reasoning is up there with it.
+     *
+     * **Before the collision check**, deliberately: a caller who has not proved
+     * who they are learns nothing from this endpoint about which usernames are
+     * taken. It costs an early return on a request that was going to be a 409
+     * anyway.
+     *
+     * **`verifyOwnPassword` and not a `bcryptjs.compare` of its own.** It is
+     * word for word the question the confirmation endpoint asks — is this the
+     * password of the account already asking? — and it carries everything a
+     * fresh comparison here would have quietly lacked: the `checkAgainstRow`
+     * the login shares, the filler hash that levels the timings, the refusal to
+     * let a locked account through a side door that would clear its own
+     * lockout, and a `PASSWORD_CONFIRM_FAILED` line that records the failed
+     * attempt without forging a login nobody made.
+     *
+     * It also, on purpose, does **not** touch `failed_attempts`: mistyping your
+     * own password while renaming yourself must not be able to shut you out of
+     * the ERP. That is why the budget against guessing lives on the route
+     * instead — see `usuario.routes.ts`.
+     *
+     * The id comes from `req.user` and never from `:id`. They are equal here by
+     * the check just made, and reading it off the session is what keeps that
+     * true if this block is ever moved.
+     */
+    if (renameRequiresOwnPassword(req)) {
+      const oldPass = (req.body as { oldPass?: unknown } | undefined)?.oldPass;
+      // Not a string is not a password, and an empty one is not a
+      // confirmation — refused before the round trip, the same way
+      // `verifyOwnPassword` refuses them, so the two cannot disagree about
+      // what counts as "sent nothing".
+      if (typeof oldPass !== "string" || oldPass === "") {
+        return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
+      }
+      const confirmacion = await verifyOwnPassword({
+        id: loggedUser.id,
+        pass: oldPass,
+        ip: req.ip ?? null,
+      });
+      if (!confirmacion.ok) {
+        // Archived between `authenticate` and here — the narrow race
+        // `verifyOwnPassword` names. Answered as the 404 the lookup below
+        // would have given anyway, and pointedly not as a wrong password:
+        // sending somebody hunting for a typo in a password that was right is
+        // worse than telling them nothing.
+        if (confirmacion.reason === "no-account") {
+          return res.status(404).json({ message: "Usuario no encontrado" });
+        }
+        return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
+      }
+    }
+
     // Case-insensitive, matching `usuarios_user_uniq`. The exact-match check
     // this replaced let a rename to `Isaias` pass the application layer while
     // `isaias` already existed, and it died on the database instead.
@@ -396,11 +524,11 @@ export async function updateUserPass(req: Request, res: Response) {
     if (oldPass) {
        const isMatch = await bcryptjs.compare(oldPass, TempUsuario.dataValues.pass);
        if (!isMatch) {
-         return res.status(401).json({ message: "La contraseña actual suministrada no es correcta." });
+         return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
        }
     } else if (!mayResetPasswords) {
         // Whoever cannot manage accounts must prove they know the current one
-       return res.status(400).json({ message: "Debe proporcionar su contraseña actual." });
+       return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
     }
 
     const motivo = validarPassword(pass ?? "");

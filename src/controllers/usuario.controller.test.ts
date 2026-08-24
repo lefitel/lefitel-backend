@@ -47,6 +47,26 @@ vi.mock("../database/sequelize.js", () => ({
   sequelize: { transaction: (...args: unknown[]) => transaction(...args) },
 }));
 vi.mock("../models/rol.model.js", () => ({ RolModel: { findByPk: vi.fn() } }));
+/**
+ * The credential door, mocked — deliberately, and this is the one mock in this
+ * file worth arguing for.
+ *
+ * `updateUserName` confirms the caller's own password through
+ * `verifyOwnPassword`, the same function `POST /api/auth/confirm-password`
+ * calls. What that function *does* — the shared `checkAgainstRow`, the filler
+ * hash, the locked-account refusal, the `PASSWORD_CONFIRM_FAILED` line, and
+ * emphatically not touching `failed_attempts` — is pinned by
+ * `credentials.test.ts` and `confirmPassword.test.ts`, and duplicating it here
+ * would mean two places to update and one of them silently wrong.
+ *
+ * What is under test here is only what this controller does with the answer:
+ * which requests it asks about at all, and what it refuses with when the answer
+ * is no.
+ */
+const verifyOwnPassword = vi.fn();
+vi.mock("../auth/credentials.js", () => ({
+  verifyOwnPassword: (...args: unknown[]) => verifyOwnPassword(...args),
+}));
 // The permission matrix is mocked rather than read: what is under test is what
 // this controller does with an answer, not which answer the database gives.
 // requirePermission.test.ts and permissions/store.test.ts cover the rest.
@@ -58,6 +78,9 @@ vi.mock("bcryptjs", () => ({
 }));
 
 const {
+  CURRENT_PASSWORD_REQUIRED_MESSAGE,
+  CURRENT_PASSWORD_WRONG_MESSAGE,
+  renameRequiresOwnPassword,
   createUsuario,
   updateUsuario,
   updateUserName,
@@ -187,6 +210,11 @@ beforeEach(() => {
   // Runs the callback and hands it the stand-in, which is what lets the tests
   // below check that the archive and the revocation received the *same* one.
   transaction.mockImplementation(async (fn: (t: unknown) => Promise<unknown>) => fn(TRANSACCION));
+  // Right, unless a test says otherwise. Every rename test below that is about
+  // something else — a collision, a race, a permission — sends a password and
+  // needs it to be accepted, so the interesting case stays the one the test
+  // names.
+  verifyOwnPassword.mockResolvedValue({ ok: true });
 });
 
 describe("creating and archiving users", () => {
@@ -216,7 +244,11 @@ describe("creating and archiving users", () => {
 describe("editing a user record", () => {
   const editors = [
     ["updateUsuario", updateUsuario, { name: "Ana" }],
-    ["updateUserName", updateUserName, { user: "ana2" }],
+    // `oldPass` is part of a rename's body now, the same as it always was for a
+    // password change: renaming your own account has to prove it is you. These
+    // four tests are about the IDOR guards, so they send a valid request and
+    // let the guard be the only thing that can refuse it.
+    ["updateUserName", updateUserName, { user: "ana2", oldPass: "la-mia" }],
     ["updateUserPass", updateUserPass, { pass: "nueva", oldPass: "vieja" }],
   ] as const;
 
@@ -817,7 +849,7 @@ describe("username collisions", () => {
 
       const c = call(
         { id: SELF, id_rol: TECNICO },
-        { params: { id: String(SELF) }, body: { user: "Isaias" } },
+        { params: { id: String(SELF) }, body: { user: "Isaias", oldPass: "la-mia" } },
       );
       await updateUserName(c.req, c.res);
 
@@ -842,6 +874,11 @@ describe("username collisions", () => {
       await updateUserName(c.req, c.res);
 
       expect(c.status).toBe(400);
+      // Pinned on the reason, because this handler now has *two* ways to answer
+      // 400 — a username that is not a string, and a missing current password —
+      // and the number alone no longer says which one ran. This is the first.
+      expect(c.message).toMatch(/debe ser un texto/i);
+      expect(c.message).not.toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
       expect(findOne).not.toHaveBeenCalled();
     });
 
@@ -855,7 +892,7 @@ describe("username collisions", () => {
 
       const c = call(
         { id: SELF, id_rol: TECNICO },
-        { params: { id: String(SELF) }, body: { user: "otronombre" } },
+        { params: { id: String(SELF) }, body: { user: "otronombre", oldPass: "la-mia" } },
       );
       await updateUserName(c.req, c.res);
 
@@ -1124,5 +1161,212 @@ describe("archiving an account ends its sessions", () => {
     expect(c.status).toBe(403);
     expect(transaction).not.toHaveBeenCalled();
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+  });
+});
+
+
+/**
+ * Renaming your own account has to prove it is you, and the server is what
+ * checks.
+ *
+ * The hole these tests close: `updateUserName` demanded nothing at all, while
+ * `updateUserPass` right beside it had always demanded the current password.
+ * The two operations are worth the same — a username is half the credential, so
+ * whoever changes yours locks you out of your own account without ever knowing
+ * your password — and one screen asked for a password it then never sent while
+ * the other never asked at all. A confirmation that lives only in the client is
+ * optional by definition.
+ *
+ * **Every assertion here names the reason and not only the number**, and that
+ * is not decoration. This endpoint already answered 400 to a username that is
+ * not a string and 409 to one in use, so a test reading the status alone can
+ * pass through the wrong branch with the gate deleted. Earlier in this plan a
+ * `toBe(401)` stayed green against broken code for exactly that reason. The two
+ * sentences are imported from the controller rather than typed out, so what is
+ * compared is the branch and not a copy of its text.
+ */
+describe("renaming your own account proves it is you", () => {
+  it("refuses a self-rename that sends no password, and says which thing is missing", async () => {
+    // The break-it test of this task on the server. Delete the block in
+    // `updateUserName` and this request goes on to answer 200.
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { user: "ana2" } },
+    );
+    await updateUserName(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+    // Nothing was compared and nothing was read: the refusal is decided from
+    // the body, before any round trip.
+    expect(verifyOwnPassword).not.toHaveBeenCalled();
+    expect(findOne).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty string and a non-string the same way, rather than comparing them", async () => {
+    // An empty string is not a confirmation and a number is not a password.
+    // Both are refused before the round trip, the same way `verifyOwnPassword`
+    // refuses them, so the two cannot disagree about what "sent nothing" means.
+    for (const oldPass of ["", 123, null, undefined, { pass: "x" }]) {
+      vi.clearAllMocks();
+      verifyOwnPassword.mockResolvedValue({ ok: true });
+      const c = call(
+        { id: SELF, id_rol: TECNICO },
+        { params: { id: String(SELF) }, body: { user: "ana2", oldPass } },
+      );
+      await updateUserName(c.req, c.res);
+
+      expect(c.status, JSON.stringify(oldPass)).toBe(400);
+      expect(c.message, JSON.stringify(oldPass)).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+      expect(verifyOwnPassword, JSON.stringify(oldPass)).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses a wrong password with 401 and writes nothing", async () => {
+    verifyOwnPassword.mockResolvedValue({ ok: false, reason: "wrong-password" });
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { user: "ana2", oldPass: "no-es-la-mia" } },
+    );
+    await updateUserName(c.req, c.res);
+
+    expect(c.status).toBe(401);
+    expect(c.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
+    expect(stored.save).not.toHaveBeenCalled();
+  });
+
+  it("asks about the caller's own account, from the session and never from the body", async () => {
+    // The id is taken off `req.user`. Read from `:id` it would be equal here
+    // today and wrong the moment this block moves; read from the body it would
+    // be whatever the caller cared to send.
+    findOne.mockResolvedValue(null);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { user: "ana2", oldPass: "la-mia", id: OTHER } },
+    );
+    await updateUserName(c.req, c.res);
+
+    expect(verifyOwnPassword).toHaveBeenCalledTimes(1);
+    expect(verifyOwnPassword.mock.calls[0][0]).toMatchObject({ id: SELF, pass: "la-mia" });
+  });
+
+  /**
+   * The decision this task had to make, pinned.
+   *
+   * `updateUserPass` lets `seguridad.editar` omit the current password, and
+   * there it is right: an administrator resets a password precisely because
+   * somebody cannot get in, so there is no current one for them to know.
+   * Renaming *yourself* rescues nobody, so the exemption buys nothing — and it
+   * would give up the check in the worst place, since an administrator's
+   * unattended machine is the same attack with more reach.
+   */
+  it("demands it from an administrator renaming themselves, permission and all", async () => {
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(ADMIN) }, body: { user: "root2" } },
+    );
+    await updateUserName(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+    expect(findOne).not.toHaveBeenCalled();
+  });
+
+  it("does not demand it from an administrator renaming somebody else", async () => {
+    // The other half of the same decision, and the reason it is not "always".
+    // `seguridad.editar` is what authorises acting on another account, and
+    // there is no password the caller could be expected to know — the target's
+    // is unknown to them by design.
+    findOne.mockResolvedValueOnce(null);
+    const stored = storedUser({ id: OTHER });
+    findOne.mockResolvedValueOnce(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(OTHER) }, body: { user: "ana2" } },
+    );
+    await updateUserName(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(verifyOwnPassword).not.toHaveBeenCalled();
+    expect(stored.save).toHaveBeenCalled();
+  });
+
+  it("checks the password before the collision, so an unproven caller learns nothing", async () => {
+    // Ordering, asserted rather than assumed. With the gate placed after the
+    // collision check this answers 409 and tells somebody who has not proved
+    // who they are that `isaias` is taken.
+    findOne.mockResolvedValueOnce(storedUser({ id: 3, user: "isaias" }).model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { user: "isaias" } },
+    );
+    await updateUserName(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+    expect(findOne).not.toHaveBeenCalled();
+  });
+
+  it("answers 404, not a wrong password, when the account went away mid-request", async () => {
+    // Archived between `authenticate` and the check. Telling somebody their
+    // password is wrong when it was right sends them hunting for a typo that
+    // does not exist.
+    verifyOwnPassword.mockResolvedValue({ ok: false, reason: "no-account" });
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO },
+      { params: { id: String(SELF) }, body: { user: "ana2", oldPass: "la-mia" } },
+    );
+    await updateUserName(c.req, c.res);
+
+    // The 404 alone proves nothing here and that is the trap this plan keeps
+    // hitting: with the gate deleted, `findOne` returns nothing and the handler
+    // answers 404 for its own unrelated reason. What separates the two is that
+    // the check ran at all.
+    expect(verifyOwnPassword).toHaveBeenCalledTimes(1);
+    expect(c.status).toBe(404);
+    expect(c.message).not.toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
+  });
+});
+
+/**
+ * The rule on its own, because two things read it: the handler, and the
+ * rate-limit mount in `usuario.routes.ts` which has to charge exactly the
+ * requests that compare a password. One function so the two cannot drift.
+ */
+describe("renameRequiresOwnPassword", () => {
+  const req = (user: unknown, id: unknown) =>
+    ({ user, params: { id } }) as unknown as Parameters<typeof renameRequiresOwnPassword>[0];
+
+  it("is true for your own account", () => {
+    expect(renameRequiresOwnPassword(req({ id: SELF, id_rol: TECNICO }, String(SELF)))).toBe(true);
+  });
+
+  it("is true for your own account even holding the permission", () => {
+    expect(renameRequiresOwnPassword(req({ id: ADMIN, id_rol: ADMIN }, String(ADMIN)))).toBe(true);
+  });
+
+  it("is false for somebody else's", () => {
+    expect(renameRequiresOwnPassword(req({ id: ADMIN, id_rol: ADMIN }, String(OTHER)))).toBe(false);
+  });
+
+  it("is false with no session, rather than throwing", () => {
+    // Not reachable through the real mount — `authenticate` answers 401 first —
+    // but this runs as middleware, and a guard that throws where it should
+    // return is a 500 on a path that had a correct answer available.
+    expect(renameRequiresOwnPassword(req(undefined, String(SELF)))).toBe(false);
+  });
+
+  it("is false for an id that is not a number", () => {
+    // `Number("ana")` is NaN and NaN equals nothing, this id included. The
+    // handler's own guard reaches the same verdict, so such a request is a 403
+    // rather than an unpaid pass through the budget.
+    expect(renameRequiresOwnPassword(req({ id: SELF, id_rol: TECNICO }, "ana"))).toBe(false);
   });
 });
