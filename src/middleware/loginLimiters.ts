@@ -1,9 +1,13 @@
 // How much room somebody gets to be wrong.
 //
-// Three budgets that do different jobs: the address bucket stops a flood, the
-// account bucket stops a guess, and the pair stops one machine grinding one
-// account. The arithmetic of the third is the part that goes wrong quietly —
-// an escalation with no ceiling is a button for locking a colleague out.
+// Four budgets that do different jobs: the address bucket stops a flood, the
+// account bucket stops one machine grinding one name, the lockout arithmetic at
+// the bottom stops a guess spread across many addresses, and the confirmation
+// bucket stops a caller who is already logged in from using "prove it is you"
+// as a password oracle. The arithmetic of the third is the part that goes wrong
+// quietly — an escalation with no ceiling is a button for locking a colleague
+// out — and the fourth is the one whose absence would be invisible, since the
+// endpoint it guards deliberately charges nothing to the lockout.
 
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import type { RateLimitRequestHandler } from "express-rate-limit";
@@ -15,6 +19,7 @@ import {
   LOCKOUT_AFTER_FAILURES,
   LOCKOUT_BASE_MINUTES,
   LOCKOUT_MAX_MINUTES,
+  PASSWORD_CONFIRM_LIMIT,
 } from "../config/security.js";
 
 /**
@@ -58,6 +63,63 @@ export function ipBucketKey(req: Request): string {
 export function accountBucketKey(req: Request): string {
   return `ipu:${ipKeyGenerator(req.ip ?? "")}:${usuarioDe(req)}`;
 }
+
+/**
+ * The key for confirming your own password, and it is the account — not the
+ * address.
+ *
+ * `POST /api/auth/confirm-password` runs behind `authenticate`, so who is
+ * asking is already known and comes off `req.user` rather than out of the body:
+ * there is no username here to capitalise differently and buy a second bucket
+ * with. Keying by account and not by address is what makes the budget follow
+ * the thing being guessed at — somebody working through a stolen session's
+ * password from a dozen addresses meets one bucket, not a dozen.
+ *
+ * The fallback exists because a key generator that returns `undefined` would
+ * put every caller in one bucket and lock the endpoint for everybody. It cannot
+ * be reached through the mount in `auth.routes.ts` — `authenticate` answers 401
+ * before this runs — so what it really guards is somebody mounting this limiter
+ * somewhere it is not behind authentication, and it fails towards the
+ * address-shaped budget rather than towards no budget at all. `ipKeyGenerator`
+ * for the same reason as the two above: without it one holder of an IPv6 /56
+ * walks through billions of separate buckets.
+ */
+export function passwordConfirmKey(req: Request): string {
+  const id = req.user?.id;
+  return typeof id === "number" ? `pc:${id}` : `pc:ip:${ipKeyGenerator(req.ip ?? "")}`;
+}
+
+/**
+ * The budget for re-typing your own password, and the only limit that endpoint
+ * has.
+ *
+ * **No `skipSuccessfulRequests`, unlike both buckets above, and that is the
+ * whole point of writing this as a third bucket instead of reusing one of
+ * them.** `POST /api/auth/confirm-password` answers a wrong password with
+ * **200** and `{ correcta: false }` — deliberately, so no client can mistake
+ * "wrong password" for "server broken" by reading a status code — so a
+ * refund rule based on the status would hand back exactly the attempts this
+ * bucket exists to charge for. Every request counts here, right or wrong.
+ *
+ * What it costs: somebody who confirms correctly five times in a quarter of an
+ * hour waits. Nobody renames themselves five times in a quarter of an hour, and
+ * the answer they get says to wait rather than that their password is wrong.
+ *
+ * Why the endpoint needs a bucket of its own at all — rather than nothing, now
+ * that a wrong answer there no longer touches `failed_attempts`: an
+ * authenticated endpoint that compares an unlimited number of passwords is a
+ * password oracle for whoever already stole a session. The lockout cannot be
+ * the answer (it would let anybody shut their own account out of the ERP by
+ * mistyping while renaming themselves) so this is.
+ */
+export const passwordConfirmLimiter = rateLimit({
+  windowMs: LOGIN_WINDOW_MS,
+  limit: PASSWORD_CONFIRM_LIMIT,
+  keyGenerator: passwordConfirmKey,
+  message: { message: "Demasiados intentos. Espere unos minutos antes de volver a confirmar." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 /**
  * Whether an answer costs the caller anything.

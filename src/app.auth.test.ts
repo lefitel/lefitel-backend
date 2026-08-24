@@ -37,7 +37,7 @@ vi.mock("bcryptjs", () => ({
 
 const app = (await import("./app.js")).default;
 const { SESSION_COOKIE_NAME } = await import("./auth/sessionCookie.js");
-const { allowedOrigins, CSRF_CLIENT_HEADER, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_DAYS, SESSION_TOUCH_THROTTLE_MINUTES } =
+const { allowedOrigins, CSRF_CLIENT_HEADER, PASSWORD_CONFIRM_LIMIT, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_DAYS, SESSION_TOUCH_THROTTLE_MINUTES } =
   await import("./config/security.js");
 
 /**
@@ -53,7 +53,9 @@ const { allowedOrigins, CSRF_CLIENT_HEADER, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_
 const CABECERA_ROL = "x-osefi-role";
 const CABECERA_VENCIMIENTO = "x-osefi-session-expires";
 const { hashSessionToken } = await import("./auth/sessionToken.js");
-const { loginIpLimiter, loginAccountIpLimiter } = await import("./middleware/loginLimiters.js");
+const { loginIpLimiter, loginAccountIpLimiter, passwordConfirmLimiter } = await import(
+  "./middleware/loginLimiters.js"
+);
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { SesionModel } = await import("./models/sesion.model.js");
 
@@ -664,6 +666,227 @@ describe("the session list", () => {
     expect(where).toMatchObject({ id_usuario: YO, revoked_at: null });
     expect(res.body.sesiones[0]).toMatchObject({ id: MI_SESION, actual: true });
     expect(JSON.stringify(res.body)).not.toContain("token_hash");
+  });
+});
+
+describe("confirming your own password, through the real stack", () => {
+  /**
+   * The endpoint that replaced "call the login and see whether it works".
+   *
+   * What only a request through the mount can see is the wiring, and there are
+   * four wires here: `authenticate` in front of it (without which any stranger
+   * could ask), `requireSameOrigin` in front of that (without which any page on
+   * the internet could ask through somebody's browser), the rate limiter behind
+   * `authenticate` and not in front of it, and the absence of everything the old
+   * implementation emitted — a `Set-Cookie`, a session row, a bitácora line
+   * claiming somebody logged in.
+   */
+  const CLAVE = `pc:${YO}`;
+
+  /**
+   * The bucket is a module singleton shared with the real app, so each test
+   * starts with the caller's budget full. Without this the sixth request in
+   * this describe would be a 429 wherever it happened to fall.
+   */
+  beforeEach(async () => {
+    await passwordConfirmLimiter.resetKey(CLAVE);
+  });
+
+  it("is mounted, and refuses without a session cookie", async () => {
+    const res = await request(app).post("/api/auth/confirm-password").send({ pass: "x" });
+
+    // Not 404: the route exists. Not 500: nothing in the chain threw.
+    expect(res.status).toBe(401);
+    // Pinned on the reason and not only the number, because 401 is reachable
+    // from three places on this path — no cookie, a dead session, an archived
+    // account — and a test that reads the number alone passes for a route
+    // mounted without `authenticate` that happens to answer 401 for its own
+    // reasons. This is `authenticate`'s own sentence.
+    expect(res.body.message).toBe("Su sesión expiró. Vuelva a iniciar sesión.");
+    // And nothing was compared: no password check ran at all.
+    expect(usuarioFindByPk).not.toHaveBeenCalled();
+  });
+
+  it("refuses a cookie-carrying request that cannot show it came from our own frontend", async () => {
+    // Without this, a page on any other site could put somebody's password to
+    // this endpoint through their own browser — cookies and all — and read the
+    // answer off the response's timing or the count of failures in the bitácora.
+    // `requireSameOrigin` runs before the router, so the request never reaches
+    // the handler.
+    const res = await request(app)
+      .post("/api/auth/confirm-password")
+      .set("Cookie", COOKIE)
+      .send({ pass: "una-clave-de-prueba" });
+
+    expect(res.status).toBe(403);
+    expect(usuarioFindByPk).not.toHaveBeenCalled();
+  });
+
+  it("says yes without issuing anything: no cookie, no session row, no bitácora line", async () => {
+    const { logAction } = await import("./utils/logAction.js");
+    const bcryptjs = (await import("bcryptjs")).default;
+    /**
+     * A row carrying a hash, for this test only.
+     *
+     * The shared fixture in `beforeEach` has no `pass` — it is written for
+     * `authenticate`, which asks for two columns — and with `bcryptjs.compare`
+     * mocked to resolve true, this test would have said "correcta: true" while
+     * the endpoint compared against `undefined`. Which is the whole family of
+     * mistake this file exists to catch, so the hash is put back and the
+     * comparison itself is asserted below.
+     */
+    usuarioFindByPk.mockResolvedValue({
+      dataValues: {
+        id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
+        name: "Isaias", lastname: "Salas", image: null, failed_attempts: 0, locked_until: null,
+      },
+    } as never);
+
+    const res = await request(app)
+      .post("/api/auth/confirm-password")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ pass: "una-clave-de-prueba" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ correcta: true });
+    // The four effects of the old implementation, one assertion each.
+    //
+    // No `Set-Cookie` at all, and that is not luck: `beforeEach` gives the
+    // session a fresh `last_used_at`, so the sliding renewal is throttled off
+    // and the only thing that could set a cookie here is somebody opening a
+    // session. Which is the thing being asserted against.
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(sesionCreate).not.toHaveBeenCalled();
+    expect(logAction).not.toHaveBeenCalled();
+    // Read by the caller's own id, from the cookie's session, and not by
+    // anything in the body.
+    expect(usuarioFindByPk).toHaveBeenCalledWith(YO);
+    // And it really compared what arrived against what is stored, rather than
+    // answering yes off a row it never read a hash out of.
+    expect(bcryptjs.compare).toHaveBeenCalledWith("una-clave-de-prueba", "$2a$12$hash");
+  });
+
+  it("says no in the body, with a 200, and charges the account nothing", async () => {
+    /**
+     * The break-it test of this task: make the endpoint answer "correcta" always
+     * and this is what falls.
+     *
+     * It asserts the **field**, not the status, and that is deliberate — this
+     * endpoint answers 200 either way, so a status assertion would pass for both
+     * answers. The plan has already been caught by the other version of this
+     * mistake once, a `toBe(401)` that stayed green with a broken branch
+     * restored because something else on the path answered 401 too.
+     *
+     * `increment` is stubbed for this one case rather than left real. The
+     * wrong-password branch of the *login* calls it, which is why the comment at
+     * the end of this file says a test that reached that branch really did send
+     * an UPDATE to whatever `.env` points at; the confirmation branch must not
+     * call it at all, and stubbing it is what turns a regression to the lockout
+     * policy into the failed assertion below instead of a write against a real
+     * database.
+     */
+    const usuarioIncrement = vi.spyOn(UsuarioModel, "increment").mockResolvedValue([[], 0] as never);
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    // With a hash on the row, for the reason spelled out in the test above: on
+    // the shared fixture the comparison would be against `undefined`, and then
+    // "correcta: false" would also be what a handler that never compares
+    // anything answers.
+    usuarioFindByPk.mockResolvedValue({
+      dataValues: {
+        id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
+        name: "Isaias", lastname: "Salas", image: null, failed_attempts: 0, locked_until: null,
+      },
+    } as never);
+    try {
+      const res = await request(app)
+        .post("/api/auth/confirm-password")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ pass: "no-es-la-suya" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.correcta).toBe(false);
+      // Nothing about the account, and a sentence that does not mention a
+      // username the caller never sent.
+      expect(res.body.message).toBe("Esa no es su contraseña actual.");
+      // The "no" came out of a real comparison against the stored hash.
+      expect(bcryptjs.compare).toHaveBeenCalledWith("no-es-la-suya", "$2a$12$hash");
+      // The reason the whole endpoint exists: a typo while renaming yourself
+      // must not spend a failed login attempt, because five of them shut the
+      // account.
+      expect(usuarioIncrement).not.toHaveBeenCalled();
+    } finally {
+      usuarioIncrement.mockRestore();
+      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    }
+  });
+
+  it("runs out of attempts long before it becomes a way of guessing a password", async () => {
+    /**
+     * The limit that replaces the lockout on this door, on the real mount and
+     * against the real bucket.
+     *
+     * Somebody who has stolen a session cookie can ask this endpoint "is the
+     * password X?" as often as it will answer, and a wrong answer here costs the
+     * account nothing by design. `PASSWORD_CONFIRM_LIMIT` is therefore the whole
+     * of the limit, and it is keyed by the account rather than the address so
+     * that asking from twenty addresses is still one budget.
+     */
+    const bcryptjs = (await import("bcryptjs")).default;
+    vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
+    try {
+      const attempt = () =>
+        request(app)
+          .post("/api/auth/confirm-password")
+          .set("Cookie", COOKIE)
+          .set(DEL_FRONTEND)
+          .send({ pass: "adivinando" });
+
+      for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
+        const res = await attempt();
+        expect(res.status, `intento ${i + 1}`).toBe(200);
+        expect(res.body.correcta, `intento ${i + 1}`).toBe(false);
+      }
+
+      const cortado = await attempt();
+      expect(cortado.status).toBe(429);
+      // And the refusal is not readable as an answer about the password. The
+      // client requires `correcta === true`, so a 429 stops it dead — but a
+      // body carrying `correcta: false` here would tell a guesser that this
+      // particular attempt was wrong, which is exactly what the budget is
+      // meant to stop them learning.
+      expect(cortado.body).not.toHaveProperty("correcta");
+
+      // The wrong password is what was charged for, not the answer's status: a
+      // correct one costs a token from the same bucket, which is why nothing
+      // here relies on `skipSuccessfulRequests`.
+      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+      const aunCortado = await attempt();
+      expect(aunCortado.status).toBe(429);
+    } finally {
+      vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+    }
+  });
+
+  it("keeps one budget per account, not one for everybody", async () => {
+    // A key generator that ignored `req.user` — or fell back to a constant —
+    // would put the whole company in one bucket, and five attempts by one
+    // person would lock the endpoint for everyone. The key is read out of the
+    // bucket rather than inferred from a second caller's 200, because two
+    // accounts cannot easily be signed in at once through this harness.
+    await request(app)
+      .post("/api/auth/confirm-password")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ pass: "una-clave-de-prueba" });
+
+    const mio = (await passwordConfirmLimiter.getKey(CLAVE)) as { totalHits?: number } | undefined;
+    expect(mio?.totalHits).toBe(1);
+    // Nothing landed in an address-shaped bucket, which is what the fallback in
+    // `passwordConfirmKey` would have produced had `req.user` not been read.
+    expect(await passwordConfirmLimiter.getKey("pc:ip:::ffff:127.0.0.1")).toBeUndefined();
   });
 });
 

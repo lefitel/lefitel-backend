@@ -75,9 +75,17 @@ const level = process.env.LOG_LEVEL ?? (underTest ? "silent" : "info");
  * Values that must never reach a log file.
  *
  * Session cookies travel on `set-cookie`, the legacy bearer token still arrives
- * on `authorization`, and passwords arrive in bodies on three endpoints. All of
- * them are replaced with `[oculto]` before anything is written, by the logger
- * itself rather than by remembering at each call site.
+ * on `authorization`, and passwords arrive in request bodies wherever somebody
+ * types one: the login, the password change, and confirming your own password
+ * before a change to your account. All of them are replaced with `[oculto]`
+ * before anything is written, by the logger itself rather than by remembering at
+ * each call site.
+ *
+ * Deliberately not "on three endpoints", which is what this said until a fourth
+ * arrived. The paths below name **fields**, not routes, so an endpoint added
+ * tomorrow that takes a `pass` is covered the moment it is written — that is a
+ * property of the list, and a count in this comment was only ever a note about
+ * one afternoon's routing table.
  *
  * `authorization` stays on the list although nothing authenticates by it any
  * more — `authenticate` stopped reading the header at all. The reasoning is the

@@ -60,6 +60,37 @@ export const LOGIN_ACCOUNT_IP_LIMIT = 10;
 export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
 /**
+ * How many times an account may re-type its own password to confirm something,
+ * per `LOGIN_WINDOW_MS`.
+ *
+ * A different budget from the two above and not a copy of them, because it is
+ * the *only* thing standing between a stolen session and an unlimited password
+ * oracle: `POST /api/auth/confirm-password` deliberately does not move the
+ * per-account lockout — see `verifyOwnPassword` for why the caller confirming
+ * themselves must not be able to lock themselves out — so this is the whole of
+ * the limit there.
+ *
+ * Five, and the two sides of the number:
+ *
+ * - A person confirming a change to their own username needs one attempt, or
+ *   two after a typo. Nobody legitimately reaches five in a quarter of an hour,
+ *   and the answer when they do says to wait rather than that the password is
+ *   wrong.
+ * - Five per quarter hour is twenty an hour against a bcrypt hash at
+ *   `BCRYPT_COST` and a password of at least `PASSWORD_MIN_LENGTH` characters.
+ *   That is not a search.
+ *
+ * **What it does not do**, written down rather than left to be discovered: this
+ * is an in-memory bucket, so it resets when the process restarts, and there is
+ * no persistent counter behind it the way `failed_attempts` sits behind the
+ * login. Somebody who holds a session cookie *and* can restart the API has
+ * bigger doors than this one; somebody who only holds the cookie gets twenty an
+ * hour and leaves a `PASSWORD_CONFIRM_FAILED` line in the bitácora for every
+ * one of them.
+ */
+export const PASSWORD_CONFIRM_LIMIT = 5;
+
+/**
  * How long a browser must refuse to reach this host over plain HTTP, in
  * seconds. Two years, which is what the preload list asks for.
  *

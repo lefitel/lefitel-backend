@@ -14,8 +14,9 @@
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
-import { loginRateLimit } from "../middleware/loginLimiters.js";
+import { loginRateLimit, passwordConfirmLimiter } from "../middleware/loginLimiters.js";
 import {
+  confirmPassword,
   endSession,
   login,
   logout,
@@ -41,6 +42,28 @@ const router = Router();
  * logging out.
  */
 router.post("/login", loginRateLimit, login);
+
+/**
+ * `POST /confirm-password` — "is this my password?", for a screen that needs to
+ * be sure it is really you before it changes something.
+ *
+ * **`authenticate` first, then the bucket, and the order is load-bearing.**
+ * `passwordConfirmLimiter` counts against the caller's account id, which only
+ * exists on `req.user` after `authenticate` has run; mounted the other way
+ * round it would key every caller the same and the first five attempts by
+ * anybody would spend the budget for everybody. Written in this order the
+ * budget also cannot be emptied by an unauthenticated stranger, because a
+ * request with no session never reaches it.
+ *
+ * It is the endpoint that replaced "call the login and see if it works", which
+ * is why it is on this router and not beside the profile routes: what it does is
+ * check a credential, and this is the file where credentials are checked. See
+ * `confirmPassword` in `auth.controller.ts` for what it deliberately does not
+ * do — no cookie, no session row, no bitácora line saying somebody logged in —
+ * and for why a wrong password is a 200 with `correcta: false` rather than a
+ * 4xx.
+ */
+router.post("/confirm-password", authenticate, passwordConfirmLimiter, confirmPassword);
 
 router.get("/me", authenticate, me);
 router.post("/logout", authenticate, logout);

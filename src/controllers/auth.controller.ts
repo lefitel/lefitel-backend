@@ -1,4 +1,5 @@
-// The session endpoints: getting in, finding out who you are, and getting out.
+// The session endpoints: getting in, finding out who you are, proving you are
+// still you, and getting out.
 //
 // Everything here answers about the caller and only the caller. There is no
 // route in this file that takes a user id from the request, and that is
@@ -8,10 +9,14 @@
 // rather than trusting it.
 //
 // What is *not* here: the credential check itself. `login` calls
-// `verifyCredentials`, which holds the uniform message, the levelled timings,
-// the account lockout and the cost re-hash. Two copies of that would have
-// drifted, and the part most likely to be left out of the second copy is the
-// lockout, because a successful login looks identical with and without it.
+// `verifyCredentials` and `confirmPassword` calls `verifyOwnPassword`, and both
+// of those run the same comparison in `auth/credentials.ts` — the uniform
+// message, the levelled timings, the account lockout and the cost re-hash. Two
+// copies of that would have drifted, and the part most likely to be left out of
+// the second copy is the lockout, because a successful check looks identical
+// with and without it. The one thing the two endpoints do differently is what a
+// wrong password costs, and it is a named argument rather than a difference in
+// code.
 //
 // There used to be a second copy of the whole endpoint. `POST /api/login` had
 // its own handler in `controllers/login.controller.ts` — same checks, same body
@@ -25,7 +30,7 @@
 import type { Request, Response } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { permissionsFor } from "../permissions/store.js";
-import { logLogin, verifyCredentials } from "../auth/credentials.js";
+import { logLogin, verifyCredentials, verifyOwnPassword } from "../auth/credentials.js";
 import { issueSession } from "../auth/issueSession.js";
 import { clearSessionCookie } from "../auth/sessionCookie.js";
 import {
@@ -64,6 +69,26 @@ const SESION_NO_DISPONIBLE =
   "No se pudo iniciar la sesión en este momento. Inténtelo de nuevo en unos minutos.";
 /** Twin of the message in `authenticate.ts`; both mean the row is gone. */
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
+/**
+ * What somebody is told when the password they re-typed to confirm something is
+ * not theirs.
+ *
+ * **Deliberately not `CREDENCIALES_INVALIDAS`**, and this is the one place in
+ * the API where that pair's reasoning does not apply. "Usuario o contraseña
+ * incorrectos" is worded to be identical for a name that does not exist and a
+ * password that is wrong, because on the login screen telling those apart is how
+ * an attacker learns which usernames exist. `POST /confirm-password` takes no
+ * username at all — the account is whichever one the session cookie belongs to
+ * — so there is nothing to enumerate and no second failure to be uniform with.
+ * Borrowing that sentence here would name a username the caller never sent and
+ * send them hunting for a mistake they could not have made.
+ *
+ * It is the wording, and only the wording, that is different. The *timing* is
+ * still levelled by the filler hash inside `checkAgainstRow`, because that
+ * comes from sharing one implementation with the login rather than from a
+ * decision made here.
+ */
+const PASSWORD_NO_CONFIRMA = "Esa no es su contraseña actual.";
 /** One answer for "not yours", "never existed" and "already closed". */
 const SESION_NO_ENCONTRADA = "Esa sesión no existe o ya se cerró.";
 
@@ -201,6 +226,74 @@ export const login = handler("login", async (req: Request, res: Response) => {
   // somebody logged in on a request that answered 500.
   logLogin(check.usuario, req.ip ?? null);
   return res.status(200).json({ usuario: check.usuario, permisos, message: "Login exitoso" });
+});
+
+/**
+ * `POST /api/auth/confirm-password` — is this my password? Yes or no, and
+ * nothing else happens.
+ *
+ * **Why it exists.** The screen that renames your own account asks you to
+ * re-type your password "to confirm", and it used to check it by calling the
+ * login. Four things came out of that, all in production: a second session was
+ * opened and the rotation on the way in revoked the one the browser was holding;
+ * "Inició sesión" was written to the bitácora for a login nobody performed; a
+ * typo counted as a failed login attempt, so getting your own password wrong a
+ * few times while renaming yourself **locked you out of the ERP** behind a
+ * message that said only "Contraseña incorrecta"; and the browser decided
+ * whether the password was right by comparing a status code against 500, a
+ * number the real answer (400) only reached because the client flattens every
+ * non-2xx to it.
+ *
+ * So this issues nothing: no cookie, no session row, no LOGIN line. It is
+ * `verifyOwnPassword` and a status code.
+ *
+ * **200 with a boolean, not 4xx.** The three answers a client has to tell apart
+ * are "yes", "no" and "I could not find out", and only the last of those must
+ * stop it dead the same way a network failure does. Saying "no" with a 4xx puts
+ * it in the same bucket as every transport and server failure — which is the
+ * shape of the accident this endpoint replaces, and `web`'s client folds any
+ * non-2xx into one status precisely because a 503 there means something a
+ * person can act on. A field in the body cannot be rewritten by a proxy, cannot
+ * be confused with an outage, and makes the client's check `correcta === true`:
+ * one explicit yes, and everything else — a missing field, a 429, a 500, a
+ * dropped connection — refusing by default. See `confirmarPassword` in
+ * `web/src/api/Login.api.ts`.
+ *
+ * **What it deliberately does not say.** Never which account, never anything
+ * about the row, and no separate answer for a locked account: `false` is the
+ * only "no" there is. The 401 below is not a third answer about the password —
+ * it is the ordinary "your session is over", the same one `me` gives when the
+ * account was archived a moment ago.
+ *
+ * Behind `authenticate` (see `auth.routes.ts`), which is what makes the
+ * question meaningful: the account being asked about is the one asking, taken
+ * from `req.user` and never from the body. And behind `passwordConfirmLimiter`,
+ * because an authenticated endpoint that compares unlimited passwords is an
+ * oracle for whoever already stole a session — the lockout cannot serve as that
+ * limit here without handing everybody a way to shut their own account.
+ */
+export const confirmPassword = handler("confirmPassword", async (req: Request, res: Response) => {
+  const caller = callerOf(req);
+  if (!caller) return res.sendStatus(401);
+
+  const check = await verifyOwnPassword({
+    id: caller.id,
+    pass: (req.body as { pass?: unknown } | undefined)?.pass,
+    ip: req.ip ?? null,
+  });
+
+  // The account was archived between `authenticate` and here. Not a wrong
+  // password and not answered as one: the session is what ended.
+  if (!check.ok && check.reason === "no-account") {
+    return res.status(401).json({ message: CUENTA_INACTIVA });
+  }
+
+  // One field, and the client is expected to require it to be exactly `true`.
+  // The sentence rides along only on the negative answer, so a screen has
+  // something to show without wording the refusal itself.
+  return check.ok
+    ? res.status(200).json({ correcta: true })
+    : res.status(200).json({ correcta: false, message: PASSWORD_NO_CONFIRMA });
 });
 
 /**

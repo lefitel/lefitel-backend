@@ -1,9 +1,13 @@
 // How much room somebody gets to be wrong.
 //
-// Three budgets that do different jobs: the address bucket stops a flood, the
-// account bucket stops a guess, and the pair stops one machine grinding one
-// account. The arithmetic of the third is the part that goes wrong quietly —
-// an escalation with no ceiling is a button for locking a colleague out.
+// Four budgets that do different jobs: the address bucket stops a flood, the
+// account bucket stops one machine grinding one name, the lockout arithmetic
+// stops a guess spread across many addresses, and the confirmation bucket stops
+// a caller who is already logged in from using "prove it is you" as a password
+// oracle. The arithmetic of the third is the part that goes wrong quietly — an
+// escalation with no ceiling is a button for locking a colleague out — and the
+// fourth is the one whose absence would be invisible, because the endpoint it
+// guards charges nothing to the lockout on purpose.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import express from "express";
@@ -18,9 +22,15 @@ import {
   ipBucketKey,
   loginAccountIpLimiter,
   loginIpLimiter,
+  passwordConfirmKey,
+  passwordConfirmLimiter,
   siguienteBloqueo,
 } from "./loginLimiters.js";
-import { LOCKOUT_AFTER_FAILURES, LOCKOUT_MAX_MINUTES } from "../config/security.js";
+import {
+  LOCKOUT_AFTER_FAILURES,
+  LOCKOUT_MAX_MINUTES,
+  PASSWORD_CONFIRM_LIMIT,
+} from "../config/security.js";
 
 describe("estaBloqueada", () => {
   it("is false for an account that has never failed", () => {
@@ -276,6 +286,128 @@ describe("what each bucket spends", () => {
     await settled();
 
     expect(await hits(loginAccountIpLimiter, claveCuenta("marisol"))).toBe(0);
+  });
+});
+
+/**
+ * The budget for confirming your own password, which is the only limit that
+ * endpoint has.
+ *
+ * `POST /api/auth/confirm-password` deliberately does not move
+ * `failed_attempts`: the account being asked about is the one already logged in,
+ * so counting a typo there would let somebody renaming themselves lock
+ * themselves out of the ERP. That decision is what makes this bucket
+ * load-bearing rather than belt-and-braces — take it away and an authenticated
+ * caller may compare passwords as often as the server will answer, which for
+ * whoever has stolen a session is an oracle for the password behind it.
+ *
+ * Its key is the account and not the address, so the two tests worth having are
+ * that the id is really what it reads, and that it reads it from `req.user` —
+ * where `authenticate` put it — rather than from anything a caller writes.
+ */
+describe("the key the confirmation bucket counts against", () => {
+  /** As `authenticate` leaves it: `req.user` filled in, all four fields. */
+  const conSesion = (id: number, body?: unknown) =>
+    ({ ip: DESDE, body, user: { id, id_rol: 3, id_sesion: "s", expires_at: new Date() } }) as unknown as Request;
+
+  it("names the account, and keeps two accounts apart", () => {
+    expect(passwordConfirmKey(conSesion(7))).toBe("pc:7");
+    expect(passwordConfirmKey(conSesion(7))).not.toBe(passwordConfirmKey(conSesion(8)));
+  });
+
+  it("ignores an id or a username written in the body", () => {
+    // The endpoint takes neither, and the bucket must not start reading one: a
+    // key a caller can choose is a fresh budget for every guess.
+    const clave = passwordConfirmKey(conSesion(7, { id: 999, user: "otro", pass: "x" }));
+    expect(clave).toBe("pc:7");
+    expect(clave).not.toContain("999");
+    expect(clave).not.toContain("otro");
+  });
+
+  it("does not put every caller in one bucket when there is no session", () => {
+    // Unreachable through the mount, where `authenticate` answers 401 first.
+    // What it guards is somebody mounting this limiter without authentication
+    // in front of it: the fallback is address-shaped, so the endpoint degrades
+    // to one budget per network instead of one budget for the whole world —
+    // which is what a key generator returning a constant would give.
+    const sinSesion = ({ ip: DESDE, body: {} }) as unknown as Request;
+    const otraRed = ({ ip: "198.51.100.4", body: {} }) as unknown as Request;
+    expect(passwordConfirmKey(sinSesion)).not.toBe(passwordConfirmKey(otraRed));
+    expect(passwordConfirmKey(sinSesion)).toContain(DESDE);
+    // And it folds IPv6 into its block, like the two buckets above: without
+    // that, one holder of a /56 has billions of budgets.
+    const v6 = (ip: string) => ({ ip, body: {} }) as unknown as Request;
+    expect(passwordConfirmKey(v6("2001:db8:1:2:3:4:5:6"))).toBe(
+      passwordConfirmKey(v6("2001:db8:1:2:ffff:ffff:ffff:ffff")),
+    );
+  });
+});
+
+describe("what the confirmation bucket spends", () => {
+  const CLAVE_CUENTA = "pc:41";
+  const conSesion = { id: 41, id_rol: 3, id_sesion: "s", expires_at: new Date() };
+
+  /**
+   * A one-route app that carries a `req.user` the way `authenticate` would, so
+   * the limiter sees what it sees on the real mount.
+   */
+  function appConSesion(status: number, body: unknown) {
+    const bare = express();
+    bare.set("trust proxy", 1);
+    bare.use(express.json());
+    bare.post("/", (req, _res, next) => {
+      req.user = conSesion;
+      next();
+    }, passwordConfirmLimiter, (_req, res) => {
+      res.status(status).json(body);
+    });
+    return bare;
+  }
+
+  beforeEach(async () => {
+    await passwordConfirmLimiter.resetKey(CLAVE_CUENTA);
+  });
+
+  it("charges an answer of 200 with correcta:false, which is what a wrong password gets", async () => {
+    // The assertion that pins the absence of `skipSuccessfulRequests`, and the
+    // reason it cannot be copied from the login buckets: a wrong password on
+    // this endpoint answers **200**, on purpose, so a refund rule that reads
+    // the status would hand back exactly the attempts this bucket exists to
+    // charge for. Everything about the request below looks successful; it still
+    // costs one.
+    const bare = appConSesion(200, { correcta: false });
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(1);
+  });
+
+  it("charges a correct confirmation too, rather than telling the two apart", async () => {
+    // Both answers cost the same, which is the only rule that cannot be turned
+    // into information: a bucket that charged only the wrong ones would let a
+    // guesser read the counter — through the `RateLimit` headers this limiter
+    // sends — and learn which attempt was right without being told.
+    const bare = appConSesion(200, { correcta: true });
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(1);
+  });
+
+  it("stops answering after PASSWORD_CONFIRM_LIMIT attempts", async () => {
+    const bare = appConSesion(200, { correcta: false });
+    for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
+      const res = await post(bare, {});
+      expect(res.status, `intento ${i + 1}`).toBe(200);
+    }
+    await settled();
+
+    const cortado = await post(bare, {});
+    expect(cortado.status).toBe(429);
+    // The refusal says to wait. It must not be readable as an answer about the
+    // password — the client requires `correcta === true` and gets neither.
+    expect(cortado.body).not.toHaveProperty("correcta");
+    expect(cortado.body.message).toMatch(/Espere/);
   });
 });
 

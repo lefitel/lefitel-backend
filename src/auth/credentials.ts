@@ -18,11 +18,23 @@
 // being folded back into it, because the next endpoint that needs to check a
 // password is the second copy this exists to prevent.
 //
-// It returns a result rather than writing a response, so its caller decides its
-// own status codes and cannot accidentally say something different about *why* a
-// login failed. There is only one "why" here on purpose.
+// **And that endpoint arrived.** `verifyOwnPassword` at the bottom of this file
+// answers "is this the password of the account already asking?" for the screen
+// that renames your own account — a screen that until now asked by calling the
+// login itself, opening a session and spending a failed attempt to answer a
+// question about somebody already logged in. It shares `checkAgainstRow` with
+// the login rather than comparing a hash of its own, which is this file's whole
+// argument arriving on time: the second copy would have been the one without
+// the filler hash, or the one that never noticed a locked account.
+//
+// The two doors differ in exactly one thing and it has a name: `FailureCost`.
+//
+// Both return a result rather than writing a response, so each caller decides
+// its own status codes and cannot accidentally say something different about
+// *why* a check failed.
 
 import bcryptjs from "bcryptjs";
+import type { IUsuario } from "../interfaces/index.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { logAction } from "../utils/logAction.js";
 import {
@@ -69,6 +81,42 @@ export interface UsuarioAutenticado {
 export type ResultadoCredenciales =
   | { ok: true; usuario: UsuarioAutenticado; message?: undefined }
   | { ok: false; usuario?: undefined; message: string };
+
+/**
+ * What a wrong password costs the account it was aimed at.
+ *
+ * A closed set of two, and neither is a default: every caller of
+ * `checkAgainstRow` has to name one, so "which of these did you mean" is a
+ * question the compiler asks instead of one nobody thinks to ask.
+ *
+ * - `"lockout"` — the login. A wrong password moves `failed_attempts`, and
+ *   enough of them shut the account for a while. This is the only budget that
+ *   makes guessing expensive for somebody attacking from many addresses, since
+ *   each address alone stays inside `LOGIN_ACCOUNT_IP_LIMIT`.
+ * - `"audit-only"` — confirming your own password on an endpoint you already
+ *   reached with a live session. The attempt is written to the bitácora and the
+ *   account's counters are not touched. What keeps *that* from being an
+ *   unlimited oracle is a rate limit on the endpoint, not this: see
+ *   `PASSWORD_CONFIRM_LIMIT`.
+ */
+type FailureCost = "lockout" | "audit-only";
+
+/**
+ * Whether the caller re-typed their own password correctly.
+ *
+ * Not `ResultadoCredenciales`: that type carries a `usuario` and a sentence to
+ * show, and this answers a yes/no question about somebody the caller already
+ * is. Its own type so the third case cannot be flattened into the second —
+ * "the account is gone" is a session that has ended, not a password that is
+ * wrong, and the two must not reach the client as the same answer.
+ *
+ * Both arms name both fields for the reason `ResultadoCredenciales` explains
+ * above: with `strictNullChecks` off, TypeScript will not narrow a union by the
+ * truthiness of its discriminant unless every key exists on both arms.
+ */
+export type ResultadoConfirmacion =
+  | { ok: true; reason?: undefined }
+  | { ok: false; reason: "wrong-password" | "no-account" };
 
 /**
  * Is this the right password for this account?
@@ -133,7 +181,50 @@ export async function verifyCredentials(input: {
     return { ok: false, message: CREDENCIALES_INVALIDAS };
   }
 
-  const data = TempUsuario.dataValues;
+  // Everything past the lookup is what both doors do identically, so it lives
+  // in one place — see `checkAgainstRow`, and `verifyOwnPassword` for the
+  // second caller.
+  return checkAgainstRow({
+    row: TempUsuario.dataValues,
+    pass,
+    ip,
+    typedAs: user,
+    failure: "lockout",
+  });
+}
+
+/**
+ * The half of a credential check that starts once the row is in hand.
+ *
+ * Two doors share it: the login, which found the row by the username somebody
+ * typed, and `verifyOwnPassword`, which found it by the id of the session
+ * already asking. What is identical between them is everything here — the
+ * locked-account refusal, the comparison, the filler hash that levels the
+ * timings, clearing the slate on success and re-hashing at the current cost.
+ * What differs is one thing only, and it is named rather than implied:
+ * `failure`.
+ *
+ * Written as one function taking a named policy rather than two functions with
+ * a copy each, for the reason at the top of this file: the part a second copy
+ * loses is the part with no visible effect on a successful check.
+ */
+async function checkAgainstRow(input: {
+  /** The account row, as read from the database. */
+  row: IUsuario;
+  /** The plaintext, exactly as it arrived. */
+  pass: string;
+  /** For the bitácora lines only, so one machine can be told from one typo. */
+  ip: string | null;
+  /**
+   * The name to write in those lines. The login writes what was *typed* rather
+   * than what is stored, because that is the string whose case or spacing may
+   * be why the attempt failed.
+   */
+  typedAs: string;
+  /** What a wrong password costs this account — see `FailureCost`. */
+  failure: FailureCost;
+}): Promise<ResultadoCredenciales> {
+  const { row: data, pass, ip, typedAs: user, failure } = input;
 
   // A locked account answers exactly like a wrong password, filler hash
   // included. Answering differently — or faster — turns the lockout into the
@@ -177,6 +268,30 @@ export async function verifyCredentials(input: {
      */
     if ((bcryptCostOf(data.pass) ?? 0) < BCRYPT_COST) {
       await bcryptjs.compare(pass, await fillerHash());
+    }
+
+    /**
+     * The confirmation door stops here: it records the attempt and charges the
+     * account nothing.
+     *
+     * Everything below this block is the login's bookkeeping — the atomic
+     * counter, the escalating wait, the ACCOUNT_LOCKED line — and the reason it
+     * must not run for a caller confirming their own password is in
+     * `verifyOwnPassword`. In one sentence: the account being confirmed is the
+     * account already logged in, so counting a typo there means somebody
+     * renaming themselves can shut themselves out of the ERP, behind a message
+     * that says nothing about it.
+     *
+     * The line is still written, with an action of its own. A run of these on
+     * one account is somebody holding a session and guessing at the password
+     * behind it, which is precisely the event worth being able to find in the
+     * bitácora — and giving it its own name keeps it out of the LOGIN_FAILED
+     * noise the login panel already reads, instead of forging entries that
+     * claim a login attempt nobody made.
+     */
+    if (failure === "audit-only") {
+      logAction({ id_usuario: data.id, action: "PASSWORD_CONFIRM_FAILED", entity: "Usuario", entity_id: data.id, detail: `Contraseña incorrecta al confirmar una acción de @${user}`, metadata: { user }, severity: 'warning', ip_address: ip });
+      return { ok: false, message: CREDENCIALES_INVALIDAS };
     }
 
     // The count is incremented in the database, not read into Node,
@@ -272,6 +387,81 @@ export async function verifyCredentials(input: {
   };
 
   return { ok: true, usuario };
+}
+
+/**
+ * Is this the password of the account already asking? Nothing else.
+ *
+ * The second door onto `checkAgainstRow`, and it exists because the screen that
+ * renames your own account asked this question **by calling the login**. That
+ * cost four things, all of them in production: a second session was opened, so
+ * the rotation on the way in revoked the one the browser was using; a line
+ * saying "Inició sesión" went into the bitácora for a login nobody performed; a
+ * typo counted as a failed login attempt, so mistyping your password a few
+ * times while renaming yourself locked you out of the ERP; and the client read
+ * the answer off a status code that only worked by accident.
+ *
+ * So this emits **nothing**: no cookie, no session row, no LOGIN line. It reads
+ * one row and compares one hash.
+ *
+ * **Who it is about is not in the request.** The id comes from `req.user`,
+ * which is to say from the session cookie `authenticate` already checked, and
+ * there is no username in the body to look up. That is what makes the enumeration
+ * question this file spends so much care on moot here rather than merely
+ * handled: there is no name to probe with, and the only account this can be
+ * asked about is the caller's own.
+ *
+ * **A locked account still refuses.** `checkAgainstRow` returns before it
+ * compares anything while `locked_until` is in the future, so a locked account
+ * gets `wrong-password` here even for the right password. Kept deliberately,
+ * and the reason is on the other side: the success path clears
+ * `failed_attempts` and `locked_until`, so letting a locked account through
+ * this door would turn it into a way of lifting a lockout — a security control
+ * undone by a side entrance. Refusing is the wrong sentence for that one
+ * caller; letting them in would be the wrong behaviour for everybody.
+ *
+ * Throws nothing of its own; a database failure propagates, and the endpoint
+ * turns it into a 500.
+ */
+export async function verifyOwnPassword(input: {
+  /** The caller's own id, from `req.user` and never from the request body. */
+  id: number;
+  pass: unknown;
+  ip: string | null;
+}): Promise<ResultadoConfirmacion> {
+  const pass = input.pass;
+  // Not a string is not a password, and an empty one is not a confirmation.
+  // Refused before any read: there is nothing here worth a database round trip
+  // and nothing to level the timing of, since the answer does not depend on
+  // which account is asking.
+  if (typeof pass !== "string" || pass === "") {
+    return { ok: false, reason: "wrong-password" };
+  }
+
+  const found = await UsuarioModel.findByPk(input.id);
+  // Archived between `authenticate` and here — the same narrow race
+  // `GET /api/auth/me` answers 401 to. Its own reason so the endpoint can say
+  // "your session is over" instead of "your password is wrong", which would
+  // send somebody looking for a typo that does not exist.
+  if (!found) {
+    return { ok: false, reason: "no-account" };
+  }
+
+  const check = await checkAgainstRow({
+    row: found.dataValues,
+    pass,
+    ip: input.ip,
+    // The stored name, because there is no typed one: the caller never sent a
+    // username. It is what the bitácora line is addressed to.
+    typedAs: found.dataValues.user,
+    failure: "audit-only",
+  });
+
+  // The `usuario` and the sentence `checkAgainstRow` returns are deliberately
+  // dropped. This endpoint answers a yes/no question, and handing back a
+  // profile — or a message worded for the login screen — is how a "confirm
+  // your password" endpoint turns into a second way of reading account data.
+  return check.ok ? { ok: true } : { ok: false, reason: "wrong-password" };
 }
 
 /**
