@@ -1052,6 +1052,37 @@ producción**. Y hay dos cosas más que saber de él:
   arnés sustituye una lista de métodos, no el acceso a la base**, así que un camino
   nuevo que use un método que no esté en la lista sale a la base de verdad.
 
+### El cupo de contraseñas cuenta contraseñas equivocadas, y hay que mantenerlo así
+
+Hay un límite de cinco intentos por cuarto de hora, **con clave por cuenta** (no por
+dirección, para que veinte personas detrás del mismo router no compartan cupo), sobre
+las puertas que comparan una contraseña sin que sea un inicio de sesión: renombrarse y
+cambiarse la contraseña.
+
+La primera versión cobraba **cada petición**, y estaba calibrada sobre una premisa
+falsa: que nadie llega a cinco legítimamente. Se llegaba enseguida — el cliente dejaba
+pulsar con seis caracteres, el servidor exige doce, y cada corrección costaba un
+intento. Lo que la persona leía era «espere unos minutos» haciendo algo perfectamente
+normal, con la otra pantalla contestándole lo mismo.
+
+**Ahora se reembolsa todo menos la respuesta que dice que la contraseña era
+incorrecta.** El cupo cuenta contraseñas equivocadas, no trabajo legítimo. Una
+contraseña nueva que no cumple la política, un campo que falta, un fallo del servidor:
+gratis.
+
+> **Invariante que no hay que romper, y el MFA lo va a rozar.** Una ruta detrás de este
+> cupo tiene que contestar a una contraseña equivocada con **401 y nada más**. Si
+> alguna contesta 200 con un booleano —que es justo lo que hacía el endpoint retirado
+> en este plan— el reembolso deja de distinguir el acierto del fallo y **el oráculo
+> vuelve**: probar contraseñas sale gratis. El step-up de MFA añadirá una tercera
+> puerta a este cupo; que conteste 401.
+
+Y por qué no se eligieron las otras salidas: subir el número no arregla nada mientras
+se cobre cada petición, porque no existe un número correcto; separar los cubos por
+operación regala diez intentos en vez de cinco; y cobrar después de evaluar la política
+arregla a quien elige una contraseña corta pero **no** a quien tiene el bundle viejo en
+caché, que es justo el caso de la ventana de despliegue.
+
 ### El Plan 2C se despliega al revés que el 2B, y por una razón concreta
 
 El 2B tenía un orden rígido —backend primero, frontend después, sin vuelta atrás—
@@ -1070,7 +1101,16 @@ servidor:
   puede resolver** — no hay ninguna casilla donde escribir lo que le piden.
 
 No es una caída: el resto del ERP funciona y basta con recargar. Pero es un error sin
-salida en una pantalla, y evitarlo cuesta solo elegir el orden.
+salida, y evitarlo cuesta solo elegir el orden.
+
+**Y son dos pantallas, no una.** La de renombrar desde la ficha de usuario es la que
+se declaró primero, pero **cualquiera renombrándose desde «Mi Perfil»** cae en lo
+mismo, y esa la usa todo el mundo, no solo quien administra.
+
+Lo que **no** ocurre, aunque se escribió aquí antes de arreglarlo: esos rechazos ya
+**no gastan del cupo**. El cupo solo cobra la respuesta que dice «esa contraseña no es
+la tuya»; un rechazo por falta de campo es gratis. Así que un bundle viejo en caché
+falla en esa pantalla y nada más — no se queda además sin intentos.
 
 ### La detección de cambio de rol se rompe entre el Plan 1 y el Plan 2B
 
@@ -1085,9 +1125,9 @@ sola. No aparece ningún error: simplemente sigue viendo los botones de su rol
 anterior, que solo pueden devolver 403 — el servidor rechaza, porque él sí lee
 el rol de la base de datos en cada petición.
 
-La cabecera que la sustituye es `x-osefi-role` (`config/security.ts`), la emiten
-las dos ramas de `authenticate`, y **la lee el frontend a partir de la última
-tarea del Plan 2B**. Consecuencia de despliegue:
+La cabecera que la sustituye es `x-osefi-role` (`config/security.ts`) y **la lee el
+frontend a partir de la última tarea del Plan 2B**. La emitían las dos ramas de
+`authenticate` mientras hubo dos; desde el Plan 2C hay una. Consecuencia de despliegue:
 
 > **El Plan 1 no se despliega sin la última tarea del Plan 2B.** Desplegar solo
 > el backend degrada esa función en silencio, y el silencio es lo peligroso:
@@ -1132,13 +1172,19 @@ lo construyó.
   que quien los provoca ya ha entrado. Sigue siendo información del interior que
   nadie necesita — nombres de tabla y de columna de Postgres — pero es otra escala
   de trabajo y no entra en este arco.
-- **`GET /api/permisos/mias`** ya no lo llama nadie. Queda declarado en el docstring
-  de su ruta en vez de retirado, porque retirarlo obliga a tocar un test que estaba
-  en manos de otro trabajo en curso.
-- **`PerfilPage` valida la contraseña nueva con seis caracteres y el servidor exige
-  doce.** Preexistente, y a tres líneas de lo que la Tarea 9 tocó. El servidor rechaza
-  correctamente, así que no entra ninguna contraseña débil; lo que pasa es que la
-  pantalla deja pulsar y el error llega del servidor en vez de avisar antes.
+- ~~**`GET /api/permisos/mias`** queda declarado en vez de retirado~~ — **retirado
+  en el Plan 2C, tarea 3.** Contesta 404, comprobado. Se deja tachado en vez de
+  borrado porque esta lista es lo que alguien lee para saber qué falta, y una deuda
+  que desaparece del papel sin dejar rastro se vuelve a descubrir.
+- ~~**`PerfilPage` valida la contraseña nueva con seis caracteres y el servidor exige
+  doce.**~~ — **arreglado**, y en tres pantallas, no en una: apareció una tercera
+  («Nuevo Usuario») que no validaba nada. La regla vive ahora en un solo sitio del
+  frontend, y su test **lee el fichero de configuración del servidor desde el disco**
+  y falla si los dos números dejan de coincidir. Y copia el *cómo* se mide, no solo el
+  cuánto: recorta espacios y cuenta puntos de código, porque «clave1      » son seis
+  caracteres disfrazados de doce y seis emoji son doce unidades UTF-16, y la forma
+  ingenua deja pasar las dos. (Cuando esto se escribió, además, el intento quedaba
+  cobrado; ya no — ver el apartado del cupo más abajo.)
 - **Un cambio de permisos de un rol no llega a quien tiene el ERP abierto.** El
   frontend compara ids de rol, no permisos, así que conceder un módulo a un rol no
   se nota hasta que la persona recarga. No es una regresión: el mecanismo anterior
