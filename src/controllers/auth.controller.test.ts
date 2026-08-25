@@ -49,6 +49,15 @@ vi.mock("../auth/sessionStore.js", () => ({
 }));
 
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
+// `login` calls this opportunistically after a successful login (see
+// `tokenStore.ts`). Mocked wholesale like `sessionStore.js` above: without
+// this, the real module would import the real `TokenUsoUnicoModel` and every
+// "person really is in" test in this file would fire a genuine DELETE
+// against whatever database this process is configured with.
+const purgeExpiredTokens = vi.fn().mockResolvedValue(0);
+vi.mock("../auth/tokenStore.js", () => ({
+  purgeExpiredTokens: (...a: unknown[]) => purgeExpiredTokens(...a),
+}));
 vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },
 }));
@@ -193,6 +202,7 @@ beforeEach(() => {
   revokeSessionOf.mockResolvedValue(true);
   revokeAllSessionsOf.mockResolvedValue(0);
   permissionsFor.mockResolvedValue(PERMISOS);
+  purgeExpiredTokens.mockResolvedValue(0);
 });
 
 describe("POST /api/auth/login", () => {
@@ -338,6 +348,24 @@ describe("POST /api/auth/login", () => {
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: "LOGIN", entity_id: YO, ip_address: "203.0.113.9" }),
     );
+  });
+
+  it("sweeps token_uso_unico on a successful login, instead of on a schedule", async () => {
+    const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(purgeExpiredTokens).toHaveBeenCalledOnce();
+  });
+
+  it("still answers 200 when the opportunistic purge itself fails", async () => {
+    // Fire-and-forget: this is housekeeping for a table this request never
+    // touched, so its failure must not turn a successful login into a 500.
+    purgeExpiredTokens.mockRejectedValue(new Error("token_uso_unico no existe"));
+    const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
   });
 });
 

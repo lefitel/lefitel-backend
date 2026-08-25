@@ -32,6 +32,7 @@ import { UsuarioModel } from "../models/usuario.model.js";
 import { permissionsFor } from "../permissions/store.js";
 import { logLogin, verifyCredentials } from "../auth/credentials.js";
 import { issueSession } from "../auth/issueSession.js";
+import { purgeExpiredTokens } from "../auth/tokenStore.js";
 import { clearSessionCookie } from "../auth/sessionCookie.js";
 import {
   listSessionsOf,
@@ -205,6 +206,21 @@ export const login = handler("login", async (req: Request, res: Response) => {
   // Last, not first. Written before the session existed, this line would claim
   // somebody logged in on a request that answered 500.
   logLogin(check.usuario, req.ip ?? null);
+  /**
+   * The opportunistic cleanup `token_uso_unico` relies on instead of a cron
+   * job — see `tokenStore.ts`. A login happens constantly and for free,
+   * which is exactly what a table with no scheduled purge needs.
+   *
+   * Fire-and-forget, on purpose: this is housekeeping for a table this
+   * request never touched, so it must not add latency to the response
+   * somebody is waiting on, and a failure in it must not turn a successful
+   * login into a 500. The failure is still reported rather than swallowed,
+   * so a purge that stops working is visible in the logs before the table
+   * grows enough for anyone to notice otherwise.
+   */
+  purgeExpiredTokens().catch((err) =>
+    authLog.error({ err }, "no se pudo purgar token_uso_unico tras el login"),
+  );
   return res.status(200).json({ usuario: check.usuario, permisos, message: "Login exitoso" });
 });
 

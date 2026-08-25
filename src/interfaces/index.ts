@@ -185,3 +185,24 @@ export interface ISesion {
   expires_at: Date;
   revoked_at: Date | null;
 }
+
+/**
+ * One outstanding email-verification or password-reset link, backed by the
+ * `token_uso_unico` table.
+ *
+ * `email_destino` is the address the link was sent to, not a reference to
+ * `usuarios.email` — it stays what it was at the moment the token was
+ * issued even if the account's address changes afterwards, which is exactly
+ * the comparison `/email/verify` needs to refuse a token minted for an
+ * address the account has since left.
+ */
+export interface ITokenUsoUnico {
+  id: string;
+  id_usuario: number;
+  email_destino: string;
+  token_hash: string;
+  proposito: "verify_email" | "reset_password";
+  expires_at: Date;
+  used_at: Date | null;
+  created_at: Date;
+}

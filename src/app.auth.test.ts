@@ -86,9 +86,10 @@ const { loginIpLimiter, loginAccountIpLimiter, passwordConfirmLimiter } = await 
 );
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { SesionModel } = await import("./models/sesion.model.js");
+const { TokenUsoUnicoModel } = await import("./models/tokenUsoUnico.model.js");
 
 /**
- * The models are real, and only their four query methods are replaced.
+ * The models are real, and only their query methods are replaced.
  *
  * `vi.mock` on a model module cannot be used here, and finding out why is worth
  * a note: six other model modules declare `UsuarioModel.hasMany(...)` and
@@ -97,6 +98,14 @@ const { SesionModel } = await import("./models/sesion.model.js");
  * "poste.belongsTo called with something that's not a subclass of
  * Sequelize.Model". Spying on the real classes keeps every association intact
  * and still means no query ever leaves for Postgres.
+ *
+ * `tokenUsoUnicoDestroy` joined this list once `login` started sweeping
+ * `token_uso_unico` opportunistically on every successful login (see
+ * `tokenStore.ts`). Without it, every "logging in, through the real stack"
+ * test below would reach the real `TokenUsoUnicoModel.destroy` and fire a
+ * genuine DELETE against whichever database this process is configured
+ * with — the exact failure global-constraints.md #11 warns about, and the
+ * reason this whole file exists to be checked for it.
  */
 const sesionFindOne = vi.spyOn(SesionModel, "findOne");
 const sesionFindAll = vi.spyOn(SesionModel, "findAll");
@@ -104,6 +113,7 @@ const sesionUpdate = vi.spyOn(SesionModel, "update");
 const sesionCreate = vi.spyOn(SesionModel, "create");
 const usuarioFindByPk = vi.spyOn(UsuarioModel, "findByPk");
 const usuarioFindOne = vi.spyOn(UsuarioModel, "findOne");
+const tokenUsoUnicoDestroy = vi.spyOn(TokenUsoUnicoModel, "destroy");
 
 const YO = 7;
 const MI_ROL = 2;
@@ -180,6 +190,7 @@ beforeEach(() => {
       name: "Isaias", lastname: "Salas", image: null, failed_attempts: 0, locked_until: null,
     },
   } as never);
+  tokenUsoUnicoDestroy.mockResolvedValue(0);
 });
 
 /** The `where` of the nth UPDATE the store sent to the sessions table. */
@@ -235,6 +246,22 @@ describe("logging in, through the real stack", () => {
     expect(res.body.usuario).not.toHaveProperty("token");
     expect(JSON.stringify(res.body)).not.toContain("token");
     expect(res.body.permisos).toEqual(permisos);
+  });
+
+  it("sweeps token_uso_unico through the real model, not just the mocked store", async () => {
+    // The only assertion in this file that would have caught the risk this
+    // task's own wiring introduced: `auth.controller.test.ts` and
+    // `login.session.test.ts` replace `tokenStore.js` wholesale, which proves
+    // the controller calls it but not that the real module underneath still
+    // reaches Postgres correctly. This request goes through the real
+    // `tokenStore.js` and the real `TokenUsoUnicoModel` — only `destroy`
+    // itself is spied — so a broken import path or a renamed model would
+    // show up here even though the other two files stay green.
+    await request(app)
+      .post("/api/auth/login")
+      .send({ user: "isaias", pass: "una-clave-de-prueba" });
+
+    expect(tokenUsoUnicoDestroy).toHaveBeenCalledOnce();
   });
 
   it("hands out no credential in the body on the old address either", async () => {

@@ -74,6 +74,15 @@ vi.mock("../auth/sessionStore.js", () => ({
 }));
 
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
+// `login` sweeps `token_uso_unico` opportunistically after a successful
+// login (see `tokenStore.ts`). Mocked wholesale for the same reason
+// `sessionStore.js` is: the real module would reach the real
+// `TokenUsoUnicoModel`, and every successful-login test below would fire a
+// genuine DELETE against whatever database this process is configured with.
+const purgeExpiredTokens = vi.fn().mockResolvedValue(0);
+vi.mock("../auth/tokenStore.js", () => ({
+  purgeExpiredTokens: (...a: unknown[]) => purgeExpiredTokens(...a),
+}));
 vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },
 }));
@@ -167,6 +176,7 @@ beforeEach(() => {
   createSession.mockResolvedValue({ token: TOKEN, expiresAt: CADUCA });
   findLiveSession.mockResolvedValue(null);
   revokeSessionOf.mockResolvedValue(true);
+  purgeExpiredTokens.mockResolvedValue(0);
 });
 
 describe("the login, once the credential is good", () => {

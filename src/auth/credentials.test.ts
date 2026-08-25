@@ -82,6 +82,12 @@ vi.mock("./sessionStore.js", () => ({
   revokeAllSessionsOf: vi.fn(),
   revokeSessionOf: vi.fn(),
 }));
+// Same failure, same fix, for the fourth thing `auth.controller.ts` imports:
+// `tokenStore.js` reaches `tokenUsoUnico.model.ts`, which also calls
+// `UsuarioModel.hasMany` on import — on the same insufficient stub above.
+// `login` calls this opportunistically after a successful credential check
+// (see `tokenStore.ts`), which is no part of what this file is testing.
+vi.mock("./tokenStore.js", () => ({ purgeExpiredTokens: vi.fn().mockResolvedValue(0) }));
 
 // The handler both `POST /api/login` and `POST /api/auth/login` are mounted on.
 const { login } = await import("../controllers/auth.controller.js");
