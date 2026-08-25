@@ -3,6 +3,7 @@ import { Op } from "sequelize";
 import { CiudadModel } from "../models/ciudad.model.js";
 import { deleteImageFile } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
+import { assignable } from "../utils/authorship.js";
 
 export async function getCiudad(req: Request, res: Response) {
   const archived = req.query.archived === "true";
@@ -19,7 +20,7 @@ export async function getCiudad(req: Request, res: Response) {
 }
 export async function createCiudad(req: Request, res: Response) {
   try {
-    const TempCiudad = await CiudadModel.create(req.body);
+    const TempCiudad = await CiudadModel.create(assignable(req.body));
     logAction({ id_usuario: req.user?.id, action: "CREATE_CIUDAD", entity: "Ciudad", entity_id: TempCiudad.dataValues.id as number, detail: `Creó ciudad ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
     res.status(200).json(TempCiudad);
   } catch (error) {
@@ -34,7 +35,7 @@ export async function updateCiudad(req: Request, res: Response) {
     const oldImage = TempCiudad.dataValues.image;
     const dv = TempCiudad.dataValues as unknown as Record<string, unknown>;
     const beforeCiudad = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempCiudad.set(req.body);
+    TempCiudad.set(assignable(req.body));
     await TempCiudad.save();
     if (oldImage && req.body.image && oldImage !== req.body.image) {
       deleteImageFile(oldImage);

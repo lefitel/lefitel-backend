@@ -4,6 +4,7 @@ import { PropietarioModel } from "../models/propietario.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { EventoModel } from "../models/evento.model.js";
 import { logAction } from "../utils/logAction.js";
+import { assignable } from "../utils/authorship.js";
 
 interface UsageRow { id: number; name: string; postesCount: string }
 interface PendientesRow { name: string; pendientes: string }
@@ -74,7 +75,7 @@ export async function getPropietario(req: Request, res: Response) {
 }
 export async function createPropietario(req: Request, res: Response) {
   try {
-    const TempPropietario = await PropietarioModel.create(req.body);
+    const TempPropietario = await PropietarioModel.create(assignable(req.body));
     logAction({ id_usuario: req.user?.id, action: "CREATE_PROPIETARIO", entity: "Propietario", entity_id: TempPropietario.dataValues.id as number, detail: `Creó propietario ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
     res.status(200).json(TempPropietario);
   } catch (error) {
@@ -88,7 +89,7 @@ export async function updatePropietario(req: Request, res: Response) {
     if (!TempPropietario) return res.status(404).json({ message: "Propietario no encontrado" });
     const dv = TempPropietario.dataValues as unknown as Record<string, unknown>;
     const beforePropietario = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempPropietario.set(req.body);
+    TempPropietario.set(assignable(req.body));
     await TempPropietario.save();
     logAction({ id_usuario: req.user?.id, action: "UPDATE_PROPIETARIO", entity: "Propietario", entity_id: Number(id), detail: `Editó propietario #${id}`, metadata: { before: beforePropietario, after: req.body }, severity: 'warning' });
     res.status(200).json(TempPropietario);

@@ -3,6 +3,7 @@ import { Op } from "sequelize";
 import { ObsModel } from "../models/obs.model.js";
 import { TipoObsModel } from "../models/tipoObs.model.js";
 import { logAction } from "../utils/logAction.js";
+import { assignable } from "../utils/authorship.js";
 
 export async function getObsStats(req: Request, res: Response) {
   try {
@@ -31,7 +32,7 @@ export async function getObs(req: Request, res: Response) {
 }
 export async function createObs(req: Request, res: Response) {
   try {
-    const TempObs = await ObsModel.create(req.body);
+    const TempObs = await ObsModel.create(assignable(req.body));
     const tipoRow = req.body.id_tipoObs != null ? await TipoObsModel.findByPk(req.body.id_tipoObs, { attributes: ["id", "name"], paranoid: false }) : null;
     const tipoRef = tipoRow ? { id: tipoRow.dataValues.id, name: tipoRow.dataValues.name } : (req.body.id_tipoObs ?? null);
     logAction({ id_usuario: req.user?.id, action: "CREATE_OBS", entity: "Obs", entity_id: TempObs.dataValues.id as number, detail: `Creó observación ${req.body.name}`, metadata: { after: { name: req.body.name, id_tipoObs: tipoRef } }, severity: 'info' });
@@ -64,7 +65,7 @@ export async function updateObs(req: Request, res: Response) {
       };
       [beforeMeta["id_tipoObs"], afterMeta["id_tipoObs"]] = await Promise.all([fkRef(bvTipo), fkRef(avTipo)]);
     }
-    TempObs.set(req.body);
+    TempObs.set(assignable(req.body));
     await TempObs.save();
     logAction({ id_usuario: req.user?.id, action: "UPDATE_OBS", entity: "Obs", entity_id: Number(id), detail: `Editó observación #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
     res.status(200).json(TempObs);

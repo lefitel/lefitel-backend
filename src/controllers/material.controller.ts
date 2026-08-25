@@ -3,6 +3,7 @@ import { Op, fn, col } from "sequelize";
 import { MaterialModel } from "../models/material.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { logAction } from "../utils/logAction.js";
+import { assignable } from "../utils/authorship.js";
 
 interface CountRow { id: number; name: string; count: string }
 
@@ -44,7 +45,7 @@ export async function getMaterial(req: Request, res: Response) {
 }
 export async function createMaterial(req: Request, res: Response) {
   try {
-    const TempMaterial = await MaterialModel.create(req.body);
+    const TempMaterial = await MaterialModel.create(assignable(req.body));
     logAction({ id_usuario: req.user?.id, action: "CREATE_MATERIAL", entity: "Material", entity_id: TempMaterial.dataValues.id as number, detail: `Creó material ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
     res.status(200).json(TempMaterial);
   } catch (error) {
@@ -58,7 +59,7 @@ export async function updateMaterial(req: Request, res: Response) {
     if (!TempMaterial) return res.status(404).json({ message: "Material no encontrado" });
     const dv = TempMaterial.dataValues as unknown as Record<string, unknown>;
     const beforeMaterial = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempMaterial.set(req.body);
+    TempMaterial.set(assignable(req.body));
     await TempMaterial.save();
     logAction({ id_usuario: req.user?.id, action: "UPDATE_MATERIAL", entity: "Material", entity_id: Number(id), detail: `Editó material #${id}`, metadata: { before: beforeMaterial, after: req.body }, severity: 'warning' });
     res.status(200).json(TempMaterial);

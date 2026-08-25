@@ -270,4 +270,35 @@ describe("what a body may never set at all", () => {
     // And it still carries what was legitimately sent.
     expect(values).toMatchObject({ description: "ok", id_evento: 3, id_usuario: 7 });
   });
+
+  // The same field, on the other kind of door, and this is the one that was
+  // left open.
+  //
+  // The pass above closed `create`: `authoredBy` deletes id, createdAt,
+  // updatedAt and deletedAt before the values reach the model. Nothing did the
+  // same for `update`. `withoutAuthor` drops `id_usuario` and only that, so a
+  // `deletedAt` in the body of a PUT arrives at `set()` untouched — and every
+  // one of these models is `paranoid: true`, which makes that column the
+  // archive.
+  //
+  // Which turns a column of the permission matrix into a decoration. The
+  // Coordinador role is defined with `archivar: false` in all ten modules and
+  // `editar: true` in four of them, so `requirePermission("eventos",
+  // "archivar")` on the DELETE route guards a door that the PUT next to it
+  // walks straight past. `editar` is not `archivar`, and the matrix says so.
+  it("refuses deletedAt on a PUT, which is the archive column", async () => {
+    const set = vi.fn();
+    eventoFindOne.mockResolvedValue({
+      dataValues: { id: 5, state: false, image: null, id_poste: 1, id_usuario: 3 },
+      set,
+      save: vi.fn(),
+    });
+    await updateEvento(
+      reqOf({ description: "otra", deletedAt: "2020-01-01T00:00:00Z" }, { id: "5" }),
+      resOf(),
+    );
+
+    expect(set).toHaveBeenCalled();
+    expect(set.mock.calls[0][0]).not.toHaveProperty("deletedAt");
+  });
 });

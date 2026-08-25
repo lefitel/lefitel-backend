@@ -3,6 +3,7 @@ import { Op, fn, col } from "sequelize";
 import { AdssModel } from "../models/adss.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
 import { logAction } from "../utils/logAction.js";
+import { assignable } from "../utils/authorship.js";
 
 interface CountRow { id: number; name: string; count: string }
 
@@ -44,7 +45,7 @@ export async function getAdss(req: Request, res: Response) {
 }
 export async function createAdss(req: Request, res: Response) {
   try {
-    const TempAdss = await AdssModel.create(req.body);
+    const TempAdss = await AdssModel.create(assignable(req.body));
     logAction({ id_usuario: req.user?.id, action: "CREATE_ADSS", entity: "Adss", entity_id: TempAdss.dataValues.id as number, detail: `Creó ferretería ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
     res.status(200).json(TempAdss);
   } catch (error) {
@@ -58,7 +59,7 @@ export async function updateAdss(req: Request, res: Response) {
     if (!TempAdss) return res.status(404).json({ message: "Adss no encontrado" });
     const dv = TempAdss.dataValues as unknown as Record<string, unknown>;
     const beforeAdss = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempAdss.set(req.body);
+    TempAdss.set(assignable(req.body));
     await TempAdss.save();
     logAction({ id_usuario: req.user?.id, action: "UPDATE_ADSS", entity: "Adss", entity_id: Number(id), detail: `Editó ferretería #${id}`, metadata: { before: beforeAdss, after: req.body }, severity: 'warning' });
     res.status(200).json(TempAdss);

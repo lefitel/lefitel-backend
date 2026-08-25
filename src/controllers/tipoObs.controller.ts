@@ -3,6 +3,7 @@ import { Op, fn, col } from "sequelize";
 import { TipoObsModel } from "../models/tipoObs.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { logAction } from "../utils/logAction.js";
+import { assignable } from "../utils/authorship.js";
 
 interface CountRow { id: number; name: string; count: string }
 
@@ -44,7 +45,7 @@ export async function getTipoObs(req: Request, res: Response) {
 }
 export async function createTipoObs(req: Request, res: Response) {
   try {
-    const TempTipoObs = await TipoObsModel.create(req.body);
+    const TempTipoObs = await TipoObsModel.create(assignable(req.body));
     logAction({ id_usuario: req.user?.id, action: "CREATE_TIPO_OBS", entity: "TipoObs", entity_id: TempTipoObs.dataValues.id as number, detail: `Creó tipo de observación ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
     res.status(200).json(TempTipoObs);
   } catch (error) {
@@ -58,7 +59,7 @@ export async function updateTipoObs(req: Request, res: Response) {
     if (!TempTipoObs) return res.status(404).json({ message: "Tipo de observación no encontrado" });
     const dv = TempTipoObs.dataValues as unknown as Record<string, unknown>;
     const beforeTipoObs = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempTipoObs.set(req.body);
+    TempTipoObs.set(assignable(req.body));
     await TempTipoObs.save();
     logAction({ id_usuario: req.user?.id, action: "UPDATE_TIPO_OBS", entity: "TipoObs", entity_id: Number(id), detail: `Editó tipo de observación #${id}`, metadata: { before: beforeTipoObs, after: req.body }, severity: 'warning' });
     res.status(200).json(TempTipoObs);
