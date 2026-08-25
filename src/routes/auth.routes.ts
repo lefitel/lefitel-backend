@@ -24,6 +24,7 @@ import {
   sessions,
 } from "../controllers/auth.controller.js";
 import { sendVerificationEmail, verifyEmail } from "../controllers/email.controller.js";
+import { forgotPassword, resetPassword } from "../controllers/password.controller.js";
 
 const router = Router();
 
@@ -96,5 +97,24 @@ router.delete("/sessions/:id", authenticate, endSession);
  */
 router.post("/email/send", authenticate, sendVerificationEmail);
 router.post("/email/verify", authenticate, verifyEmail);
+
+/**
+ * Getting back in when you cannot log in at all. Task 5 of
+ * `2026-08-25-correo-verificado-y-recuperacion`; see
+ * `src/controllers/password.controller.ts` for the two handlers.
+ *
+ * **No `authenticate` on either** — unlike every route above, deliberately:
+ * these two are what a person reaches for *because* they have no session,
+ * so gating them on one would make them unreachable by the people they
+ * exist for. `routeGuards.test.ts`'s `AUTHENTICATION_NOT_APPLICABLE` and
+ * `GATE_NOT_APPLICABLE` need an entry each for both routes — not added
+ * here; that file already mixes Isaias's uncommitted work with this plan's,
+ * and he owns adding the two lines. See `task-5-report.md`.
+ *
+ * No rate limiter on either yet, same as the pair above — Task 6's, mounted
+ * once these exist.
+ */
+router.post("/password/forgot", forgotPassword);
+router.post("/password/reset", resetPassword);
 
 export default router;
