@@ -30,7 +30,7 @@ import type { RateLimitRequestHandler } from "express-rate-limit";
 import rateLimit from "express-rate-limit";
 import type { Request, RequestHandler } from "express";
 import app from "../app.js";
-import { costsNothing } from "./loginLimiters.js";
+import { costsNothing, passwordConfirmLimiter } from "./loginLimiters.js";
 import { hashOpaqueToken } from "../auth/opaqueToken.js";
 import {
   emailSendLimiter,
@@ -492,11 +492,11 @@ describe("mounted on the real routes, not merely built", () => {
    */
   interface Layer {
     regexp: { source: string };
-    route?: { path: string; methods: Record<string, boolean>; stack: { handle: { name: string } }[] };
+    route?: { path: string; methods: Record<string, boolean>; stack: { handle: RequestHandler & { name: string } }[] };
     handle: { stack?: Layer[] };
   }
 
-  function chainFor(method: string, path: string): string[] {
+  function stackFor(method: string, path: string): (RequestHandler & { name: string })[] {
     const stack = (app as unknown as { _router: { stack: Layer[] } })._router.stack;
     for (const layer of stack) {
       if (!layer.handle.stack) continue;
@@ -504,10 +504,14 @@ describe("mounted on the real routes, not merely built", () => {
         if (!inner.route) continue;
         if (inner.route.path !== path) continue;
         if (!inner.route.methods[method.toLowerCase()]) continue;
-        return inner.route.stack.map((s) => s.handle.name);
+        return inner.route.stack.map((s) => s.handle);
       }
     }
     throw new Error(`no se encontró ${method} ${path} en el árbol de rutas`);
+  }
+
+  function chainFor(method: string, path: string): string[] {
+    return stackFor(method, path).map((h) => h.name);
   }
 
   it("puts a nameable limiter chain in front of /password/forgot and /password/reset", () => {
@@ -520,10 +524,23 @@ describe("mounted on the real routes, not merely built", () => {
     // which carry no name of their own (checked directly: a plain
     // `rateLimit()` call's `.name` is `""`) — so the wiring is pinned by
     // position and chain length instead of by a name that does not exist.
-    const send = chainFor("POST", "/email/send");
-    expect(send[0]).toBe("authenticate");
-    expect(send[2]).toBe("sendVerificationEmail");
-    expect(send).toHaveLength(3);
+    //
+    // `/email/send` grew a fourth link in its Ronda de arreglo 2 of Task 4:
+    // `passwordConfirmLimiter`, the account-takeover fix that requires the
+    // caller's current password before this route does anything, mounted
+    // *before* `emailSendLimiter` on purpose — so a request that never had
+    // the right password does not also spend the account's own email quota
+    // or the company's shared daily one. `passwordConfirmLimiter` is just as
+    // nameless as the other three bare `rateLimit()` results here, so telling
+    // it apart from `emailSendLimiter` by name is impossible — this compares
+    // the actual middleware functions by reference instead, which is the
+    // only way to pin that specific order.
+    const send = stackFor("POST", "/email/send");
+    expect(send).toHaveLength(4);
+    expect(send[0].name).toBe("authenticate");
+    expect(send[1]).toBe(passwordConfirmLimiter);
+    expect(send[2]).toBe(emailSendLimiter);
+    expect(send[3].name).toBe("sendVerificationEmail");
 
     const verify = chainFor("POST", "/email/verify");
     expect(verify[0]).toBe("authenticate");

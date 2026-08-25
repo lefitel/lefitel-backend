@@ -14,6 +14,16 @@
 //   went out or not — compared as whole objects, not just a status code,
 //   per the brief's own warning that a status-only test passes while the
 //   body gives away which path was taken.
+//
+// A third thing joined these two in Ronda de arreglo 2, and it is the more
+// serious of the three: `/email/send` used to require nothing but a live
+// session, which chains into a real account takeover — steal a session, set
+// the recovery address to one you control, verify it, wait, then
+// `/password/forgot` and reset the legitimate owner out entirely. The tests
+// below for `verifyOwnPassword` and the previous-address notice are what
+// close that, and the red demonstration for this round removes the
+// `verifyOwnPassword` call itself rather than a single condition inside it —
+// see "the account-takeover fix" below.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
@@ -54,6 +64,19 @@ vi.mock("../auth/mailer.js", () => ({
   enviarCorreo: (...a: unknown[]) => enviarCorreo(...a),
 }));
 
+// Mocked wholesale rather than let the real `credentials.js` load: that
+// module imports `UsuarioModel` (fine, already mocked above) but also
+// `bcryptjs`, `config/security.js`'s `fillerHash`/`bcryptCostOf` and
+// `middleware/loginLimiters.js`'s `estaBloqueada` — none of which this file
+// has any business exercising to prove what `sendVerificationEmail` does
+// with `verifyOwnPassword`'s answer. What is under test here is the
+// controller's own branching on `{ ok, reason }`, not `verifyOwnPassword`
+// itself — that function's own suite is `auth/verifyOwnPassword.test.ts`.
+const verifyOwnPassword = vi.fn();
+vi.mock("../auth/credentials.js", () => ({
+  verifyOwnPassword: (...a: unknown[]) => verifyOwnPassword(...a),
+}));
+
 const logAction = vi.fn();
 vi.mock("../utils/logAction.js", () => ({ logAction: (...a: unknown[]) => logAction(...a) }));
 
@@ -68,6 +91,8 @@ const {
   EMAIL_ENVIO_RESPUESTA,
   TOKEN_REQUERIDO,
   TOKEN_INVALIDO,
+  CURRENT_PASSWORD_REQUIRED_MESSAGE,
+  CURRENT_PASSWORD_WRONG_MESSAGE,
 } = await import("./email.controller.js");
 
 const A = 7;
@@ -123,6 +148,9 @@ function call(
 
 const YO_CON_SESION = { id: A, id_rol: 2, id_sesion: "aaaaaaaa-11cd-4111-8111-aaaaaaaaaaaa", expires_at: new Date() };
 
+/** The current password, standing in for whatever the caller actually typed. */
+const PASS = "una-clave-de-prueba";
+
 beforeEach(() => {
   vi.clearAllMocks();
   findByPk.mockResolvedValue(usuarioRow());
@@ -132,6 +160,7 @@ beforeEach(() => {
   crearToken.mockResolvedValue(TOKEN_CRUDO);
   consumirToken.mockResolvedValue({ id_usuario: A, email_destino: "a@osefi.net" });
   enviarCorreo.mockResolvedValue({ ok: true });
+  verifyOwnPassword.mockResolvedValue({ ok: true });
 });
 
 describe("POST /auth/email/send", () => {
@@ -170,17 +199,87 @@ describe("POST /auth/email/send", () => {
     expect(c.message).toBe(EMAIL_INVALIDO);
   });
 
-  it("answers 401 when the account was archived between authenticate and here", async () => {
-    findByPk.mockResolvedValue(null);
-    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
-    await sendVerificationEmail(c.req, c.res);
+  /**
+   * The account-takeover fix (Ronda de arreglo 2). Without a password
+   * confirmation, a stolen session is enough to redirect the account's
+   * recovery address to one the attacker controls, verify it, wait for the
+   * owner to log out, and reset the password out from under them — which
+   * revokes every session, including the legitimate owner's. `verifyOwnPassword`
+   * is the exact piece `usuario.controller.ts`'s `updateUserName` already
+   * uses for the same question, reused rather than a fresh `bcryptjs.compare`.
+   */
+  describe("requires the caller's current password", () => {
+    it("refuses a body with no password, and never touches the row — comparing the row, not just the status", async () => {
+      const c = call(YO_CON_SESION, { email: "a@osefi.net" });
+      await sendVerificationEmail(c.req, c.res);
 
-    expect(c.status).toBe(401);
-    expect(transaction).not.toHaveBeenCalled();
+      expect(c.status).toBe(400);
+      expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    });
+
+    it("refuses a non-string password without crashing, and never touches the row", async () => {
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: 12345 });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("refuses the wrong current password, and never touches the row", async () => {
+      verifyOwnPassword.mockResolvedValue({ ok: false, reason: "wrong-password" });
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: "no-es-la-mia" });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(401);
+      expect(c.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
+      expect(verifyOwnPassword).toHaveBeenCalledWith({ id: A, pass: "no-es-la-mia", ip: "203.0.113.9" });
+      expect(update).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+      expect(findByPk).not.toHaveBeenCalled();
+    });
+
+    it("answers 401 without a wrong-password sentence when the account is gone by the time the password is checked", async () => {
+      // `no-account`: archived between `authenticate` and `verifyOwnPassword`'s
+      // own lookup. Answered the same way `/api/auth/me` answers the same
+      // race, and pointedly not as a wrong password — telling somebody to
+      // look for a typo in a password nothing ever compared is worse than
+      // telling them their session is over.
+      verifyOwnPassword.mockResolvedValue({ ok: false, reason: "no-account" });
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(401);
+      expect(c.message).not.toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
+      expect(findByPk).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("answers 401 for the narrower race between verifyOwnPassword's own lookup and this handler's second one", async () => {
+      findByPk.mockResolvedValue(null);
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(401);
+      expect(update).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    });
+
+    it("proceeds once the password is confirmed", async () => {
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(verifyOwnPassword).toHaveBeenCalledWith({ id: A, pass: PASS, ip: "203.0.113.9" });
+      expect(c.status).toBe(200);
+      expect(transaction).toHaveBeenCalledOnce();
+    });
   });
 
   it("trims and lowercases the address before writing, minting and mailing", async () => {
-    const c = call(YO_CON_SESION, { email: "  Isaias@Osefi.NET  " });
+    const c = call(YO_CON_SESION, { email: "  Isaias@Osefi.NET  ", pass: PASS });
     await sendVerificationEmail(c.req, c.res);
 
     expect(c.status).toBe(200);
@@ -193,7 +292,7 @@ describe("POST /auth/email/send", () => {
   });
 
   it("sets email_verified_at to NULL on every write, even the first one", async () => {
-    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
     await sendVerificationEmail(c.req, c.res);
 
     const [values] = update.mock.calls[0] as [Record<string, unknown>];
@@ -201,7 +300,7 @@ describe("POST /auth/email/send", () => {
   });
 
   it("invalidates every pending token of the account, any purpose, in the same transaction as the email write", async () => {
-    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
     await sendVerificationEmail(c.req, c.res);
 
     const [, usuarioOptions] = update.mock.calls[0] as [unknown, { transaction: unknown }];
@@ -219,7 +318,7 @@ describe("POST /auth/email/send", () => {
 
   it("answers the exact same body whether the mail actually sent or not", async () => {
     enviarCorreo.mockResolvedValue({ ok: true });
-    const enviado = call(YO_CON_SESION, { email: "a@osefi.net" });
+    const enviado = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
     await sendVerificationEmail(enviado.req, enviado.res);
 
     vi.clearAllMocks();
@@ -228,8 +327,9 @@ describe("POST /auth/email/send", () => {
     tokenUpdate.mockResolvedValue([0]);
     transaction.mockImplementation(async (fn: (t: unknown) => Promise<unknown>) => fn(TRANSACCION));
     crearToken.mockResolvedValue(TOKEN_CRUDO);
+    verifyOwnPassword.mockResolvedValue({ ok: true });
     enviarCorreo.mockResolvedValue({ ok: false });
-    const caido = call(YO_CON_SESION, { email: "a@osefi.net" });
+    const caido = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
     await sendVerificationEmail(caido.req, caido.res);
 
     expect(enviado.status).toBe(caido.status);
@@ -238,7 +338,7 @@ describe("POST /auth/email/send", () => {
   });
 
   it("logs EMAIL_SEND on every call, with the destination address and no token", async () => {
-    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
     await sendVerificationEmail(c.req, c.res);
 
     expect(logAction).toHaveBeenCalledWith(
@@ -254,7 +354,7 @@ describe("POST /auth/email/send", () => {
 
   it("logs EMAIL_CHANGED, as critical, only when a verified address is being replaced", async () => {
     findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
-    const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
     await sendVerificationEmail(c.req, c.res);
 
     expect(logAction).toHaveBeenCalledWith(
@@ -268,7 +368,7 @@ describe("POST /auth/email/send", () => {
 
   it("does not log EMAIL_CHANGED for a first-time or still-unverified address", async () => {
     findByPk.mockResolvedValue(usuarioRow({ email: null, email_verified_at: null }));
-    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
     await sendVerificationEmail(c.req, c.res);
 
     expect(logAction).not.toHaveBeenCalledWith(
@@ -277,10 +377,57 @@ describe("POST /auth/email/send", () => {
   });
 
   it("never puts the plain token in the response, whatever it is", async () => {
-    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
     await sendVerificationEmail(c.req, c.res);
 
     expect(JSON.stringify(c.payload)).not.toContain(TOKEN_CRUDO);
+  });
+
+  /**
+   * Arreglo 2's other half — the notice to the address that is *leaving*
+   * the account, and arguably the more important of the two fixes: it is
+   * the only message in this whole flow that reaches a mailbox the attacker
+   * does not hold.
+   */
+  describe("notifying the previous address", () => {
+    it("mails the new address and the previous one, masked, when replacing a verified address", async () => {
+      findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
+      const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(enviarCorreo).toHaveBeenCalledTimes(2);
+      const [primero, segundo] = enviarCorreo.mock.calls.map((call) => call[0] as Record<string, unknown>);
+      expect(primero.para).toBe("nueva@osefi.net");
+      expect(segundo.para).toBe("vieja@osefi.net");
+      // The new address is masked in the notice — recognisable, not spelled
+      // out, to whoever now reads the old mailbox.
+      expect(segundo.html).toContain("n***@osefi.net");
+      expect(segundo.texto).toContain("n***@osefi.net");
+      expect(segundo.html).not.toContain("nueva@osefi.net");
+      expect(segundo.texto).not.toContain("nueva@osefi.net");
+    });
+
+    it("mails only the new address when there is no previous address at all", async () => {
+      findByPk.mockResolvedValue(usuarioRow({ email: null, email_verified_at: null }));
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(enviarCorreo).toHaveBeenCalledTimes(1);
+      expect(enviarCorreo.mock.calls[0][0]).toMatchObject({ para: "a@osefi.net" });
+    });
+
+    it("mails only the new address when the address it replaces was never verified", async () => {
+      // There is a previous address, but it was never confirmed — nobody
+      // relies on it as a recovery channel yet, so there is nobody to warn.
+      findByPk.mockResolvedValue(usuarioRow({ email: "sin-verificar@osefi.net", email_verified_at: null }));
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(enviarCorreo).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

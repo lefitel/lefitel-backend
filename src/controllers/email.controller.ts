@@ -37,6 +37,7 @@ import { TokenUsoUnicoModel } from "../models/tokenUsoUnico.model.js";
 import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
+import { verifyOwnPassword } from "../auth/credentials.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -47,6 +48,19 @@ const handler = makeHandler(emailLog);
 
 /** Twin of the message in `authenticate.ts` and `auth.controller.ts`; both mean the row is gone. */
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
+
+/**
+ * Same wording as `usuario.controller.ts`'s exports of the same name — a
+ * second, deliberate copy rather than an import, for the same reason
+ * `handler()` used to be one before it moved to `utils/handler.js`:
+ * importing either constant from `usuario.controller.ts` pulls that file's
+ * own import graph (`RolModel`, `permissions/store.js`'s `can`, `bcryptjs`)
+ * into this file's tests to load two sentences. Flagged in the report —
+ * if a third caller ever needs these, they are the next candidate for the
+ * treatment `handler()` got, in a module with no imports of its own.
+ */
+export const CURRENT_PASSWORD_REQUIRED_MESSAGE = "Debe proporcionar su contraseña actual.";
+export const CURRENT_PASSWORD_WRONG_MESSAGE = "La contraseña actual suministrada no es correcta.";
 
 /**
  * One answer for "no email in the body" and "that string is not shaped like
@@ -165,11 +179,78 @@ function verificationEmailBody(enlace: string): { html: string; texto: string } 
 }
 
 /**
+ * `nueva@osefi.net` → `n***@osefi.net`.
+ *
+ * The notice below goes to a mailbox this account may no longer control —
+ * that is the whole reason it is sent — so the new address is not spelled
+ * out in it: enough for the real owner to recognise their own account did
+ * this, not enough to hand the new address to whoever now reads the old
+ * inbox. A fixed run of asterisks rather than one per real character, so the
+ * mask does not also leak the new address's length.
+ */
+function enmascarada(email: string): string {
+  const [usuario, dominio] = email.split("@");
+  if (!usuario || !dominio) return "***";
+  return `${usuario.slice(0, 1)}***@${dominio}`;
+}
+
+/**
+ * The security notice that goes to the *previous* address when it was
+ * already verified — see the long comment on `sendVerificationEmail` for
+ * why this is the real defence in the whole flow: it is the one message in
+ * this file that reaches a mailbox nobody who just ran `/email/send` can
+ * have redirected.
+ */
+function previousAddressNoticeBody(nuevaEnmascarada: string): { html: string; texto: string } {
+  return {
+    html: [
+      "<p>Hola,</p>",
+      `<p>La dirección de correo de recuperación de tu cuenta de Osefi se cambió a ${nuevaEnmascarada}.</p>`,
+      "<p>Si no fuiste tú quien hizo este cambio, contacta con administración de inmediato.</p>",
+    ].join("\n"),
+    texto: [
+      "Hola,",
+      "",
+      `La dirección de correo de recuperación de tu cuenta de Osefi se cambió a ${nuevaEnmascarada}.`,
+      "",
+      "Si no fuiste tú quien hizo este cambio, contacta con administración de inmediato.",
+    ].join("\n"),
+  };
+}
+
+/**
  * `POST /auth/email/send` — register (or replace) the address on my account
  * and ask me to confirm it.
  *
- * Always the same three things, in this order, for the account behind
- * `req.user.id`:
+ * **Requires the caller's current password. This is the fix for a real
+ * account-takeover chain, not a nicety.** Without it: steal a live session
+ * (an unattended office machine is enough) → set the recovery address to one
+ * you control → verify it → wait for the owner to log out → `/password/forgot`
+ * → reset the password, which revokes every session — and the legitimate
+ * owner is now locked out, by the very feature this plan exists to give them
+ * a way back through. The spec had this in its step-up list all along
+ * ("cambiar el email propio — y se avisa a la dirección anterior"); it did
+ * not make it into this task's brief, and this is that gap closed.
+ *
+ * Required for the **first** address too, not only when replacing a verified
+ * one: the attack above works identically against an account with no
+ * recovery address yet, and the moment somebody is establishing their own way
+ * back in is exactly the moment a confirmation is worth the one extra field.
+ *
+ * Does not touch Global Constraint #1. That constraint is about the
+ * *destination* address — whether it is free, already claimed, or whether
+ * Resend is up — and nothing here depends on any of those three. The caller
+ * is already authenticated, so a 401 for a missing or wrong password reveals
+ * nothing about who has an account; it is the same shape as
+ * `usuario.controller.ts`'s `updateUserName`, reusing the exact same pieces:
+ * `verifyOwnPassword` (never a fresh `bcryptjs.compare` — see its own
+ * comment for the filler hash and the levelled timings that come with it)
+ * and `passwordConfirmLimiter`, mounted on this route in `auth.routes.ts`
+ * exactly as `chargeConfirmBudgetOnSelfChange` mounts it on the two
+ * `usuario` routes — same shared budget, same account, same secret.
+ *
+ * Once confirmed, always the same four things, in this order, for the
+ * account behind `req.user.id`:
  *
  * 1. Write `email` (normalised) and `email_verified_at = NULL`, and in the
  *    *same* transaction, mark every still-pending `token_uso_unico` row of
@@ -182,9 +263,15 @@ function verificationEmailBody(enlace: string): { html: string; texto: string } 
  *    `reset_password` row, and it cannot make the write atomic with this
  *    one. Both of those are why this step exists here instead of being left
  *    to it.
- * 2. Mint a fresh `verify_email` token and mail it.
- * 3. Answer the one uniform sentence — see `EMAIL_ENVIO_RESPUESTA` — whether
- *    the mail actually went out or not.
+ * 2. Mint a fresh `verify_email` token and mail it to the new address.
+ * 3. If the address just replaced was already verified, mail a notice to
+ *    the *previous* one, with the new address masked — see
+ *    `previousAddressNoticeBody`. This is the second half of the fix, and
+ *    arguably the half that matters more: it is the only message in this
+ *    whole flow that lands in a mailbox the attacker does not hold. Without
+ *    it, step 2 of the attack above is completely silent.
+ * 4. Answer the one uniform sentence — see `EMAIL_ENVIO_RESPUESTA` — whether
+ *    either mail actually went out or not.
  *
  * No collision check against other accounts: the design in
  * `task-4-brief.md` is explicit that checking here would itself be the leak
@@ -203,12 +290,31 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     return res.status(400).json({ message: EMAIL_INVALIDO });
   }
 
+  const pass = (req.body as { pass?: unknown } | undefined)?.pass;
+  // Not a string is not a password, and an empty one is not a confirmation —
+  // refused before the round trip, the same way `verifyOwnPassword` refuses
+  // them, so the two cannot disagree about what counts as "sent nothing".
+  if (typeof pass !== "string" || pass === "") {
+    return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
+  }
+  const confirmacion = await verifyOwnPassword({ id: caller.id, pass, ip: req.ip ?? null });
+  if (!confirmacion.ok) {
+    // Archived between `authenticate` and here — the narrow race
+    // `verifyOwnPassword` names. Answered the same way `/api/auth/me`
+    // answers it, and pointedly not as a wrong password: sending somebody
+    // hunting for a typo in a password that was never compared is worse
+    // than telling them their session is over.
+    if (confirmacion.reason === "no-account") {
+      return res.status(401).json({ message: CUENTA_INACTIVA });
+    }
+    return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
+  }
+
   const found = await UsuarioModel.findByPk(caller.id, {
     attributes: ["id", "email", "email_verified_at"],
   });
-  // Archived between `authenticate` and here — the same narrow race `GET
-  // /api/auth/me` answers this way to. About the caller's own session, not
-  // about the address, so it does not touch Global Constraint #1.
+  // Archived in the instant between `verifyOwnPassword`'s own lookup and
+  // this one — narrower still than the race above, and answered the same way.
   if (!found) {
     return res.status(401).json({ message: CUENTA_INACTIVA });
   }
@@ -264,8 +370,22 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     html: cuerpo.html,
     texto: cuerpo.texto,
   });
-  // `enviarCorreo`'s own `{ ok }` is deliberately not read here — branching
-  // the response on it is exactly the oracle Global Constraint #1 forbids.
+
+  if (eraVerificada && direccionAnterior) {
+    // The real defence in this whole flow — see the handler's own comment.
+    // Sent to the address that is *leaving* the account, never the new one,
+    // and never blocking or altering the response: same contract as the
+    // verification mail above.
+    const aviso = previousAddressNoticeBody(enmascarada(destino));
+    await enviarCorreo({
+      para: direccionAnterior,
+      asunto: "Tu dirección de recuperación cambió — Osefi",
+      html: aviso.html,
+      texto: aviso.texto,
+    });
+  }
+  // Neither `enviarCorreo` call's `{ ok }` is read here — branching the
+  // response on it is exactly the oracle Global Constraint #1 forbids.
 
   return res.status(200).json({ message: EMAIL_ENVIO_RESPUESTA });
 });

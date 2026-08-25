@@ -1434,6 +1434,22 @@ describe("the addresses this arc retired", () => {
  * real `tokenStore.js`.
  */
 describe("email verification, through the real stack", () => {
+  /**
+   * `POST /email/send` now sits behind `passwordConfirmLimiter` too (Ronda
+   * de arreglo 2) — the same shared `pc:7` bucket `usuario.routes.ts` mounts
+   * on the rename and the password change, deliberately, since it is the
+   * same secret being confirmed for the same account. That bucket is a
+   * module-level store with no reset between describe blocks, and the tests
+   * in "changing your own credentials..." above happen to leave it at 0 by
+   * the time their block ends — but only because their own last test
+   * confirms a *correct* password, which is refunded. That is incidental to
+   * their ordering, not a guarantee this block should lean on, so it is
+   * reset here explicitly.
+   */
+  beforeEach(async () => {
+    await passwordConfirmLimiter.resetKey(`pc:${YO}`);
+  });
+
   it("mounts both routes, and refuses both without a cookie", async () => {
     const send = await request(app).post("/api/auth/email/send").send({ email: "a@osefi.net" });
     const verify = await request(app).post("/api/auth/email/verify").send({ token: "x" });
@@ -1454,6 +1470,27 @@ describe("email verification, through the real stack", () => {
     // first database call.
     expect(usuarioUpdate).not.toHaveBeenCalled();
     expect(tokenUsoUnicoUpdate).not.toHaveBeenCalled();
+  });
+
+  it("gets past the email check and still refuses with no password, through the real mount", async () => {
+    // Unlike the "no body at all" test above, `email` really is present and
+    // valid here — this is a step deeper into the handler, past the point
+    // that test exercises. What this pins is that `passwordConfirmLimiter`,
+    // freshly mounted on this route, really calls `next()` for a fresh
+    // account rather than answering 429 or 500 on its own, so the 400 seen
+    // is the handler's own "no password sent" and not the limiter
+    // misbehaving. A password-bearing happy path is still not exercised
+    // here — see the comment on `usuarioUpdate`/`tokenUsoUnicoUpdate` above
+    // for why `/email/send`'s own transaction keeps that out of this file's
+    // scope.
+    const res = await request(app)
+      .post("/api/auth/email/send")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ email: "a@osefi.net" });
+
+    expect(res.status).toBe(400);
+    expect(usuarioUpdate).not.toHaveBeenCalled();
   });
 
   it("answers the generic message, through the real tokenStore, for a token that does not redeem", async () => {

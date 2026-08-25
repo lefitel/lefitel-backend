@@ -14,7 +14,7 @@
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
-import { loginRateLimit } from "../middleware/loginLimiters.js";
+import { loginRateLimit, passwordConfirmLimiter } from "../middleware/loginLimiters.js";
 import {
   emailSendLimiter,
   emailVerifyLimiter,
@@ -102,8 +102,19 @@ router.delete("/sessions/:id", authenticate, endSession);
  * has run. See `middleware/recoveryLimiters.ts` for why neither one refunds
  * a request based on the response — both routes below can answer 200 for
  * reasons that have nothing to do with who is asking.
+ *
+ * `passwordConfirmLimiter` on `/email/send` only, and mounted **before**
+ * `emailSendLimiter` — Ronda de arreglo 2 of Task 4's report. The handler
+ * now requires the caller's current password (an account-takeover fix, see
+ * its own comment), reusing the exact same budget `usuario.routes.ts` mounts
+ * on the rename and the password change: one account, one secret being
+ * confirmed, one bucket. Mounted first so that somebody already out of
+ * guesses on that shared budget gets refused here, before `emailSendLimiter`
+ * would otherwise charge the account's own 5/hour quota — and the company's
+ * shared 100/day one — for a request that never had the right password to
+ * begin with.
  */
-router.post("/email/send", authenticate, emailSendLimiter, sendVerificationEmail);
+router.post("/email/send", authenticate, passwordConfirmLimiter, emailSendLimiter, sendVerificationEmail);
 router.post("/email/verify", authenticate, emailVerifyLimiter, verifyEmail);
 
 /**
