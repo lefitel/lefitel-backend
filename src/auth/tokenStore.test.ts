@@ -43,11 +43,26 @@ vi.mock("../database/sequelize.js", () => ({
 const { crearToken, consumirToken, purgeExpiredTokens } = await import("./tokenStore.js");
 const { hashOpaqueToken } = await import("./opaqueToken.js");
 const { EMAIL_VERIFY_TOKEN_TTL_MS, PASSWORD_RESET_TOKEN_TTL_MS } = await import("../config/security.js");
+const { sequelize } = await import("../database/sequelize.js");
 
 /** The bound of a `{ [Op.x]: value }` clause, read past the Symbol key. */
 const boundOf = (clause: unknown, op: symbol) => (clause as Record<symbol, unknown>)[op];
 /** The operators actually present on a `{ [Op.x]: value }` clause. */
 const opsOf = (clause: unknown) => Object.getOwnPropertySymbols(clause as object);
+/**
+ * `where`-clause matching against a plain object — just enough for the two
+ * shapes this module produces (equality, including against `null`, and
+ * `{ [Op.gt]: Date }`). Shared by the two in-memory fake tables below.
+ */
+function matches(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
+  return Object.entries(where).every(([key, clause]) => {
+    if (clause !== null && typeof clause === "object" && !(clause instanceof Date)) {
+      const gt = (clause as Record<symbol, unknown>)[Op.gt];
+      if (gt instanceof Date) return (row[key] as Date).getTime() > gt.getTime();
+    }
+    return row[key] === clause;
+  });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -269,17 +284,6 @@ describe("crearToken and consumirToken together", () => {
     return rows;
   }
 
-  /** `where`-clause matching against a plain object — just enough for the two shapes this module produces. */
-  function matches(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
-    return Object.entries(where).every(([key, clause]) => {
-      if (clause !== null && typeof clause === "object" && !(clause instanceof Date)) {
-        const gt = (clause as Record<symbol, unknown>)[Op.gt];
-        if (gt instanceof Date) return (row[key] as Date).getTime() > gt.getTime();
-      }
-      return row[key] === clause;
-    });
-  }
-
   it("leaves the previous token dead once a second one is minted for the same account and purpose", async () => {
     fakeTable();
     const primero = await crearToken({
@@ -340,5 +344,129 @@ describe("crearToken and consumirToken together", () => {
 
     expect(rows.every((row) => row.token_hash !== token)).toBe(true);
     expect(JSON.stringify(rows)).not.toContain(token);
+  });
+});
+
+describe("consumirToken with a caller-provided transaction", () => {
+  it("behaves exactly as before when no transaction is given", async () => {
+    // Every test in the plain `consumirToken` describe above already calls
+    // it with two arguments and passes; this pins the omission on the wire
+    // itself, so a change that silently starts requiring the third
+    // argument — or defaults it to something other than "no transaction" —
+    // is caught here rather than only in a type error at some future call
+    // site.
+    await consumirToken("t", "verify_email");
+    const [, options] = update.mock.calls[0] as [unknown, { transaction?: unknown }];
+    expect(options.transaction).toBeUndefined();
+  });
+
+  it("passes a given transaction straight through to the same UPDATE", async () => {
+    const DEL_LLAMADOR = { id: "la-transaccion-de-quien-llama" };
+    await consumirToken(
+      "t",
+      "verify_email",
+      DEL_LLAMADOR as unknown as Parameters<typeof consumirToken>[2],
+    );
+    const [, options] = update.mock.calls[0] as [unknown, { transaction?: unknown }];
+    expect(options.transaction).toBe(DEL_LLAMADOR);
+  });
+
+  /**
+   * A rollback-aware fake table, for the one test below that needs it.
+   *
+   * A real Postgres transaction is invisible to anything outside it until
+   * it commits, and every write inside it vanishes on ROLLBACK. `fakeTable`
+   * above cannot show that: its `update` mutates one shared array with no
+   * notion of "inside" or "outside" a transaction, so it cannot tell a
+   * write that respected the transaction apart from one that bypassed it.
+   *
+   * This keeps two views: `committed`, the table as anyone outside the
+   * transaction sees it, and `pending`, a working copy only writes tagged
+   * with the currently-open transaction's own token touch. On success,
+   * `pending` becomes the new `committed` — the commit. On the callback
+   * throwing, `pending` is simply discarded — the rollback — and
+   * `committed` is left exactly as any write that did *not* carry the
+   * transaction already left it. That last part is what makes the
+   * demonstration below possible: a write missing the `transaction` option
+   * lands on `committed` immediately and is never rolled back, which is
+   * exactly what a real, un-transacted query does against a real database
+   * too.
+   */
+  function fakeTransactionalTable() {
+    const committed: Record<string, unknown>[] = [];
+    let pending: Record<string, unknown>[] | null = null;
+    let openToken: unknown = null;
+
+    update.mockImplementation(
+      async (
+        values: Record<string, unknown>,
+        options: { where: Record<string, unknown>; transaction?: unknown },
+      ) => {
+        const inTransaction = pending !== null && options.transaction === openToken;
+        const target = inTransaction ? pending! : committed;
+        const matched = target.filter((row) => matches(row, options.where));
+        matched.forEach((row) => Object.assign(row, values));
+        return [matched.length, matched.map((row) => ({ dataValues: row }))];
+      },
+    );
+
+    transaction.mockImplementation(async (fn: (t: unknown) => Promise<unknown>) => {
+      openToken = TRANSACCION;
+      pending = committed.map((row) => ({ ...row }));
+      try {
+        const result = await fn(openToken);
+        // COMMIT: the transaction's own view of the world becomes the truth.
+        committed.length = 0;
+        committed.push(...pending);
+        return result;
+      } finally {
+        // On a throw, execution never reaches the two lines above, so
+        // `committed` is left untouched by anything that respected the
+        // transaction — which *is* the rollback. Nothing to undo here.
+        pending = null;
+        openToken = null;
+      }
+    });
+
+    return committed;
+  }
+
+  it("leaves the token still redeemable when the caller's own transaction rolls back", async () => {
+    // Demonstrated by breaking it: remove `transaction` from the options
+    // `consumirToken` hands to `TokenUsoUnicoModel.update` and this goes
+    // red, because the redemption below then bypasses the fake transaction
+    // entirely and commits immediately — see task-2-report.md for the
+    // pasted failure.
+    const rows = fakeTransactionalTable();
+    rows.push({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+      token_hash: hashOpaqueToken("un-token"),
+      proposito: "reset_password",
+      used_at: null,
+      expires_at: new Date(Date.now() + 60_000),
+    });
+
+    await expect(
+      sequelize.transaction(async (t: unknown) => {
+        const result = await consumirToken(
+          "un-token",
+          "reset_password",
+          t as unknown as Parameters<typeof consumirToken>[2],
+        );
+        expect(result).not.toBeNull();
+        // The case this parameter exists for: something after the
+        // redemption fails — hashing or writing the new password, clearing
+        // the lockout, revoking sessions — before `/password/reset` finishes.
+        throw new Error("simulated failure after redemption, before the reset finished");
+      }),
+    ).rejects.toThrow("simulated failure after redemption");
+
+    // Outside that rolled-back transaction, the token is exactly as it was
+    // before: still pending, still redeemable.
+    expect(await consumirToken("un-token", "reset_password")).toEqual({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+    });
   });
 });

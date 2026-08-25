@@ -1,4 +1,4 @@
-import { Op } from "sequelize";
+import { Op, type Transaction } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { TokenUsoUnicoModel } from "../models/tokenUsoUnico.model.js";
 import { newOpaqueToken, hashOpaqueToken } from "./opaqueToken.js";
@@ -92,10 +92,32 @@ export async function crearToken(input: {
  * already-used and never-existed apart from this answer, on purpose: any of
  * the three would otherwise let a caller confirm a token existed for a given
  * purpose before proving they hold the current value of it.
+ *
+ * **`transaction` is optional, and exists for callers whose own work after
+ * the redemption can still fail.** `/auth/password/reset` is the case that
+ * needs it: redeem, hash the new password, write it, clear the lockout,
+ * revoke every session — and if any of that fails after the redemption, a
+ * fifteen-minute token is now dead for nothing, on an endpoint budgeted at
+ * three requests an hour. Wrapped in one transaction, that failure rolls
+ * the redemption back too, and the same token is still good to try again.
+ * `/auth/email/verify` does not need it the same way: if the follow-up write
+ * fails there, the token being dead is usually correct anyway — the case
+ * the design expects is the unique index rejecting an address someone else
+ * already verified, and retrying the same token would not fix that.
+ *
+ * **The rule for whoever calls this inside a transaction: do the expensive,
+ * CPU-only work *before* opening it, never after.** bcrypt at cost 12 is
+ * about 250 ms of CPU that has nothing to do with the database, and running
+ * it inside the transaction holds this row's lock for that whole 250 ms.
+ * `/auth/password/reset` is not a hot path, but "CPU work inside an open
+ * transaction" is a pattern that gets copied into one that is — hence the
+ * comment living here, where the next caller reads it before writing the
+ * copy.
  */
 export async function consumirToken(
   token: string,
   proposito: ITokenUsoUnico["proposito"],
+  transaction?: Transaction,
 ): Promise<{ id_usuario: number; email_destino: string } | null> {
   const [count, rows] = await TokenUsoUnicoModel.update(
     { used_at: new Date() },
@@ -111,6 +133,7 @@ export async function consumirToken(
         expires_at: { [Op.gt]: new Date() },
       },
       returning: true,
+      transaction,
     },
   );
   if (count === 0) return null;
