@@ -23,6 +23,7 @@ import {
   me,
   sessions,
 } from "../controllers/auth.controller.js";
+import { sendVerificationEmail, verifyEmail } from "../controllers/email.controller.js";
 
 const router = Router();
 
@@ -78,5 +79,22 @@ router.post("/logout", authenticate, logout);
 router.post("/logout-all", authenticate, logoutAll);
 router.get("/sessions", authenticate, sessions);
 router.delete("/sessions/:id", authenticate, endSession);
+
+/**
+ * Registering and confirming your own address. Task 4 of
+ * `2026-08-25-correo-verificado-y-recuperacion`; see
+ * `src/controllers/email.controller.ts` for the two handlers.
+ *
+ * Both behind `authenticate` like the five above, and both belong in
+ * `routeGuards.test.ts`'s `GATE_NOT_APPLICABLE` for the same reason the
+ * session routes do — no role may or may not verify its own address — but
+ * that file is not touched here; see `task-4-report.md`.
+ *
+ * No rate limiter on either yet. That is Task 6's, mounted on top of these
+ * once they exist — not invented here, and not left with a marked gap
+ * either: nothing about these two routes needs to change for it to land.
+ */
+router.post("/email/send", authenticate, sendVerificationEmail);
+router.post("/email/verify", authenticate, verifyEmail);
 
 export default router;

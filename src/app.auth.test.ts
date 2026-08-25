@@ -114,6 +114,27 @@ const sesionCreate = vi.spyOn(SesionModel, "create");
 const usuarioFindByPk = vi.spyOn(UsuarioModel, "findByPk");
 const usuarioFindOne = vi.spyOn(UsuarioModel, "findOne");
 const tokenUsoUnicoDestroy = vi.spyOn(TokenUsoUnicoModel, "destroy");
+/**
+ * Two more spies, added for Task 4's routes specifically — nothing already
+ * exercised in this file reached either method for real.
+ *
+ * `usuarioUpdate` is `verifyEmail`'s own write (`email_verified_at = now()`).
+ * `tokenUsoUnicoUpdate` is what `consumirToken` calls underneath —
+ * `/email/verify` never wraps it in a transaction (see
+ * `email.controller.ts`'s own comment on why), so exercising it here through
+ * the real `tokenStore.js` never opens one and stays safe under this file's
+ * "spy on the model methods, never mock `database/sequelize.js`" rule (that
+ * mock would break `sequelize.define(...)` for every model `app.ts` loads).
+ *
+ * Deliberately not extended to `/email/send`'s happy path: that handler opens
+ * a real `sequelize.transaction()` on its very first write, and `crearToken`
+ * opens a second one of its own — neither is reachable here without a real
+ * database connection, which this file's models-only spying cannot prevent.
+ * That path is covered instead by `email.controller.test.ts`, which mocks
+ * `database/sequelize.js` directly and does not import `app.js` at all.
+ */
+const usuarioUpdate = vi.spyOn(UsuarioModel, "update");
+const tokenUsoUnicoUpdate = vi.spyOn(TokenUsoUnicoModel, "update");
 
 const YO = 7;
 const MI_ROL = 2;
@@ -191,6 +212,8 @@ beforeEach(() => {
     },
   } as never);
   tokenUsoUnicoDestroy.mockResolvedValue(0);
+  usuarioUpdate.mockResolvedValue([1] as never);
+  tokenUsoUnicoUpdate.mockResolvedValue([0, []] as never);
 });
 
 /** The `where` of the nth UPDATE the store sent to the sessions table. */
@@ -1394,5 +1417,84 @@ describe("the addresses this arc retired", () => {
     // being mounted", which would answer 404 here too.
     const matriz = await request(app).get("/api/permisos/").set("Cookie", COOKIE);
     expect(matriz.status).toBe(403);
+  });
+});
+
+/**
+ * Task 4's two routes, through the real mount.
+ *
+ * Scope is deliberately narrower than the rest of this file: see the comment
+ * on `usuarioUpdate`/`tokenUsoUnicoUpdate` above for why `/email/send`'s own
+ * happy path — which opens a real `sequelize.transaction()` — is not
+ * exercised here at all. What this section proves instead is the mounting
+ * and the gating (both routes really sit behind `authenticate`, in the real
+ * Express stack, not just in a hand-built `req`), the real body-parser's
+ * shape per Global Constraint #13, and — for `/email/verify` specifically,
+ * whose design never opens a transaction — a real round trip through the
+ * real `tokenStore.js`.
+ */
+describe("email verification, through the real stack", () => {
+  it("mounts both routes, and refuses both without a cookie", async () => {
+    const send = await request(app).post("/api/auth/email/send").send({ email: "a@osefi.net" });
+    const verify = await request(app).post("/api/auth/email/verify").send({ token: "x" });
+
+    expect(send.status).toBe(401);
+    expect(verify.status).toBe(401);
+  });
+
+  it("answers 400, not 500, for a POST with no body at all — Global Constraint #13", async () => {
+    // With a cookie, so the 400 cannot be mistaken for the 401 the two tests
+    // above already cover.
+    const send = await request(app).post("/api/auth/email/send").set("Cookie", COOKIE).set(DEL_FRONTEND);
+    const verify = await request(app).post("/api/auth/email/verify").set("Cookie", COOKIE).set(DEL_FRONTEND);
+
+    expect(send.status).toBe(400);
+    expect(verify.status).toBe(400);
+    // Neither reached a write: the validation refused before either handler's
+    // first database call.
+    expect(usuarioUpdate).not.toHaveBeenCalled();
+    expect(tokenUsoUnicoUpdate).not.toHaveBeenCalled();
+  });
+
+  it("answers the generic message, through the real tokenStore, for a token that does not redeem", async () => {
+    // `tokenUsoUnicoUpdate` defaults to `[0, []]` — no row matched, which is
+    // exactly what a made-up token looks like against the real `consumirToken`.
+    const res = await request(app)
+      .post("/api/auth/email/verify")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ token: "un-token-inventado" });
+
+    expect(res.status).toBe(400);
+    expect(usuarioUpdate).not.toHaveBeenCalled();
+  });
+
+  it("verifies the token's own account for real, through the real tokenStore and the real model", async () => {
+    // The one happy path in this section that is safe to run for real:
+    // `verifyEmail` never opens a transaction (see `email.controller.ts`), so
+    // `consumirToken`'s single `TokenUsoUnicoModel.update` — spied, not the
+    // real query — is the only write this whole request makes before this
+    // test's own `usuarioUpdate` spy takes the second one.
+    tokenUsoUnicoUpdate.mockResolvedValue([
+      1,
+      [{ dataValues: { id_usuario: YO, email_destino: "isaias@osefi.net" } }],
+    ] as never);
+    usuarioFindByPk.mockResolvedValue({
+      dataValues: { id: YO, email: "isaias@osefi.net" },
+    } as never);
+
+    const res = await request(app)
+      .post("/api/auth/email/verify")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ token: "un-token-valido" });
+
+    expect(res.status).toBe(200);
+    const [values, options] = usuarioUpdate.mock.calls[0] as [
+      Record<string, unknown>,
+      { where: Record<string, unknown> },
+    ];
+    expect(values.email_verified_at).toBeInstanceOf(Date);
+    expect(options.where).toEqual({ id: YO });
   });
 });
