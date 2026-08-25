@@ -392,12 +392,26 @@ describe("GET /api/auth/me", () => {
     // Listed one by one rather than excluding `pass`. The next plan adds
     // `email`, `mfa_grace_until` and more to this table, and an exclusion list
     // publishes every one of them the day the migration runs.
+    //
+    // That plan arrived, and this is what deliberate looks like: `email` and
+    // `email_verified_at` were added here on purpose, because the profile
+    // screen draws both. What did *not* come with them — `failed_attempts`,
+    // `locked_until`, and `pass` above all — is the whole reason this list is
+    // written out by hand. An exclusion list would have handed over all three
+    // without anybody deciding to.
     const c = call(YO_CON_SESION);
     await me(c.req, c.res);
 
     const [id, options] = findByPk.mock.calls[0] as [number, { attributes: string[] }];
     expect(id).toBe(YO);
-    expect(options.attributes).toEqual(["id", "id_rol", "user", "name", "lastname", "image"]);
+    expect(options.attributes).toEqual([
+      "id", "id_rol", "user", "name", "lastname", "image", "email", "email_verified_at",
+    ]);
+    // The point of the assertion above, stated so it cannot rot into a
+    // rubber stamp: whatever else changes, these never appear.
+    for (const jamas of ["pass", "failed_attempts", "locked_until"]) {
+      expect(options.attributes).not.toContain(jamas);
+    }
   });
 
   it("ends the session when the account is no longer there", async () => {

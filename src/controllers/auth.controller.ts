@@ -240,7 +240,18 @@ export const me = handler("me", async (req: Request, res: Response) => {
   if (!caller) return res.sendStatus(401);
 
   const found = await UsuarioModel.findByPk(caller.id, {
-    attributes: ["id", "id_rol", "user", "name", "lastname", "image"],
+    // `email` and `email_verified_at` are here because the profile screen has
+    // to show both, and the second one is the half that matters: a stored but
+    // unverified address is worth exactly as much as no address at all, and a
+    // screen that draws it as just another field lets somebody believe their
+    // way back in is set up when it is not.
+    //
+    // Safe to send here and nowhere else: this endpoint answers "who am I" for
+    // the caller's own account, behind `authenticate`. `USUARIO_AS_AUTHOR`
+    // stays as it is — an address is not part of being named as the author of
+    // something, and widening that list is how a column leaks into every
+    // endpoint that includes a user.
+    attributes: ["id", "id_rol", "user", "name", "lastname", "image", "email", "email_verified_at"],
   });
   // Archived between `authenticate` and here. A narrow race, and the answer is
   // the same as authenticate's: the session is over.
