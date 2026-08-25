@@ -41,10 +41,11 @@ import {
 } from "../auth/sessionStore.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
+import { makeHandler } from "../utils/handler.js";
 
 const authLog = log("auth");
+const handler = makeHandler(authLog);
 
-const ERROR_INESPERADO = "Ocurrió un error al procesar la petición.";
 /**
  * What somebody is told when their password was right and the server still
  * could not let them in.
@@ -87,33 +88,6 @@ const SESION_NO_ENCONTRADA = "Esa sesión no existe o ya se cerró.";
  * to revoke the row and leave the cookie behind.
  */
 const ES_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-/**
- * One place that turns an unexpected failure into a 500.
- *
- * Every handler below is `async`, and Express 4 does not catch a rejected
- * promise from one: it never reaches the terminal handler in `app.ts`, the
- * request just hangs until the client gives up. So each handler is wrapped
- * rather than each one remembering its own try/catch — and the message the
- * client sees is the same one `app.ts` and `authenticate.ts` use, instead of
- * whatever a database driver happened to say.
- */
-function handler(name: string, fn: (req: Request, res: Response) => Promise<unknown>) {
-  const wrapped = async (req: Request, res: Response) => {
-    try {
-      await fn(req, res);
-    } catch (err) {
-      authLog.error({ err, ruta: req.originalUrl }, `fallo en ${name}`);
-      if (!res.headersSent) {
-        res.status(500).json({ message: ERROR_INESPERADO });
-      }
-    }
-  };
-  // The name survives the wrapper because `routeGuards.test.ts` reads the
-  // handler names off the assembled app to tell a gated route from an open one.
-  Object.defineProperty(wrapped, "name", { value: name });
-  return wrapped;
-}
 
 /**
  * Who the caller is, according to the credential `authenticate` already checked.

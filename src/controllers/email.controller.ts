@@ -18,17 +18,18 @@
 //   there is nothing here to compare `req.user.id` against even if the design
 //   wanted to.
 //
-// `handler()` and `callerOf()` below are deliberately their own small copies
-// rather than imports from `auth.controller.ts`, which already has both.
-// Importing either one from there would pull in that module's entire import
-// graph — `sessionStore.js`, `credentials.js`, `permissions/store.js`,
-// `bcryptjs` — none of which this file needs, and every one of which a test
-// for *this* file would then have to mock just to load two trivial
-// utilities safely (see `auth.controller.test.ts`'s own mock list for what
-// that graph drags in, and Task 2's report for the `UsuarioModel.hasMany is
-// not a function` failure that graph produces when the mock is incomplete).
-// Two small, stable functions are cheaper to duplicate than to couple this
-// file's tests to an unrelated module's imports.
+// `handler()` used to be its own small copy here rather than an import from
+// `auth.controller.ts`, which already had one — importing it would have
+// pulled that module's entire import graph (`sessionStore.js`,
+// `credentials.js`, `permissions/store.js`, `bcryptjs`) into this file's
+// tests just to load one trivial wrapper safely. That was right about the
+// coupling and wrong about the fix: `../utils/handler.js` is what actually
+// removes it, by taking the logger as a parameter instead of assuming
+// `auth.controller.ts`'s. See that module's header for the rest of the
+// reasoning, including the third copy this was starting to become.
+//
+// `callerOf()` did not move anywhere — it was one line, `req.user ?? null`,
+// and is written out inline below instead.
 
 import type { Request, Response } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
@@ -38,11 +39,11 @@ import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
+import { makeHandler } from "../utils/handler.js";
 import { allowedOrigins, DEV_FRONTEND_ORIGIN } from "../config/security.js";
 
 const emailLog = log("email");
-
-const ERROR_INESPERADO = "Ocurrió un error al procesar la petición.";
+const handler = makeHandler(emailLog);
 
 /** Twin of the message in `authenticate.ts` and `auth.controller.ts`; both mean the row is gone. */
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
@@ -164,32 +165,6 @@ function verificationEmailBody(enlace: string): { html: string; texto: string } 
 }
 
 /**
- * One place that turns an unexpected failure into a 500 — the same reason
- * `auth.controller.ts`'s own `handler()` exists: Express 4 does not catch a
- * rejected promise from an `async` handler, so without this a failure here
- * would hang the request instead of answering it.
- */
-function handler(name: string, fn: (req: Request, res: Response) => Promise<unknown>) {
-  const wrapped = async (req: Request, res: Response) => {
-    try {
-      await fn(req, res);
-    } catch (err) {
-      emailLog.error({ err, ruta: req.originalUrl }, `fallo en ${name}`);
-      if (!res.headersSent) {
-        res.status(500).json({ message: ERROR_INESPERADO });
-      }
-    }
-  };
-  Object.defineProperty(wrapped, "name", { value: name });
-  return wrapped;
-}
-
-/** Who `authenticate` says is calling, read the same way every other auth handler does. */
-function callerOf(req: Request): NonNullable<Request["user"]> | null {
-  return req.user ?? null;
-}
-
-/**
  * `POST /auth/email/send` — register (or replace) the address on my account
  * and ask me to confirm it.
  *
@@ -220,7 +195,7 @@ function callerOf(req: Request): NonNullable<Request["user"]> | null {
  * anything.
  */
 export const sendVerificationEmail = handler("sendVerificationEmail", async (req: Request, res: Response) => {
-  const caller = callerOf(req);
+  const caller = req.user ?? null;
   if (!caller) return res.sendStatus(401);
 
   const destino = normalizedEmailFrom((req.body as { email?: unknown } | undefined)?.email);
@@ -321,7 +296,7 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
  * and suspenders, and the cost of keeping it is one extra `findByPk`.
  */
 export const verifyEmail = handler("verifyEmail", async (req: Request, res: Response) => {
-  const caller = callerOf(req);
+  const caller = req.user ?? null;
   if (!caller) return res.sendStatus(401);
 
   const token = (req.body as { token?: unknown } | undefined)?.token;
