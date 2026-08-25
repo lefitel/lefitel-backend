@@ -2,7 +2,11 @@ import { Sequelize } from "sequelize";
 import dotenv from "dotenv";
 import { log } from "../utils/logger.js";
 
-dotenv.config();
+// `quiet` because dotenv 17 prints a line of its own on every load — an
+// "injected env (13) from .env" with a tip appended. Everything else this
+// process writes to stdout is a pino JSON record, so one plain line at the top
+// is what stops a log collector from parsing the boot output.
+dotenv.config({ quiet: true });
 
 const dbLog = log("db");
 

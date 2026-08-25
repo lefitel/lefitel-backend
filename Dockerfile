@@ -2,7 +2,10 @@
 # No NODE_ENV here: `npm ci` installs devDependencies whenever it is unset, and
 # TypeScript lives in devDependencies. Declaring "development" only made the
 # intent of the image ambiguous.
-FROM node:20-alpine AS builder
+# Node 24, which is the active LTS. Node 20 went end-of-life in April 2026,
+# so an image built on it had been shipping without security patches for
+# months. 26 exists but is Current, not LTS, until October.
+FROM node:24-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -10,7 +13,7 @@ COPY . .
 RUN npm run build
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
-FROM node:20-alpine
+FROM node:24-alpine
 WORKDIR /app
 
 # Load-bearing. Every FROM resets ENV, so without this line the container runs
