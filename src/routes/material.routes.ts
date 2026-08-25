@@ -15,7 +15,7 @@ const router = Router();
 router.post("/", requirePermission("parametros", "crear"), createMaterial);
 router.put("/:id", requirePermission("parametros", "editar"), updateMaterial);
 router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarMaterial);
-router.get("/stats", getMaterialStats);
+router.get("/stats", requirePermission("parametros", "ver"), getMaterialStats);
 router.get("/", getMaterial);
 router.delete("/:id", requirePermission("parametros", "archivar"), deleteMaterial);
 

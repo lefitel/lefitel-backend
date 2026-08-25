@@ -15,7 +15,7 @@ const router = Router();
 router.post("/", requirePermission("parametros", "crear"), createObs);
 router.put("/:id", requirePermission("parametros", "editar"), updateObs);
 router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarObs);
-router.get("/stats", getObsStats);
+router.get("/stats", requirePermission("parametros", "ver"), getObsStats);
 router.get("/", getObs);
 router.delete("/:id", requirePermission("parametros", "archivar"), deleteObs);
 
