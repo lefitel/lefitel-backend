@@ -39,6 +39,22 @@ describe("required configuration", () => {
   it("names COOKIE_SECURE as required in production", () => {
     expect(requiredEnv("production")).toContain("COOKIE_SECURE");
   });
+
+  it("names RESEND_API_KEY and MAIL_FROM as required in production", () => {
+    // Missing either is silent the same way COOKIE_NAME's absence is: the
+    // process boots, and `auth/mailer.ts` quietly answers `{ ok: true }` to
+    // every verification and reset email without sending one. See
+    // `mailer.ts` for the branch this closes off.
+    expect(requiredEnv("production")).toContain("RESEND_API_KEY");
+    expect(requiredEnv("production")).toContain("MAIL_FROM");
+  });
+
+  it("does not require RESEND_API_KEY or MAIL_FROM outside production", () => {
+    // Development runs the same fallback deliberately, so the rest of the
+    // auth flow can be built without spending the shared daily quota.
+    expect(requiredEnv("development")).not.toContain("RESEND_API_KEY");
+    expect(requiredEnv("development")).not.toContain("MAIL_FROM");
+  });
 });
 
 describe("cookieNameCarriesHostPrefix", () => {

@@ -136,7 +136,20 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
   // the `__Host-` prefix still boots, and this list has no way to catch
   // that. `index.ts` runs the value check separately, at boot, with
   // `cookieNameCarriesHostPrefix`.
-  return nodeEnv === "production" ? ["CORS_ORIGIN", "COOKIE_NAME", "COOKIE_SECURE"] : [];
+  //
+  // RESEND_API_KEY and MAIL_FROM: `auth/mailer.ts` treats either one being
+  // missing as "development, spend no quota" and answers `{ ok: true }`
+  // without sending anything. That fallback is exactly wrong in production —
+  // every verification and reset email would silently no-op, and the first
+  // sign of it would be a user who never got their link. Refusing to boot
+  // is what turns that into a deploy-time failure instead of a support
+  // ticket. Unlike COOKIE_NAME, there is no further value check to run at
+  // boot: any non-empty string is a usable attempt, and whether it is the
+  // *right* key or address is Resend's problem to reject, the same way a
+  // wrong CORS_ORIGIN is the browser's problem to reject.
+  return nodeEnv === "production"
+    ? ["CORS_ORIGIN", "COOKIE_NAME", "COOKIE_SECURE", "RESEND_API_KEY", "MAIL_FROM"]
+    : [];
 }
 
 /**
