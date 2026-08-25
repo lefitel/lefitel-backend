@@ -16,6 +16,12 @@ import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { loginRateLimit } from "../middleware/loginLimiters.js";
 import {
+  emailSendLimiter,
+  emailVerifyLimiter,
+  passwordForgotRateLimit,
+  passwordResetRateLimit,
+} from "../middleware/recoveryLimiters.js";
+import {
   endSession,
   login,
   logout,
@@ -91,12 +97,14 @@ router.delete("/sessions/:id", authenticate, endSession);
  * session routes do — no role may or may not verify its own address — but
  * that file is not touched here; see `task-4-report.md`.
  *
- * No rate limiter on either yet. That is Task 6's, mounted on top of these
- * once they exist — not invented here, and not left with a marked gap
- * either: nothing about these two routes needs to change for it to land.
+ * Task 6's rate limiters sit after `authenticate` on both, not before: each
+ * is keyed by account (`req.user.id`), which only exists once `authenticate`
+ * has run. See `middleware/recoveryLimiters.ts` for why neither one refunds
+ * a request based on the response — both routes below can answer 200 for
+ * reasons that have nothing to do with who is asking.
  */
-router.post("/email/send", authenticate, sendVerificationEmail);
-router.post("/email/verify", authenticate, verifyEmail);
+router.post("/email/send", authenticate, emailSendLimiter, sendVerificationEmail);
+router.post("/email/verify", authenticate, emailVerifyLimiter, verifyEmail);
 
 /**
  * Getting back in when you cannot log in at all. Task 5 of
@@ -111,10 +119,16 @@ router.post("/email/verify", authenticate, verifyEmail);
  * here; that file already mixes Isaias's uncommitted work with this plan's,
  * and he owns adding the two lines. See `task-5-report.md`.
  *
- * No rate limiter on either yet, same as the pair above — Task 6's, mounted
- * once these exist.
+ * Task 6's rate limiters, mounted before either handler. Neither route takes
+ * `authenticate`, so both key primarily on IP (the one thing a caller cannot
+ * get a fresh copy of on every request) rather than on account — see
+ * `middleware/recoveryLimiters.ts` for the full budgets, address plus a daily
+ * backstop on `/forgot`, address plus the token on `/reset`.
+ * `/password/forgot`'s chain never refunds, same reasoning as `/email/send`
+ * above; `/password/reset`'s does, since a bad token there is a real 400 and
+ * a 5xx is genuinely this server's fault.
  */
-router.post("/password/forgot", forgotPassword);
-router.post("/password/reset", resetPassword);
+router.post("/password/forgot", passwordForgotRateLimit, forgotPassword);
+router.post("/password/reset", passwordResetRateLimit, resetPassword);
 
 export default router;

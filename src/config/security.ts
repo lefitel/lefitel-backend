@@ -457,6 +457,102 @@ export const EMAIL_VERIFY_TOKEN_TTL_MS = 60 * 60 * 1000;
 export const PASSWORD_RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
 
 /**
+ * Budgets for the four routes that get somebody back into an account they
+ * cannot fully use yet — Task 6 of `2026-08-25-correo-verificado-y-recuperacion`.
+ * See `middleware/recoveryLimiters.ts` for how each number is spent, including
+ * which of these charge every request and which refund one the way
+ * `costsNothing` above does.
+ */
+
+/** Shared by every budget below except the daily one: the brief specifies each
+ *  of these "per hour". */
+export const RECOVERY_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * `/password/forgot`, keyed by the address asked about.
+ *
+ * Bounds how many mails one address can be made to receive — a flood aimed at
+ * a single mailbox, not a way to find out whether that mailbox has an account,
+ * since the route answers the same 200 either way (Global Constraint #1).
+ */
+export const PASSWORD_FORGOT_EMAIL_LIMIT = 3;
+
+/**
+ * `/password/forgot`, keyed by IP.
+ *
+ * Bounds how many *different* addresses one caller can poke in an hour — the
+ * defense against rotating the email to dodge the budget above. This is the
+ * primary key for `/forgot` for the same reason it is primary for
+ * `/password/reset`: it is the one the caller cannot choose their way around.
+ */
+export const PASSWORD_FORGOT_IP_LIMIT = 20;
+
+/**
+ * `/password/forgot`, counted against one shared key for every caller, for a
+ * full day.
+ *
+ * Not in the brief this task implements — added after checking the two
+ * numbers above against the thing they are supposed to protect: Resend's
+ * quota, which is 100 sends a day for the *whole company*, shared with every
+ * other feature that mails.
+ *
+ * ```
+ * PASSWORD_FORGOT_EMAIL_LIMIT (3/h) → 72/day from one address alone, and two
+ *   known addresses already clear the quota.
+ * PASSWORD_FORGOT_IP_LIMIT   (20/h) → 480/day from one caller rotating
+ *   addresses — near five times the quota, alone.
+ * ```
+ *
+ * Neither bucket, sitting at its own ceiling, keeps the *daily* damage under
+ * the quota that is supposed to be the point of both — so this third bucket
+ * is the one that actually does. Fifty is invisible to real use (twenty to
+ * sixty people, a handful of genuine resets a week) and it is what turns
+ * "an attacker empties the mail quota and kills password recovery *and* email
+ * verification for the rest of the day" into "an attacker spends half the
+ * quota and only password recovery goes dark, only until the day rolls over".
+ *
+ * It is, on purpose, a bucket every caller shares — the same shape that hurt
+ * once already, when a 503 refunding into a shared bucket locked the whole
+ * office out of login for a quarter of an hour over a database blink. Accepted
+ * here anyway, because the comparison above is the point: without this cap the
+ * failure is total (both mail-sending features down, for the whole quota's
+ * reset window), and with it the failure is partial and contained to the one
+ * route the attacker actually hit.
+ */
+export const PASSWORD_FORGOT_DAILY_LIMIT = 50;
+export const PASSWORD_FORGOT_DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** `/email/send`, keyed by account — there already is a session, unlike
+ *  `/password/forgot`, so there is no address to rotate around it. */
+export const EMAIL_SEND_LIMIT = 5;
+
+/**
+ * `/password/reset`, keyed by IP — the primary budget.
+ *
+ * A token is 32 random bytes; nobody is going to guess one, so the caller
+ * pounding this route with invented tokens is not trying to open an account,
+ * they are running the server's most expensive undefended step —
+ * `bcryptjs.hash` at `BCRYPT_COST` — for free, with no credential at all. A
+ * key chosen by the caller (the token itself) is not a limiter against that:
+ * every invented token opens a fresh bucket, and none of them ever fills. The
+ * address is the one thing they cannot get a fresh one of on every request.
+ */
+export const PASSWORD_RESET_IP_LIMIT = 20;
+
+/**
+ * `/password/reset`, keyed by the token being redeemed — secondary.
+ *
+ * Protects one thing only: somebody who already holds a *valid* token from
+ * burning retries against `validarPassword` — "too short", "too short",
+ * again — rather than against a stranger guessing a 32-byte value, which the
+ * IP budget above is what actually bounds.
+ */
+export const PASSWORD_RESET_TOKEN_LIMIT = 5;
+
+/** `/email/verify`, keyed by account, same as `/email/send`. */
+export const EMAIL_VERIFY_LIMIT = 10;
+
+/**
  * The session cookie's name, and whether it must be Secure.
  *
  * In production the name carries the `__Host-` prefix, which a browser only
