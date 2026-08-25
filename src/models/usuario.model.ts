@@ -1,4 +1,4 @@
-import { DataTypes, ModelDefined, Optional } from "sequelize";
+import { DataTypes, Model, ModelDefined, Optional } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { RolModel } from "./rol.model.js";
 import { IUsuario } from "../interfaces/index.js";
@@ -40,6 +40,25 @@ export const UsuarioModel: ModelDefined<IUsuario, UsuarioCreation> = sequelize.d
     defaultValue: 0,
   },
   locked_until: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+  email: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+    // Normalised to lowercase here, and only here, so every write path —
+    // `/auth/email/send`, an admin screen, a seed script, whatever comes
+    // next — stores the same casing without each one remembering to call a
+    // helper first. Reads are deliberately left untouched: what this stored
+    // is what a lookup compares against. `usuarios_email_verificado_uniq`
+    // also applies `lower()` in the migration, but that is a second line of
+    // defence against a row written by raw SQL, not the primary one — the
+    // primary one is here, at the one place every ORM write goes through.
+    set(this: Model, value: unknown) {
+      this.setDataValue("email", typeof value === "string" ? value.toLowerCase() : value);
+    },
+  },
+  email_verified_at: {
     type: DataTypes.DATE,
     allowNull: true,
   },

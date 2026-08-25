@@ -17,6 +17,8 @@ export interface IUsuario {
   deletedAt?: Date | null;
   failed_attempts?: number;
   locked_until?: Date | null;
+  email?: string | null;
+  email_verified_at?: Date | null;
 }
 
 export interface ICiudad {
