@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { Op } from "sequelize";
 import { ReporteVistaModel } from "../models/reporteVista.model.js";
-import { UsuarioModel } from "../models/usuario.model.js";
+import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 import { buildCatalogView } from "../reportBuilder/catalogView.js";
 import { MAX_ROWS } from "../reportBuilder/catalog.js";
 import { countReport, runReport } from "../reportBuilder/execute.js";
@@ -414,7 +414,7 @@ export async function getReportes(req: Request, res: Response) {
         [Op.or]: [{ id_usuario: userId }, { visibility: "shared" }],
       },
       include: canSeeAuthors
-        ? [{ model: UsuarioModel, attributes: ["id", "name", "lastname"] }]
+        ? [{ model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] }]
         : [{ model: UsuarioModel, attributes: ["id"] }],
       order: [
         ["favorite", "DESC"],

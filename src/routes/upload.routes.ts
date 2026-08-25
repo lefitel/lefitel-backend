@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import { UploadImage } from "../controllers/upload.controller.js";
 import multer from "multer";
+import { uploadLimiter } from "../middleware/uploadLimiters.js";
 
 const router = Router();
 
@@ -16,7 +17,11 @@ const router = Router();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-router.post("/", upload.single("file"), UploadImage);
-// Routes
+// `uploadLimiter` before `multer`, and the order is the point: `memoryStorage`
+// reads the whole five megabytes into memory before any handler runs, so a
+// request that is already over budget has to be turned away in front of it. The
+// budget itself, and why an endpoint outside the permission matrix needs one,
+// are in `middleware/uploadLimiters.ts`.
+router.post("/", uploadLimiter, upload.single("file"), UploadImage);
 
 export default router;

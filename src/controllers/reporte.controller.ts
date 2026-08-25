@@ -3,7 +3,7 @@ import { EventoModel } from "../models/evento.model.js";
 import { Op } from "sequelize";
 import { EventoObsModel } from "../models/eventoObs.model.js";
 import { RevisionModel, REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.model.js";
-import { PosteModel } from "../models/poste.model.js";
+import { PosteModel, POSTE_PUBLIC_ATTRIBUTES } from "../models/poste.model.js";
 import { SolucionModel, SOLUCION_PUBLIC_ATTRIBUTES } from "../models/solucion.model.js";
 import { CiudadModel } from "../models/ciudad.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
@@ -63,6 +63,7 @@ export async function putReporteGeneral(req: Request, res: Response) {
       include: [
         {
           model: PosteModel,
+          attributes: [...POSTE_PUBLIC_ATTRIBUTES],
           include: [
             { model: MaterialModel },
             { model: PropietarioModel },
@@ -114,6 +115,7 @@ export async function putReporteTramo(req: Request, res: Response) {
         { model: EventoObsModel },
         {
           model: PosteModel,
+          attributes: [...POSTE_PUBLIC_ATTRIBUTES],
           required: !!posteWhere,
           ...(posteWhere ? { where: posteWhere } : {}),
           include: [
@@ -155,6 +157,7 @@ export async function putReporteRecorrido(req: Request, res: Response) {
       include: [
         {
           model: PosteModel,
+          attributes: [...POSTE_PUBLIC_ATTRIBUTES],
           required: true,
           where: {
             [Op.or]: [

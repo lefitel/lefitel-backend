@@ -8,7 +8,7 @@ import { CiudadModel } from "../models/ciudad.model.js";
 import { EventoModel } from "../models/evento.model.js";
 import { EventoObsModel } from "../models/eventoObs.model.js";
 import { ObsModel } from "../models/obs.model.js";
-import { PosteModel } from "../models/poste.model.js";
+import { PosteModel, POSTE_PUBLIC_ATTRIBUTES } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { RevisionModel, REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.model.js";
 import { SolucionModel } from "../models/solucion.model.js";
@@ -83,7 +83,7 @@ export async function getEvento(req: Request, res: Response) {
       },
       {
         model: UsuarioModel,
-        attributes: ["id", "name", "lastname"],
+        attributes: [...USUARIO_AS_AUTHOR],
       },
     ],
   };
@@ -154,6 +154,7 @@ export async function searchEvento(req: Request, res: Response) {
         { model: RevisionModel, attributes: [...REVISION_PUBLIC_ATTRIBUTES] },
         {
           model: PosteModel,
+          attributes: [...POSTE_PUBLIC_ATTRIBUTES],
           include: [
             { model: CiudadModel, as: "ciudadA" },
             { model: CiudadModel, as: "ciudadB" },

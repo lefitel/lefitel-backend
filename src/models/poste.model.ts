@@ -50,6 +50,30 @@ export const PosteModel: ModelDefined<IPoste, PosteCreation> = sequelize.define(
   },
 }, { paranoid: true });
 
+/**
+ * The columns of a pole that may travel inside somebody else's response.
+ *
+ * `id_usuario` is the one left out, and it is the reason this list exists. The
+ * column arrived with the authorship backfill, and `responseShape.test.ts`
+ * guarded three models against exactly this — a bare `include` shipping a whole
+ * row — but poles were not among them, so `GET /evento/:id` and the three fixed
+ * reports were handing the author of every pole to any logged-in account, the
+ * Cliente role included. Authorship is exposed in the generator, behind
+ * `seguridad.ver`; here it is not exposed at all.
+ *
+ * `image` is out too, for a different reason: no consumer of a nested pole reads
+ * it. The one screen that shows a pole's photograph reads it from
+ * `GET /poste/:id`, where the pole is the root and this list does not apply.
+ *
+ * Named rather than inlined at the four call sites because the failure is
+ * silent, and because adding a column is what causes it — so the list belongs
+ * where whoever adds one will be looking.
+ */
+export const POSTE_PUBLIC_ATTRIBUTES = [
+  "id", "name", "date", "lat", "lng",
+  "id_propietario", "id_material", "id_ciudadA", "id_ciudadB",
+] as const;
+
 //Relacion con poste
 PropietarioModel.hasMany(PosteModel, { foreignKey: "id_propietario" });
 PosteModel.belongsTo(PropietarioModel, { foreignKey: "id_propietario" });

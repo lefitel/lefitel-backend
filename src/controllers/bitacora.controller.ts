@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { Op, WhereOptions } from "sequelize";
 import { BitacoraModel } from "../models/bitacora.model.js";
-import { UsuarioModel } from "../models/usuario.model.js";
+import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 
 export async function getAllBitacora(req: Request, res: Response) {
   const page   = Math.max(Number(req.query.page)  || 1,   1);
@@ -36,7 +36,7 @@ export async function getAllBitacora(req: Request, res: Response) {
       order: orderEntries.length ? orderEntries as [[string, string]] : [["id", "DESC"]],
       limit,
       offset,
-      include: [{ model: UsuarioModel, attributes: ["id", "name", "lastname", "user"] }],
+      include: [{ model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] }],
     });
     res.status(200).json({ data: rows, total: count });
   } catch (error) {

@@ -30,7 +30,7 @@ import { USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** Models whose full row must never reach a client. */
-const GUARDED = ["UsuarioModel", "RevisionModel", "SolucionModel"];
+const GUARDED = ["UsuarioModel", "RevisionModel", "SolucionModel", "PosteModel", "EventoModel"];
 
 /**
  * Finds the object literal an `include` entry sits in, by matching braces.
@@ -126,5 +126,43 @@ describe("the lists themselves", () => {
     for (const field of ["phone", "user", "birthday", "failed_attempts", "locked_until", "id_rol"]) {
       expect(USUARIO_AS_AUTHOR).not.toContain(field);
     }
+  });
+
+  // And no include may send more of an account than that list holds.
+  //
+  // The test above passed while the bitácora shipped the login name anyway,
+  // because it wrote its own array — `["id", "name", "lastname", "user"]` —
+  // instead of reaching for the constant. Asserting the contents of a list
+  // nobody is obliged to use proves nothing: it states the right answer without
+  // checking that anybody gave it.
+  //
+  // `user` is the login name, and the screen reading that endpoint paints
+  // `name` and `lastname` and nothing else, so it travelled to every account
+  // holding `bitacora.ver` for no reason at all.
+  //
+  // Narrower is allowed, and deliberately: the report builder sends `["id"]`
+  // alone to a viewer who may not see authors. The rule is a ceiling, not an
+  // equality — writing it as "must be the constant" would have failed that
+  // line, which is the one place in the repository already doing the careful
+  // thing.
+  it("never sends more of an account than USUARIO_AS_AUTHOR holds", () => {
+    const allowed = new Set<string>(USUARIO_AS_AUTHOR);
+
+    const over = includes()
+      .filter((i) => i.model === "UsuarioModel")
+      .filter((i) => !i.literal.includes("USUARIO_AS_AUTHOR"))
+      .flatMap((i) => {
+        const list = /attributes:\s*\[([^\]]*)\]/.exec(i.literal);
+        if (list === null) return [`${i.file}:${i.line} (sin attributes)`];
+        return [...list[1].matchAll(/"([^"]+)"/g)]
+          .map((m) => m[1])
+          .filter((field) => !allowed.has(field))
+          .map((field) => `${i.file}:${i.line} manda "${field}"`);
+      });
+
+    expect(
+      over,
+      `estos includes de usuario mandan campos fuera de USUARIO_AS_AUTHOR: ${over.join(", ")}`,
+    ).toEqual([]);
   });
 });

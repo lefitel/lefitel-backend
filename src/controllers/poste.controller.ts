@@ -61,7 +61,7 @@ export async function getPoste(req: Request, res: Response) {
       { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
       { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
       { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
-      { model: UsuarioModel, attributes: ["id", "name", "lastname"] },
+      { model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] },
     ],
   };
 

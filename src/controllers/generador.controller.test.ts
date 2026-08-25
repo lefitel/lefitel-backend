@@ -23,7 +23,13 @@ vi.mock("../models/reporteVista.model.js", () => ({
     create: (...args: unknown[]) => create(...args),
   },
 }));
-vi.mock("../models/usuario.model.js", () => ({ UsuarioModel: { name: "UsuarioModel" } }));
+vi.mock("../models/usuario.model.js", () => ({
+  UsuarioModel: { name: "UsuarioModel" },
+  // The real list, because the controller spreads it: a mock that omits it
+  // makes `[...undefined]` throw inside the handler, and the failure surfaces
+  // three lines later as a missing mock call.
+  USUARIO_AS_AUTHOR: ["id", "name", "lastname"],
+}));
 const logAction = vi.fn();
 vi.mock("../utils/logAction.js", () => ({ logAction: (...args: unknown[]) => logAction(...args) }));
 
