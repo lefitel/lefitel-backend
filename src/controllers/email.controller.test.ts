@@ -542,7 +542,7 @@ describe("POST /auth/email/verify", () => {
         id_usuario: A,
         action: "EMAIL_VERIFIED",
         severity: "info",
-        metadata: { email: "a@osefi.net" },
+        metadata: { email_destino: "a@osefi.net" },
       }),
     );
   });
@@ -606,7 +606,7 @@ describe("POST /auth/email/verify", () => {
       const [, options] = update.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
       expect(options.where).toEqual({ id: A });
       expect(logAction).toHaveBeenCalledWith(
-        expect.objectContaining({ id_usuario: A, metadata: { email: "a@osefi.net" } }),
+        expect.objectContaining({ id_usuario: A, metadata: { email_destino: "a@osefi.net" } }),
       );
     });
   });

@@ -37,6 +37,7 @@ import { TokenUsoUnicoModel } from "../models/tokenUsoUnico.model.js";
 import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
+import { avisarCorreoCambiado } from "../auth/securityNotice.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
@@ -387,7 +388,20 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
   // Neither `enviarCorreo` call's `{ ok }` is read here — branching the
   // response on it is exactly the oracle Global Constraint #1 forbids.
 
-  return res.status(200).json({ message: EMAIL_ENVIO_RESPUESTA });
+  res.status(200).json({ message: EMAIL_ENVIO_RESPUESTA });
+
+  // The copy to the company, after the response and only when an address was
+  // actually replaced. The warning above goes to a mailbox that may already
+  // belong to whoever is doing this; this one goes somewhere they do not
+  // control, which is the only version of the warning they cannot silence.
+  if (eraVerificada && direccionAnterior) {
+    avisarCorreoCambiado({
+      id_usuario: caller.id,
+      email_anterior: direccionAnterior,
+      email_nuevo: destino,
+      ip: req.ip ?? null,
+    }).catch((err) => emailLog.error({ err }, "fallo enviando el aviso de correo cambiado"));
+  }
 });
 
 /**
@@ -460,7 +474,7 @@ export const verifyEmail = handler("verifyEmail", async (req: Request, res: Resp
     entity: "Usuario",
     entity_id: redeemed.id_usuario,
     detail: "Confirmó su dirección de correo",
-    metadata: { email: redeemed.email_destino },
+    metadata: { email_destino: redeemed.email_destino },
     severity: "info",
     ip_address: req.ip ?? null,
   });

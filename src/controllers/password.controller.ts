@@ -32,6 +32,7 @@ import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
+import { avisarPasswordRestablecida } from "../auth/securityNotice.js";
 import { validarPassword } from "../utils/password.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
@@ -311,5 +312,21 @@ export const resetPassword = handler("resetPassword", async (req: Request, res: 
 
   // No session opened, and no cookie touched. Global Constraint #9: this
   // returns to the login screen on purpose — see the module comment.
-  return res.status(200).json({ message: PASSWORD_RESET_OK });
+  res.status(200).json({ message: PASSWORD_RESET_OK });
+
+  // After the response, for the same reason `/forgot` works that way: this is
+  // two mail round trips, and the person who just reset their password should
+  // not wait on them. Unlike `/forgot`, the reason here is latency rather than
+  // a timing channel — the answer above already says plainly whether the reset
+  // worked, so there is nothing left to level.
+  //
+  // A crash between the response and these settling loses the notices for this
+  // one reset. The `critical` bitácora line is already written by then, above,
+  // and that is the record that has to survive; the mail is the copy that makes
+  // somebody look at it.
+  avisarPasswordRestablecida({
+    id_usuario: redeemed.id_usuario,
+    email_destino: redeemed.email_destino,
+    ip: req.ip ?? null,
+  }).catch((err) => passwordLog.error({ err }, "fallo enviando los avisos de contraseña restablecida"));
 });
