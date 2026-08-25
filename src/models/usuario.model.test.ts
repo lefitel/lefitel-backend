@@ -1,5 +1,5 @@
 // The one piece of behaviour this model defines beyond column shape: `email`
-// normalises to lowercase on write. `Model.build()` only constructs an
+// trims and lowercases on write. `Model.build()` only constructs an
 // in-memory instance — it issues no query — so this is safe to exercise
 // directly against the real model, no mocking required.
 
@@ -9,6 +9,17 @@ import { UsuarioModel } from "./usuario.model.js";
 describe("UsuarioModel", () => {
   it("lowercases email when it is set, so every write path stores the same casing", () => {
     const usuario = UsuarioModel.build({ email: "Isaias@Osefi.NET" } as never);
+    expect(usuario.dataValues.email).toBe("isaias@osefi.net");
+  });
+
+  it("trims padding from both ends, not just lowercases", () => {
+    // Without the trim, " isaias@x.com " and "isaias@x.com" are two different
+    // strings to Postgres: the partial unique index stops catching the same
+    // mailbox claimed twice, and whoever typed their address without the
+    // stray space later gets no match on `lower(email) = lower($1)` in
+    // `/auth/password/forgot` — which answers identically either way, so
+    // there is nothing on the outside to say why the reset link never comes.
+    const usuario = UsuarioModel.build({ email: "  ISAIAS@Osefi.net  " } as never);
     expect(usuario.dataValues.email).toBe("isaias@osefi.net");
   });
 

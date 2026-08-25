@@ -46,16 +46,29 @@ export const UsuarioModel: ModelDefined<IUsuario, UsuarioCreation> = sequelize.d
   email: {
     type: DataTypes.STRING(255),
     allowNull: true,
-    // Normalised to lowercase here, and only here, so every write path —
-    // `/auth/email/send`, an admin screen, a seed script, whatever comes
-    // next — stores the same casing without each one remembering to call a
-    // helper first. Reads are deliberately left untouched: what this stored
-    // is what a lookup compares against. `usuarios_email_verificado_uniq`
+    // Trimmed and normalised to lowercase here, and only here, so every write
+    // path — `/auth/email/send`, an admin screen, a seed script, whatever
+    // comes next — stores the same value without each one remembering to
+    // call a helper first. Reads are deliberately left untouched: what this
+    // stored is what a lookup compares against. `usuarios_email_verificado_uniq`
     // also applies `lower()` in the migration, but that is a second line of
     // defence against a row written by raw SQL, not the primary one — the
     // primary one is here, at the one place every ORM write goes through.
+    //
+    // The trim is not cosmetic — deleting it is a real bug, silently. Without
+    // it, " isaias@x.com " and "isaias@x.com" are different strings to both
+    // Postgres and Node, so (1) the partial unique index stops doing its job
+    // — two accounts can "verify" what is really the same mailbox, one with
+    // padding and one without — and (2) whoever typed their address without
+    // the stray space later, e.g. into `/auth/password/forgot`, gets no match
+    // on `lower(email) = lower($1)`. That endpoint answers identically
+    // whether the account exists or not, on purpose, so there is no error
+    // message anywhere to point at the padding: the reset link just never
+    // arrives, for a reason nobody can see from outside. Same class of bug as
+    // the password comparison this codebase already fixed by trimming before
+    // measuring — here it is trim before storing.
     set(this: Model, value: unknown) {
-      this.setDataValue("email", typeof value === "string" ? value.toLowerCase() : value);
+      this.setDataValue("email", typeof value === "string" ? value.trim().toLowerCase() : value);
     },
   },
   email_verified_at: {
