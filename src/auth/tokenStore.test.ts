@@ -1,29 +1,48 @@
-// Redeeming and purging `token_uso_unico` rows.
+// Minting, redeeming and purging `token_uso_unico` rows.
 //
-// The model is mocked: what matters here is the shape of the query, not a
-// real database enforcing it — this repo has no shared DB harness (see
+// Most of this file mocks the model and asserts the shape of the query, not
+// a real database enforcing it — this repo has no shared DB harness (see
 // global-constraints.md, #11), so the `where` clause Sequelize is handed is
-// the closest thing to a proof this suite can offer. Every condition below
-// is asserted on the clause itself, with the exact operator, rather than on
-// "the key is present" — a key present with the wrong operator (`Op.lt`
-// where `Op.gt` belongs) would pass a shallower check and delete or accept
-// exactly the wrong rows.
+// the closest thing to a proof this suite can offer for those. Every
+// condition is asserted on the clause itself, with the exact operator,
+// rather than on "the key is present" — a key present with the wrong
+// operator (`Op.lt` where `Op.gt` belongs) would pass a shallower check and
+// delete or accept exactly the wrong rows.
+//
+// The one exception is the "crearToken and consumirToken together" block at
+// the bottom, which needs to show a *behaviour* — that minting a second
+// token really does leave the first one dead — and a shape assertion on a
+// `where` clause cannot show that. It runs `create` and `update` against a
+// tiny in-memory array instead of a canned return value, just for that block.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Op } from "sequelize";
 
+const create = vi.fn();
 const update = vi.fn();
 const destroy = vi.fn();
 
 vi.mock("../models/tokenUsoUnico.model.js", () => ({
   TokenUsoUnicoModel: {
+    create: (...a: unknown[]) => create(...a),
     update: (...a: unknown[]) => update(...a),
     destroy: (...a: unknown[]) => destroy(...a),
   },
 }));
 
-const { consumirToken, purgeExpiredTokens } = await import("./tokenStore.js");
+// `crearToken` wraps its two writes in `sequelize.transaction(...)` — see the
+// same pattern and the same mock shape in `usuario.controller.test.ts`. The
+// fake just invokes the callback with a fixed token standing in for the real
+// transaction object, so every write inside can be asserted to carry it.
+const TRANSACCION = { id: "una-transaccion" };
+const transaction = vi.fn();
+vi.mock("../database/sequelize.js", () => ({
+  sequelize: { transaction: (...a: unknown[]) => transaction(...a) },
+}));
+
+const { crearToken, consumirToken, purgeExpiredTokens } = await import("./tokenStore.js");
 const { hashOpaqueToken } = await import("./opaqueToken.js");
+const { EMAIL_VERIFY_TOKEN_TTL_MS, PASSWORD_RESET_TOKEN_TTL_MS } = await import("../config/security.js");
 
 /** The bound of a `{ [Op.x]: value }` clause, read past the Symbol key. */
 const boundOf = (clause: unknown, op: symbol) => (clause as Record<symbol, unknown>)[op];
@@ -32,8 +51,10 @@ const opsOf = (clause: unknown) => Object.getOwnPropertySymbols(clause as object
 
 beforeEach(() => {
   vi.clearAllMocks();
+  create.mockResolvedValue({ dataValues: {} });
   update.mockResolvedValue([0, []]);
   destroy.mockResolvedValue(0);
+  transaction.mockImplementation(async (fn: (t: unknown) => Promise<unknown>) => fn(TRANSACCION));
 });
 
 describe("consumirToken", () => {
@@ -136,5 +157,188 @@ describe("purgeExpiredTokens", () => {
     expect(opsOf(expiredBranch!.expires_at)).not.toContain(Op.gt);
     const cutoff = boundOf(expiredBranch!.expires_at, Op.lt) as Date;
     expect(Math.abs(cutoff.getTime() - Date.now())).toBeLessThan(1000);
+  });
+});
+
+describe("crearToken", () => {
+  it("returns a fresh opaque token and stores only its hash", async () => {
+    const token = await crearToken({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+      proposito: "verify_email",
+    });
+    const [values] = create.mock.calls[0] as [Record<string, unknown>];
+    expect(values.token_hash).toBe(hashOpaqueToken(token));
+    expect(values.token_hash).not.toBe(token);
+  });
+
+  it("never writes the plain token anywhere it could be read back", async () => {
+    const token = await crearToken({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+      proposito: "verify_email",
+    });
+    expect(JSON.stringify(create.mock.calls)).not.toContain(token);
+    // The invalidation call never sees a token at all — checked anyway,
+    // because a future edit that threaded it through for no reason should
+    // not go unnoticed.
+    expect(JSON.stringify(update.mock.calls)).not.toContain(token);
+  });
+
+  it("gives verify_email one hour, not a duration the caller chose", async () => {
+    const before = Date.now();
+    await crearToken({ id_usuario: 7, email_destino: "isaias@osefi.net", proposito: "verify_email" });
+    const after = Date.now();
+    const [values] = create.mock.calls[0] as [Record<string, unknown>];
+    const restante = (values.expires_at as Date).getTime() - after;
+    // `before`/`after` bracket the call; `expires_at` was computed from a
+    // `Date.now()` somewhere inside that bracket, so `restante` (measured
+    // from the *later* of the two bounds) is at most the full TTL, and at
+    // least the TTL minus however long the call itself took.
+    expect(restante).toBeGreaterThan(EMAIL_VERIFY_TOKEN_TTL_MS - (after - before) - 1000);
+    expect(restante).toBeLessThanOrEqual(EMAIL_VERIFY_TOKEN_TTL_MS);
+  });
+
+  it("gives reset_password fifteen minutes — the purpose decides, the caller does not", async () => {
+    // There is no argument on `crearToken` for a duration at all: the input
+    // type has no such field, so a caller cannot ask for one even by
+    // accident. What this pins is that the *purpose* alone selects a
+    // different, shorter number.
+    const before = Date.now();
+    await crearToken({ id_usuario: 7, email_destino: "isaias@osefi.net", proposito: "reset_password" });
+    const after = Date.now();
+    const [values] = create.mock.calls[0] as [Record<string, unknown>];
+    const restante = (values.expires_at as Date).getTime() - after;
+    expect(restante).toBeGreaterThan(PASSWORD_RESET_TOKEN_TTL_MS - (after - before) - 1000);
+    expect(restante).toBeLessThanOrEqual(PASSWORD_RESET_TOKEN_TTL_MS);
+    expect(PASSWORD_RESET_TOKEN_TTL_MS).toBeLessThan(EMAIL_VERIFY_TOKEN_TTL_MS);
+  });
+
+  it("invalidates only the still-pending tokens of the same account and purpose", async () => {
+    await crearToken({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+      proposito: "reset_password",
+    });
+    const [values, options] = update.mock.calls[0] as [
+      Record<string, unknown>,
+      { where: Record<string, unknown> },
+    ];
+    expect(values.used_at).toBeInstanceOf(Date);
+    // The exact where, not a subset: leaving out `used_at: null` here would
+    // re-stamp rows already redeemed, overwriting the true moment they were
+    // used with the moment a later, unrelated token was minted.
+    expect(options.where).toEqual({ id_usuario: 7, proposito: "reset_password", used_at: null });
+  });
+
+  it("runs the invalidation and the insert inside the same transaction", async () => {
+    await crearToken({ id_usuario: 7, email_destino: "isaias@osefi.net", proposito: "verify_email" });
+    const [, updateOptions] = update.mock.calls[0] as [unknown, { transaction: unknown }];
+    const [, createOptions] = create.mock.calls[0] as [unknown, { transaction: unknown }];
+    expect(updateOptions.transaction).toBe(TRANSACCION);
+    expect(createOptions.transaction).toBe(TRANSACCION);
+  });
+});
+
+describe("crearToken and consumirToken together", () => {
+  /**
+   * A tiny in-memory stand-in for the table, used only in this block.
+   *
+   * Every test above treats `create`/`update` as opaque calls and checks
+   * their arguments — correct for pinning a query's shape, but unable to
+   * show that minting a second token actually leaves the first dead: that
+   * claim is about what happens when both functions run against the *same*
+   * data, which a canned return value cannot represent. This makes `create`
+   * and `update` operate on a real (if tiny) array instead, so the two
+   * functions genuinely interact the way they would through a real table.
+   */
+  function fakeTable() {
+    const rows: Record<string, unknown>[] = [];
+    create.mockImplementation(async (values: Record<string, unknown>) => {
+      const row = { ...values };
+      rows.push(row);
+      return { dataValues: row };
+    });
+    update.mockImplementation(
+      async (values: Record<string, unknown>, options: { where: Record<string, unknown> }) => {
+        const matched = rows.filter((row) => matches(row, options.where));
+        matched.forEach((row) => Object.assign(row, values));
+        return [matched.length, matched.map((row) => ({ dataValues: row }))];
+      },
+    );
+    return rows;
+  }
+
+  /** `where`-clause matching against a plain object — just enough for the two shapes this module produces. */
+  function matches(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
+    return Object.entries(where).every(([key, clause]) => {
+      if (clause !== null && typeof clause === "object" && !(clause instanceof Date)) {
+        const gt = (clause as Record<symbol, unknown>)[Op.gt];
+        if (gt instanceof Date) return (row[key] as Date).getTime() > gt.getTime();
+      }
+      return row[key] === clause;
+    });
+  }
+
+  it("leaves the previous token dead once a second one is minted for the same account and purpose", async () => {
+    fakeTable();
+    const primero = await crearToken({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+      proposito: "reset_password",
+    });
+    const segundo = await crearToken({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+      proposito: "reset_password",
+    });
+
+    expect(await consumirToken(primero, "reset_password")).toBeNull();
+    expect(await consumirToken(segundo, "reset_password")).toEqual({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+    });
+  });
+
+  it("leaves a pending token of a different purpose for the same account alone", async () => {
+    fakeTable();
+    const verificacion = await crearToken({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+      proposito: "verify_email",
+    });
+    await crearToken({ id_usuario: 7, email_destino: "isaias@osefi.net", proposito: "reset_password" });
+
+    expect(await consumirToken(verificacion, "verify_email")).toEqual({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+    });
+  });
+
+  it("leaves a pending token of the same purpose for a different account alone", async () => {
+    fakeTable();
+    const deOtraCuenta = await crearToken({
+      id_usuario: 9,
+      email_destino: "otro@osefi.net",
+      proposito: "reset_password",
+    });
+    await crearToken({ id_usuario: 7, email_destino: "isaias@osefi.net", proposito: "reset_password" });
+
+    expect(await consumirToken(deOtraCuenta, "reset_password")).toEqual({
+      id_usuario: 9,
+      email_destino: "otro@osefi.net",
+    });
+  });
+
+  it("never stores the plain token anywhere in the table", async () => {
+    const rows = fakeTable();
+    const token = await crearToken({
+      id_usuario: 7,
+      email_destino: "isaias@osefi.net",
+      proposito: "verify_email",
+    });
+
+    expect(rows.every((row) => row.token_hash !== token)).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain(token);
   });
 });

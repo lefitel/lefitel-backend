@@ -426,6 +426,24 @@ export const SESSION_USER_AGENT_MAX = 255;
 export const SESSION_IP_MAX = 45;
 
 /**
+ * How long a `token_uso_unico` row stays redeemable, by `proposito` — see
+ * `crearToken` in `src/auth/tokenStore.ts`, the only place that reads these.
+ *
+ * Both numbers are the design spec's own (§3). An email-verification link is
+ * lower stakes and gets an hour, since it sits in an inbox somebody might not
+ * open right away. A password-reset link is a live credential for whoever
+ * holds the mailbox it was sent to, so it stays open only long enough to be
+ * used once, right now, by the person who just asked for it.
+ *
+ * Named here rather than left as a literal inside `crearToken` so a caller
+ * cannot hand in its own expiry — the whole point of pinning the duration to
+ * the purpose is that nothing downstream gets to ask for "a reset token good
+ * for three days".
+ */
+export const EMAIL_VERIFY_TOKEN_TTL_MS = 60 * 60 * 1000;
+export const PASSWORD_RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
+
+/**
  * The session cookie's name, and whether it must be Secure.
  *
  * In production the name carries the `__Host-` prefix, which a browser only
