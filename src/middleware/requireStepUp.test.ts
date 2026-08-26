@@ -27,11 +27,14 @@ const passwordConfirmKey = vi.fn();
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword }));
 vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor }));
 vi.mock("../utils/logAction.js", () => ({ logAction }));
-vi.mock("./loginLimiters.js", () => ({
-  passwordConfirmLimiter,
-  passwordConfirmKey,
-  PASSWORD_CONFIRM_MESSAGE: "Demasiados intentos. Espere unos minutos antes de volver a confirmar.",
-}));
+// `importOriginal` pulls the real `PASSWORD_CONFIRM_MESSAGE` through rather
+// than retyping the sentence a third time (`loginLimiters.ts` names it once,
+// `requireStepUp.ts` imports it) — a third hand-typed copy is exactly the
+// drift that constant exists to rule out, even one sitting only in a test.
+vi.mock("./loginLimiters.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./loginLimiters.js")>();
+  return { ...actual, passwordConfirmLimiter, passwordConfirmKey };
+});
 
 const {
   requireStepUp,

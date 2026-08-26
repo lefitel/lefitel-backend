@@ -192,6 +192,12 @@ export function confirmCostsNothing(_req: Request, res: Response): boolean {
   return res.statusCode !== 401;
 }
 
+/** The one sentence a spent budget answers with, named so `requireStepUp.ts`
+ *  can reuse it instead of retyping it — two copies of one sentence is how
+ *  they read differently the day one of them gets improved. */
+export const PASSWORD_CONFIRM_MESSAGE =
+  "Demasiados intentos. Espere unos minutos antes de volver a confirmar.";
+
 /**
  * The budget for re-typing your own password, and the only limit those routes
  * have.
@@ -214,13 +220,6 @@ export function confirmCostsNothing(_req: Request, res: Response): boolean {
  * answer (it would let anybody shut their own account out of the ERP by
  * mistyping while renaming themselves) so this is.
  */
-
-/** The one sentence a spent budget answers with, named so `requireStepUp.ts`
- *  can reuse it instead of retyping it — two copies of one sentence is how
- *  they read differently the day one of them gets improved. */
-export const PASSWORD_CONFIRM_MESSAGE =
-  "Demasiados intentos. Espere unos minutos antes de volver a confirmar.";
-
 export const passwordConfirmLimiter = rateLimit({
   windowMs: LOGIN_WINDOW_MS,
   limit: PASSWORD_CONFIRM_LIMIT,
@@ -237,12 +236,16 @@ export const passwordConfirmLimiter = rateLimit({
   // only ever calls this on a confirmed-wrong password, and denies without
   // calling on, so `chargeConfirmBudgetOnSelfChange` never runs in the same
   // request that gate charged). `validate.singleCount` — express-rate-limit's
-  // default check that a key is touched at most once per request — was
-  // disabled here for one round while an earlier design of that gate charged
-  // unconditionally and could touch this key twice; it is deliberately left
-  // at its default (on) now that the two charges are mutually exclusive,
-  // because there is a real invariant here worth that check catching if a
-  // future change breaks it.
+  // default check that a key is touched at most once per request — is left at
+  // its default (on) now that the two charges are mutually exclusive, but say
+  // plainly what that buys: `express-rate-limit` disables each of its own
+  // validations after its first invocation *per limiter instance*
+  // (`index.mjs`'s `getValidations`), so `singleCount` can only ever inspect
+  // the very first increment this limiter instance ever serves after the
+  // process boots — not an ongoing guard against every request after that.
+  // Left on anyway, at no cost, because there is nothing this bucket needs
+  // from disabling it any more; it is not standing watch for a future
+  // regression the way an earlier version of this comment claimed.
 });
 
 /**

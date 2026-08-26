@@ -88,6 +88,7 @@ const { loginIpLimiter, loginAccountIpLimiter, passwordConfirmLimiter } = await 
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { logAction } = await import("./utils/logAction.js");
 const { SesionModel } = await import("./models/sesion.model.js");
+const { RolModel } = await import("./models/rol.model.js");
 const { TokenUsoUnicoModel } = await import("./models/tokenUsoUnico.model.js");
 const { CredencialWebauthnModel } = await import("./models/credencialWebauthn.model.js");
 const { FactorTotpModel } = await import("./models/factorTotp.model.js");
@@ -118,6 +119,19 @@ const sesionUpdate = vi.spyOn(SesionModel, "update");
 const sesionCreate = vi.spyOn(SesionModel, "create");
 const usuarioFindByPk = vi.spyOn(UsuarioModel, "findByPk");
 const usuarioFindOne = vi.spyOn(UsuarioModel, "findOne");
+/**
+ * Two more, for the DELETE tests near the bottom of this file — spied rather
+ * than left real for the same reason as everything else here, and chosen
+ * over `UsuarioModel.destroy` specifically: `deleteUsuario` opens a real
+ * `sequelize.transaction()`, which reaches for a real connection before its
+ * callback runs a single (mocked) query inside it — so spying only the model
+ * calls inside that transaction still leaves the transaction itself hitting
+ * the configured database, which in this environment is a copy of
+ * production. `deleteRol` opens no transaction at all, so spying its two
+ * calls is what actually keeps this file's promise.
+ */
+const usuarioCount = vi.spyOn(UsuarioModel, "count");
+const rolFindOne = vi.spyOn(RolModel, "findOne");
 const tokenUsoUnicoDestroy = vi.spyOn(TokenUsoUnicoModel, "destroy");
 /**
  * Two more spies, added for Task 4's routes specifically — nothing already
@@ -246,6 +260,10 @@ beforeEach(() => {
   } as never);
   tokenUsoUnicoDestroy.mockResolvedValue(0);
   usuarioUpdate.mockResolvedValue([1] as never);
+  // No role in use, and a role that exists and can be archived — the
+  // deleteRol success path the DELETE tests below exercise.
+  usuarioCount.mockResolvedValue(0 as never);
+  rolFindOne.mockResolvedValue({ dataValues: { id: 99, name: "Sobrante" }, destroy: vi.fn().mockResolvedValue(undefined) } as never);
   tokenUsoUnicoUpdate.mockResolvedValue([0, []] as never);
   // No factor registered, by default — matching every other fixture in this
   // file, which models an ordinary account under plan 4A.
@@ -1614,8 +1632,8 @@ describe("requireStepUp, mounted on the real routes", () => {
   });
 
   /**
-   * `DELETE /api/usuario/:id` is gated too, and until now nothing exercised
-   * it — every `DELETE` this file or `requireStepUp.test.ts` sent went to
+   * DELETE routes are gated too, and until now nothing exercised one — every
+   * `DELETE` this file or `requireStepUp.test.ts` sent went to
    * `/api/auth/sessions/*`, which carries no gate at all. That gap mattered
    * for a specific reason: Express only parses a request body when the
    * client sends a `Content-Type` it recognises, and a body-less
@@ -1625,23 +1643,36 @@ describe("requireStepUp, mounted on the real routes", () => {
    * article of faith rather than something measured — and the frontend
    * being built against this gate is about to send exactly that shape.
    *
+   * `DELETE /api/rol/:id`, not `/api/usuario/:id` — both carry the gate, but
+   * `deleteUsuario` opens a real `sequelize.transaction()` around a real
+   * `UsuarioModel.destroy()`, neither of which this file mocks, and a fix
+   * round measured that combination committing a genuine soft-delete against
+   * the configured database (a copy of production), with only the target id
+   * not existing standing between that and a real account. `deleteRol` opens
+   * no transaction and touches only `RolModel.findOne` and
+   * `UsuarioModel.count`, both spied above — so what is under test here is
+   * `requireStepUp`'s own body-reading, unconnected to which controller
+   * happens to sit behind it.
+   *
    * `id: 99` is this file's own established stand-in for "a row that is not
-   * `YO`'s and does not exist" — see the rename/reset tests above, which
-   * already target it the same way.
+   * `YO`'s" — see the rename/reset tests above, which already target it the
+   * same way; `rolFindOne`'s default mock above answers it as a real,
+   * archivable role rather than a 404, which is what lets these reach the
+   * gate at all.
    */
   describe("on DELETE, where a body only exists if Content-Type says so", () => {
     it("lets a body-less DELETE through: no factor, nothing sent, nothing to prove", async () => {
       puede = true;
       try {
         const res = await request(app)
-          .delete("/api/usuario/99")
+          .delete("/api/rol/99")
           .set("Cookie", COOKIE)
           .set(DEL_FRONTEND);
 
-        // Measured, not assumed: deleteUsuario runs a real transaction here
-        // (no live row at id 99 to destroy, no session to revoke), and 200
-        // is what it actually answers — which is what proves the gate let
-        // the request through rather than refusing it with STEP_UP_REQUIRED.
+        // Measured, not assumed: deleteRol reaches a real answer here (no
+        // accounts on the role, `destroy` is a spy), and 200 is what it
+        // actually answers — which is what proves the gate let the request
+        // through rather than refusing it with STEP_UP_REQUIRED.
         expect(res.status).toBe(200);
         // And it took branch 3's skip to get there, not a silent "nothing
         // was ever read" bug that would answer 200 for a different reason —
@@ -1653,10 +1684,17 @@ describe("requireStepUp, mounted on the real routes", () => {
     });
 
     it("reads stepup_password out of a DELETE body once Content-Type says to parse one", async () => {
+      // Load-bearing for exactly one thing: that `requireStepUp` reads
+      // `stepup_password` from `req.body` and not, say, `req.query` — the
+      // "reads the budget"/"charges on wrong"/"never charges on right"
+      // behaviours are already pinned at the unit level in
+      // `requireStepUp.test.ts` and are not what this trio adds. Do not trim
+      // this one for looking redundant next to the other two: it is the only
+      // one of the three that a `req.query` regression would not also fail.
       puede = true;
       try {
         const res = await request(app)
-          .delete("/api/usuario/99")
+          .delete("/api/rol/99")
           .set("Cookie", COOKIE)
           .set(DEL_FRONTEND)
           .send({ stepup_password: "la-de-verdad" });
@@ -1681,7 +1719,7 @@ describe("requireStepUp, mounted on the real routes", () => {
       puede = true;
       try {
         const res = await request(app)
-          .delete("/api/usuario/99")
+          .delete("/api/rol/99")
           .set("Cookie", COOKIE)
           .set(DEL_FRONTEND)
           .send({ stepup_password: "no-es-la-mia" });

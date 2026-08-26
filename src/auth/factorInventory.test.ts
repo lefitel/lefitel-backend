@@ -77,14 +77,28 @@ describe("tieneAlgunFactor", () => {
   });
 
   it("does NOT count an unconfirmed TOTP secret as a factor", async () => {
-    // factoresDe's own query already excludes it (see the test above), so an
-    // unconfirmed secret is modelled truthfully here as a zero count, not as
-    // a row this function chooses to ignore.
+    // Modelled truthfully here as a zero count, not as a row this function
+    // chooses to ignore — the exclusion lives in the WHERE clause the next
+    // test pins, not in this test's own mock.
     //
     // A secret generated and never typed back is a QR somebody may have
     // failed to scan; counting it would demand a code they cannot produce.
     totpCount.mockResolvedValue(0);
     expect(await tieneAlgunFactor(YO)).toBe(false);
+  });
+
+  it("asks the database for confirmed TOTP secrets only, in its own query", async () => {
+    // `tieneAlgunFactor` runs its own `FactorTotpModel.count`, separate from
+    // `factoresDe`'s — see that function's own comment for why. That split
+    // means `factoresDe`'s own test of this WHERE shape no longer proves
+    // anything about *this* function's query: dropping `confirmed_at` from
+    // `tieneAlgunFactor` alone left every other test in this describe block
+    // green, because none of them look at what was actually asked for, only
+    // at the mocked answer. This is the one that would have caught it.
+    await tieneAlgunFactor(YO);
+    expect(totpCount).toHaveBeenCalledWith({
+      where: { id_usuario: YO, confirmed_at: { [Op.ne]: null } },
+    });
   });
 
   it("does NOT count recovery codes alone as a factor, however many there are", async () => {
