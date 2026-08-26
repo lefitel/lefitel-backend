@@ -234,16 +234,27 @@ dirección no se puede reasignar. Tres: `lower()` porque el `UNIQUE` de Postgres
 distingue mayúsculas y los buzones no, y `Isaias@` e `isaias@` acabarían siendo
 dos cuentas contra el mismo correo real.
 
-**Novena migración, de propina y de una línea:** `usuarios.user` sigue sin índice
-único —lo dejó abierto la auditoría anterior— y `createUsuario` no comprueba
-colisión. El login resuelve la identidad por ese campo, y ahora además cuelgan de
-él las sesiones y los factores: una segunda fila `isaias` con contraseña conocida
-competiría por el login.
+~~**Novena migración, de propina y de una línea:** `usuarios.user` sigue sin índice
+único~~ — **hecho en el Plan 1**, el mismo día que se escribió esto, en
+[`20260821000001-add-account-lockout.ts:52`](../../src/migrations/20260821000001-add-account-lockout.ts#L52).
+Se deja tachado en vez de borrado porque **este párrafo hizo daño**: el Plan 3
+copió de aquí un `CREATE UNIQUE INDEX usuarios_user_uniq` creyéndolo pendiente, y
+al ir dentro de una sola transacción con las columnas de email, habría fallado con
+«relation already exists» y **se habría llevado las columnas nuevas en la
+reversión**. La migración no habría aplicado nunca. Lo cazó el implementador
+mirando el disco, no leyendo.
 
 ```sql
+-- Ya aplicado por el Plan 1. NO repetir en otra migración.
 CREATE UNIQUE INDEX usuarios_user_uniq
   ON usuarios (lower("user")) WHERE "deletedAt" IS NULL;
 ```
+
+Lo que **sigue vigente** es el motivo por el que hacía falta: el login resuelve la
+identidad por ese campo, de él cuelgan ahora las sesiones y los factores, y
+`createUsuario` **todavía no comprueba colisión**. Así que la consulta de
+diagnóstico de duplicados de §11 no sobra: el índice está escrito pero no
+desplegado, y un duplicado puede nacer antes de que lo esté.
 
 ### `sesion`
 
@@ -797,8 +808,18 @@ y descubrirla el sábado por la noche deja a todo el mundo, dueño incluido, sin
 código de verificación.
 
 Variables nuevas en Coolify: `MFA_ENCRYPTION_KEY`, `RESEND_API_KEY`, `MAIL_FROM`,
-`WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGIN` (lista de orígenes exactos), `COOKIE_NAME`,
-`COOKIE_SECURE`.
+`MAIL_SECURITY_TO`, `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGIN` (lista de orígenes exactos),
+`COOKIE_NAME`, `COOKIE_SECURE`.
+
+**Y hay dos categorías entre ellas, que no es lo mismo.** `RESEND_API_KEY` y
+`MAIL_FROM` están en `requiredEnv`: **sin ellas el proceso no arranca**, porque sin
+ellas `mailer.ts` interpreta «faltan claves» como «desarrollo, no gastes cupo» y
+**todos** los correos serían un no-op silencioso — el primer síntoma sería alguien que
+nunca recibió su enlace. `MAIL_SECURITY_TO` **no** está: sin ella solo se pierde la
+copia del aviso a la empresa, y negarse a arrancar por eso convierte una carencia en
+una caída. Pero cada aviso omitido escribe una línea de log, porque un despliegue que
+nunca la puso se parece exactamente a uno donde los avisos funcionan, hasta el día en
+que alguien busca la alerta que nunca se mandó.
 
 **`MFA_ENCRYPTION_KEY` es material de copia de seguridad, igual que el dump.** 32
 bytes en hexadecimal, **validados por longitud al arrancar** — que la variable
@@ -891,6 +912,7 @@ tienen `down`, pero `runMigrations()` solo llama a `up()` y no hay ningún
    Guardar también MFA_ENCRYPTION_KEY: sin ella el dump es inservible para MFA.
 2. Verificar SPF/DKIM de osefi.net en Resend. Envío de prueba real. (Días antes.)
 3. Añadir las variables nuevas. NO borrar JWT_SECRET.
+   🔴 RESEND_API_KEY y MAIL_FROM son OBLIGATORIAS: sin ellas la API NO ARRANCA.
 4. Probar auth:rescue:deploy DENTRO del contenedor.
 5. Crear la cuenta de rescate (rol 1) y guardar sus códigos impresos.
 6. migrate:deploy
@@ -1111,6 +1133,32 @@ Lo que **no** ocurre, aunque se escribió aquí antes de arreglarlo: esos rechaz
 **no gastan del cupo**. El cupo solo cobra la respuesta que dice «esa contraseña no es
 la tuya»; un rechazo por falta de campo es gratis. Así que un bundle viejo en caché
 falla en esa pantalla y nada más — no se queda además sin intentos.
+
+### 🔴 El Plan 3 no se despliega sin el Plan 4, y esto no es una preferencia
+
+Decisión de Isaias el 2026-08-25, al plantearle el compromiso: **nada llega a
+producción hasta que esté acabado.**
+
+El motivo importa más que la regla. El Plan 3 trae «he olvidado mi contraseña», y
+hoy robar el Gmail de alguien **no da acceso al ERP**; en cuanto exista esa
+pantalla, ese Gmail **es** la cuenta. El spec cierra eso obligando a pasar el
+segundo factor después del reset (§5) — pero el segundo factor es el Plan 4. Con el
+Plan 3 desplegado solo, hay una ventana en la que el buzón personal de cada
+técnico, en cuentas que la empresa no controla ni ha endurecido, es una llave
+completa.
+
+No se acepta la ventana: **se elimina no desplegando.** Los dos planes van juntos,
+o el 4 detrás del 3 sin que el 3 haya pasado por producción.
+
+Está escrito aquí porque es exactamente lo que se pierde entre sesiones: alguien
+—una sesión futura de Claude, con el contexto compactado— ve el Plan 3 terminado y
+verificado en la rama, no encuentra ninguna razón para no desplegarlo, y reabre la
+ventana sin saber que existía.
+
+Las dos mitigaciones del Plan 3 (línea `critical` en bitácora y aviso a una
+dirección fija de la empresa en todo reset) **se construyen igual**. No eran solo
+para la ventana: siguen valiendo con el MFA puesto, cuando un reset legítimo tiene
+que ser visible para alguien que no sea quien lo pidió.
 
 ### La detección de cambio de rol se rompe entre el Plan 1 y el Plan 2B
 
