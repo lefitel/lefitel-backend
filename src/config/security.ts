@@ -564,7 +564,36 @@ export const EMAIL_VERIFY_LIMIT = 10;
  * `http://localhost`. Hence a variable rather than a constant.
  */
 export const SESSION_COOKIE_NAME = process.env.COOKIE_NAME ?? "osefi_session";
-export const SESSION_COOKIE_SECURE = process.env.COOKIE_SECURE !== "false";
+
+/**
+ * Whether the session cookie is `Secure`, and why the default depends on the
+ * environment instead of simply being `true`.
+ *
+ * It used to be `process.env.COOKIE_SECURE !== "false"` — fail closed, always.
+ * Safe, and it made a fresh checkout impossible to run: with neither variable
+ * set, `SESSION_COOKIE_NAME` falls back to a name without the `__Host-`
+ * prefix while this said `Secure`, and `index.ts` refuses to boot on exactly
+ * that combination. A developer with no `.env` for these got a FATAL line
+ * about a prefix they had never heard of.
+ *
+ * That contradicted `requiredEnv`, one screen up, which deliberately requires
+ * neither of them outside production. Promising "you do not need to set these
+ * in development" and then refusing to start without them is not a strict
+ * default, it is two halves of the config disagreeing.
+ *
+ * So: an explicit value always wins, and the fallback opens **only** for an
+ * environment that has declared itself non-production. Anything else —
+ * `NODE_ENV` unset, misspelled, or something nobody anticipated — still gets
+ * `Secure`. The failure mode that matters is a production deployment whose
+ * `NODE_ENV` is wrong, and this keeps that one closed; `requiredEnv` forces
+ * the variable to be set in production anyway, so that branch is belt on top
+ * of braces.
+ */
+const ENTORNOS_SIN_TLS = ["development", "test"];
+export const SESSION_COOKIE_SECURE =
+  process.env.COOKIE_SECURE !== undefined
+    ? process.env.COOKIE_SECURE !== "false"
+    : !ENTORNOS_SIN_TLS.includes(process.env.NODE_ENV ?? "");
 
 /**
  * Whether `name` can actually deliver the guarantee a `Secure` session
