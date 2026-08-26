@@ -639,7 +639,7 @@ expediente de actividad de cada empleado — y ese controlador no declara
 
 ---
 
-## 7. Las diez rutas que se borran
+## 7. Las siete rutas que se borran, y tres que esperan
 
 Sin ningún cliente en `web`, con sus controladores:
 
@@ -647,9 +647,11 @@ Sin ningún cliente en `web`, con sus controladores:
 POST   /api/solucion/       GET    /api/solucion/
 PUT    /api/solucion/:id    DELETE /api/solucion/:id
 PUT    /api/revision/:id    DELETE /api/revision/:id
+GET    /api/files/
+
+pendientes de decisión, no borradas:
 POST   /api/rol/            PUT    /api/rol/:id
 DELETE /api/rol/:id
-GET    /api/files/
 ```
 
 El CRUD de `solucion` quedó muerto cuando `POST /api/evento/:id/resolver` pasó a
@@ -662,15 +664,26 @@ llama es código que nadie está comprobando.
   no es `paranoid`, y `permisos.id_rol` tiene `onDelete: "CASCADE"`: borrar un
   rol destruía sus 40 filas de permisos sin vuelta atrás. Ése es el argumento
   fuerte para quitarlo, mucho más que la falta de cliente.
-- **Con `POST /api/rol/` se pierde la única forma de crear un rol.** `createRol`
+- **Las tres de `rol` NO se borran: quedan como decisión abierta.** `createRol`
   es el único llamante de `seedRolePermissions`, que existe justamente para que
-  un rol nuevo nazca con sus 40 filas. Sin él, el modelo de permisos queda
-  congelado en tres roles — y este mismo diseño depende de que existan roles con
-  combinaciones finas. **Se borran los tres, y queda anotado que crear roles pasa
-  a ser trabajo pendiente de producto**, no un efecto que nadie previó.
+  un rol nuevo nazca con sus 40 filas. Borrarlas congela el modelo de permisos en
+  tres roles — y este mismo diseño depende de que existan roles con combinaciones
+  finas, así que el argumento «nadie las llama» se vuelve contra sí mismo: no las
+  llama nadie porque falta la pantalla, no porque sobren.
 
-Recuento final: **104 − 10 borradas + 5 nuevas (cuatro de opciones y `autores`)
-= 99 rutas en 20 montajes.** El manejador de 404 de §3.6 no entra en la cuenta:
+  **Decidido el 25 de agosto: la gestión de roles hace falta y hay que
+  meditarla.** Hasta entonces las tres rutas se quedan donde están, sin cliente,
+  y el recuento de §7 las cuenta como vivas. Lo que sí se hace es cerrar el riesgo
+  concreto del `DELETE`: o pasa a archivar en vez de borrar, o se le añade la
+  comprobación de que ningún usuario tiene ese rol. Hoy destruye las 40 filas de
+  permisos en cascada y sin vuelta atrás.
+
+  Las tres son trabajo de producto —una pantalla de roles— y por tanto un diseño
+  aparte, no un apartado de éste.
+
+Recuento final: **104 − 7 borradas + 5 nuevas (cuatro de opciones y `autores`)
+= 102 rutas en 20 montajes.** Las tres de `rol` que quedan pendientes de
+decisión están contadas como vivas. El manejador de 404 de §3.6 no entra en la cuenta:
 no es una ruta, es lo que responde cuando no hay ninguna.
 
 ---
@@ -720,7 +733,7 @@ Por lo que cuesta **no** hacerlo. Los dos primeros ya están hechos.
 |---|---|---|
 | **0a** | El cuerpo de la petición deja de poder archivar filas (§3.9) | ✅ `ce91b1b` — 10 ficheros |
 | **0b** | Autoría de postes, nombre de cuenta en bitácora, presupuesto de subidas | ✅ `64431bf` — 11 ficheros |
-| **1** | Los seis `PUT`→`POST`; las 10 rutas muertas; el manejador de 404; `ARCHITECTURE.md` | **Riesgo medio, sin red** |
+| **1** | Los seis `PUT`→`POST`; las 7 rutas muertas; el manejador de 404; `ARCHITECTURE.md` | **Riesgo medio, sin red** |
 | **2** | Los 97 sitios que filtran `error.message`, con el reparto esperado / inesperado | Bajo, mecánico |
 | **3** | Los cuatro endpoints de opciones; cerrar las veinte lecturas; `bitacora/autores`; los 25 `include` anchos | Medio. Toca pantallas |
 | **4** | El sobre único en los 23 listados; `limit=all` y su techo | Medio. Cambio de contrato |
