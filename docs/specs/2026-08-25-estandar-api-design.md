@@ -639,7 +639,7 @@ expediente de actividad de cada empleado — y ese controlador no declara
 
 ---
 
-## 7. Las siete rutas que se borran, y tres que esperan
+## 7. Las siete rutas que se borran
 
 Sin ningún cliente en `web`, con sus controladores:
 
@@ -648,42 +648,59 @@ POST   /api/solucion/       GET    /api/solucion/
 PUT    /api/solucion/:id    DELETE /api/solucion/:id
 PUT    /api/revision/:id    DELETE /api/revision/:id
 GET    /api/files/
-
-pendientes de decisión, no borradas:
-POST   /api/rol/            PUT    /api/rol/:id
-DELETE /api/rol/:id
 ```
 
-El CRUD de `solucion` quedó muerto cuando `POST /api/evento/:id/resolver` pasó a
-crear la solución él mismo; el de `rol` nunca tuvo pantalla. Código que nadie
-llama es código que nadie está comprobando.
+Comprobado el 26 de agosto contra el código y contra la historia de `web`, no
+contra este documento. El árbol tiene dos consumidores —`api` y `web`—, así que
+«sin cliente en `web`» quiere decir «sin cliente en ninguna parte».
 
-**Dos cosas que la razón «nadie lo llama» no cubre:**
+**Cuatro no pierden nada.** `GET /api/files/` devuelve la lista del disco a
+secas y `GET /api/files/orphans` devuelve lo mismo más quién usa cada fichero:
+es un subconjunto estricto. Las tres de `solucion` las reemplazó
+`POST /api/evento/:id/resolver` con su pareja `reabrir` — el cliente de
+`getSolucion` y `deleteSolucion` se fue en `4d1b4fe` (17 de marzo) y el de
+`createSolucion` en `0c6f4d2` (3 de mayo), el mismo commit que trajo `resolver`.
+Y no son solo redundantes: crean o quitan la solución **sin** tocar
+`evento.state`, mientras `resolver` y `reabrir` hacen las dos cosas en una
+transacción. `POST /api/solucion/` deja un evento arreglado que la lista sigue
+mostrando abierto; `DELETE /api/solucion/:id` deja un evento resuelto sin
+registro de cómo se resolvió. `GET /api/solucion/` encima no declara ningún
+permiso —lo dice su propio controlador—, así que borrarla cierra una lectura
+abierta a cualquier sesión.
 
-- **`DELETE /api/rol/:id` era un borrado duro con daño en cascada.** `RolModel`
-  no es `paranoid`, y `permisos.id_rol` tiene `onDelete: "CASCADE"`: borrar un
-  rol destruía sus 40 filas de permisos sin vuelta atrás. Ése es el argumento
-  fuerte para quitarlo, mucho más que la falta de cliente.
-- **Las tres de `rol` NO se borran: quedan como decisión abierta.** `createRol`
-  es el único llamante de `seedRolePermissions`, que existe justamente para que
-  un rol nuevo nazca con sus 40 filas. Borrarlas congela el modelo de permisos en
-  tres roles — y este mismo diseño depende de que existan roles con combinaciones
-  finas, así que el argumento «nadie las llama» se vuelve contra sí mismo: no las
-  llama nadie porque falta la pantalla, no porque sobren.
+**Tres nunca tuvieron cliente, y ahí está el matiz.** `PUT /api/solucion/:id`,
+`PUT /api/revision/:id` y `DELETE /api/revision/:id` son el único sitio del
+sistema donde se corrige un registro ya escrito, y no aparecen en la historia de
+`web` ni una sola vez.
 
-  **Decidido el 25 de agosto: la gestión de roles hace falta y hay que
-  meditarla.** Hasta entonces las tres rutas se quedan donde están, sin cliente,
-  y el recuento de §7 las cuenta como vivas. Lo que sí se hace es cerrar el riesgo
-  concreto del `DELETE`: o pasa a archivar en vez de borrar, o se le añade la
-  comprobación de que ningún usuario tiene ese rol. Hoy destruye las 40 filas de
-  permisos en cascada y sin vuelta atrás.
+Se borran igual, y la razón es que **hoy tampoco dan esa capacidad**: sin
+pantalla que las llame, corregir una solución ya exige entrar a la base de datos.
+Lo que se pierde no es una función, es una puerta sin cerradura. «Corregir un
+registro ajeno» trae detrás una pregunta de permisos que nadie ha contestado
+—¿un Técnico corrige la suya, la de otro, hasta cuándo?— y una ruta muerta no la
+contesta: solo espera a que alguien la enchufe sin pensarla.
 
-  Las tres son trabajo de producto —una pantalla de roles— y por tanto un diseño
-  aparte, no un apartado de éste.
+**Pendiente de producto, anotado aquí para no perderlo.** Corregir una solución o
+una revisión necesita pantalla, permiso propio y rastro en la bitácora, igual que
+la gestión de roles. Mientras no exista, la única salida sigue siendo reabrir y
+volver a resolver — y conviene saber que reabrir **borra la foto del disco de
+forma irrecuperable** (`deleteImageFile(solucionImage)` en `evento.controller.ts`),
+aunque la fila sobreviva porque el modelo es `paranoid`.
+
+**Lo que cuesta borrarlas.** `authorship.test.ts` —el test que vigila el agujero
+de `deletedAt`— llama directamente a `createSolucion`, `updateSolucion` y
+`updateRevision`. Cuatro de sus casos hay que reescribirlos contra los
+controladores que queden. El agujero sigue vigilado; se vigila desde otra puerta.
+
+**Las tres de `/api/rol` no entran en este apartado.** La gestión de roles la
+lleva otra sesión. `POST /api/rol/`, `PUT /api/rol/:id` y `DELETE /api/rol/:id`
+se quedan donde están, este documento no las toca, y el recuento las cuenta como
+vivas. Lo único que conviene que sepa quien las coja: `RolModel` no es
+`paranoid` y `permisos.id_rol` tiene `onDelete: "CASCADE"`, así que hoy
+`DELETE /api/rol/:id` destruye las 40 filas de permisos del rol sin vuelta atrás.
 
 Recuento final: **104 − 7 borradas + 5 nuevas (cuatro de opciones y `autores`)
-= 102 rutas en 20 montajes.** Las tres de `rol` que quedan pendientes de
-decisión están contadas como vivas. El manejador de 404 de §3.6 no entra en la cuenta:
+= 102 rutas en 20 montajes.** El manejador de 404 de §3.6 no entra en la cuenta:
 no es una ruta, es lo que responde cuando no hay ninguna.
 
 ---
