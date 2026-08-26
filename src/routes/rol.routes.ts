@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   createRol,
   deleteRol,
+  desarchivarRol,
   getRol,
   updateRol,
 } from "../controllers/rol.controller.js";
@@ -19,5 +20,6 @@ router.post("/", requirePermission("roles", "crear"), createRol);
 router.put("/:id", requirePermission("roles", "editar"), updateRol);
 router.get("/", getRol);
 router.delete("/:id", requirePermission("roles", "archivar"), deleteRol);
+router.patch("/:id/desarchivar", requirePermission("roles", "archivar"), desarchivarRol);
 
 export default router;

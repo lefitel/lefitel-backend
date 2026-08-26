@@ -2,6 +2,8 @@ export interface IRol {
   id: number;
   name: string;
   description: string;
+  /** Set since 20260826000001: archiving a role must not cascade to its users. */
+  deletedAt?: Date | null;
 }
 
 export interface IUsuario {
