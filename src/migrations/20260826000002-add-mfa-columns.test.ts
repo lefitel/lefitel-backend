@@ -6,6 +6,7 @@
 // constraints spell the state names the code will compare against.
 
 import { describe, it, expect } from "vitest";
+import { DataTypes } from "sequelize";
 import { up, down } from "./20260826000002-add-mfa-columns.js";
 
 function fakeQueryInterface() {
@@ -115,6 +116,26 @@ describe("add-mfa-columns", () => {
     expect((estado?.args[2] as { defaultValue?: string })?.defaultValue).toBe("completa");
   });
 
+  it("gives the three timestamp columns a timezone, like every other timestamp in this schema", async () => {
+    // TIMESTAMPTZ is a hard constraint on this project; DataTypes.DATE is what
+    // Sequelize maps to it. A naive TIMESTAMP here would drift by however many
+    // hours separate the server's timezone from UTC — the same class of bug
+    // the account-lockout migration's note on locked_until exists to avoid.
+    const qi = fakeQueryInterface();
+    await up({ context: qi as never });
+
+    const typeOf = (table: string, column: string) => {
+      const call = qi.calls.find(
+        (c) => c.fn === "addColumn" && c.args[0] === table && c.args[1] === column,
+      );
+      return (call?.args[2] as { type?: unknown } | undefined)?.type;
+    };
+
+    expect(typeOf("usuarios", "mfa_grace_until")).toBe(DataTypes.DATE);
+    expect(typeOf("usuarios", "pass_changed_at")).toBe(DataTypes.DATE);
+    expect(typeOf("sesiones", "mfa_satisfied_at")).toBe(DataTypes.DATE);
+  });
+
   it("reverses cleanly", async () => {
     const qi = fakeQueryInterface();
     await down({ context: qi as never });
@@ -130,5 +151,46 @@ describe("add-mfa-columns", () => {
     // The constraints go before the columns they constrain, or the DROP fails.
     const sql = queriesOf(qi);
     expect(sql).toContain("DROP CONSTRAINT");
+  });
+
+  it("carries the transaction on every single call, going down too", async () => {
+    // The same "runs half way" failure the up-path test above guards against,
+    // but on the rollback: "reverses cleanly" exercises down() without ever
+    // checking the transaction, so a regression that dropped { transaction }
+    // from a removeColumn or a DROP CONSTRAINT query here would go undetected.
+    const qi = fakeQueryInterface();
+    await down({ context: qi as never });
+
+    expect(qi.calls.length).toBeGreaterThan(0);
+    for (const call of qi.calls) {
+      expect(transactionOf(call), `${call.fn}(${String(call.args[0])}) sin transacción en down()`).toBeDefined();
+    }
+  });
+
+  it("drops the constraints before it removes the columns they constrain", async () => {
+    // "reverses cleanly" only checks that a DROP CONSTRAINT appears somewhere
+    // in the query log, never that it runs before removeColumn(sesiones, ...).
+    // If that order flipped, this would still pass while the down migration
+    // failed against a real database: Postgres refuses to drop a column a
+    // CHECK still references, so removeColumn("sesiones", "estado", ...) would
+    // throw instead of running.
+    const qi = fakeQueryInterface();
+    await down({ context: qi as never });
+
+    const lastDropConstraintIndex = qi.calls.reduce(
+      (last, call, i) =>
+        call.fn === "query" && String(call.args[0]).includes("DROP CONSTRAINT") ? i : last,
+      -1,
+    );
+    const firstSesionesRemoveColumnIndex = qi.calls.findIndex(
+      (call) => call.fn === "removeColumn" && call.args[0] === "sesiones",
+    );
+
+    expect(lastDropConstraintIndex).toBeGreaterThanOrEqual(0);
+    expect(firstSesionesRemoveColumnIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      lastDropConstraintIndex,
+      "a DROP CONSTRAINT ran after removeColumn(sesiones, ...): against a real database that removeColumn would fail outright, since Postgres refuses to drop a column a CHECK still references",
+    ).toBeLessThan(firstSesionesRemoveColumnIndex);
   });
 });
