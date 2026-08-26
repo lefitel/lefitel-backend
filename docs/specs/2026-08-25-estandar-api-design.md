@@ -1,7 +1,7 @@
 # Estándar de la API — diseño
 
 Fija la convención de la superficie HTTP y del contrato de respuesta, y la aplica
-a las **104 rutas que no son de autenticación**. No añade ninguna función: cierra
+a las **105 rutas que no son de autenticación**. No añade ninguna función: cierra
 la puerta a que la próxima ruta se escriba de una séptima manera.
 
 > **Segunda versión.** La primera fue auditada por cuatro revisores con enfoques
@@ -13,12 +13,17 @@ la puerta a que la próxima ruta se escriba de una séptima manera.
 > en §8 junto a los demás, porque un descarte razonado vale lo mismo que una
 > regla.
 
-**Por qué el alcance se cuenta y el total no.** Mientras se escribía esto, la
-otra sesión añadió cuatro rutas de autenticación: `POST /api/auth/email/send`,
-`/email/verify`, `/password/forgot` y `/password/reset`. El total pasó de 114 a
-118 en unas horas. Las 104 que no son de autenticación no se movieron ni una, y
-por eso son la cifra de este documento: la otra sólo mide cuándo se hizo el
-recuento.
+**Ninguna cifra de este documento sirve para firmar nada, y hay que decirlo
+arriba.** Mientras se escribía la primera versión, la otra sesión añadió cuatro
+rutas de autenticación y el total pasó de 114 a 118 en unas horas. Esa versión
+concluyó que las que no son de autenticación «no se movieron ni una, y por eso
+son la cifra de este documento». Al día siguiente se movieron: la sesión de roles
+añadió `PATCH /api/rol/:id/desarchivar` y pasaron de 104 a **105**.
+
+En veinticuatro horas envejecieron cinco cifras más. La lección no es corregirlas
+—van corregidas— sino la que gobierna §9: **el criterio de terminado de cada
+tarea es un comando que se ejecuta, no un número escrito aquí.** Los números del
+texto sirven para entender el tamaño del trabajo. Nada más.
 
 ---
 
@@ -98,7 +103,7 @@ están, incluida `revicions` —escrita así, con su falta— y la mezcla de
 una migración con ventana de despliegue y sin ningún cambio visible para quien
 usa la aplicación.
 
-**104 rutas.** Las catorce de autenticación las lleva otra sesión, en el Plan 3
+**105 rutas.** Las catorce de autenticación las lleva otra sesión, en el Plan 3
 (correo verificado y recuperación de contraseña) y el Plan 4 (TOTP, passkeys):
 
 ```
@@ -134,15 +139,52 @@ en las dos pantallas peores sin necesitar ninguna librería.
 
 **Renombrar las tablas.** Ver arriba.
 
-**Versionar la API o mantener alias.** No hace falta, y el argumento es
-organizativo, no mecánico — la primera versión lo escribió al revés y merece la
-corrección: `CORS_ORIGIN` **es una lista separada por comas**, y el comentario de
+**Versionar la API.** No hace falta, y el argumento es organizativo, no mecánico
+— la primera versión lo escribió al revés y merece la corrección: `CORS_ORIGIN`
+**es una lista separada por comas**, y el comentario de
 [`security.ts`](../../src/config/security.ts) dice por qué («*so a second
 frontend, a preview deployment, is a variable and not a code change*»). Además
 `requireSameOrigin` sólo juzga escrituras que ya llevan cookie de sesión, y la
 cabecera `Origin` únicamente es infalsificable **desde un navegador**: un script
 pone la que quiera. Lo que sostiene la decisión es que no hay ningún otro cliente
 conocido y que los dos repositorios son nuestros — no que el mecanismo lo impida.
+
+**Mantener alias es otra cosa, y sí se hace.** La primera versión metía las dos
+en el mismo saco y con eso se cerraba la única salida barata a la ventana de
+despliegue. Son distintas: versionar es una forma permanente («la API tiene una
+`v1` y una `v2` para siempre»), y un alias es una tolerancia **temporal y con
+fecha de borrado** mientras el cliente viejo se apaga. Lo segundo no sólo se
+permite, es obligatorio en la familia C entera — §11 lo explica, y el motivo es
+que la aplicación se actualiza cuando el usuario pulsa un botón, no cuando
+despliega Vercel. El código de tolerancia se borra en el paso 3 de su propia
+tarea, y ese borrado está en la lista.
+
+---
+
+### Dónde para este documento
+
+Hay otras dos sesiones trabajando el mismo árbol, y sus fronteras no se declaran
+una vez sobre una lista de rutas: hay que decir **qué reglas no las alcanzan**,
+porque las de §3 y §4 están escritas en universal y un implementador diligente
+las aplicaría a todo.
+
+**Autenticación** — `/api/login`, `/api/auth/*` y los tres cambios de credencial
+bajo `/api/usuario`. No les aplican §3.3 (el sobre: `GET /api/auth/sessions`
+devuelve una colección y **no** se envuelve), §3.5 (los códigos: su `DELETE` de
+sesión no pasa a `204`), §3.6 salvo el manejador de 404, ni §4.1/§4.2. Y dos
+ficheros son suyos aunque este documento los toque: `api/src/app.ts` y
+`web/src/api/http.ts`, más el interceptor de `SesionProvider.tsx`.
+
+**Roles** — `/api/rol` entero, sus cuatro rutas, y en el cliente `Rol.api.ts`,
+`RolesPanel.tsx` y `PermisosPanel.tsx`. No les aplica ninguna regla de este
+documento. La única excepción es §6, que asigna `roles:ver` a `GET /api/rol/`
+para poder vaciar la lista de excepciones de lectura — y eso hay que acordarlo
+con ellos, porque el comentario que hoy encabeza ese controlador dice
+explícitamente lo contrario.
+
+**De los tres** — `routeGuards.test.ts`. Este documento le quita tres entradas en
+A1 y le vacía la lista en C5; la sesión de autenticación le añade rutas en su
+Plan 4. Cualquier cambio ahí se avisa.
 
 ---
 
@@ -202,7 +244,7 @@ Postgres: la ruta nueva disparando la fuga que §3.5 arregla.
 primera versión la apoyaba en que `GET /api/revision/5` devuelve las revisiones
 *del evento* 5 mientras `DELETE /api/revision/5` borra *la revisión* 5. Cierto —
 pero §7 borra ese `DELETE` y ese `PUT` por no tener cliente, así que para cuando
-llegue el tramo del renombrado la trampa ya no existe. Lo que queda en pie es más
+llegue D1, el renombrado, la trampa ya no existe. Lo que queda en pie es más
 sencillo y menos dramático: siete direcciones que se leen solas frente a cuatro
 convenciones que hay que memorizar.
 
@@ -265,11 +307,29 @@ colección vacía responde el sobre con `total: 0`, `totalPages: 1`.
 Dos cosas que la primera versión dijo mal y conviene no repetir: el precedente
 que citaba, `MAX_CONSULTA_CELLS = 300_000`, mide **celdas**, no filas; y existe
 `MAX_EXPORT_ROWS = 20_000` en el exportador, cuatro veces más laxo, que no
-mencionó. Los dos topes conviven porque miden cosas distintas —una exportación
-construye un fichero y se mete en su propio presupuesto de caudal; una lectura de
-listado va a una pantalla— pero eso hay que decirlo, no dejar dos números sueltos
-contradiciéndose. Y la respuesta de postes con `limit=all` ronda **0,7 MB**, no
-«decenas de megas»: el argumento del techo se sostiene sin exagerar la magnitud.
+mencionó. Y la respuesta de postes con `limit=all` ronda **0,7 MB**, no «decenas
+de megas»: el argumento del techo se sostiene sin exagerar la magnitud.
+
+**Pero la conciliación entre los dos topes que escribió la primera versión es
+falsa, y la auditoría del 26 de agosto la tumbó.** Decía que «una exportación
+construye un fichero y se mete en su propio presupuesto». Eso sólo vale para
+`POST /api/generador/exportar`, que construye el fichero **en el servidor**. Los
+botones de Excel, CSV y PDF de las pantallas de Postes y Eventos no hacen eso:
+piden todas las filas con `?export=true` y construyen el fichero **en el
+navegador**. Al quitar ese parámetro pasan a ser lecturas de listado y heredan el
+techo de 5.000 — o sea que en cuanto la tabla de eventos lo supere, **los tres
+botones de exportación dejan de funcionar con un `413`**, y los 20.000 que este
+párrafo cita quedan inalcanzables desde el navegador.
+
+Y hay un segundo uso que el nombre esconde: `exportPostes(true)` y
+`exportEventos(true)` **no exportan nada** — son el cargador de la pestaña
+«Archivados». Quitar `export=true` también la rompe.
+
+Las dos cosas se deciden al empezar C3, y son decisiones de verdad, no detalles:
+o el techo distingue por destino, o las exportaciones de navegador pasan a
+construirse en el servidor como las del generador, o la pestaña de archivados
+deja de pedir todas las filas de golpe. La tercera es la barata y probablemente
+la correcta.
 
 **Por qué el sobre también en los catálogos.** Un catálogo de doce materiales
 envuelto responde `totalPages: 1`, que hoy no aporta nada. Aporta el día que la
@@ -306,7 +366,7 @@ en singular (`export`, `count`, `query`).
 
 | Hoy | Después | Por qué |
 |---|---|---|
-| `/:id/desarchivar` (×9) | `/:id/restore` | Verbo de operación |
+| `/:id/desarchivar` (×10) | `/:id/restore` | Verbo de operación |
 | `/:id/reabrir` | `/:id/reopen` | Verbo |
 | `/:id/resolver` | `/:id/resolve` | Verbo |
 | `/exportar` | `/export` | Verbo |
@@ -341,7 +401,7 @@ más `postReporte`, `postDuplicar` y `UploadImage`. `POST /:id/resolver` y
 `POST /:id/reopen` son `200`: cambian el estado de algo que ya existía. (Hoy sólo
 dos de esas quince responden `201`.)
 
-**`204` sólo donde el archivado no informa de nada:** el `DELETE` de las nueve
+**`204` sólo donde el archivado no informa de nada:** el `DELETE` de las diez
 entidades con papelera. **`DELETE /api/files/orphans` y `/broken-refs` se quedan
 en `200` con su cuerpo**, porque devuelven cuántos ficheros limpiaron y esa cifra
 es la única salida de la pantalla de Archivos — un `204` no puede llevar cuerpo, y
@@ -361,12 +421,17 @@ error». El patrón correcto ya está escrito en casa — `handleError` en
 errores tipados a `400`/`413`/`429` con su propia frase y deja lo demás en
 neutro. Se extiende, no se inventa.
 
-**Los códigos van en el mismo tramo que la capa cliente (§9), y por eso.** Trece
-sitios del frontend comparan literalmente contra `200`. Desplegar `201`/`204`
+**Los códigos van en el mismo tramo que la capa cliente (C4 en §9), y por eso.**
+El frontend compara literalmente contra `200` en decenas de sitios —la primera
+versión decía trece, y la auditoría del 26 de agosto encontró 57 comparaciones
+repartidas en 25 ficheros, de las que al menos quince rompen de verdad—. La cifra
+exacta se recuenta al empezar C4 y vive en su test, no aquí. Desplegar `201`/`204`
 antes de arreglarlos significa que cada archivado correcto muestra «No se pudo
-archivar» y la fila sigue en pantalla; y en `AddRevisionSheet` el comentario del
-propio fichero documenta que ese fallo ya ocurrió una vez y costó una inspección
-de campo. Un tramo, un despliegue, ninguna ventana.
+archivar» y la fila sigue en pantalla, y que cada alta correcta muestra «No se
+pudo crear» sobre algo que sí se creó — con el riesgo de que la persona reintente
+y duplique. En `AddRevisionSheet` el comentario del propio fichero documenta que
+ese fallo ya ocurrió una vez y costó una inspección de campo. Y su test mockea
+`200` como éxito, así que seguirá verde con la pantalla rota.
 
 ### 3.6 El formato de error, que casi está resuelto
 
@@ -378,12 +443,14 @@ hechas y no lo estaban:
 - **Once respuestas no llevan `message`:** nueve `res.sendStatus(401)` con cuerpo
   vacío y dos `res.status(500).send("…")` de texto plano en
   [`upload.controller.ts`](../../src/controllers/upload.controller.ts). Las dos
-  de subida pasan a `{ message }`; las de `401` las lleva la otra sesión.
+  de subida pasan a `{ message }`. De los nueve `401`, siete son de la sesión de
+  autenticación; los otros dos están en `requirePermission.ts` y por tanto son de
+  éste: una petición que llega sin `id_rol` recibe hoy un cuerpo vacío.
 - **Falta el manejador de 404.** Una ruta que no existe no es un error, así que
   no llega al manejador global: cae en el `finalhandler` de Express, que responde
   **HTML**. Y el 404-de-ruta-inexistente es exactamente lo que fabrican los
   tramos que mueven direcciones. Se añade `app.use((req, res) => res.status(404)
-  .json({ message: … }))` al final, y es prerrequisito del tramo 6.
+  .json({ message: … }))` al final, y es prerrequisito de D1.
 
 ### 3.7 Toda ruta declara su permiso, lecturas incluidas
 
@@ -437,7 +504,7 @@ Lo que pasaba: todos los modelos que estos controladores editan son
 descartaba al crear; `withoutAuthor` no la descartaba al editar; y siete
 controladores de catálogo no pasaban por ninguno de los dos. Un `PUT` con
 `deletedAt` en el cuerpo archivaba la fila — y el rol Coordinador está definido
-con `archivar: false` en los diez módulos y `editar: true` en cuatro, así que la
+con `archivar: false` en nueve de los diez módulos y `editar: true` en cinco, así que la
 columna `archivar` de la matriz era decorativa para quien pudiera editar.
 
 **Y ningún `include` manda más de lo que la pantalla lee.** `PosteModel` ganó
@@ -448,7 +515,7 @@ saltándose la constante que existe para eso.
 
 **Queda pendiente la mitad ancha de esta regla:** veinticinco `include` siguen
 devolviendo la fila completa de ciudad, material o propietario donde la pantalla
-sólo usa el nombre. Eso es peso, no fuga de datos de autoría, y va en el tramo 3.
+sólo usa el nombre. Eso es peso, no fuga de datos de autoría, y va en C5.
 
 ---
 
@@ -456,11 +523,11 @@ sólo usa el nombre. Eso es peso, no fuga de datos de autoría, y va en el tramo
 
 ### 4.1 El cliente lanza, no devuelve
 
-Las 34 funciones que hacen `.then(r => r.status).catch(() => 400)` —en nueve
-módulos— pasan a devolver los datos y a propagar el fallo. Hoy un `403` por
-permiso, un `500` del servidor y una red caída llegan los tres como el número
-400, así que la información se destruye en la capa de API antes de que la
-pantalla pueda verla, y sólo cabe un mensaje.
+Las funciones que hacen `.then(r => r.status).catch(() => 400)` —cuántas son y en
+cuántos módulos se recuenta al empezar C4, no aquí— pasan a devolver los datos y
+a propagar el fallo. Hoy un `403` por permiso, un `500` del servidor y una red
+caída llegan los tres como el número 400, así que la información se destruye en
+la capa de API antes de que la pantalla pueda verla, y sólo cabe un mensaje.
 
 El criterio contrario ya existe en parte del repositorio, y la primera versión lo
 describió mal: `generador.api.ts` propaga y traduce con `mensajeDeError()`;
@@ -552,6 +619,7 @@ consumir:
 | `/api/evento/opciones` | `obs` | `id, name, id_tipoObs` — el selector agrupa por tipo |
 | | `tipoObs` | `id, name` |
 | `/api/reporte/opciones` | `tramos` | `id_ciudadA, id_ciudadB` — pares, no filas |
+| | `ciudad` | `id, name, lat, lng` — **`ReportRecorrido` traza la línea con ellas**; sin `lat`/`lng` la guarda sale por la primera línea y la pantalla se dibuja sin recorrido |
 | | resto | `id, name` |
 | `/api/usuario/opciones` | `rol` | `id, name` |
 
@@ -593,18 +661,33 @@ Un endpoint de opciones puede responder 403 —si el rol no tiene el permiso de 
 pantalla— pero **nunca devuelve un bloque a medias**. La pantalla que lo pida
 maneja el 403 como lo que es: no puede usar ese formulario.
 
-Los consumidores que se migran, que son la lista completa del tramo 3:
-`PosteSheet`, `ReportTramoSec`, `ReportGeneralSec`, `ReportRecorrido`,
-`EventoSheet`, `AddEventoPageSheet`, `UsuarioSheet` y la edición en línea de
-`poste/index.tsx`. Las cinco pantallas de Parámetros y `CiudadesPage` siguen con
-los endpoints de administración, que es lo suyo.
+Los consumidores que se migran en C2: `PosteSheet`, `ReportTramoSec`,
+`ReportGeneralSec`, `ReportRecorrido`, `EventoSheet`, `AddEventoPageSheet`,
+`UsuarioSheet` y la edición en línea de `poste/index.tsx`. Las cinco pantallas de
+Parámetros y `CiudadesPage` siguen con los endpoints de administración, que es lo
+suyo.
+
+**Y dos que la primera versión se dejó fuera llamándose «la lista completa».** La
+auditoría del 26 de agosto las encontró, y las dos importan porque son el único
+camino hacia un dato que ningún endpoint de opciones sirve todavía:
+
+- `useTramoNeighbors.ts` es el **único** llamante de `GET /api/poste/tramos`, y
+  de él cuelgan las tres pantallas de informes. §5 promete un bloque `tramos` en
+  `/api/reporte/opciones`; o ese bloque no tiene quien lo use, o hay que tocar
+  este fichero. Con los roles sembrados no rompe —Cliente tiene `postes:ver`—
+  pero un rol de sólo informes se quedaría sin el desplegable de tramos.
+- `AddEventoPageSheet` pide el listado de postes con `exportPostes()`, o sea con
+  `?export=true`, que C3 borra. `/api/evento/opciones` cubre sus otros dos
+  catálogos pero no los postes, y **añadir un bloque de postes ahí sería servir
+  el registro de postes bajo `eventos:ver`, que es peor que el problema.** Queda
+  como decisión de C3, no de C2, y hay que tomarla antes de quitar `export=true`.
 
 ---
 
 ## 6. Cómo quedan las veinte lecturas
 
-**Con las direcciones de hoy**, porque este cierre es el tramo 3 y los
-sub-recursos son el tramo 6 — la primera versión las nombraba ya renombradas y
+**Con las direcciones de hoy**, porque este cierre es C5 y los
+sub-recursos son D1 — la primera versión las nombraba ya renombradas y
 obligaba a traducir la tabla de vuelta.
 
 | Permiso | Rutas |
@@ -626,7 +709,9 @@ expediente de actividad de cada empleado — y ese controlador no declara
 `eventos:ver`: el generador marca la entidad `usuario` como `staffOnly` contra
 `seguridad.ver`, y la bitácora usa `requireSelfOrPermission("bitacora","ver",…)`.
 
-**Dos advertencias sobre lo que este cierre no consigue**, para no vender humo:
+**Cuatro advertencias sobre lo que este cierre no consigue**, para no vender
+humo. Las dos primeras estaban desde la primera versión; las dos últimas las
+encontró la auditoría del 26 de agosto, y la cuarta es la más incómoda.
 
 - **`GET /api/poste/tramos` gateado no cierra nada** mientras el generador siga
   por debajo: el rol Cliente tiene `generador: TODO`, y el generador sirve
@@ -636,6 +721,29 @@ expediente de actividad de cada empleado — y ese controlador no declara
   `searchPoste` y `searchEvento` incluyan material, propietario y ciudades sin
   `attributes`. Por eso los veinticinco `include` de §3.9 van en el mismo tramo:
   cerrar la puerta principal y dejar la de servicio abierta no es cerrar.
+- **Y los propios endpoints de opciones vuelven a servir esos catálogos bajo
+  otros permisos.** `/api/poste/opciones` entrega adss, material y propietario
+  con `postes:ver`; `/api/evento/opciones` entrega obs y tipoObs con
+  `eventos:ver`; `/api/reporte/opciones` entrega cuatro de los cinco con
+  `reportes:ver`. El rol Cliente tiene los tres. O sea que para los tres roles
+  sembrados hoy, **cerrar `parametros:ver` no le quita a nadie el acceso a los
+  nombres de los catálogos.** Eso no invalida el diseño —una pantalla que puede
+  ver postes puede ver las opciones del formulario de postes, y §5.1 explica por
+  qué el permiso es el del formulario— pero sí obliga a decir con precisión qué
+  se cierra: la vista de administración, con `description`, las marcas de tiempo
+  y el `?archived=true`. No los nombres. §1 lo vendía como un cambio de capacidad
+  y para los roles de hoy no lo es.
+- **La lectura más grande de la API se queda fuera y el test no puede verla.**
+  `express.static` está montado en la raíz de `app.ts`, once líneas antes del
+  primer `authenticate`, así que **toda fotografía del disco** —de evento, de
+  poste, de solución y el retrato de cada cuenta— está servida a cualquiera, sin
+  sesión. Los nombres tampoco son secretos: viajan dentro de cada listado. Este
+  trabajo no lo abre ni lo cierra, pero `routeGuards.test.ts` sólo enumera rutas
+  y eso es un middleware sin ruta, así que C5 se declararía terminado —«toda
+  lectura declara su permiso»— con esa puerta abierta. Queda escrito aquí para
+  que la frase no mienta. Cerrarlo es un arco propio: hay que decidir si las
+  imágenes se sirven autenticadas, con URL firmada, o se quedan públicas a
+  sabiendas.
 
 ---
 
@@ -668,17 +776,25 @@ registro de cómo se resolvió. `GET /api/solucion/` encima no declara ningún
 permiso —lo dice su propio controlador—, así que borrarla cierra una lectura
 abierta a cualquier sesión.
 
-**Tres nunca tuvieron cliente, y ahí está el matiz.** `PUT /api/solucion/:id`,
+**Tres no tienen cliente hoy, y ahí está el matiz.** `PUT /api/solucion/:id`,
 `PUT /api/revision/:id` y `DELETE /api/revision/:id` son el único sitio del
-sistema donde se corrige un registro ya escrito, y no aparecen en la historia de
-`web` ni una sola vez.
+sistema donde se corrige un registro ya escrito.
 
-Se borran igual, y la razón es que **hoy tampoco dan esa capacidad**: sin
-pantalla que las llame, corregir una solución ya exige entrar a la base de datos.
-Lo que se pierde no es una función, es una puerta sin cerradura. «Corregir un
-registro ajeno» trae detrás una pregunta de permisos que nadie ha contestado
-—¿un Técnico corrige la suya, la de otro, hasta cuándo?— y una ruta muerta no la
-contesta: solo espera a que alguien la enchufe sin pensarla.
+Corrección de la primera redacción de este apartado, que decía que las tres
+«no aparecen en la historia de `web` ni una sola vez». Es cierto para las dos de
+`revision`, y **falso para la de `solucion`**: el cliente la llamaba desde 2024
+bajo el nombre `editSolucion`, y se retiró en `4d1b4fe` (17 de marzo) junto con
+el resto del CRUD. El error de comprobación fue buscar en el repositorio del
+cliente el nombre que usa el servidor. El dato correcto **refuerza** el borrado
+en vez de debilitarlo: no es una ruta que nadie quiso nunca, es una que se
+retiró a propósito hace cinco meses.
+
+Se borran igual, y la razón es que **hoy no dan esa capacidad**: sin pantalla
+que las llame, corregir una solución ya exige entrar a la base de datos. Lo que
+se pierde no es una función, es una puerta sin cerradura. «Corregir un registro
+ajeno» trae detrás una pregunta de permisos que nadie ha contestado —¿un Técnico
+corrige la suya, la de otro, hasta cuándo?— y una ruta muerta no la contesta:
+sólo espera a que alguien la enchufe sin pensarla.
 
 **Pendiente de producto, anotado aquí para no perderlo.** Corregir una solución o
 una revisión necesita pantalla, permiso propio y rastro en la bitácora, igual que
@@ -687,28 +803,49 @@ volver a resolver — y conviene saber que reabrir **borra la foto del disco de
 forma irrecuperable** (`deleteImageFile(solucionImage)` en `evento.controller.ts`),
 aunque la fila sobreviva porque el modelo es `paranoid`.
 
-**Lo que cuesta borrarlas.** `authorship.test.ts` —el test que vigila el agujero
-de `deletedAt`— llama directamente a `createSolucion`, `updateSolucion` y
-`updateRevision`. Cuatro de sus casos hay que reescribirlos contra los
-controladores que queden. El agujero sigue vigilado; se vigila desde otra puerta.
+**Lo que cuesta borrarlas, que es más de lo que decía la primera redacción.** Son
+dos ficheros de test, no uno:
 
-**Las tres de `/api/rol` no entran en este apartado.** La gestión de roles la
-lleva otra sesión. `POST /api/rol/`, `PUT /api/rol/:id` y `DELETE /api/rol/:id`
-se quedan donde están, este documento no las toca, y el recuento las cuenta como
-vivas. Lo único que conviene que sepa quien las coja: `RolModel` no es
-`paranoid` y `permisos.id_rol` tiene `onDelete: "CASCADE"`, así que hoy
-`DELETE /api/rol/:id` destruye las 40 filas de permisos del rol sin vuelta atrás.
+- `authorship.test.ts` —el que vigila el agujero de `deletedAt`— llama
+  directamente a `createSolucion`, `updateSolucion` y `updateRevision`. Son
+  **cinco** casos, no cuatro, y uno de ellos no se reescribe: el que fija la rama
+  sin `:id` de `updateRevision`, que también crea, no tiene equivalente en ningún
+  sitio después. Ése se borra.
+- `routeGuards.test.ts`, que §12 declara intocable, nombra tres de las rutas que
+  se van: `GET /api/solucion/` en `READ_GATE_NOT_APPLICABLE`, y las dos de
+  escritura de `revision` en `EVENTOS_GATES`. Si no se quitan a la vez, **la
+  suite queda roja** — y es justamente el fichero que gobierna la seguridad de
+  las 105 rutas, así que dejarlo rojo un rato no es una opción.
 
-Recuento final: **104 − 7 borradas + 5 nuevas (cuatro de opciones y `autores`)
-= 102 rutas en 20 montajes.** El manejador de 404 de §3.6 no entra en la cuenta:
-no es una ruta, es lo que responde cuando no hay ninguna.
+Y quedan seis imports huérfanos que tumban el lint. El agujero sigue vigilado; se
+vigila desde otra puerta.
+
+**Las cuatro de `/api/rol` no entran en este apartado.** La gestión de roles la
+lleva otra sesión. `POST /api/rol/`, `PUT /api/rol/:id`, `DELETE /api/rol/:id` y
+`PATCH /api/rol/:id/desarchivar` se quedan donde están, este documento no las
+toca, y el recuento las cuenta como vivas.
+
+La primera redacción decía aquí que `RolModel` no era `paranoid` y que el
+`DELETE` destruía las 40 filas de permisos en cascada. **Ya no es cierto**, y
+dejó de serlo dieciocho minutos antes de que se escribiera: el commit `0c91d55`
+puso `paranoid: true` en el modelo, añadió la migración que le da su columna de
+archivado, y metió un `409` que se niega a archivar un rol mientras haya cuentas
+usándolo. Es el ejemplo exacto de por qué §9 pone que **cada tarea se audita
+antes de empezarla**: en este árbol trabajan tres sesiones y un párrafo puede
+nacer caducado.
+
+Recuento final: **105 − 7 borradas + 5 nuevas (cuatro de opciones y `autores`)
+= 103 rutas.** Y con la advertencia que gobierna todo este documento desde la
+segunda auditoría: esa cifra es para entender el tamaño, no para firmar nada. Se
+movió dos veces en dos días. El manejador de 404 de §3.6 tampoco entra en la
+cuenta: no es una ruta, es lo que responde cuando no hay ninguna.
 
 ---
 
 ## 8. Lo que se descartó, y por qué
 
 **El sello multi-permiso para un catálogo único.** Ver §5.1. Habría tocado la
-infraestructura de permisos —lo que gobierna las 104 rutas a la vez— para
+infraestructura de permisos —lo que gobierna las 105 rutas a la vez— para
 resolver un problema creado al juntar ocho listas en una puerta.
 
 **Todo en inglés.** Era la lectura literal de la regla de la casa, y llevaba a
@@ -716,7 +853,7 @@ dos sitios malos: traducir el vocabulario del negocio empeora los nombres (§3.4
 y los permisos son datos, así que el estándar nacía con una excepción forzosa.
 
 **Todo en español.** Obliga a pelearse con Sequelize por `createdAt` y
-`deletedAt` en diecisiete modelos para no ganar nada que nadie note.
+`deletedAt` en diecinueve modelos para no ganar nada que nadie note.
 
 **Sobre sólo donde hoy hay paginación.** Era la opción barata: no tocaba ningún
 consumidor. La clasificación «acotada / no acotada» es una apuesta sobre el
@@ -742,53 +879,207 @@ administración que no le corresponde.
 
 ---
 
-## 9. Orden del trabajo
+## 9. El trabajo, tarea a tarea
 
-Por lo que cuesta **no** hacerlo. Los dos primeros ya están hechos.
+La primera versión de este apartado agrupaba por materia: «los códigos de
+estado», «los permisos», «los nombres». La segunda auditoría —26 de agosto,
+cuatro revisores con encargos separados— demostró que ese corte estaba mal
+hecho, y no por gusto: metía en la misma caja cosas que se despliegan de formas
+incompatibles. El tramo 1 juntaba borrar código muerto, que no puede romper
+nada, con cambiar seis métodos HTTP, que rompe a todo cliente que tenga la
+aplicación instalada. Una caja así no se puede desplegar de ninguna manera
+correcta.
 
-| | Qué | Estado / riesgo |
+**El corte nuevo es por radio de daño al desplegar**, no por materia. Salen
+catorce tareas en cuatro familias, y las tres primeras familias se pueden hacer
+en cualquier orden dentro de la suya.
+
+### Las dos reglas que gobiernan la lista
+
+**Primera: cada tarea se audita antes y después.** Antes, para que no se empiece
+media definida: ¿el criterio de terminado es cierto?, ¿qué rompe que no esté
+dicho?, ¿sigue el árbol donde el documento cree que está? Después, para no dar
+por bueno lo que no lo está. No es una lectura por encima: son revisores
+adversariales, del tamaño que pida la tarea.
+
+La regla nace de un hecho concreto. El criterio de terminado del antiguo tramo 1
+ordenaba que «`/api/solucion` no existe», y esa ruta tiene un consumidor vivo
+cuyo cliente se traga el fallo con un `.catch(() => null)`: cumplirlo al pie de
+la letra habría pintado **todo evento resuelto como pendiente**, sin un solo
+error en consola. Lo encontró una auditoría, no una relectura.
+
+**Segunda: el criterio de terminado es un test, no una cifra.** La primera
+versión decía cosas como «los 13 sitios que comparan con `200` están migrados» o
+«los 18 ficheros». En veinticuatro horas se movieron cinco de esas cifras, porque
+hay otras dos sesiones trabajando el mismo árbol. Una cifra en un documento
+envejece en silencio; un test que la asevera se pone rojo y avisa. Así que **el
+número vive en el test y el documento apunta al test.**
+
+Corolario incómodo pero cierto: **no hay CI en ninguno de los dos repositorios.**
+No existe `.github/`, `api/Dockerfile` no ejecuta `npm test` y Vercel sólo hace
+`vite build`. Toda verificación es manual, y por eso cada tarea nombra el comando
+exacto que hay que ejecutar y en qué repositorio.
+
+### Ya hecho
+
+| | Qué | Estado |
 |---|---|---|
 | **0a** | El cuerpo de la petición deja de poder archivar filas (§3.9) | ✅ `ce91b1b` — 10 ficheros |
 | **0b** | Autoría de postes, nombre de cuenta en bitácora, presupuesto de subidas | ✅ `64431bf` — 11 ficheros |
-| **1** | Los seis `PUT`→`POST`; las 7 rutas muertas; el manejador de 404; `ARCHITECTURE.md` | **Riesgo medio, sin red** |
-| **2** | Los 97 sitios que filtran `error.message`, con el reparto esperado / inesperado | Bajo, mecánico |
-| **3** | Los cuatro endpoints de opciones; cerrar las veinte lecturas; `bitacora/autores`; los 25 `include` anchos | Medio. Toca pantallas |
-| **4** | El sobre único en los 23 listados; `limit=all` y su techo | Medio. Cambio de contrato |
-| **5** | `201`/`204` **y** la capa cliente, en un solo despliegue | Medio. Las dos orillas |
-| **6** | Los nombres (§3.4) y los sub-recursos (§3.2) | El que más ficheros toca |
+| **T0** | Este documento al día tras la segunda auditoría | ✅ — cifras, criterios, despliegue y este apartado |
 
-**El tramo 1 no es «riesgo ninguno», que es lo que decía la primera versión.** No
-existe un solo test que ejercite `/api/reporte`: `grep` de esa ruta en los tests
-devuelve vacío, y `routeGuards.test.ts` acepta `PUT` y `POST` por igual, así que
-el cambio le es invisible. Si al mover las seis se olvida una de las seis
-funciones de `reporte.api.ts`, la ruta no existe, Express responde 404 y **CI
-sigue verde** con seis pantallas de informes rotas. Su primer entregable es el
-test que hoy falta.
+### Familia A — sólo servidor, no rompe a nadie
 
-**Y «reutilizando el limitador del generador» no se puede.** `perUser` y los
-cuatro limitadores son `const` **sin `export`** dentro de `generador.routes.ts`.
-Se mudan a `src/middleware/reportLimiters.ts` sin cambiar sus números, y los seis
-informes fijos comparten un cubo con el mismo presupuesto que `consulta`, porque
-cuestan lo mismo.
+Ninguna necesita que el cliente se entere. Se despliegan cuando convenga, sin
+coordinar con Vercel.
 
-**Terminado significa**, por tramo:
+**A1 · Borrar las siete rutas muertas.** Las de §7. Arrastra tres cosas que no
+son opcionales: tres entradas de `routeGuards.test.ts` (`READ_GATE_NOT_APPLICABLE`
+y `EVENTOS_GATES`) que dejan la suite roja si no se quitan, cinco casos de
+`authorship.test.ts` que llaman directamente a los controladores que se van, y
+seis imports que quedan huérfanos y tumban el lint. **Cuidado con `/api/solucion`:
+no desaparece.** Conserva `GET /evento/:id_evento`, que sí tiene consumidor; el
+montaje se va en D1, no aquí.
 
-- **1** — las seis rutas responden a `POST` con la misma primera fila que
-  devolvían por `PUT`, hay test que lo comprueba, `/api/solucion` no existe, una
-  dirección inventada responde `404` con `{message}` en JSON.
-- **2** — `grep` de `error.message` dentro de un `catch` que responde no
-  encuentra nada en los 18 ficheros; una criticidad fuera de rango sigue
-  diciendo qué está mal.
-- **3** — `READ_GATE_NOT_APPLICABLE` vacía de lo que no es autenticación; las
-  ocho pantallas migradas hacen una petición de opciones cada una; ningún
-  `include` sin `attributes`.
-- **4** — los 23 listados responden el sobre; `PostePaginatedResponse` y
-  `EventoPaginatedResponse` son un `Paginated<T>`; ninguna llamada pasa
-  `export=true`.
-- **5** — las 34 funciones propagan; los 13 sitios que comparan con `200` están
-  migrados; el auto-logout de `SesionProvider` sigue disparando con 401.
-- **6** — ninguna ruta con mayúsculas ni verbo en español; los tests que citan
-  direcciones, actualizados.
+```
+cd api && grep -cE 'router\.(post|put|delete)\(' src/routes/solucion.routes.ts   # 0
+cd api && npx vitest run && npm run lint && npm run typecheck
+```
+
+**A2 · El manejador de 404 en JSON (§3.6).** Vive en `src/app.ts`, que es
+fichero de la sesión de autenticación: hay que avisar. Y decide dos cosas que la
+primera versión daba por obvias: si va acotado a `/api` o es global —porque
+`express.static` está montado en la raíz y un manejador global cambiaría también
+lo que devuelve una imagen que falta— y si va antes o después del manejador de
+error terminal.
+
+```
+cd api && npx vitest run src/app.notfound.test.ts
+```
+
+**A3 · Sacar `error.message` de las respuestas de 500 (§3.5).** Mecánico, unos
+veinte controladores. Uno de ellos es `rol.controller.ts`, de la sesión de roles:
+o se coordina, o se deja fuera y se dice. El criterio no es contar ficheros, es
+que el test lo prohíba.
+
+```
+cd api && npx vitest run src/controllers/errorShape.test.ts
+```
+
+### Familia B — aditivas, no cambian nada existente
+
+Añaden rutas que todavía no llama nadie. Si salen mal, no rompen nada, porque no
+hay quien las use hasta la familia C.
+
+**B1 · Los cuatro endpoints de opciones, en el servidor (§5).** Con una trampa
+que el propio documento describe en §3.2 y que sus rutas nuevas pisaban:
+`/opciones` es un literal y hay que **declararlo antes** del `/:id` de cada
+router, o Express se lo come y acaba consultando `id = "opciones"`. Afecta a
+`poste`, `evento` y `usuario`.
+
+```
+cd api && npx vitest run src/routes/opciones.test.ts
+```
+
+**B2 · `GET /api/bitacora/autores` (§5.4).** Misma trampa: antes de
+`/:id_usuario`.
+
+```
+cd api && npx vitest run src/controllers/bitacora.autores.test.ts
+```
+
+**B3 · Los limitadores del generador a su propio fichero, y aplicados a los seis
+informes.** Hoy son `const` sin `export` dentro de `generador.routes.ts`. Se
+mudan a `src/middleware/reportLimiters.ts` sin cambiar sus números. **Decisión
+pendiente:** si los seis informes fijos comparten cubo con
+`POST /generador/consulta` —y entonces tirar informes se come el presupuesto del
+generador— o tienen cubo propio con el mismo caudal. Se elige antes de empezar la
+tarea.
+
+```
+cd api && npx vitest run src/middleware/reportLimiters.test.ts
+```
+
+### Familia C — las dos orillas
+
+Aquí está todo lo que cambia un contrato, y todo se hace con la **maniobra de
+tres pasos** de §11. Cada tarea son por tanto tres despliegues, no uno.
+
+**C1 · Los seis informes, de `PUT` a `POST` (§3.1).** Paso 1: el servidor acepta
+los dos métodos. Paso 2: `web/src/api/reporte.api.ts` pasa a `POST`. Paso 3: el
+servidor retira el `PUT`. El primer entregable no es ninguno de los tres: **es el
+test que hoy no existe.** Ninguna prueba ejercita `/api/reporte`, y el único test
+que toca esos controladores se auto-omite si no hay Postgres, que es peor que
+nada porque pasa en verde sin haberse ejecutado. Antes de mover un método hay que
+decidir qué comprueba ese test y con qué datos, porque no hay base de pruebas.
+
+```
+cd api && npx vitest run src/controllers/reporte.contract.test.ts
+cd web && grep -c 'axios.put' src/api/reporte.api.ts    # 0 tras el paso 2
+```
+
+**C2 · El cliente pasa a usar los endpoints de opciones (§5.5).** Ocho pantallas.
+De diez peticiones de catálogo a dos. No retira nada del servidor, así que no
+necesita paso 3 — pero sí necesita que B1 esté desplegado antes.
+
+```
+cd web && npx vitest run
+```
+
+**C3 · El sobre único en los listados (§3.3).** Y con él, **la decisión del
+centinela, que hay que rehacer.** `limit=all` contra el servidor de hoy no falla:
+`Number("all")` es `NaN`, `NaN || 50` es `50`, y devuelve cincuenta filas en
+silencio — exactamente el fallo por el que se descartó `limit=0`. No es un
+defecto del centinela, es la ventana de despliegue; se resuelve con la maniobra
+de tres pasos, no cambiando de centinela.
+
+```
+cd api && npx vitest run src/routes/listShape.test.ts
+```
+
+**C4 · `201`/`204` y la capa cliente (§3.5, §4.1).** La tarea más grande de las
+catorce. **La cifra de la primera versión estaba muy corta:** hay 57
+comparaciones literales con `200` repartidas en 25 ficheros de `web/src`, de las
+cuales las que rompen de verdad son al menos quince, cada una con su mensaje
+falso — «No se pudo archivar» sobre una fila que sí se archivó, «No se pudo
+crear» sobre algo ya creado, con el riesgo de que el usuario reintente y
+duplique. Choca con `http.ts` y `SesionProvider.tsx`, de la sesión de
+autenticación, y con `RolesPanel.tsx` y `Rol.api.ts`, de la de roles.
+
+```
+cd web && npx vitest run src/api/statusPropagation.test.ts
+cd api && npx vitest run src/routes/statusCodes.test.ts
+```
+
+**C5 · Cerrar las veinte lecturas sin permiso (§3.7, §6).** Dos pasos, no tres:
+el cliente pide bien primero (C2), se cierra después. Rompe a cualquier rol que
+no tenga el permiso, así que se comprueba contra los roles sembrados antes de
+desplegar. **Y hay que escribir la excepción**: `express.static` está montado en
+la raíz once líneas antes del primer `authenticate`, así que toda fotografía del
+disco —eventos, postes y el retrato de cada cuenta— está servida a cualquiera sin
+sesión. Este trabajo no lo abre ni lo cierra, pero no se puede declarar «toda
+lectura tiene permiso» sin decirlo, porque el test que lo vigila no puede verlo:
+sólo enumera rutas, y eso es un middleware sin ruta.
+
+```
+cd api && npx vitest run src/routes/routeGuards.test.ts
+```
+
+### Familia D — al final
+
+**D1 · Los nombres y los sub-recursos (§3.2, §3.4).** Cosmético, y el que más
+ficheros toca. Aquí se mueve `GET /api/solucion/evento/:id_evento` a
+`GET /api/evento/:id/solucion`, y con eso sí desaparece el montaje de
+`/api/solucion`. Toca `App.tsx` y `menuItems.ts`, que la sesión de roles está
+tocando ahora mismo. Y el test de §3.4 hay que escribirlo sobre **la tabla
+montada**, no sobre los ficheros fuente: los dos únicos segmentos con mayúsculas
+de toda la API son prefijos de montaje de `app.ts`, así que un test que recorra
+`src/routes/*.ts` pasa hoy sin cambiar nada y seguiría pasando aunque la tarea no
+se hiciera.
+
+```
+cd api && npx vitest run src/routes/naming.test.ts
+```
 
 ---
 
@@ -797,17 +1088,22 @@ cuestan lo mismo.
 Una regla sin forma de comprobarse es una recomendación. La primera versión
 dejaba seis reglas sin verificación, incluida la orilla del cliente entera.
 
+**Y cada tarea, además, se audita antes y después** — ver §9. La tabla de abajo
+dice cómo se comprueba cada regla; la auditoría es otra cosa y no la sustituye:
+el test dice que el código hace lo que dice el documento, y la auditoría dice si
+el documento sigue teniendo razón.
+
 | Regla | Cómo se comprueba |
 |---|---|
-| 3.1 método | El test de contrato de los seis informes (tramo 1) |
-| 3.2 sub-recursos y orden de declaración | Test que recorre las rutas montadas y falla si un literal se declara después de un paramétrico del mismo nivel — es una propiedad del stack de Express, perfectamente asertable |
-| 3.3 sobre | Test con la **lista escrita a mano** de los 23 listados. Derivarlo es imposible: `res.json(x)` no revela la forma de `x`, y ése fue el error de la primera versión |
-| 3.3 techo y `limit=all` | Test de `limit=all` sobre una colección por encima y por debajo del tope |
-| 3.4 nombres | Test que recorre `src/routes/*.routes.ts` y falla si un segmento tiene mayúsculas o un verbo fuera de la lista |
+| 3.1 método | El test de contrato de los seis informes (C1), que hay que escribir antes de mover nada |
+| 3.2 sub-recursos y orden de declaración | Test que recorre **las rutas montadas** y falla si un literal se declara después de un paramétrico del mismo nivel. Se escribe en B1, no en D1: las rutas de opciones son las primeras que pisan esa trampa |
+| 3.3 sobre | Test con la **lista escrita a mano** de los listados. Derivarlo es imposible: `res.json(x)` no revela la forma de `x`, y ése fue el error de la primera versión. La lista se cuenta al empezar C3, no ahora: hoy ya es uno menos que ayer porque A1 borra uno |
+| 3.3 techo y centinela | Test del centinela sobre una colección por encima y por debajo del tope, más un caso del valor que el servidor viejo interpretaba como `50` |
+| 3.4 nombres | Test que recorre **la tabla montada** —no los ficheros— y falla si un segmento tiene mayúsculas o un verbo fuera de la lista |
 | 3.5 códigos | Test por método sobre las rutas que crean y archivan |
 | 3.5 `error.message` | Test que lo prohíbe **en cualquier parte del cuerpo de un `catch` que responde**, no sólo dentro del `res.json` — la forma con variable intermedia es la mayoritaria. Acotado al `500`: el generador lo devuelve a propósito en `400`/`413`/`429`, y son frases escritas para el usuario |
 | 3.6 formato de error | Test de que una dirección inexistente responde JSON |
-| 3.7 permisos | `routeGuards.test.ts`, que ya existe |
+| 3.7 permisos | `routeGuards.test.ts`, que ya existe — con la excepción de `express.static` escrita, porque el test no puede verla |
 | 3.8 propiedad | `routeGuards.test.ts` ya distingue el gate de propiedad del de permiso; se añade que el tercer argumento coincida con el parámetro de la ruta |
 | 3.9 entrada | ✅ `requestShape.test.ts` y `responseShape.test.ts`, ya escritos |
 | 4.1 / 4.2 cliente | Test en `web`: un 403, un 500 y un fallo de red producen `status` 403, 500 y 0; y el auto-logout sigue disparando con 401 |
@@ -819,44 +1115,76 @@ dejaba seis reglas sin verificación, incluida la orilla del cliente entera.
 
 `api` va a Coolify y `web` a Vercel: son dos tuberías, y entre una y otra hay una
 ventana. La primera versión lo despachaba con «para eso sirve desplegar los dos
-repositorios juntos», que no existe. Los tramos 3, 4, 5 y 6 cambian el contrato,
-así que cada uno necesita su orden.
+repositorios juntos», que no existe. La segunda decía «los dos a la vez» para dos
+tramos, que tampoco.
 
-| Tramo | Orden | Por qué |
-|---|---|---|
-| 1 | Servidor primero | El frontend no llama a lo que se borra. Los seis informes van con el frontend, en el mismo despliegue |
-| 2 | Servidor solo | No cambia ningún contrato |
-| 3 | Servidor primero | Los endpoints de opciones deben existir antes de que nadie los pida; el cierre de las lecturas, **después** del frontend migrado |
-| 4 | **Frontend primero, tolerando las dos formas** | Ningún orden funciona solo: si sale la API antes, los consumidores de array reciben un objeto; si sale el frontend antes, hace `.data` sobre un array |
-| 5 | Los dos a la vez | Es lo que hace que este tramo sea uno solo (§3.5) |
-| 6 | Frontend primero, llamando a la dirección nueva con reintento a la vieja | Un renombrado produce 404 en la ventana |
+**Y la ventana es mucho peor de lo que parece: no dura minutos, puede durar
+semanas.** `web` es una aplicación instalable, y su service worker está
+configurado con `registerType: "prompt"` (`web/vite.config.ts`). Eso significa
+que el navegador se descarga la versión nueva **y espera**: no la aplica hasta
+que la persona pulse «Actualizar». Un técnico de campo con la aplicación
+instalada en el móvil puede seguir ejecutando el paquete de hace semanas contra
+la API de hoy, y nadie se entera.
 
-**El código de tolerancia de los tramos 4 y 6 se borra en el tramo siguiente, y
-su borrado es una tarea del plan, no una nota.** `Array.isArray(r.data) ? r.data
-: r.data.data` es de las cosas que se quedan cinco años si nadie las apunta.
+De ahí la regla que gobierna la familia C entera:
+
+> **Ningún cambio puede romper al cliente viejo.** No existe «los dos a la vez».
+
+Y de ahí la única maniobra segura, que son tres despliegues:
+
+1. **El servidor acepta lo viejo y lo nuevo.** Nadie se rompe: el cliente antiguo
+   sigue funcionando, el nuevo ya cabe.
+2. **El cliente pasa a lo nuevo.** Sigue sin romperse nadie: el servidor entiende
+   las dos formas.
+3. **El servidor retira lo viejo.** Éste es el único paso peligroso, y es el que
+   hay que aguantar sin dar hasta saber que ya nadie usa la forma vieja.
+
+**Cómo saber cuándo dar el paso 3 es una decisión que no está tomada.** Hoy no
+hay forma de saberlo: nadie cuenta quién llama a la forma antigua. Dos salidas
+razonables, y hay que elegir una en C1, que es la primera tarea que la necesita:
+contar el uso de la forma vieja en la bitácora y esperar a que llegue a cero, o
+fijar un plazo largo y asumirlo. Contar es más trabajo y es la respuesta
+correcta; el plazo es más barato y se equivoca en silencio.
+
+**El código de tolerancia que introduce el paso 1 se borra en el paso 3, y su
+borrado es una tarea del plan, no una nota.** `Array.isArray(r.data) ? r.data :
+r.data.data` es de las cosas que se quedan cinco años si nadie las apunta.
+
+Las familias A y B no necesitan nada de esto: A no cambia ningún contrato y B
+sólo añade.
 
 ---
 
 ## 12. Lo que no cambia
 
 El formato de error `{ message }` y su manejador global. `requireSelfOrPermission`
-y que la propiedad no sea un permiso. Los cuatro limitadores del generador y su
-exportación de una en una. Los `separate: true` que evitan el producto cartesiano
-y la subconsulta de eventos pendientes. Los permisos como `modulo` y `accion` en
-español y en la base de datos. Y `routeGuards.test.ts`, que no se sustituye: se le
-vacía la lista de excepciones.
+y que la propiedad no sea un permiso. Los cuatro limitadores del generador y sus
+números —cambia dónde viven, no cuánto dejan pasar (B3)—. Los `separate: true`
+que evitan el producto cartesiano y la subconsulta de eventos pendientes. Los
+permisos como `modulo` y `accion` en español y en la base de datos. Y
+`routeGuards.test.ts`, que no se sustituye: se le quitan tres entradas en A1 y se
+le vacía la lista de excepciones en C5.
 
 De la paginación de postes y eventos no cambian el tope de 100 por página ni sus
 optimizaciones. **La lectura de `limit` sí cambia** (§3.3) — la primera versión
 declaraba intocable toda la paginación en una sección y la modificaba en otra.
 
+Y no cambia nada de lo que llevan las otras dos sesiones: las catorce rutas de
+autenticación, y `/api/rol` con su pantalla de roles.
+
 ---
 
 **Fuentes.** `src/routes/*.routes.ts`, `src/app.ts`, `src/routes/routeGuards.test.ts`,
-`src/controllers/*.ts`, `src/permissions/matrix.ts`, `src/middleware/requirePermission.ts`,
-cruzado con `web/src/api/*.api.ts`, `web/src/pages` y `web/src/components`.
+`src/controllers/*.ts`, `src/middleware/requirePermission.ts`, cruzado con
+`web/src/api/*.api.ts`, `web/src/pages`, `web/src/components` y `web/vite.config.ts`.
 
-Recuento hecho sobre el árbol de trabajo del 25 de agosto de 2026. Auditado el
-mismo día por cuatro revisores con enfoques separados; los hallazgos que
-cambiaron una decisión están incorporados y señalados en el texto, y los que
-cambiaron sólo una cifra, corregidos en silencio.
+Recuento hecho sobre el árbol de trabajo del 25 de agosto de 2026 y **revisado el
+26**, cuando la segunda auditoría encontró que cinco cifras se habían movido en
+veinticuatro horas por trabajo de otras sesiones. Ésa es la razón de que los
+criterios de terminado de §9 sean comandos y no números: el documento no puede
+seguirle el ritmo al árbol, y no debe intentarlo.
+
+Auditado dos veces por revisores adversariales con encargos separados —cuatro el
+25 de agosto sobre el diseño, cuatro el 26 sobre si se podía empezar a
+construir—. Los hallazgos que cambiaron una decisión están incorporados y
+señalados en el texto; los que cambiaron sólo una cifra, corregidos en silencio.
