@@ -3,11 +3,16 @@ import { sequelize } from "../database/sequelize.js";
 import { UsuarioModel } from "./usuario.model.js";
 import { ISesion } from "../interfaces/index.js";
 
-// `revoked_at`, `user_agent` and `ip_address` are optional here even though
-// `ISesion` requires them, so that `createSession` (a later task) can create a
-// row without naming all three — they still resolve to `null` on both sides,
-// since the columns below allow it.
-type SesionCreation = Optional<ISesion, "revoked_at" | "user_agent" | "ip_address">;
+// `revoked_at`, `user_agent`, `ip_address`, `mfa_satisfied_at` and
+// `mfa_source` are optional here even though `ISesion` requires them, so that
+// `createSession` (a later task) can create a row without naming all five —
+// they still resolve to `null` on both sides, since the columns below allow
+// it. `estado` is optional too, but for the opposite reason: it has a
+// default value below rather than allowing null.
+type SesionCreation = Optional<
+  ISesion,
+  "revoked_at" | "user_agent" | "ip_address" | "estado" | "mfa_satisfied_at" | "mfa_source"
+>;
 
 /**
  * `tableName` and `timestamps: false` are both deliberate.
@@ -33,6 +38,14 @@ export const SesionModel: ModelDefined<ISesion, SesionCreation> = sequelize.defi
     last_used_at: { type: DataTypes.DATE, allowNull: false },
     expires_at: { type: DataTypes.DATE, allowNull: false },
     revoked_at: { type: DataTypes.DATE, allowNull: true },
+    // Mirrors the migration's DB-level default so a `.create(...)` that
+    // omits `estado` does not fail Sequelize's own `notNull` validation
+    // before ever reaching Postgres.
+    estado: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "completa" },
+    // Written only by a live proof of a factor — null on a session opened
+    // via a remembered device, on purpose.
+    mfa_satisfied_at: { type: DataTypes.DATE, allowNull: true },
+    mfa_source: { type: DataTypes.STRING(20), allowNull: true },
   },
   { tableName: "sesiones", timestamps: false },
 );

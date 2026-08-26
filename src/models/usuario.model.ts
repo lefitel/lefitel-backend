@@ -75,6 +75,20 @@ export const UsuarioModel: ModelDefined<IUsuario, UsuarioCreation> = sequelize.d
     type: DataTypes.DATE,
     allowNull: true,
   },
+  mfa_grace_until: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+  // NOT NULL with no value ever supplied by `createUsuario` — `creatableFrom`
+  // never picks it. The column has a `now()` default in the migration, but
+  // Sequelize's own `notNull` validation runs before any SQL is sent and
+  // knows nothing about a DB-level default, so without this the same
+  // `.create(...)` call that works today would throw on every new account.
+  pass_changed_at: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    defaultValue: DataTypes.NOW,
+  },
 }, { paranoid: true });
 
 RolModel.hasMany(UsuarioModel, {

@@ -42,4 +42,22 @@ describe("UsuarioModel", () => {
     usuario.dataValues.email = "MixedCase@NotNormalised.com";
     expect(usuario.dataValues.email).toBe("MixedCase@NotNormalised.com");
   });
+
+  it("builds a valid instance without pass_changed_at, the way createUsuario does", async () => {
+    // `pass_changed_at` is `allowNull: false` with no value ever sent by
+    // `createUsuario` — `creatableFrom` only picks name, lastname, birthday,
+    // image, phone, user, pass and (when permitted) id_rol. The database
+    // column has a `now()` default, but Sequelize's own `notNull` validation
+    // runs before any SQL is sent and knows nothing about it: without a
+    // matching `defaultValue` on the model, this exact payload throws on
+    // every new account instead of reaching Postgres.
+    const usuario = UsuarioModel.build({
+      name: "Diego",
+      lastname: "Rios",
+      user: "driosnew",
+      pass: "$2a$12$hashedvalue",
+      id_rol: 2,
+    } as never);
+    await expect(usuario.validate()).resolves.not.toThrow();
+  });
 });
