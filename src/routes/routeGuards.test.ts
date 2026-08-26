@@ -290,6 +290,111 @@ describe("who may change data", () => {
 });
 
 /**
+ * The writes a live session is not, on its own, enough for.
+ *
+ * `requireStepUp` (`middleware/requireStepUp.ts`) asks a second question after
+ * the permission has already said yes: was a factor proved in the last ten
+ * minutes — or, while the account has no factor to prove at all, is the
+ * caller's own password supplied. Eleven routes ask it: creating and editing
+ * accounts, and everything that touches roles or the permission matrix.
+ *
+ * **Why this list exists at all.** Whether a route *mounts* the gate is
+ * invisible to every request-shaped test of the gate's own rules, because a
+ * route with no gate answers exactly what a satisfied gate answers. That is
+ * not hypothetical here: three tests used to cover `DELETE /api/usuario/:id`'s
+ * mount as a side effect, a fix round moved them to `DELETE /api/rol/:id` for
+ * an unrelated and correct reason, and from then on `requireStepUp()` could be
+ * deleted from that route with the whole suite — 73 files, 1163 tests — still
+ * green. Eleven mounts held up by side effects of tests about something else is
+ * how one of them goes missing without anybody noticing.
+ *
+ * **Written out rather than derived**, for the same reason `GENERADOR_GATES`
+ * below is: a list computed from the routers would only assert that the code
+ * agrees with itself. These eleven are the intent, and the comparison runs both
+ * ways — a mount that disappears fails, and so does one that appears.
+ *
+ * **The second direction is load-bearing, not symmetry for its own sake.**
+ * `PATCH /api/usuario/:id/desbloquear` is a write on the same router, behind
+ * the same module's permission, and is deliberately *not* here: lifting a
+ * lockout is what an administrator does because somebody cannot get in, often
+ * in a hurry, and step-up there adds a step to the recovery path without
+ * closing anything. See the comment beside it in `usuario.routes.ts`. A list
+ * that only checked for missing mounts would let that decision be reversed in
+ * silence.
+ *
+ * Live here and not in `app.auth.test.ts`, which pins the gate's *behaviour*
+ * through real requests: this file already walks the app as Express assembled
+ * it, across all three routers at once, and already owns the question "is the
+ * right gate on the right route". Splitting the eleven between two files would
+ * mean two half-tables, which is the shape the gap above came in.
+ */
+const STEP_UP_GATED = [
+  // usuario.routes.ts — six of the eleven.
+  "POST /api/usuario/",
+  "DELETE /api/usuario/:id",
+  "PATCH /api/usuario/:id/desarchivar",
+  "PUT /api/usuario/:id",
+  "PUT /api/usuario/username/:id",
+  "PUT /api/usuario/userpass/:id",
+  // rol.routes.ts — four. `GET /` is a read and carries no gate of any kind:
+  // every screen that shows a person needs the name of their role.
+  "POST /api/rol/",
+  "PUT /api/rol/:id",
+  "DELETE /api/rol/:id",
+  "PATCH /api/rol/:id/desarchivar",
+  // permiso.routes.ts — one. The screen that edits who may do what.
+  "PUT /api/permisos/:id_rol",
+];
+
+describe("which writes also demand a recently proved factor", () => {
+  const gated = routes
+    .filter((r) => r.chain.includes("stepUpGate"))
+    .map((r) => `${r.method} ${r.path}`)
+    .sort();
+
+  it("mounts requireStepUp on exactly those eleven routes and on no others", () => {
+    // `stepUpGate` is the name `requireStepUp()` gives the function it returns,
+    // for exactly this — see the comment above the `return` in
+    // `requireStepUp.ts`. An anonymous handler there would make this assertion
+    // unwritable.
+    expect(gated).toEqual([...STEP_UP_GATED].sort());
+  });
+
+  it("runs the permission check first on every one of them, never the gate", () => {
+    // The order the routers were written in, asserted rather than trusted:
+    // somebody without the permission must be refused by the permission —
+    // spending no bcrypt comparison, and learning nothing about the route
+    // existing — instead of being asked to prove a factor first.
+    const mal: string[] = [];
+    for (const nombre of STEP_UP_GATED) {
+      const [method, path] = nombre.split(" ");
+      const ruta = routes.find((r) => r.method === method && r.path === path);
+      if (!ruta) {
+        mal.push(`${nombre} → no está montada`);
+        continue;
+      }
+      const permiso = ruta.chain.findIndex((name) => GATES.includes(name));
+      const step = ruta.chain.indexOf("stepUpGate");
+      // Both looked up before either is compared. Without these two lines the
+      // comparison below passes for a chain missing either name, because
+      // `indexOf` answers -1 and -1 is less than everything — the exact shape
+      // of assertion this file exists to stop.
+      if (permiso === -1) {
+        mal.push(`${nombre} → sin permiso: ${ruta.chain.join(" -> ")}`);
+        continue;
+      }
+      if (step === -1) {
+        mal.push(`${nombre} → sin stepUpGate: ${ruta.chain.join(" -> ")}`);
+        continue;
+      }
+      if (permiso > step) mal.push(`${nombre} → ${ruta.chain.join(" -> ")}`);
+    }
+
+    expect(mal, `el orden permiso→step-up no se cumple en:\n  ${mal.join("\n  ")}`).toEqual([]);
+  });
+});
+
+/**
  * Read routes that deliberately ask for no permission.
  *
  * The write test above has always been the whole of this file's ambition, and

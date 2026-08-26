@@ -1372,6 +1372,12 @@ describe("requireStepUp, mounted on the real routes", () => {
   // the shared default claimed a satisfied window instead — once the default
   // was corrected to match reality, the helper became a byte-for-byte
   // restatement of it and was removed rather than kept as dead ceremony.
+  //
+  // What this block does *not* assert: which routes mount the gate. Every test
+  // here goes through a request, and a request cannot tell an unmounted gate
+  // from a satisfied one — both answer whatever the handler answers. The
+  // eleven mounts are held structurally in `routes/routeGuards.test.ts`, in
+  // one table. Do not start a second half-table here.
 
   beforeEach(async () => {
     await passwordConfirmLimiter.resetKey(CLAVE_YO);
@@ -1654,6 +1660,15 @@ describe("requireStepUp, mounted on the real routes", () => {
    * `requireStepUp`'s own body-reading, unconnected to which controller
    * happens to sit behind it.
    *
+   * That move was right and it cost something, said plainly because it went
+   * unnoticed for a round: while these three sent their DELETEs to
+   * `/api/usuario/:id`, they were the only thing in the suite that would
+   * notice `requireStepUp()` disappearing from that route. Afterwards the gate
+   * could be deleted from `usuario.routes.ts` with all 1163 tests still green.
+   * Mount coverage is not this trio's job and never should have been: it now
+   * lives in `routes/routeGuards.test.ts`, which pins all eleven gated routes
+   * against the app Express actually assembled.
+   *
    * `id: 99` is this file's own established stand-in for "a row that is not
    * `YO`'s" — see the rename/reset tests above, which already target it the
    * same way; `rolFindOne`'s default mock above answers it as a real,
@@ -1684,13 +1699,32 @@ describe("requireStepUp, mounted on the real routes", () => {
     });
 
     it("reads stepup_password out of a DELETE body once Content-Type says to parse one", async () => {
-      // Load-bearing for exactly one thing: that `requireStepUp` reads
-      // `stepup_password` from `req.body` and not, say, `req.query` — the
-      // "reads the budget"/"charges on wrong"/"never charges on right"
-      // behaviours are already pinned at the unit level in
-      // `requireStepUp.test.ts` and are not what this trio adds. Do not trim
-      // this one for looking redundant next to the other two: it is the only
-      // one of the three that a `req.query` regression would not also fail.
+      // What this one holds, measured by mutating the gate three ways and
+      // reading which of the trio went red — not argued from the shape of the
+      // code, which is how the sentence that used to stand here came to be
+      // false in both directions at once.
+      //
+      //   `req.body` → `req.query` in `requireStepUp.ts`: this test *and* the
+      //   wrong-password one below go red; the body-less one above stays
+      //   green. So this is not the only guard against the field being read
+      //   out of the wrong place — the old comment claimed it was the only one
+      //   that would *not* fail, which is neither true nor what it meant.
+      //
+      //   `requireStepUp()` deleted from `DELETE /api/rol/:id`: the other two
+      //   go red and this one stays green. It cannot see the mount at all, and
+      //   that is the honest reason it looks redundant next to them. The mount
+      //   itself is pinned structurally, for all eleven gated routes at once,
+      //   in `routes/routeGuards.test.ts`.
+      //
+      //   a correct password stops opening the gate (`confirmacion.ok`
+      //   defeated): this is the only one of the three that goes red, and it
+      //   is why the test is kept. The one below proves a *wrong* password is
+      //   refused — which a gate that refused every password would satisfy
+      //   just as well.
+      //
+      // The "reads the budget"/"charges on wrong"/"never charges on right"
+      // behaviours are pinned at the unit level in `requireStepUp.test.ts` and
+      // are not what this trio adds.
       puede = true;
       try {
         const res = await request(app)
