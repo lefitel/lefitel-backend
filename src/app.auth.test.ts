@@ -86,6 +86,7 @@ const { loginIpLimiter, loginAccountIpLimiter, passwordConfirmLimiter } = await 
   "./middleware/loginLimiters.js"
 );
 const { UsuarioModel } = await import("./models/usuario.model.js");
+const { logAction } = await import("./utils/logAction.js");
 const { SesionModel } = await import("./models/sesion.model.js");
 const { TokenUsoUnicoModel } = await import("./models/tokenUsoUnico.model.js");
 const { CredencialWebauthnModel } = await import("./models/credencialWebauthn.model.js");
@@ -140,14 +141,17 @@ const tokenUsoUnicoDestroy = vi.spyOn(TokenUsoUnicoModel, "destroy");
 const usuarioUpdate = vi.spyOn(UsuarioModel, "update");
 const tokenUsoUnicoUpdate = vi.spyOn(TokenUsoUnicoModel, "update");
 /**
- * Three more, added for Task 6's `requireStepUp`. `authenticate`'s default
- * session below satisfies that gate's window for almost every test in this
- * file, so these three are never actually reached except by the describe
- * block that puts the account back in the unsatisfied state on purpose —
- * but they still have to be spied rather than left real: `tieneAlgunFactor`
- * is a genuine query with no fixture data behind it here, and a route that
- * reached it unmocked would fail on a live connection this file's own header
- * promises none of its tests need.
+ * Three more, added for Task 6's `requireStepUp`. The shared session below
+ * has `mfa_satisfied_at: null` — the real, shipped value — so any test that
+ * reaches a `requireStepUp`-gated route calls the real `tieneAlgunFactor`,
+ * which reads these three. They have to be spied rather than left real:
+ * `tieneAlgunFactor` is a genuine query with no fixture data behind it here,
+ * and a route that reached it unmocked would fail on a live connection this
+ * file's own header promises none of its tests need. Left at their default
+ * (no factor registered), `tieneAlgunFactor` answers `false` and the gated
+ * routes fall to `requireStepUp`'s branch 3 — no password sent, nothing to
+ * prove, let through — which is what most of the tests below that touch
+ * those routes actually rely on, whether they say so or not.
  */
 const passkeyCount = vi.spyOn(CredencialWebauthnModel, "count");
 const totpCount = vi.spyOn(FactorTotpModel, "count");
@@ -1005,19 +1009,14 @@ describe("changing your own credentials spends the budget for a wrong password, 
     // holds the permission, so the guard passes on the permission and not on
     // ownership.
     //
-    // What this is not about is `requireStepUp` itself — that gate reads
-    // `stepup_password`, and this request targets somebody else's account, so
-    // `requiresOwnPassword` (and therefore `chargeConfirmBudgetOnSelfChange`)
-    // was never going to touch this bucket regardless. Giving *this* session a
-    // satisfied window is what lets the request reach that question at all
-    // without this test also having to carry a `stepup_password` field that
-    // has nothing to do with what it is checking.
-    sesionFindOne.mockResolvedValue({
-      dataValues: {
-        id: MI_SESION, id_usuario: YO, created_at: SESION_CREADA, expires_at: SESION_EXPIRA_FILA,
-        last_used_at: new Date(), estado: "completa", mfa_satisfied_at: new Date(),
-      },
-    } as never);
+    // No session override needed: the shared default's `mfa_satisfied_at:
+    // null` and no factor registered send this caller through
+    // `requireStepUp`'s branch 3 (no password sent, nothing to prove),
+    // logging STEP_UP_SKIPPED and calling on — measured identical to the
+    // "satisfied window" fiction an earlier round gave this session, which
+    // this test never needed in the first place: what it is actually
+    // checking is that `requiresOwnPassword` spares somebody else's account
+    // from `chargeConfirmBudgetOnSelfChange`'s own charge.
     puede = true;
     try {
       const res = await request(app)
@@ -1027,8 +1026,12 @@ describe("changing your own credentials spends the budget for a wrong password, 
         .send({ user: "isalas" });
       await settled();
 
+      // Pinned rather than excluded: `usuarioFindOne`'s default fixture
+      // resolves any query to the caller's own row, so `nombreEnUso` reads
+      // that back as "the name isn't ours to keep" and answers 409 — a
+      // fixture limit, not this route refusing anything.
+      expect(res.status).toBe(409);
       expect(res.status).not.toBe(403);
-      expect(res.status).not.toBe(400);
       expect(await gastado()).toBeUndefined();
       // Nor did it land in anybody else's bucket, keyed by the target rather
       // than the caller.
@@ -1044,20 +1047,16 @@ describe("changing your own credentials spends the budget for a wrong password, 
     // 429 to the sixth piece of legitimate administrative work in a quarter of
     // an hour.
     //
-    // The status is asserted by exclusion rather than as a 200, for the reason
-    // `escribible` above gives: `usuarioFindOne` here resolves a plain object
-    // with no `set`, so the write itself cannot complete. What is under test is
-    // the mount, and the mount runs before any of that.
+    // Pinned rather than asserted as a 200, for the reason `escribible`
+    // above gives: `usuarioFindOne` here resolves a plain object with no
+    // `set`, so the write itself cannot complete and answers 500 — a
+    // fixture limit, not the mount refusing anything. What is under test is
+    // that the mount reaches the handler at all.
     //
-    // A satisfied window for the same reason as the rename test above: this
-    // is about `requiresOwnPassword` sparing somebody else's account, not
-    // about `requireStepUp`'s own fallback.
-    sesionFindOne.mockResolvedValue({
-      dataValues: {
-        id: MI_SESION, id_usuario: YO, created_at: SESION_CREADA, expires_at: SESION_EXPIRA_FILA,
-        last_used_at: new Date(), estado: "completa", mfa_satisfied_at: new Date(),
-      },
-    } as never);
+    // No session override needed, same reason as the rename test above:
+    // the shared default already sends this caller through
+    // `requireStepUp`'s branch 3, measured identical to what a "satisfied
+    // window" fiction produced.
     puede = true;
     try {
       const res = await request(app)
@@ -1067,8 +1066,8 @@ describe("changing your own credentials spends the budget for a wrong password, 
         .send({ pass: "una-clave-de-prueba" });
       await settled();
 
+      expect(res.status).toBe(500);
       expect(res.status).not.toBe(403);
-      expect(res.status).not.toBe(400);
       expect(await gastado()).toBeUndefined();
       expect(await passwordConfirmLimiter.getKey("pc:99")).toBeUndefined();
     } finally {
@@ -1218,13 +1217,19 @@ describe("changing your own credentials spends the budget for a wrong password, 
      * column yet. A fix-round review caught an earlier version of this test
      * describing a state that does not exist (the window pre-satisfied), which
      * made `requireStepUp` a no-op and left this arithmetic unwitnessed by
-     * anything that actually runs. With the real state restored, each attempt
-     * below pays into `pc:7` *twice* — once for `requireStepUp`'s own
-     * fallback (the correct `stepup_password`, refunded), once for
-     * `chargeConfirmBudgetOnSelfChange`'s own `oldPass` check (wrong, kept) —
-     * and the arithmetic below still lands on exactly one net charge per
-     * attempt, which is `confirmCostsNothing`'s consume-once mechanism doing
-     * its job: see that function's comment in `loginLimiters.ts`.
+     * anything that actually runs.
+     *
+     * With the real state restored, each attempt below still charges `pc:7`
+     * exactly **once** — from `chargeConfirmBudgetOnSelfChange`'s own
+     * `oldPass` check, which is wrong here. `requireStepUp`'s own fallback
+     * runs first with the correct `stepup_password` and charges nothing at
+     * all: a right answer never calls the real limiter (see
+     * `requireStepUp.ts`'s own docstring), so there is no second charge for
+     * anything to refund. A fix-round review measured a version of this gate
+     * that *did* charge a correct answer and refund it afterwards, and found
+     * that the not-yet-refunded charge could inflate the count this same
+     * `oldPass` check reads mid-request; that version is gone, and this test
+     * is the arithmetic it would have broken.
      */
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockImplementation(soloRechaza("adivinando") as never);
@@ -1342,16 +1347,13 @@ describe("changing your own credentials spends the budget for a wrong password, 
 describe("requireStepUp, mounted on the real routes", () => {
   const CLAVE_YO = `pc:${YO}`;
 
-  /** Puts the caller's own session back in the unsatisfied state this whole
-   *  gate exists for — the shared default above satisfies its window. */
-  function sinFactorReciente() {
-    sesionFindOne.mockResolvedValue({
-      dataValues: {
-        id: MI_SESION, id_usuario: YO, created_at: SESION_CREADA, expires_at: SESION_EXPIRA_FILA,
-        last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null,
-      },
-    } as never);
-  }
+  // No per-test session override needed anywhere in this describe block: the
+  // shared default already carries `mfa_satisfied_at: null` and no factor
+  // registered, which is the real, shipped state. An earlier round gave this
+  // block its own `sinFactorReciente()` helper to force that state, back when
+  // the shared default claimed a satisfied window instead — once the default
+  // was corrected to match reality, the helper became a byte-for-byte
+  // restatement of it and was removed rather than kept as dead ceremony.
 
   beforeEach(async () => {
     await passwordConfirmLimiter.resetKey(CLAVE_YO);
@@ -1362,7 +1364,6 @@ describe("requireStepUp, mounted on the real routes", () => {
     // ran first, a caller with no factor and no password would see its 403
     // and STEP_UP_REQUIRED instead of the permission's plain refusal — and
     // would have cost a query to the factor tables to get there.
-    sinFactorReciente();
     const res = await request(app)
       .post("/api/usuario")
       .set("Cookie", COOKIE)
@@ -1386,7 +1387,6 @@ describe("requireStepUp, mounted on the real routes", () => {
      * own password: all of it, every account, always. This test is what
      * that outage looked like from the outside, now pinned the other way.
      */
-    sinFactorReciente();
     puede = true;
     try {
       const res = await request(app)
@@ -1412,7 +1412,6 @@ describe("requireStepUp, mounted on the real routes", () => {
   });
 
   it("lets the same request through once the caller's own current password is supplied too", async () => {
-    sinFactorReciente();
     puede = true;
     try {
       const res = await request(app)
@@ -1439,7 +1438,6 @@ describe("requireStepUp, mounted on the real routes", () => {
     vi.mocked(bcryptjs.compare).mockImplementation(
       (async (plain: string) => plain !== "no-es-la-mia") as never,
     );
-    sinFactorReciente();
     puede = true;
     try {
       const res = await request(app)
@@ -1465,7 +1463,6 @@ describe("requireStepUp, mounted on the real routes", () => {
     // The real module, not a mock of it: this is what proves the mount reads
     // the genuine `tieneAlgunFactor`, not a stand-in some other file left
     // behind.
-    sinFactorReciente();
     passkeyCount.mockResolvedValue(1);
     puede = true;
     try {
@@ -1487,7 +1484,6 @@ describe("requireStepUp, mounted on the real routes", () => {
     // arguable: nothing is flipped by hand between this test and the one
     // above it letting the identical body through. The only difference is
     // what the real `factorInventory` module reports.
-    sinFactorReciente();
     passkeyCount.mockResolvedValue(1);
     puede = true;
     try {
@@ -1511,7 +1507,6 @@ describe("requireStepUp, mounted on the real routes", () => {
     // factor and an unsatisfied window: if this route carried the gate, that
     // combination would answer 403 STEP_UP_REQUIRED before ever reaching the
     // permission check below it.
-    sinFactorReciente();
     puede = true;
     try {
       const res = await request(app)
@@ -1537,7 +1532,6 @@ describe("requireStepUp, mounted on the real routes", () => {
     // editing its own role (409) before it ever reads the body — a
     // collision this test does not want, since what it is proving is that
     // the gate let the request reach the handler at all.
-    sinFactorReciente();
     puede = true;
     try {
       const res = await request(app)
@@ -1560,7 +1554,6 @@ describe("requireStepUp, mounted on the real routes", () => {
     vi.mocked(bcryptjs.compare).mockImplementation(
       (async (plain: string) => plain !== "no-es-la-mia") as never,
     );
-    sinFactorReciente();
     puede = true;
     try {
       const res = await request(app)
@@ -1577,22 +1570,22 @@ describe("requireStepUp, mounted on the real routes", () => {
     }
   });
 
-  it("survives confirming the same password twice in one request — this gate's own check, then the rename's own — without crashing or double-charging a right answer", async () => {
+  it("survives confirming the same password twice in one request — this gate's own check, then the rename's own — without crashing or leaving a charge behind", async () => {
     /**
-     * The trickiest shape this mount produces. With no factor registered and
-     * an unsatisfied window, a self-rename on `/username/:id` confirms the
-     * caller's password twice in the same request: once for this gate, once
-     * for `updateUserName`'s own `oldPass` check — both against the very same
-     * `pc:7` bucket, since both are `chargeConfirmBudgetOnSelfChange`'s
-     * `passwordConfirmLimiter` and this gate's own call to it.
-     * express-rate-limit's default `singleCount` validation assumes a key is
-     * touched once per request; `passwordConfirmLimiter`'s `validate: {
-     * singleCount: false }` (loginLimiters.ts) is what keeps that assumption
-     * from doing anything worse than log once. Both confirmations are correct
-     * here, so both are refunded and the budget ends the request where it
-     * started.
+     * A self-rename on `/username/:id`, with no factor registered and an
+     * unsatisfied window, asks for the caller's password twice in one
+     * request: once for this gate's own fallback, once for `updateUserName`'s
+     * own `oldPass` check, both against the same `pc:7` key. Measured,
+     * though: only **one** real charge is ever made here. This gate's own
+     * check is correct, and a correct answer never calls the real limiter at
+     * all (see `requireStepUp.ts`'s own docstring) — there is nothing for it
+     * to charge or refund. The one charge that does happen is
+     * `chargeConfirmBudgetOnSelfChange`'s, for `oldPass`, and it refunds
+     * because `oldPass` is correct too. What this proves is narrower than
+     * "two charges, both given back": it is that asking the same key about
+     * the same secret from two call sites in one request does not crash and
+     * leaves the budget exactly where it started.
      */
-    sinFactorReciente();
     usuarioFindOne.mockResolvedValue({
       dataValues: {
         id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
@@ -1618,6 +1611,91 @@ describe("requireStepUp, mounted on the real routes", () => {
     expect(await passwordConfirmLimiter.getKey(CLAVE_YO)).toEqual(
       expect.objectContaining({ totalHits: 0 }),
     );
+  });
+
+  /**
+   * `DELETE /api/usuario/:id` is gated too, and until now nothing exercised
+   * it — every `DELETE` this file or `requireStepUp.test.ts` sent went to
+   * `/api/auth/sessions/*`, which carries no gate at all. That gap mattered
+   * for a specific reason: Express only parses a request body when the
+   * client sends a `Content-Type` it recognises, and a body-less
+   * `axios.delete(url)` — the shape the current frontend actually sends —
+   * never triggers that parser. Whether `requireStepUp` can read
+   * `stepup_password` off a DELETE at all was, until these three tests, an
+   * article of faith rather than something measured — and the frontend
+   * being built against this gate is about to send exactly that shape.
+   *
+   * `id: 99` is this file's own established stand-in for "a row that is not
+   * `YO`'s and does not exist" — see the rename/reset tests above, which
+   * already target it the same way.
+   */
+  describe("on DELETE, where a body only exists if Content-Type says so", () => {
+    it("lets a body-less DELETE through: no factor, nothing sent, nothing to prove", async () => {
+      puede = true;
+      try {
+        const res = await request(app)
+          .delete("/api/usuario/99")
+          .set("Cookie", COOKIE)
+          .set(DEL_FRONTEND);
+
+        // Measured, not assumed: deleteUsuario runs a real transaction here
+        // (no live row at id 99 to destroy, no session to revoke), and 200
+        // is what it actually answers — which is what proves the gate let
+        // the request through rather than refusing it with STEP_UP_REQUIRED.
+        expect(res.status).toBe(200);
+        // And it took branch 3's skip to get there, not a silent "nothing
+        // was ever read" bug that would answer 200 for a different reason —
+        // the two are indistinguishable by status code alone.
+        expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
+      } finally {
+        puede = false;
+      }
+    });
+
+    it("reads stepup_password out of a DELETE body once Content-Type says to parse one", async () => {
+      puede = true;
+      try {
+        const res = await request(app)
+          .delete("/api/usuario/99")
+          .set("Cookie", COOKIE)
+          .set(DEL_FRONTEND)
+          .send({ stepup_password: "la-de-verdad" });
+
+        expect(res.status).toBe(200);
+        // The discriminator this test exists for: a 200 here is ambiguous by
+        // itself — it is also what a gate that silently failed to read the
+        // body at all would answer, by falling through to the same skip the
+        // test above exercises on purpose. Asserting the skip did *not* fire
+        // is what proves this 200 came from a verified password instead.
+        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
+      } finally {
+        puede = false;
+      }
+    });
+
+    it("refuses and charges a wrong stepup_password sent on a DELETE", async () => {
+      const bcryptjs = (await import("bcryptjs")).default;
+      vi.mocked(bcryptjs.compare).mockImplementation(
+        (async (plain: string) => plain !== "no-es-la-mia") as never,
+      );
+      puede = true;
+      try {
+        const res = await request(app)
+          .delete("/api/usuario/99")
+          .set("Cookie", COOKIE)
+          .set(DEL_FRONTEND)
+          .send({ stepup_password: "no-es-la-mia" });
+
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe(CODIGO_STEP_UP);
+        expect(await passwordConfirmLimiter.getKey(CLAVE_YO)).toEqual(
+          expect.objectContaining({ totalHits: 1 }),
+        );
+      } finally {
+        puede = false;
+        vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
+      }
+    });
   });
 });
 

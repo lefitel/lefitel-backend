@@ -59,12 +59,23 @@ export async function factoresDe(id_usuario: number): Promise<InventarioFactores
  * Whether this account has anything `requireStepUp` may accept in place of
  * the current password.
  *
- * Deliberately `passkeys > 0 || totp > 0` and nothing else. `codigos` is
- * read off `factoresDe` like the other two but never joins the `||` — adding
- * it here is the one-line change that would undo the second rule this file
- * exists to enforce.
+ * Deliberately `passkeys > 0 || totp > 0` and nothing else — the second rule
+ * this file exists to enforce is that recovery codes never join that `||`.
+ *
+ * Queries the two relevant tables directly rather than calling `factoresDe`
+ * and discarding its `codigos` count: this runs on the hot path of every
+ * gated write `requireStepUp` guards, and a third COUNT this function has no
+ * use for is a third round trip charged to every one of them. `factoresDe`
+ * keeps all three, for callers that actually want the full inventory (a
+ * settings screen showing "2 passkeys, no TOTP, 5 recovery codes left").
+ * Both share the same confirmed-only TOTP rule, each in its own query, since
+ * there is no third function here for one copy of it to live in without one
+ * of these two calling the other and paying for a table it does not need.
  */
 export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
-  const { passkeys, totp } = await factoresDe(id_usuario);
+  const [passkeys, totp] = await Promise.all([
+    CredencialWebauthnModel.count({ where: { id_usuario } }),
+    FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } } }),
+  ]);
   return passkeys > 0 || totp > 0;
 }

@@ -101,4 +101,14 @@ describe("tieneAlgunFactor", () => {
     codigoCount.mockResolvedValue(8);
     expect(await tieneAlgunFactor(YO)).toBe(true);
   });
+
+  it("never queries the recovery-code table at all, on the hot path of every gated write", async () => {
+    // `factoresDe` pays for all three tables because it answers a broader
+    // question; this function answers a narrower one and only asks the two
+    // tables that question is actually about. The tests above already prove
+    // codes never flip the answer — this proves the query for them was never
+    // sent in the first place, which is the round trip this fix removed.
+    await tieneAlgunFactor(YO);
+    expect(codigoCount).not.toHaveBeenCalled();
+  });
 });

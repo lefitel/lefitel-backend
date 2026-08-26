@@ -214,26 +214,35 @@ export function confirmCostsNothing(_req: Request, res: Response): boolean {
  * answer (it would let anybody shut their own account out of the ERP by
  * mistyping while renaming themselves) so this is.
  */
+
+/** The one sentence a spent budget answers with, named so `requireStepUp.ts`
+ *  can reuse it instead of retyping it — two copies of one sentence is how
+ *  they read differently the day one of them gets improved. */
+export const PASSWORD_CONFIRM_MESSAGE =
+  "Demasiados intentos. Espere unos minutos antes de volver a confirmar.";
+
 export const passwordConfirmLimiter = rateLimit({
   windowMs: LOGIN_WINDOW_MS,
   limit: PASSWORD_CONFIRM_LIMIT,
   skipSuccessfulRequests: true,
   requestWasSuccessful: confirmCostsNothing,
   keyGenerator: passwordConfirmKey,
-  message: { message: "Demasiados intentos. Espere unos minutos antes de volver a confirmar." },
+  message: { message: PASSWORD_CONFIRM_MESSAGE },
   standardHeaders: true,
   legacyHeaders: false,
-  // `requireStepUp` now calls this same limiter directly, ahead of
-  // `chargeConfirmBudgetOnSelfChange`, on `PUT /usuario/username/:id` and
-  // `PUT /usuario/userpass/:id`: a self-edit with no factor registered yet
-  // confirms the caller's password twice in one request — once for the gate,
-  // once for the route's own `oldPass` — against the shared `pc:<id>` bucket.
-  // express-rate-limit's default `singleCount` validation assumes a key is
-  // only ever touched once per request and otherwise only logs a warning
-  // (`ERR_ERL_DOUBLE_COUNT`) rather than refusing anything, but there is
-  // nothing to warn about here: two genuine confirmations of the same secret
-  // in one request is the intended shape now, not a bug to be flagged.
-  validate: { singleCount: false },
+  // `requireStepUp` (`middleware/requireStepUp.ts`) also calls this same
+  // limiter, ahead of `chargeConfirmBudgetOnSelfChange` on
+  // `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id` — but the two
+  // never both charge in the same request (see that gate's own docstring: it
+  // only ever calls this on a confirmed-wrong password, and denies without
+  // calling on, so `chargeConfirmBudgetOnSelfChange` never runs in the same
+  // request that gate charged). `validate.singleCount` — express-rate-limit's
+  // default check that a key is touched at most once per request — was
+  // disabled here for one round while an earlier design of that gate charged
+  // unconditionally and could touch this key twice; it is deliberately left
+  // at its default (on) now that the two charges are mutually exclusive,
+  // because there is a real invariant here worth that check catching if a
+  // future change breaks it.
 });
 
 /**

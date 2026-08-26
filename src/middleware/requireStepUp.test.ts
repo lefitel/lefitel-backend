@@ -27,9 +27,19 @@ const passwordConfirmKey = vi.fn();
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword }));
 vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor }));
 vi.mock("../utils/logAction.js", () => ({ logAction }));
-vi.mock("./loginLimiters.js", () => ({ passwordConfirmLimiter, passwordConfirmKey }));
+vi.mock("./loginLimiters.js", () => ({
+  passwordConfirmLimiter,
+  passwordConfirmKey,
+  PASSWORD_CONFIRM_MESSAGE: "Demasiados intentos. Espere unos minutos antes de volver a confirmar.",
+}));
 
-const { requireStepUp, CODIGO_STEP_UP } = await import("./requireStepUp.js");
+const {
+  requireStepUp,
+  CODIGO_STEP_UP,
+  MOTIVO_ESTADO_INCOMPLETO,
+  MOTIVO_SIN_FACTOR_RECIENTE,
+  MOTIVO_CONTRASENA_INCORRECTA,
+} = await import("./requireStepUp.js");
 const { STEP_UP_WINDOW_MINUTES } = await import("../config/security.js");
 
 const haceMinutos = (m: number) => new Date(Date.now() - m * 60_000);
@@ -59,6 +69,12 @@ beforeEach(() => {
 
 describe("requireStepUp", () => {
   it("lets through a factor proved inside the window", async () => {
+    // tieneAlgunFactor is forced true so this can only pass by the window
+    // rule — with the default false, branch 3's skip (no factor, no
+    // password) produces the identical observable outcome (next() called,
+    // nothing charged) and this test would stay green with the window
+    // check deleted entirely, which is what a fix-round review caught.
+    tieneAlgunFactor.mockResolvedValue(true);
     const { req, res, next } = contexto({
       id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(STEP_UP_WINDOW_MINUTES - 1),
     });
@@ -74,6 +90,9 @@ describe("requireStepUp", () => {
     await requireStepUp()(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
     expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }),
+    );
   });
 
   it("refuses a session that came in on a remembered device", async () => {
@@ -132,6 +151,9 @@ describe("requireStepUp", () => {
     );
     await requireStepUp()(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
+    );
   });
 
   it("writes a bitácora line when it refuses", async () => {
@@ -150,6 +172,20 @@ describe("requireStepUp", () => {
     const { req, res, next } = contexto(undefined);
     await requireStepUp()(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
+  });
+
+  it("answers 500 instead of hanging when tieneAlgunFactor itself fails", async () => {
+    // Express 4 does not catch a rejected promise from an `async`
+    // middleware — a query that throws here, with nothing catching it,
+    // would leave the request hanging until the client gave up rather than
+    // answering anything at all. `authenticate.ts` wraps its whole body in
+    // one try/catch for exactly this reason; this gate does the same.
+    tieneAlgunFactor.mockRejectedValue(new Error("la tabla de factores no respondió"));
+    const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null });
+    await requireStepUp()(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(next).not.toHaveBeenCalled();
   });
 
   it("names the inner handler stepUpGate, not an anonymous function", () => {
@@ -263,11 +299,22 @@ describe("requireStepUp", () => {
     });
 
     it("never touches the budget when the window already satisfies the gate", async () => {
+      // Same reason as "lets through a factor proved inside the window":
+      // forcing a factor to exist is what makes this test depend on the
+      // window rule instead of on branch 3's skip, which also never
+      // touches the budget.
+      tieneAlgunFactor.mockResolvedValue(true);
       const { req, res, next } = contexto({
         id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(STEP_UP_WINDOW_MINUTES - 1),
       });
       await requireStepUp()(req, res, next);
 
+      // Both assertions matter: the budget-untouched half is also true of
+      // a refusal (tieneAlgunFactor's own branch never touches it either),
+      // so without next() actually having been called this test cannot
+      // tell "let through by the window" apart from "refused by the factor
+      // check" — a fix-round review found exactly that gap.
+      expect(next).toHaveBeenCalled();
       expect(passwordConfirmLimiter.getKey).not.toHaveBeenCalled();
       expect(passwordConfirmLimiter).not.toHaveBeenCalled();
     });
@@ -356,6 +403,13 @@ describe("requireStepUp", () => {
         expect(next).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(403);
         expect(passwordConfirmLimiter).toHaveBeenCalled();
+        // The discriminator a client acts on to know *which* remedy applies
+        // — a client cannot tell "type the password again" apart from "go
+        // finish onboarding" by `code` alone, since both answer the same
+        // `CODIGO_STEP_UP`.
+        expect(res.json).toHaveBeenCalledWith(
+          expect.objectContaining({ motivo: MOTIVO_CONTRASENA_INCORRECTA }),
+        );
       });
 
       it("still lets a correct password through, charging nothing", async () => {
