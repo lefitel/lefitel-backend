@@ -89,6 +89,8 @@ beforeEach(async () => {
       created_at: new Date(),
       expires_at: new Date(Date.now() + 86_400_000),
       last_used_at: new Date(),
+      estado: "completa",
+      mfa_satisfied_at: null,
     },
   } as never);
   sesionUpdate.mockResolvedValue([1] as never);

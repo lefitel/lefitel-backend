@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { findLiveSession, touchSession, slidingExpiry, cappedByCeiling } from "../auth/sessionStore.js";
+import { puedeAlcanzar, MENSAJE_FACTOR_PENDIENTE } from "../auth/sessionState.js";
 import { readSessionCookie, setSessionCookie } from "../auth/sessionCookie.js";
 import { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER, SESSION_EXPIRES_HEADER } from "../config/security.js";
 import { log } from "../utils/logger.js";
@@ -8,6 +9,7 @@ import { log } from "../utils/logger.js";
 const authLog = log("auth");
 const SESION_EXPIRADA = "Su sesión expiró. Vuelva a iniciar sesión.";
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
+const SESION_INCOMPLETA = "Termina de iniciar sesión.";
 const ERROR_INESPERADO = "Ocurrió un error al procesar la petición.";
 
 /**
@@ -77,6 +79,42 @@ async function authenticateBySession(
   const usuario = await currentUser(sesion.id_usuario);
   if (!usuario) {
     res.status(401).json({ message: CUENTA_INACTIVA });
+    return;
+  }
+
+  /**
+   * What this session may reach, on top of whether it exists.
+   *
+   * Until this block, `authenticate` answered one question — is this cookie a
+   * live session — and a row written the instant a password was accepted
+   * looked exactly like one that had proved a factor. That is what made the
+   * second factor decorative: the whole ERP sat behind "the cookie exists".
+   *
+   * The two answers are deliberately different, and the difference is what the
+   * frontend does with them:
+   *
+   * - `parcial` gets **401**. The login is unfinished; ending the session and
+   *   going back to the start is the correct move.
+   * - `onboarding` gets **403**. This person *is* logged in, and their setup
+   *   screen is inside the application. A 401 here would throw them out to a
+   *   login they have already passed, and they would pass it again, and land
+   *   in the same place: a loop with no way out.
+   *
+   * `originalUrl` and not `req.path`: this middleware runs inside routers, so
+   * `req.path` is relative to the mount point — "/1", not "/api/usuario/1".
+   *
+   * Placed here, after the account is resolved and before any response header
+   * is written: a refused request must not carry `ROLE_HEADER` or
+   * `SESSION_EXPIRES_HEADER`, which are facts about an authenticated caller
+   * this one has not become.
+   */
+  const ruta = req.originalUrl;
+  if (!puedeAlcanzar(sesion.estado, ruta)) {
+    if (sesion.estado === "parcial") {
+      res.status(401).json({ message: SESION_INCOMPLETA });
+      return;
+    }
+    res.status(403).json({ message: MENSAJE_FACTOR_PENDIENTE });
     return;
   }
 
@@ -166,14 +204,23 @@ async function authenticateBySession(
   // endpoint that only runs once per page load, but still a database round
   // trip this data does not need when the value is already sitting in memory.
   //
-  // Both fields are **required** on `req.user` (`app.ts`), and this line is the
-  // only thing that fills them in. They were optional because the old bearer
-  // path reached `next()` without a session row, so half of `req.user` was
-  // absent and six places in `auth.controller.ts` had to ask whether it was
-  // there. That path is gone: an authenticated request has a row by
-  // construction, and the type says so, so those questions cannot be asked
-  // again.
-  req.user = { id: usuario.id, id_rol: usuario.id_rol, id_sesion: sesion.id, expires_at: expiresAt };
+  // All fields are **required** on `req.user` (`app.ts`), and this line is the
+  // only thing that fills them in. `id_sesion` and `expires_at` were optional
+  // because the old bearer path reached `next()` without a session row, so
+  // half of `req.user` was absent and six places in `auth.controller.ts` had
+  // to ask whether it was there. That path is gone: an authenticated request
+  // has a row by construction, and the type says so, so those questions
+  // cannot be asked again. `estado` and `mfa_satisfied_at` follow the same
+  // rule for the same reason — the step-up gate a later task adds reads both
+  // and must not have to ask whether they are there either.
+  req.user = {
+    id: usuario.id,
+    id_rol: usuario.id_rol,
+    id_sesion: sesion.id,
+    expires_at: expiresAt,
+    estado: sesion.estado,
+    mfa_satisfied_at: sesion.mfa_satisfied_at,
+  };
   next();
 }
 

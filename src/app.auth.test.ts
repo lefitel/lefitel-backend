@@ -197,6 +197,8 @@ beforeEach(() => {
       created_at: SESION_CREADA,
       expires_at: SESION_EXPIRA_FILA,
       last_used_at: new Date(),
+      estado: "completa",
+      mfa_satisfied_at: null,
     },
   } as never);
   sesionFindAll.mockResolvedValue([] as never);
@@ -419,6 +421,8 @@ describe("who the cookie says I am", () => {
         created_at: creada,
         expires_at: new Date(Date.now() + 5 * DIA_MS),
         last_used_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
       },
     } as never);
 
@@ -448,6 +452,8 @@ describe("who the cookie says I am", () => {
         created_at: creada,
         expires_at: new Date(Date.now() + 10 * 60_000),
         last_used_at: usadaHaceMucho,
+        estado: "completa",
+        mfa_satisfied_at: null,
       },
     } as never);
 

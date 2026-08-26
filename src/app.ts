@@ -1,10 +1,11 @@
 import express, { Request, Response, NextFunction } from "express";
+import type { EstadoSesion } from "./auth/sessionState.js";
 
 /**
  * Who `authenticate` decided the caller is, for everything mounted behind it.
  *
  * `user` itself is optional — a request that never reached `authenticate`, or
- * was refused by it, has none — but **its four fields are not**. `id_sesion`
+ * was refused by it, has none — but **its fields are not**. `id_sesion`
  * and `expires_at` used to be optional too, and the reason was written down in
  * `sessionStore.ts`: a request authenticated by the old bearer token reached a
  * controller with no session row, so there was nothing to fill them with. That
@@ -22,7 +23,20 @@ declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      user?: { id: number; id_rol: number; id_sesion: string; expires_at: Date };
+      user?: {
+        id: number;
+        id_rol: number;
+        id_sesion: string;
+        expires_at: Date;
+        // Both required for the same reason the two above are: an
+        // authenticated request has a session row by construction, so there is
+        // nothing for a controller to check. `requireStepUp` reads them and
+        // must not have to ask whether they are there — an optional field is
+        // an invitation to a `?.` that silently reads `undefined` as "not
+        // satisfied" in one place and as "no opinion" in another.
+        estado: EstadoSesion;
+        mfa_satisfied_at: Date | null;
+      };
     }
   }
 }

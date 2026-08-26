@@ -16,6 +16,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
+import type { EstadoSesion } from "../auth/sessionState.js";
 
 /**
  * A signing key for this file, put in the environment on purpose.
@@ -71,13 +72,25 @@ const { authenticate } = await import("./authenticate.js");
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
 const { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER, SESSION_EXPIRES_HEADER } =
   await import("../config/security.js");
+// Real, not mocked: this file's whole point from here on is that `authenticate`
+// hands the real `puedeAlcanzar` the caller's estado and its own route, and
+// reacts to what it says. Mocking `sessionState.js` would only prove
+// `authenticate` calls *something*, never that the something is this allowlist.
+const { MENSAJE_FACTOR_PENDIENTE } = await import("../auth/sessionState.js");
 
 /**
  * `authorization` sets the header verbatim, and it is still called that rather
  * than `bearer`: the point of every remaining use is that this is an ordinary
  * request header the middleware does not read, not a credential of any kind.
+ *
+ * `originalUrl` and `path` are independent, on purpose: `authenticate` runs
+ * inside routers (see `app.ts`), so a real `req.path` is relative to the
+ * mount point and differs from `req.originalUrl`. Defaulting `path` to the
+ * same value as `originalUrl` keeps every test that does not care about the
+ * distinction realistic without forcing it to say so; the one test that does
+ * care overrides both to different strings.
  */
-function call(opts: { cookie?: string; authorization?: string } = {}) {
+function call(opts: { cookie?: string; authorization?: string; originalUrl?: string; path?: string } = {}) {
   const res = {
     statusCode: 0,
     body: undefined as unknown,
@@ -96,6 +109,8 @@ function call(opts: { cookie?: string; authorization?: string } = {}) {
     cookies: opts.cookie ? { [SESSION_COOKIE_NAME]: opts.cookie } : {},
     headers: opts.authorization ? { authorization: opts.authorization } : {},
     ip: "::1",
+    originalUrl: opts.originalUrl ?? "/api/recurso",
+    path: opts.path ?? opts.originalUrl ?? "/api/recurso",
   } as unknown as Request;
   const next = vi.fn() as unknown as NextFunction;
   return {
@@ -123,7 +138,7 @@ beforeEach(() => {
 
 describe("with a session cookie", () => {
   it("lets a live session through and says who it is", async () => {
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
     const c = call({ cookie: "buen-token" });
     await authenticate(c.req, c.res, c.next);
 
@@ -134,7 +149,7 @@ describe("with a session cookie", () => {
   it("reads the role from the database, not from anything the client sent", async () => {
     // A demoted person kept their old permissions for up to a week under the
     // old token. The role is re-read on every request for that reason.
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
     findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 3 } });
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
@@ -187,6 +202,8 @@ describe("with a session cookie", () => {
         created_at: new Date(NOW.getTime() - 2 * 86_400_000),
         expires_at: new Date(NOW.getTime() + 1e6),
         last_used_at: new Date(NOW.getTime() - (THROTTLE_MS - 1_000)),
+        estado: "completa",
+        mfa_satisfied_at: null,
       });
       const c = call({ cookie: "t" });
       await authenticate(c.req, c.res, c.next);
@@ -207,6 +224,8 @@ describe("with a session cookie", () => {
         created_at: new Date(NOW.getTime() - 2 * 86_400_000),
         expires_at: new Date(NOW.getTime() + 1e6),
         last_used_at: new Date(NOW.getTime() - (THROTTLE_MS + 1_000)),
+        estado: "completa",
+        mfa_satisfied_at: null,
       });
       const c = call({ cookie: "t" });
       await authenticate(c.req, c.res, c.next);
@@ -234,6 +253,8 @@ describe("with a session cookie", () => {
         created_at: createdAt,
         expires_at: new Date(NOW.getTime() + 1e6),
         last_used_at: new Date(NOW.getTime() - (THROTTLE_MS + 1_000)),
+        estado: "completa",
+        mfa_satisfied_at: null,
       });
       const c = call({ cookie: "el-token" });
       await authenticate(c.req, c.res, c.next);
@@ -266,6 +287,8 @@ describe("with a session cookie", () => {
         created_at: new Date(NOW.getTime() - 2 * 86_400_000),
         expires_at: new Date(NOW.getTime() + 10 * 60_000),
         last_used_at: new Date(NOW.getTime() - (THROTTLE_MS + 1_000)),
+        estado: "completa",
+        mfa_satisfied_at: null,
       });
       const c = call({ cookie: "t" });
       await authenticate(c.req, c.res, c.next);
@@ -294,6 +317,8 @@ describe("with a session cookie", () => {
         created_at: createdAt,
         expires_at: filaDice,
         last_used_at: new Date(NOW.getTime() - 1_000),
+        estado: "completa",
+        mfa_satisfied_at: null,
       });
       const c = call({ cookie: "t" });
       await authenticate(c.req, c.res, c.next);
@@ -317,6 +342,8 @@ describe("with a session cookie", () => {
       created_at: new Date(Date.now() - 2 * 86_400_000),
       expires_at: new Date(Date.now() + 1e6),
       last_used_at: new Date(Date.now() - 60 * 60 * 1000),
+      estado: "completa",
+      mfa_satisfied_at: null,
     });
     touchSession.mockRejectedValue(new Error("pool agotado"));
     const c = call({ cookie: "t" });
@@ -347,6 +374,119 @@ describe("with a session cookie", () => {
   });
 });
 
+describe("what a session's state may reach", () => {
+  // The cut this whole plan exists for. Until this block, `authenticate`
+  // answered one question — is this cookie a live session — and a row
+  // written the instant a password was accepted was indistinguishable from
+  // one that had proved a second factor. `puedeAlcanzar` and
+  // `MENSAJE_FACTOR_PENDIENTE` are Task 4's; this proves `authenticate`
+  // actually reads their answer instead of merely having imported them.
+
+  /** A live session row shaped like `findLiveSession`'s real return, minus what each test overrides. */
+  const sesionCon = (estado: EstadoSesion, extra: Record<string, unknown> = {}) => ({
+    id: "s1",
+    id_usuario: 7,
+    created_at: new Date(Date.now() - 1e6),
+    expires_at: new Date(Date.now() + 1e6),
+    last_used_at: new Date(),
+    estado,
+    mfa_satisfied_at: null,
+    ...extra,
+  });
+
+  it("refuses the ERP to a partial session", async () => {
+    // The assertion that makes MFA real. A session that has shown a password
+    // and nothing else must not read a single row of the business data.
+    findLiveSession.mockResolvedValue(sesionCon("parcial"));
+    const c = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.status).toBe(401);
+    expect(c.next).not.toHaveBeenCalled();
+  });
+
+  it("lets a partial session finish logging in", async () => {
+    findLiveSession.mockResolvedValue(sesionCon("parcial"));
+    const c = call({ cookie: "t", originalUrl: "/api/auth/mfa/verify" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.next).toHaveBeenCalled();
+  });
+
+  it("answers 403 and not 401 to an onboarding session reaching the ERP", async () => {
+    // The difference is what the frontend does with it: a 401 ends the
+    // session and sends somebody back to the login they just completed,
+    // which is a loop. A 403 keeps them inside, where the screen that
+    // finishes their setup is.
+    findLiveSession.mockResolvedValue(sesionCon("onboarding"));
+    const c = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.status).toBe(403);
+    expect((c.res as unknown as { body: { message: string } }).body).toEqual({
+      message: MENSAJE_FACTOR_PENDIENTE,
+    });
+    expect(c.next).not.toHaveBeenCalled();
+  });
+
+  it("puts the state on req.user, for the step-up gate to read", async () => {
+    findLiveSession.mockResolvedValue(sesionCon("onboarding", { mfa_satisfied_at: null }));
+    const c = call({ cookie: "t", originalUrl: "/api/auth/email/send" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.req.user).toMatchObject({ estado: "onboarding", mfa_satisfied_at: null });
+  });
+
+  it("reads the path off originalUrl, not off req.path", async () => {
+    // The real values, not invented ones: `auth.routes.ts` mounts
+    // `authenticate` per-route on a router hung at `/api/auth`
+    // (`router.get("/me", authenticate, me)`), so a real request to
+    // `GET /api/auth/me` carries `req.originalUrl === "/api/auth/me"` and
+    // `req.path === "/me"` — relative to that mount.
+    //
+    // A test that picks a route the allowlist refuses either way would pass
+    // whichever field the code reads, and prove nothing — which is exactly
+    // the shape of test the brief warns is worthless here. `/api/auth/me` is
+    // the opposite case: it is in `parcial`'s allowlist by its real, full
+    // path, and refused by the bare `/me` a mount-relative read would
+    // produce (nothing in the allowlist is `/me` or starts with `/me/`).
+    // Reading `originalUrl` calls `next()`; reading `req.path` would answer
+    // 401 instead, for a request `parcial` is supposed to be allowed to make.
+    findLiveSession.mockResolvedValue(sesionCon("parcial"));
+    const c = call({ cookie: "t", originalUrl: "/api/auth/me", path: "/me" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.next).toHaveBeenCalled();
+    expect(c.status).toBe(0);
+  });
+
+  it("does not set the role header on a request the state check refuses", async () => {
+    // Where the check goes matters: after `usuario` is resolved (so the
+    // account-archived path is untouched) but before any response header is
+    // written. A refused request carrying `ROLE_HEADER` would tell a caller
+    // who did not pass the gate what role they have.
+    findLiveSession.mockResolvedValue(sesionCon("parcial"));
+    const c = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.status).toBe(401);
+    expect(c.headers[ROLE_HEADER]).toBeUndefined();
+    expect(c.headers[SESSION_EXPIRES_HEADER]).toBeUndefined();
+  });
+
+  it("still lets a complete session through unchanged", async () => {
+    // `puedeAlcanzar("completa", ...)` is always true — the gate this task
+    // adds must not narrow what a fully authenticated session could already
+    // reach.
+    findLiveSession.mockResolvedValue(sesionCon("completa"));
+    const c = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.next).toHaveBeenCalled();
+    expect(c.status).toBe(0);
+  });
+});
+
 describe("the current-role header", () => {
   // Task 2's whole point: the frontend used to notice a role change by
   // decoding `id_rol` out of a re-signed JWT (`x-new-token`, now dead — see
@@ -359,7 +499,7 @@ describe("the current-role header", () => {
   // credential now.
 
   it("is set on the cookie path, from the database", async () => {
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
     findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 4 } });
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
