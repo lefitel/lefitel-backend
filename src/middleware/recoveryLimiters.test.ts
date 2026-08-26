@@ -35,8 +35,8 @@ import { hashOpaqueToken } from "../auth/opaqueToken.js";
 import {
   emailSendLimiter,
   emailVerifyLimiter,
-  passwordForgotDailyLimiter,
   passwordForgotEmailLimiter,
+  FORGOT_BUCKET_COUNT,
   passwordForgotIpLimiter,
   passwordForgotRateLimit,
   passwordResetIpLimiter,
@@ -46,7 +46,6 @@ import {
 import {
   EMAIL_SEND_LIMIT,
   EMAIL_VERIFY_LIMIT,
-  PASSWORD_FORGOT_DAILY_LIMIT,
   PASSWORD_FORGOT_EMAIL_LIMIT,
   PASSWORD_FORGOT_IP_LIMIT,
   PASSWORD_RESET_IP_LIMIT,
@@ -120,7 +119,6 @@ beforeEach(async () => {
   // that reads its counter from zero.
   await passwordForgotEmailLimiter.resetKey("pf-email:isaias@osefi.net");
   await passwordForgotIpLimiter.resetKey(`pf-ip:${DESDE}`);
-  await passwordForgotDailyLimiter.resetKey("pf-daily");
   await passwordResetIpLimiter.resetKey(`pr-ip:${DESDE}`);
 });
 
@@ -133,8 +131,15 @@ describe("the brief's own numbers", () => {
     expect(PASSWORD_FORGOT_IP_LIMIT).toBe(20);
   });
 
-  it("/password/forgot: 50 a day, globally — the cap this task added on top of the brief", () => {
-    expect(PASSWORD_FORGOT_DAILY_LIMIT).toBe(50);
+  it("/password/forgot has no daily bucket in front of it any more, on purpose", () => {
+    // There was one, keyed globally, and it counted requests. Fifty POSTs
+    // with a malformed body answered 400, sent no mail, spent none of the
+    // Resend quota, and shut recovery off for everybody for a day — a denial
+    // of service handed out by the defence itself. The ceiling now lives at
+    // the send site (`auth/mailBudget.ts`), where what is counted is what is
+    // spent. Asserted as an absence so that re-adding it has to be a decision
+    // somebody makes against this sentence, not an oversight.
+    expect(FORGOT_BUCKET_COUNT).toBe(2);
   });
 
   it("/email/send: 5 an hour", () => {
@@ -431,20 +436,24 @@ describe("exhausting the cupo — the brief's own acceptance criteria", () => {
     expect(vigesimoPrimero.status).toBe(429);
   });
 
-  it("the daily backstop cuts off the 51st request of the day, however it is spread out", async () => {
+  /**
+   * The inverse of the test that used to live here.
+   *
+   * There was a global daily bucket in front of this route, and this asserted
+   * that the 51st request got a 429. That was the bug: fifty requests can be
+   * fifty *malformed* requests that send nothing, and the ceiling still fell
+   * on everybody for a day. So the assertion is now that spreading requests
+   * across addresses and networks does **not** shut the route down — the
+   * ceiling moved to the send site, where mail is counted instead of
+   * requests. See `mailBudget.test.ts` for the mechanism that replaced it.
+   */
+  it("does not shut the route down for everyone just because many requests arrived", async () => {
     const bare = appAround(passwordForgotRateLimit, 200);
-    // Fifty requests, each its own address and (via a distinct X-Forwarded-For)
-    // its own IP too — nothing here trips the 3-per-email or 20-per-IP bucket,
-    // which is exactly the gap Task 6's own daily cap exists to close: many
-    // individually-under-budget identities, summing past the mail quota.
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 60; i++) {
       const res = await post(bare, { email: `global-${i}@osefi.net` }, `198.51.100.${i % 200}`);
       await settled();
       expect(res.status, `intento ${i + 1}`).toBe(200);
     }
-
-    const cincuentaYUno = await post(bare, { email: "global-final@osefi.net" }, "198.51.100.250");
-    expect(cincuentaYUno.status).toBe(429);
   });
 
   /**

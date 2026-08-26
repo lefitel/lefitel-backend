@@ -37,6 +37,7 @@ import { TokenUsoUnicoModel } from "../models/tokenUsoUnico.model.js";
 import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
+import { consumirPresupuestoDeCorreo } from "../auth/mailBudget.js";
 import { avisarCorreoCambiado } from "../auth/securityNotice.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
 import { logAction } from "../utils/logAction.js";
@@ -144,9 +145,20 @@ function isEmailUniqueViolation(error: unknown): boolean {
  * specified to live, and the token rides in the URL *fragment* rather than
  * the query, matching the reasoning `task-9-brief.md` already gives for the
  * password-reset link: a fragment never reaches a server log or a `Referer`
- * header, a query does. Whoever builds the page this points at should
- * confirm the path, or change it here — this is the only place it is
- * written.
+ * header, a query does.
+ *
+ * **The path is `/app/perfil`, and it was `/perfil` until the final review
+ * caught it.** `PerfilPage` is nested under `/app` in `web/src/App.tsx`, so
+ * `/perfil` matched nothing, fell through to that file's catch-all `<Route
+ * path="*">`, and `Navigate` dropped the fragment on the way to the home
+ * page. Every verification link ever sent was inert: no account could reach
+ * `email_verified_at`, and `/password/forgot` only operates on verified
+ * addresses, so the whole feature was dead and said nothing about it.
+ *
+ * This comment used to end by asking whoever built that page to confirm the
+ * path. Nobody did, which is what a comment addressed to a future reader
+ * buys. `frontendLinks.test.ts` now reads the route table out of `App.tsx`
+ * and fails if this string stops matching it.
  *
  * `allowedOrigins(...)[0]` is the same "primary configured frontend origin"
  * `app.auth.test.ts` already reads off this function; the fallback to
@@ -155,7 +167,7 @@ function isEmailUniqueViolation(error: unknown): boolean {
  */
 function verificationLinkFor(token: string): string {
   const origin = allowedOrigins(process.env.CORS_ORIGIN, process.env.NODE_ENV)[0] ?? DEV_FRONTEND_ORIGIN;
-  return `${origin}/perfil#verify_email=${encodeURIComponent(token)}`;
+  return `${origin}/app/perfil#verify_email=${encodeURIComponent(token)}`;
 }
 
 function verificationEmailBody(enlace: string): { html: string; texto: string } {
@@ -357,6 +369,25 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
       severity: "critical",
       ip_address: req.ip ?? null,
     });
+  }
+
+  // The daily mail budget, asked before the token is minted — see
+  // `auth/mailBudget.ts`. This route had no daily ceiling at all until the
+  // final review did the arithmetic: five calls an hour per account, up to
+  // three messages each, is 360 a day from one logged-in account against a
+  // Resend quota of 100 for the whole company. `passwordConfirmLimiter` in
+  // front of it does not help — it refunds everything that is not a wrong
+  // password, which is exactly what a well-formed request is.
+  //
+  // Before minting, for the same reason `/password/forgot` asks first:
+  // `crearToken` marks whatever was pending for this account as used, so a
+  // token that cannot be mailed would destroy a link already sitting in
+  // somebody's inbox and give them nothing back. And the response stays the
+  // uniform one — a caller who could tell "the budget ran out" apart from
+  // "sent" learns nothing useful, and Constraint #1 says the answer does not
+  // move for anything.
+  if (!consumirPresupuestoDeCorreo("email/send")) {
+    return res.status(200).json({ message: EMAIL_ENVIO_RESPUESTA });
   }
 
   // Constant #2: the token this mints is never logged, never put in the

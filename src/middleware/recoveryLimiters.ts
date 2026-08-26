@@ -36,8 +36,6 @@ import {
   RECOVERY_WINDOW_MS,
   PASSWORD_FORGOT_EMAIL_LIMIT,
   PASSWORD_FORGOT_IP_LIMIT,
-  PASSWORD_FORGOT_DAILY_LIMIT,
-  PASSWORD_FORGOT_DAILY_WINDOW_MS,
   EMAIL_SEND_LIMIT,
   PASSWORD_RESET_IP_LIMIT,
   PASSWORD_RESET_TOKEN_LIMIT,
@@ -68,18 +66,6 @@ function forgotEmailKey(req: Request): string {
  *  the two apart. */
 function forgotIpKey(req: Request): string {
   return `pf-ip:${ipKeyGenerator(req.ip ?? "")}`;
-}
-
-/**
- * `/password/forgot`'s daily backstop: one key, for everyone.
- *
- * Not "no key" — `express-rate-limit` needs a `keyGenerator` regardless, and
- * a function that always returns the same string is what makes every caller
- * share the one counter this bucket is for. See `PASSWORD_FORGOT_DAILY_LIMIT`
- * in `config/security.ts` for the arithmetic this exists to fix.
- */
-function forgotDailyKey(): string {
-  return "pf-daily";
 }
 
 /** By account — `/email/send` runs behind `authenticate`, so there is a
@@ -163,18 +149,6 @@ export const passwordForgotIpLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-/** The daily backstop, one key for the whole company. Same absence of
- *  `requestWasSuccessful` as the two above, and for the same reason —
- *  see `PASSWORD_FORGOT_DAILY_LIMIT`'s comment for the arithmetic this is
- *  sized against. */
-export const passwordForgotDailyLimiter = rateLimit({
-  windowMs: PASSWORD_FORGOT_DAILY_WINDOW_MS,
-  limit: PASSWORD_FORGOT_DAILY_LIMIT,
-  keyGenerator: forgotDailyKey,
-  message: { message: "Se alcanzó el máximo de solicitudes de restablecimiento por hoy. Intente más tarde." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
 /**
  * All three `/password/forgot` buckets as one middleware.
@@ -192,11 +166,34 @@ export const passwordForgotDailyLimiter = rateLimit({
  * 429 itself or calls on, so an error from any of them reaches `next(err)`
  * instead of being dropped.
  */
+/**
+ * 🔴 `passwordForgotDailyLimiter` used to be the third entry here, and it is
+ * gone on purpose. Middleware runs before the handler, so it could only count
+ * *requests*, and requests are not the resource: fifty POSTs carrying a
+ * malformed body answered 400, sent no mail, spent none of Resend's quota, and
+ * still shut recovery off for the whole company for twenty-four hours —
+ * `RateLimit-Remaining` counting down for whoever was doing it. A defence
+ * cheaper to defeat than the thing it defends is worse than none, because it
+ * is also a denial of service somebody else can trigger.
+ *
+ * The ceiling it was reaching for now lives at the send site,
+ * `auth/mailBudget.ts`, where the thing being counted is the thing being
+ * spent. The two buckets left here are the ones whose keys are honest: an
+ * address and a network.
+ */
 const forgotBuckets: readonly RateLimitRequestHandler[] = [
   passwordForgotIpLimiter,
   passwordForgotEmailLimiter,
-  passwordForgotDailyLimiter,
 ];
+
+/**
+ * How many buckets `/password/forgot` actually runs behind, exported so a test
+ * can assert it. There were three; the third counted requests instead of mail
+ * and is documented above as an absence rather than deleted quietly, because
+ * re-adding it looks like an improvement to anybody who has not read why it
+ * went.
+ */
+export const FORGOT_BUCKET_COUNT = forgotBuckets.length;
 
 export function passwordForgotRateLimit(req: Request, res: Response, next: NextFunction) {
   const run = (i: number) => {

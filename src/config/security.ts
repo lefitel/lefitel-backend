@@ -488,38 +488,23 @@ export const PASSWORD_FORGOT_EMAIL_LIMIT = 3;
 export const PASSWORD_FORGOT_IP_LIMIT = 20;
 
 /**
- * `/password/forgot`, counted against one shared key for every caller, for a
- * full day.
+ * ~~`PASSWORD_FORGOT_DAILY_LIMIT` / `PASSWORD_FORGOT_DAILY_WINDOW_MS`~~ —
+ * retiradas por la revisión final, y anotadas en vez de borradas porque el
+ * error que representaban es fácil de repetir.
  *
- * Not in the brief this task implements — added after checking the two
- * numbers above against the thing they are supposed to protect: Resend's
- * quota, which is 100 sends a day for the *whole company*, shared with every
- * other feature that mails.
+ * Eran el tope de un `express-rate-limit` con clave global montado delante de
+ * `/password/forgot`. El middleware corre antes que el handler, así que solo
+ * podía contar **peticiones** — y la petición no es el recurso. Cincuenta POST
+ * con el cuerpo mal formado contestaban 400, no mandaban ni un correo, no
+ * gastaban nada de la cuota de Resend, y dejaban a toda la empresa sin
+ * recuperación veinticuatro horas, con `RateLimit-Remaining` llevándole la
+ * cuenta al atacante.
  *
- * ```
- * PASSWORD_FORGOT_EMAIL_LIMIT (3/h) → 72/day from one address alone, and two
- *   known addresses already clear the quota.
- * PASSWORD_FORGOT_IP_LIMIT   (20/h) → 480/day from one caller rotating
- *   addresses — near five times the quota, alone.
- * ```
- *
- * Neither bucket, sitting at its own ceiling, keeps the *daily* damage under
- * the quota that is supposed to be the point of both — so this third bucket
- * is the one that actually does. Fifty is invisible to real use (twenty to
- * sixty people, a handful of genuine resets a week) and it is what turns
- * "an attacker empties the mail quota and kills password recovery *and* email
- * verification for the rest of the day" into "an attacker spends half the
- * quota and only password recovery goes dark, only until the day rolls over".
- *
- * It is, on purpose, a bucket every caller shares — the same shape that hurt
- * once already, when a 503 refunding into a shared bucket locked the whole
- * office out of login for a quarter of an hour over a database blink. Accepted
- * here anyway, because the comparison above is the point: without this cap the
- * failure is total (both mail-sending features down, for the whole quota's
- * reset window), and with it the failure is partial and contained to the one
- * route the attacker actually hit.
+ * El techo que buscaban vive ahora en `MAIL_DAILY_BUDGET`, contado en el sitio
+ * donde el correo se manda de verdad.
  */
-export const PASSWORD_FORGOT_DAILY_LIMIT = 50;
+export const MAIL_DAILY_BUDGET = 80;
+export const MAIL_DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const PASSWORD_FORGOT_DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** `/email/send`, keyed by account — there already is a session, unlike
