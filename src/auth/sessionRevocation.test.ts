@@ -225,7 +225,7 @@ beforeEach(() => {
 
 /** A browser: a session row of YO's, and the cookie header that names it. */
 async function navegador(): Promise<{ cookie: string; id: string }> {
-  const { token } = await createSession(YO, { userAgent: "Chrome", ip: "1.2.3.4" });
+  const { token } = await createSession(YO, { userAgent: "Chrome", ip: "1.2.3.4" }, "completa");
   const fila = tabla[tabla.length - 1];
   return { cookie: `${SESSION_COOKIE_NAME}=${token}`, id: String(fila.id) };
 }
@@ -366,7 +366,7 @@ describe("closing one session", () => {
      * at somebody else's row and finding it still alive afterwards.
      */
     const mia = await navegador();
-    const { token: ajeno } = await createSession(99, {});
+    const { token: ajeno } = await createSession(99, {}, "completa");
     const filaAjena = tabla[tabla.length - 1];
 
     const res = await request(app)

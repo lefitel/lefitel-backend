@@ -70,18 +70,18 @@ const opsOf = (clause: unknown) => Object.getOwnPropertySymbols(clause as object
 describe("createSession", () => {
   it("never writes the token itself", async () => {
     // The one property that makes this table safe to dump.
-    const { token } = await createSession(7, {});
+    const { token } = await createSession(7, {}, "completa");
     expect(JSON.stringify(written())).not.toContain(token);
     expect(written().token_hash).toBe(hashSessionToken(token));
   });
 
   it("returns a token that is not what it stored", async () => {
-    const { token } = await createSession(7, {});
+    const { token } = await createSession(7, {}, "completa");
     expect(token).not.toBe(written().token_hash);
   });
 
   it("expires at the idle limit, not at the absolute one", async () => {
-    const { expiresAt } = await createSession(7, {});
+    const { expiresAt } = await createSession(7, {}, "completa");
     const dias = (expiresAt.getTime() - Date.now()) / 86_400_000;
     expect(dias).toBeGreaterThan(SESSION_IDLE_DAYS - 0.01);
     expect(dias).toBeLessThan(SESSION_IDLE_DAYS + 0.01);
@@ -91,7 +91,7 @@ describe("createSession", () => {
     // Cheap insurance: dropping id_usuario, created_at, last_used_at or the
     // revoked_at: null would pass every other test here and fail in
     // production against a NOT NULL column instead.
-    await createSession(7, {});
+    await createSession(7, {}, "completa");
     const row = written();
     expect(row.id_usuario).toBe(7);
     expect(row.created_at).toBeInstanceOf(Date);
@@ -102,7 +102,7 @@ describe("createSession", () => {
 
   it("truncates a browser's absurd user agent instead of failing the insert", async () => {
     const enviado = "x".repeat(400);
-    await createSession(7, { userAgent: enviado });
+    await createSession(7, { userAgent: enviado }, "completa");
     // Not just "short enough": the stored value has to be the input's own
     // prefix, or a function that always returned e.g. an empty string would
     // pass a bare length check too.
@@ -116,7 +116,7 @@ describe("createSession", () => {
     // the insert outright (error 22001), which would turn a login into a 500
     // instead of a session.
     const enviado = "1".repeat(400);
-    await createSession(7, { ip: enviado });
+    await createSession(7, { ip: enviado }, "completa");
     expect(written().ip_address).toBe(enviado.slice(0, SESSION_IP_MAX));
     expect(String(written().ip_address).length).toBe(SESSION_IP_MAX);
   });
@@ -125,8 +125,13 @@ describe("createSession", () => {
     // The realistic shape of an oversized ip, if `trust proxy` were ever
     // misconfigured: several addresses, not one long one. The client's own
     // address is the first, and is what a session list should show.
-    await createSession(7, { ip: "203.0.113.5, 10.0.0.1, 10.0.0.2" });
+    await createSession(7, { ip: "203.0.113.5, 10.0.0.1, 10.0.0.2" }, "completa");
     expect(written().ip_address).toBe("203.0.113.5");
+  });
+
+  it("writes the state it was told, and never invents one", async () => {
+    await createSession(7, {}, "parcial");
+    expect(create.mock.calls.at(-1)?.[0]).toMatchObject({ id_usuario: 7, estado: "parcial" });
   });
 });
 
@@ -203,6 +208,35 @@ describe("findLiveSession", () => {
     expect(found?.created_at).toEqual(createdAt);
     const [options] = findOne.mock.calls[0] as [{ attributes: string[] }];
     expect(options.attributes).toContain("created_at");
+  });
+
+  it("selects and returns estado, mfa_satisfied_at and mfa_source, which the next task reads", async () => {
+    // Task 5 decides what a request may reach by reading `estado`, and
+    // `requireStepUp` (a later plan) reads the other two. Neither can do that
+    // if this function drops them on the way out, or if they were never asked
+    // for in the SELECT to begin with — same two-failures-in-one shape as
+    // `created_at` above.
+    const satisfiedAt = new Date("2026-01-02T00:00:00.000Z");
+    findOne.mockResolvedValue({
+      dataValues: {
+        id: "s1",
+        id_usuario: 7,
+        created_at: new Date(),
+        expires_at: new Date(),
+        last_used_at: new Date(),
+        estado: "onboarding",
+        mfa_satisfied_at: satisfiedAt,
+        mfa_source: "totp",
+      },
+    });
+    const found = await findLiveSession("t");
+    expect(found?.estado).toBe("onboarding");
+    expect(found?.mfa_satisfied_at).toEqual(satisfiedAt);
+    expect(found?.mfa_source).toBe("totp");
+    const [options] = findOne.mock.calls[0] as [{ attributes: string[] }];
+    expect(options.attributes).toEqual(
+      expect.arrayContaining(["estado", "mfa_satisfied_at", "mfa_source"]),
+    );
   });
 });
 

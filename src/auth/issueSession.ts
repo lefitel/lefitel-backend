@@ -19,6 +19,7 @@
 import type { Request, Response } from "express";
 import { createSession, findLiveSession, revokeSessionOf } from "./sessionStore.js";
 import { readSessionCookie, setSessionCookie } from "./sessionCookie.js";
+import type { EstadoSesion } from "./sessionState.js";
 
 /**
  * Open a session for this person and put it in the response as a cookie.
@@ -32,13 +33,26 @@ import { readSessionCookie, setSessionCookie } from "./sessionCookie.js";
  * the two callers cannot disagree about which header the session list shows.
  * `req.ip` respects `trust proxy` (set to one hop in `app.ts`), so it is the
  * client's address and not the Coolify proxy's.
+ *
+ * `estado` is mandatory, same reasoning and no default, one level up from
+ * `createSession`'s own: this is the last place before the row is written
+ * where the caller — the login — still knows what it just decided.
  */
-export async function issueSession(req: Request, res: Response, id_usuario: number): Promise<void> {
+export async function issueSession(
+  req: Request,
+  res: Response,
+  id_usuario: number,
+  estado: EstadoSesion,
+): Promise<void> {
   await rotateOut(req);
-  const { token, expiresAt } = await createSession(id_usuario, {
-    userAgent: req.headers["user-agent"],
-    ip: req.ip,
-  });
+  const { token, expiresAt } = await createSession(
+    id_usuario,
+    {
+      userAgent: req.headers["user-agent"],
+      ip: req.ip,
+    },
+    estado,
+  );
   setSessionCookie(res, token, expiresAt);
 }
 

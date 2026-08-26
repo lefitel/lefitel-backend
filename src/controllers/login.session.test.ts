@@ -185,13 +185,20 @@ describe("the login, once the credential is good", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(createSession).toHaveBeenCalledWith(7, {
-      // Both come off the request rather than being invented here: the session
-      // list in the profile screen is only recognisable to its owner if these
-      // are the browser and address that actually made the call.
-      userAgent: NAVEGADOR,
-      ip: "203.0.113.9",
-    });
+    expect(createSession).toHaveBeenCalledWith(
+      7,
+      {
+        // Both come off the request rather than being invented here: the
+        // session list in the profile screen is only recognisable to its
+        // owner if these are the browser and address that actually made the
+        // call.
+        userAgent: NAVEGADOR,
+        ip: "203.0.113.9",
+      },
+      // "completa": nothing yet decides otherwise (that is a later task in
+      // this plan) — see the comment on this call site in auth.controller.ts.
+      "completa",
+    );
   });
 
   it("hands the token over as a cookie the page cannot read", async () => {
@@ -307,7 +314,7 @@ describe("the login, once the credential is good", () => {
     expect(findLiveSession).toHaveBeenCalledWith("token-anterior");
     expect(revokeSessionOf).toHaveBeenCalledWith(7, "la-anterior");
     // And the new one still gets opened: rotation replaces, it does not skip.
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything());
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), expect.anything());
   });
 
   it("revokes nothing when the cookie it was sent is already dead", async () => {

@@ -167,7 +167,13 @@ export const login = handler("login", async (req: Request, res: Response) => {
    * reasoning, including why that cannot be turned into a free guess.
    */
   try {
-    await issueSession(req, res, check.usuario.id);
+    // "completa" for now: nothing yet decides whether this login should land
+    // in "parcial" or "onboarding" instead — that wiring is a later task in
+    // this same plan. Passing it explicitly here, rather than letting
+    // `issueSession` default it, is what keeps today's behaviour ("a normal
+    // user sees the ERP exactly as before") a decision made at the call site
+    // instead of one made silently by the storage layer.
+    await issueSession(req, res, check.usuario.id, "completa");
   } catch (err) {
     authLog.error(
       { err, id_usuario: check.usuario.id },

@@ -8,6 +8,7 @@ import {
   SESSION_IP_MAX,
 } from "../config/security.js";
 import type { ISesion } from "../interfaces/index.js";
+import type { EstadoSesion } from "./sessionState.js";
 
 const DAY_MS = 86_400_000;
 
@@ -53,6 +54,13 @@ function fitIp(ip?: string): string | null {
 export async function createSession(
   id_usuario: number,
   meta: { userAgent?: string; ip?: string },
+  // No default. A default here would be a policy decision taken by the
+  // storage layer, and whichever value it took would be wrong somewhere:
+  // `completa` hands a fresh password-only login the whole ERP, and `parcial`
+  // locks out every caller that has legitimately finished. Making it
+  // mandatory turns "which state does this login deserve" into a question the
+  // compiler asks at each of the call sites, where the answer is known.
+  estado: EstadoSesion,
 ): Promise<{ token: string; expiresAt: Date }> {
   const token = newSessionToken();
   const now = new Date();
@@ -67,6 +75,7 @@ export async function createSession(
     last_used_at: now,
     expires_at: expiresAt,
     revoked_at: null,
+    estado,
   });
 
   return { token, expiresAt };
@@ -80,9 +89,16 @@ export async function createSession(
  * ceiling are all "no". Checking them in JavaScript after the fact is how one
  * of them ends up forgotten on a later edit.
  */
-export async function findLiveSession(
-  token: string,
-): Promise<{ id: string; id_usuario: number; created_at: Date; expires_at: Date; last_used_at: Date } | null> {
+export async function findLiveSession(token: string): Promise<{
+  id: string;
+  id_usuario: number;
+  created_at: Date;
+  expires_at: Date;
+  last_used_at: Date;
+  estado: EstadoSesion;
+  mfa_satisfied_at: Date | null;
+  mfa_source: string | null;
+} | null> {
   const now = new Date();
   const found = await SesionModel.findOne({
     where: {
@@ -91,7 +107,16 @@ export async function findLiveSession(
       expires_at: { [Op.gt]: now },
       created_at: { [Op.gt]: new Date(now.getTime() - SESSION_ABSOLUTE_DAYS * DAY_MS) },
     },
-    attributes: ["id", "id_usuario", "created_at", "expires_at", "last_used_at"],
+    attributes: [
+      "id",
+      "id_usuario",
+      "created_at",
+      "expires_at",
+      "last_used_at",
+      "estado",
+      "mfa_satisfied_at",
+      "mfa_source",
+    ],
   });
   if (!found) return null;
   const v = found.dataValues;
@@ -101,6 +126,9 @@ export async function findLiveSession(
     created_at: v.created_at,
     expires_at: v.expires_at,
     last_used_at: v.last_used_at,
+    estado: v.estado,
+    mfa_satisfied_at: v.mfa_satisfied_at,
+    mfa_source: v.mfa_source,
   };
 }
 
