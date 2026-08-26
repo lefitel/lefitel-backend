@@ -17,6 +17,7 @@ import type { Request, Response } from "express";
 import app from "../app.js";
 import {
   accountBucketKey,
+  confirmCostsNothing,
   costsNothing,
   estaBloqueada,
   ipBucketKey,
@@ -506,14 +507,76 @@ describe("what the confirmation bucket spends", () => {
  * that fix in place, through the real limiter, the way the rest of this
  * describe block pins the 401 rule.
  */
+describe("confirmCostsNothing reads the flag directly, as a pure function", () => {
+  const conFlag = (flag: boolean | undefined, statusCode: number) => {
+    const res = { statusCode, locals: {} as Record<string, unknown> } as Response;
+    if (flag !== undefined) res.locals.stepUpPasswordWrong = flag;
+    return res;
+  };
+
+  it("costs when the flag says the password was wrong, whatever the status code is", () => {
+    // 403, not 401 — the whole reason this branch exists.
+    expect(confirmCostsNothing(fakeReq(DESDE), conFlag(true, 403))).toBe(false);
+  });
+
+  it("is free when the flag says the password was right, even though the final response is a 401", () => {
+    // The exact shape a double confirmation produces: this gate's own charge
+    // succeeded, but the *other* charge in the same request failed with a
+    // 401 — the response this predicate is handed carries that 401, and the
+    // flag is what overrides it for this charge alone.
+    expect(confirmCostsNothing(fakeReq(DESDE), conFlag(false, 401))).toBe(true);
+  });
+
+  it("falls through to the ordinary 401 rule when the flag was never set", () => {
+    expect(confirmCostsNothing(fakeReq(DESDE), conFlag(undefined, 401))).toBe(false);
+    expect(confirmCostsNothing(fakeReq(DESDE), conFlag(undefined, 403))).toBe(true);
+  });
+
+  it("consumes the flag: a second read of the same response falls through to the 401 rule", () => {
+    // The mechanism the halving fix depends on. Two independent
+    // `passwordConfirmLimiter` calls in one request each register their own
+    // `finish` handler, and both call this function with the very same
+    // `(req, res)` — there is no way for either call to know it is "the
+    // first" or "the second" except by this one consuming what it read.
+    const res = conFlag(false, 401);
+    expect(confirmCostsNothing(fakeReq(DESDE), res)).toBe(true);
+    // Second call, same res: the flag is gone, so this now answers the
+    // question a plain second charge in the same request actually needs
+    // answered — was the *final* response a 401 — and gets `false` (costs),
+    // matching the 401 on it.
+    expect(confirmCostsNothing(fakeReq(DESDE), res)).toBe(false);
+  });
+});
+
+/**
+ * The one thing `requireStepUp` needed from this bucket that neither route
+ * above had a use for: a way to charge a wrong password that does not answer
+ * 401.
+ *
+ * `requireStepUp` (`middleware/requireStepUp.ts`) shares this exact limiter —
+ * same store, same `pc:<id>` key — for its own password fallback, but every
+ * refusal it makes is uniformly `403 { code: CODIGO_STEP_UP }`, on purpose, so
+ * the frontend reacts to a stale window, a missing factor and a wrong password
+ * the same way. `confirmCostsNothing`'s original rule ("only a 401 costs")
+ * would have refunded every one of those wrong guesses, leaving the gate with
+ * no real budget behind it — see the comment on `res.locals.stepUpPasswordWrong`
+ * in `confirmCostsNothing` itself for the fix. The tests below pin that fix in
+ * place through the real limiter, the way the rest of this describe block pins
+ * the 401 rule — and the last one pins `confirmCostsNothing`'s consume-once
+ * read as defence in depth against a *second*, independent charge landing on
+ * the same response, which is the shape a fix-round finding showed can halve
+ * this bucket's real budget if a caller ever marks a right answer that way
+ * (see that test's own comment for why `requireStepUp` no longer does).
+ */
 describe("the flag a caller sets when its own answer cannot be a 401", () => {
   const CLAVE_CUENTA = "pc:42";
   const conSesion = { id: 42, id_rol: 3, id_sesion: "s", expires_at: new Date() };
 
   /** Same shape as `appConSesion` above, except the route answers 403 and
-   *  optionally marks that 403 as a wrong password before sending it — which
-   *  is exactly what `requireStepUp` does right before calling `denegar`. */
-  function appConBandera(marca: boolean) {
+   *  optionally marks that 403 as a wrong (or right) password before sending
+   *  it — which is exactly what `requireStepUp` does right before calling
+   *  `denegar`, or before calling `next`. */
+  function appConBandera(marca: boolean | undefined) {
     const bare = express();
     bare.set("trust proxy", 1);
     bare.use(express.json());
@@ -525,7 +588,7 @@ describe("the flag a caller sets when its own answer cannot be a 401", () => {
       },
       passwordConfirmLimiter,
       (_req, res) => {
-        if (marca) res.locals.stepUpPasswordWrong = true;
+        if (marca !== undefined) res.locals.stepUpPasswordWrong = marca;
         res.status(403).json({ message: "Esta operación necesita que confirmes tu identidad.", code: "STEP_UP_REQUIRED" });
       },
     );
@@ -544,15 +607,72 @@ describe("the flag a caller sets when its own answer cannot be a 401", () => {
     expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(1);
   });
 
-  it("still refunds an ordinary 403 that carries no such flag", async () => {
-    // The regression this guards against: the original rule — only a 401
-    // costs — has to keep holding for every caller that never sets the flag,
-    // which is both routes this bucket guarded before requireStepUp existed.
+  it("refunds a 403 explicitly marked as a right password", async () => {
     const bare = appConBandera(false);
     await post(bare, {});
     await settled();
 
     expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(0);
+  });
+
+  it("still refunds an ordinary 403 that carries no such flag at all", async () => {
+    // The regression this guards against: the original rule — only a 401
+    // costs — has to keep holding for every caller that never sets the flag,
+    // which is both routes this bucket guarded before requireStepUp existed.
+    const bare = appConBandera(undefined);
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(0);
+  });
+
+  it("splits two charges in one request correctly, as defence in depth: a right answer marked explicitly is refunded, a second, wrong one is not", async () => {
+    /**
+     * Not `requireStepUp`'s own shape — that gate never charges a right
+     * answer at all any more, precisely because charging one and refunding it
+     * later turned out to cause a *different* bug (see `requireStepUp.ts`'s
+     * own docstring: the not-yet-refunded charge briefly inflated the count
+     * `chargeConfirmBudgetOnSelfChange`'s own charge read, tripping its budget
+     * check one attempt early). This reproduces the halving bug that would
+     * exist if some future caller ever *did* charge-and-mark a right answer
+     * this way, sharing a key with a second charge in the same request — the
+     * mechanism `confirmCostsNothing`'s consume-once read has to get right
+     * regardless of whether `requireStepUp` happens to trigger it today.
+     * Before that fix, both `finish` handlers below would read the same final
+     * 401 and neither would refund: one right answer and one wrong one would
+     * cost 2, not 1, halving `PASSWORD_CONFIRM_LIMIT` from five to two.
+     */
+    const bare = express();
+    bare.set("trust proxy", 1);
+    bare.use(express.json());
+    bare.post(
+      "/",
+      (req, _res, next) => {
+        req.user = conSesion;
+        next();
+      },
+      // A hypothetical first charge: correct, so it marks itself for a
+      // refund explicitly and calls on.
+      (req, res, next) => {
+        passwordConfirmLimiter(req, res, () => {
+          res.locals.stepUpPasswordWrong = false;
+          next();
+        });
+      },
+      // chargeConfirmBudgetOnSelfChange's own charge: registers a second
+      // `finish` handler for the very same key.
+      passwordConfirmLimiter,
+      // The route's own oldPass check: wrong, answered as the one status
+      // this bucket has always read off routes that are not requireStepUp.
+      (_req, res) => {
+        res.status(401).json({ message: "La contraseña actual suministrada no es correcta." });
+      },
+    );
+
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(1);
   });
 });
 

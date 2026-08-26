@@ -103,14 +103,15 @@ export function passwordConfirmKey(req: Request): string {
  * for what it decides is this one — see `costsNothing` below for the same note.
  * Whatever this returns true for is refunded once the response has finished.
  *
- * **Only the 401 costs, and the 401 is exactly "your current password is
- * wrong".** On both routes this bucket now guards, that status has one producer
- * and one meaning: the comparison ran and failed. Nothing else on either path
- * answers 401 — `authenticate` does, but it runs at the mount in `app.ts`,
- * before this middleware, so its refusals never reach the counter, and
- * `requireSelfOrPermission` runs before it too.
+ * **On `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id`, only the
+ * 401 costs, and the 401 is exactly "your current password is wrong".** Those
+ * two routes are this function's original callers, and on them that status has
+ * one producer and one meaning: the comparison ran and failed. Nothing else on
+ * either path answers 401 — `authenticate` does, but it runs at the mount in
+ * `app.ts`, before this middleware, so its refusals never reach the counter,
+ * and `requireSelfOrPermission` runs before it too.
  *
- * **What this fixes, and it is the failure this whole bucket was most likely to
+ * **What that fixed, and it is the failure this bucket was most likely to
  * produce in real use.** Every request used to count, right or wrong, and the
  * charge happens before the handler evaluates anything — so the *legitimate*
  * work of changing your own password was what emptied the budget. Somebody who
@@ -138,30 +139,55 @@ export function passwordConfirmKey(req: Request): string {
  * the number was chosen for — and it now measures the same event the account
  * lockout measures, at the same threshold, instead of measuring legitimate work.
  *
- * **The one thing that has to stay true**, written down because "somebody adds a
- * case the enumeration does not cover" is the shape of half of this file's
- * history: a route behind this bucket must answer a wrong current password with
- * **401 and nothing else**. A door that reported one some other way — a 200
- * carrying a boolean, say — would be refunded every guess. There was exactly
- * such a door, `POST /api/auth/confirm-password`, and that is why this bucket
- * could not have a refund rule until it was retired: it answered a wrong
- * password with 200 on purpose, so no status-based rule could tell its two
- * answers apart.
+ * **The rule those two routes still have to keep**, written down because
+ * "somebody adds a case the enumeration does not cover" is the shape of half of
+ * this file's history: a route relying on the 401 branch below must answer a
+ * wrong current password with **401 and nothing else**. A door that reported
+ * one some other way — a 200 carrying a boolean, say — would be refunded every
+ * guess. There was exactly such a door, `POST /api/auth/confirm-password`, and
+ * that is why this bucket could not have a refund rule until it was retired: it
+ * answered a wrong password with 200 on purpose, so no status-based rule could
+ * tell its two answers apart.
+ *
+ * **A third caller, added for `requireStepUp` (`middleware/requireStepUp.ts`),
+ * cannot use that 401 rule at all**, and needs its own branch above it. It
+ * shares this exact bucket — same secret, same account, so it has to be the
+ * same budget rather than a second one that doubles a guesser's allowance —
+ * but every refusal it makes is the same uniform `403 { code: CODIGO_STEP_UP }`,
+ * on purpose, so the frontend can react to a stale window, a missing factor and
+ * a wrong password all the same way. Reading only the status code would refund
+ * every wrong guess made through that gate, leaving it with no real budget
+ * behind it at all. `res.locals.stepUpPasswordWrong` is how it says the answer
+ * instead — set to `true` right before it charges, and only when it charges.
+ *
+ * **It only ever sets that flag to `true`, never to `false`, because it only
+ * ever calls this limiter at all when the comparison came back wrong** — see
+ * `requireStepUp.ts`'s own docstring for why a right answer touches nothing
+ * here, and the timing bug that made it charge-and-refund the wrong way to
+ * begin with. That matters here because `chargeConfirmBudgetOnSelfChange`
+ * makes its own, independent charge against this same key right after this
+ * gate, on `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id` — and
+ * with `requireStepUp` only ever charging on a *wrong* answer, the two charges
+ * are mutually exclusive within one request: a wrong answer here ends the
+ * request (`requireStepUp` denies, `chargeConfirmBudgetOnSelfChange` never
+ * runs), and a right one never touches the counter for `chargeConfirmBudget-
+ * OnSelfChange`'s own charge to collide with.
+ *
+ * This function still reads the flag **once** and deletes it, and still
+ * treats an explicit `false` as a refund, even though nothing in this
+ * codebase sets `false` today. That is defence in depth, not dead code: it is
+ * what would keep two charges in one request from reading each other's
+ * verdict off a single shared `res.statusCode` the day some future caller
+ * *does* need to mark a charge as right — the exact shape of the halving bug
+ * a fix round found here, with the checks reversed. `loginLimiters.test.ts`
+ * exercises the deletion directly, against a flag set to `false` by hand,
+ * because `requireStepUp` alone will never produce that case to test it with.
  */
 export function confirmCostsNothing(_req: Request, res: Response): boolean {
-  // `requireStepUp` (`middleware/requireStepUp.ts`) shares this exact bucket
-  // for its own password fallback — the same secret, the same account, so it
-  // has to be the same budget rather than a second one that doubles a
-  // guesser's allowance. But it cannot answer a wrong password with 401: every
-  // refusal it makes is uniformly `403 { code: CODIGO_STEP_UP }`, on purpose,
-  // so the frontend can react to a stale window, a missing factor and a wrong
-  // password all the same way. That uniformity is exactly what breaks the rule
-  // below — reading only the status code would refund every wrong guess made
-  // through that gate, leaving it with no real budget behind it at all.
-  // `res.locals` is the one place a caller can say "this was the
-  // wrong-password answer" without changing what the client sees on the wire.
-  if (res.locals.stepUpPasswordWrong === true) {
-    return false;
+  const marcado = res.locals.stepUpPasswordWrong as boolean | undefined;
+  if (marcado !== undefined) {
+    delete res.locals.stepUpPasswordWrong;
+    return !marcado;
   }
   return res.statusCode !== 401;
 }

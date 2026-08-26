@@ -2,29 +2,32 @@
 // enough for: creating and editing users, and touching roles and the
 // permission matrix.
 //
-// This file mocks four things: `verifyOwnPassword` (the last-resort
+// This file mocks five things: `verifyOwnPassword` (the last-resort
 // fallback), `tieneAlgunFactor` (whether that fallback is even reachable),
 // `logAction` (the bitácora line every refusal writes), and
-// `passwordConfirmLimiter` (the shared budget the fallback spends). The
-// fourth is not in the original test skeleton for this task — it exists
-// because `requireStepUp` shares its rate-limit bucket with
-// `chargeConfirmBudgetOnSelfChange` in `usuario.routes.ts`, and the real
-// limiter answers by writing real headers on a real `Response`, which the
-// bare `res` fixture below is not. Mocking it here keeps this file a unit
-// test of `requireStepUp`'s own decisions; the shared bucket's arithmetic is
-// `loginLimiters.test.ts`'s job, and that file gained its own cases for the
-// one thing only this gate needed from it — see "confirmCostsNothing" there.
+// `passwordConfirmLimiter` plus `passwordConfirmKey` (the shared budget the
+// fallback reads and, on a wrong answer only, spends). The limiter is not in
+// the original test skeleton for this task — it exists because `requireStepUp`
+// shares its rate-limit bucket with `chargeConfirmBudgetOnSelfChange` in
+// `usuario.routes.ts`, and the real limiter answers by writing real headers
+// on a real `Response`, which the bare `res` fixture below is not. Mocking it
+// here keeps this file a unit test of `requireStepUp`'s own decisions; the
+// shared bucket's arithmetic is `loginLimiters.test.ts`'s job, and that file
+// gained its own cases for the one thing only this gate needed from it — see
+// "confirmCostsNothing" there.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const verifyOwnPassword = vi.fn();
 const tieneAlgunFactor = vi.fn();
 const logAction = vi.fn();
-const passwordConfirmLimiter = vi.fn();
+const passwordConfirmLimiter = vi.fn() as ReturnType<typeof vi.fn> & { getKey: ReturnType<typeof vi.fn> };
+passwordConfirmLimiter.getKey = vi.fn();
+const passwordConfirmKey = vi.fn();
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword }));
 vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor }));
 vi.mock("../utils/logAction.js", () => ({ logAction }));
-vi.mock("./loginLimiters.js", () => ({ passwordConfirmLimiter }));
+vi.mock("./loginLimiters.js", () => ({ passwordConfirmLimiter, passwordConfirmKey }));
 
 const { requireStepUp, CODIGO_STEP_UP } = await import("./requireStepUp.js");
 const { STEP_UP_WINDOW_MINUTES } = await import("../config/security.js");
@@ -41,10 +44,15 @@ beforeEach(() => {
   verifyOwnPassword.mockReset();
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
   logAction.mockReset();
-  // The default: under budget, so the fallback reaches `verifyOwnPassword` in
-  // every test that does not say otherwise. Mirrors what the real limiter
-  // does when the account has room left — calls on.
-  passwordConfirmLimiter.mockReset().mockImplementation((_req: unknown, _res: unknown, next: () => void) => {
+  passwordConfirmKey.mockReset().mockReturnValue("pc:1");
+  // The default: nothing spent yet, so the read-only pre-check lets the
+  // fallback reach `verifyOwnPassword` in every test that does not say
+  // otherwise.
+  passwordConfirmLimiter.getKey.mockReset().mockResolvedValue(undefined);
+  // Only reached on a confirmed-wrong password (see requireStepUp.ts's own
+  // comment on why): under budget, so it charges and calls on. Mirrors what
+  // the real limiter does when the account has room left.
+  passwordConfirmLimiter.mockReset().mockImplementation((_req: unknown, _res: unknown, next: (err?: unknown) => void) => {
     next();
   });
 });
@@ -157,13 +165,19 @@ describe("requireStepUp", () => {
     // counting its own guesses separately — a second bucket keyed the same way
     // would hand out ten attempts a quarter of an hour to anybody willing to
     // alternate the two doors onto the same secret.
+    //
+    // This gate only ever *charges* (calls `passwordConfirmLimiter` itself)
+    // on a confirmed-wrong password — see requireStepUp.ts's own comment on
+    // why a fix round moved it away from charging unconditionally and
+    // refunding a right answer afterwards. Checking whether the budget is
+    // already spent, before that, reads the count through `getKey` instead —
+    // which is why the tests below mock `getKey` for the "already spent" and
+    // "read fails" cases, and the callable `passwordConfirmLimiter` itself
+    // only for the "charging a wrong answer fails" case.
 
-    it("checks the budget before the password is looked at, and refuses once it is spent", async () => {
-      // The limiter answers its own 429 and never calls on — exactly what the
-      // real one does when an account has none left.
-      passwordConfirmLimiter.mockImplementation((_req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) => {
-        res.status(429).json({ message: "Demasiados intentos. Espere unos minutos antes de volver a confirmar." });
-      });
+    it("reads the budget before the password is looked at, and refuses for free once it is spent", async () => {
+      const { PASSWORD_CONFIRM_LIMIT } = await import("../config/security.js");
+      passwordConfirmLimiter.getKey.mockResolvedValue({ totalHits: PASSWORD_CONFIRM_LIMIT, resetTime: new Date() });
       const { req, res, next } = contexto(
         { id: 1, estado: "completa", mfa_satisfied_at: null },
         { stepup_password: "la-de-verdad" },
@@ -172,17 +186,68 @@ describe("requireStepUp", () => {
 
       expect(res.status).toHaveBeenCalledWith(429);
       expect(verifyOwnPassword).not.toHaveBeenCalled();
+      // Read, not charged: nothing here was ever wrong, so there is nothing
+      // for the real limiter to increment.
+      expect(passwordConfirmLimiter).not.toHaveBeenCalled();
       expect(next).not.toHaveBeenCalled();
+      // The brief's own rule — every refusal writes one — includes this one.
+      // Not through `denegar` (that would answer a second response on top of
+      // the 429 above), but written all the same.
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
+      );
+    });
+
+    it("fails closed when reading the budget itself errors, instead of comparing the password anyway", async () => {
+      // A store that cannot even answer "how many hits" is not a store this
+      // gate can trust to have been enforcing anything.
+      const fallo = new Error("el almacén del limitador no respondió");
+      passwordConfirmLimiter.getKey.mockRejectedValue(fallo);
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: null },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp()(req, res, next);
+
+      expect(next).toHaveBeenCalledWith(fallo);
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when charging a confirmed-wrong password errors, instead of answering as a plain wrong password", async () => {
+      // `express-rate-limit` routes a store failure to the third argument as
+      // `next(error)`, not to a plain "denied" — `MemoryStore` never does
+      // this today, but the Redis store this file already anticipates does.
+      // A callback that ignored that argument would let this gate answer a
+      // store failure as "your password was wrong", with the real error
+      // vanishing.
+      verifyOwnPassword.mockResolvedValue({ ok: false });
+      const fallo = new Error("el almacén del limitador no respondió");
+      passwordConfirmLimiter.mockImplementation((_req: unknown, _res: unknown, cb: (err?: unknown) => void) => {
+        cb(fallo);
+      });
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: null },
+        { stepup_password: "no-es-la-mia" },
+      );
+      await requireStepUp()(req, res, next);
+
+      expect(next).toHaveBeenCalledWith(fallo);
+      // Nothing of this gate's own — the error handler downstream answers,
+      // not this middleware racing it with a response of its own.
+      expect(res.status).not.toHaveBeenCalled();
     });
 
     it("never touches the budget when a factor already exists", async () => {
       // Constraint: the password is only accepted while tieneAlgunFactor is
       // false, checked before the password is even looked at. The budget is
-      // part of "looking at the password", so it must not be spent either.
+      // part of "looking at the password", so it must not be read or spent
+      // either.
       tieneAlgunFactor.mockResolvedValue(true);
       const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null });
       await requireStepUp()(req, res, next);
 
+      expect(passwordConfirmLimiter.getKey).not.toHaveBeenCalled();
       expect(passwordConfirmLimiter).not.toHaveBeenCalled();
     });
 
@@ -193,6 +258,7 @@ describe("requireStepUp", () => {
       );
       await requireStepUp()(req, res, next);
 
+      expect(passwordConfirmLimiter.getKey).not.toHaveBeenCalled();
       expect(passwordConfirmLimiter).not.toHaveBeenCalled();
     });
 
@@ -202,7 +268,124 @@ describe("requireStepUp", () => {
       });
       await requireStepUp()(req, res, next);
 
+      expect(passwordConfirmLimiter.getKey).not.toHaveBeenCalled();
       expect(passwordConfirmLimiter).not.toHaveBeenCalled();
+    });
+
+    it("never charges the budget for a password that turns out to be right", async () => {
+      // The other half of the fix: charging unconditionally and refunding a
+      // right answer afterwards is what let this gate's own not-yet-refunded
+      // charge inflate the count `chargeConfirmBudgetOnSelfChange` reads for
+      // its own, separate charge on the same key — see requireStepUp.ts's
+      // docstring. Never charging on a right answer removes that charge
+      // entirely, rather than making it and giving it back.
+      verifyOwnPassword.mockResolvedValue({ ok: true });
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: null },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp()(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(passwordConfirmLimiter).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The gate that nothing could satisfy, found by a separate audit of this
+     * branch: `web/src` never sends `stepup_password` — that frontend is a
+     * later plan's job — so an earlier version of this file that refused
+     * outright whenever `tieneAlgunFactor` said no was refusing *every*
+     * gated write on every account, unconditionally, because nothing
+     * anywhere could ever answer its own fallback. An account with no
+     * factor has nothing beyond its session to prove, which is exactly the
+     * state the whole ERP was already in — so letting the write through
+     * costs nothing that was not already true, and it costs it loudly, via
+     * a bitácora line, rather than silently.
+     */
+    describe("an account with no factor and no password to prove it", () => {
+      it("lets the write through, rather than refusing a gate nothing can satisfy", async () => {
+        const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null }, {});
+        await requireStepUp()(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+        // Nothing was read or spent — there was nothing to check a budget
+        // against.
+        expect(passwordConfirmLimiter.getKey).not.toHaveBeenCalled();
+        expect(passwordConfirmLimiter).not.toHaveBeenCalled();
+        expect(verifyOwnPassword).not.toHaveBeenCalled();
+      });
+
+      it("treats an empty string the same as no password at all", async () => {
+        const { req, res, next } = contexto(
+          { id: 1, estado: "completa", mfa_satisfied_at: null },
+          { stepup_password: "" },
+        );
+        await requireStepUp()(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+      });
+
+      it("writes a distinct, non-critical bitácora line when it skips", async () => {
+        // Not STEP_UP_DENIED (that name means a refusal) and not `critical`
+        // (that severity means one) — this account was not refused
+        // anything, so counting it alongside real refusals would make the
+        // one action name meant for attackers unreadable.
+        const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null }, {});
+        await requireStepUp()(req, res, next);
+
+        expect(logAction).toHaveBeenCalledWith(
+          expect.objectContaining({ action: "STEP_UP_SKIPPED", severity: "warning" }),
+        );
+        expect(logAction).not.toHaveBeenCalledWith(
+          expect.objectContaining({ action: "STEP_UP_DENIED" }),
+        );
+      });
+
+      it("still verifies, and still charges on a wrong guess, when a password is sent anyway", async () => {
+        // The shape the later frontend plan will use, and the only shape
+        // this ever refuses for a factor-less account.
+        verifyOwnPassword.mockResolvedValue({ ok: false });
+        const { req, res, next } = contexto(
+          { id: 1, estado: "completa", mfa_satisfied_at: null },
+          { stepup_password: "no-es-la-mia" },
+        );
+        await requireStepUp()(req, res, next);
+
+        expect(next).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(403);
+        expect(passwordConfirmLimiter).toHaveBeenCalled();
+      });
+
+      it("still lets a correct password through, charging nothing", async () => {
+        verifyOwnPassword.mockResolvedValue({ ok: true });
+        const { req, res, next } = contexto(
+          { id: 1, estado: "completa", mfa_satisfied_at: null },
+          { stepup_password: "la-de-verdad" },
+        );
+        await requireStepUp()(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+        expect(passwordConfirmLimiter).not.toHaveBeenCalled();
+      });
+
+      it("closes on its own the moment the account has a factor: the same no-password request is then refused", async () => {
+        // The assertion that proves the skip is temporary by construction,
+        // not by intention: nothing here is a flag that gets cleared or a
+        // cleanup task that has to run. `tieneAlgunFactor` answering `true`
+        // is the one thing this whole branch depends on never being reached
+        // for an account that has registered anything.
+        tieneAlgunFactor.mockResolvedValue(true);
+        const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null }, {});
+        await requireStepUp()(req, res, next);
+
+        expect(next).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(403);
+        expect(logAction).toHaveBeenCalledWith(
+          expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
+        );
+      });
     });
   });
 });

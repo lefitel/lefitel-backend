@@ -30,9 +30,12 @@ const router = Router();
  * hole on the rename would have been a net loss: an attacker holding a stolen
  * session would simply guess against a route that counts nothing.
  *
- * These are the only two routes on that bucket now. `POST
- * /api/auth/confirm-password` was a third, and it is retired — see
- * `auth.routes.ts`.
+ * These were the only two routes on that bucket, until `requireStepUp`
+ * (`middleware/requireStepUp.ts`) started calling `passwordConfirmLimiter`
+ * directly for its own password fallback — mounted ahead of this very
+ * function on both of these routes, and on several more besides. `POST
+ * /api/auth/confirm-password` was a third caller of a different kind, and it
+ * is retired — see `auth.routes.ts`.
  *
  * **`updateUserPass` needed it more, and had it least.** It has compared
  * `oldPass` since long before this plan, with no bucket of any kind on the
