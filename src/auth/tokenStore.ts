@@ -117,14 +117,44 @@ export async function crearToken(input: {
 export async function consumirToken(
   token: string,
   proposito: ITokenUsoUnico["proposito"],
-  transaction?: Transaction,
+  opciones: {
+    transaction?: Transaction;
+    /**
+     * Refuse to redeem unless the row belongs to this account.
+     *
+     * Not an identifier read from the request body — Global Constraint #4
+     * still holds, and this narrows the redemption rather than aiming it.
+     * `/email/verify` passes the id `authenticate` put on the session, and
+     * the difference is the whole point: without it, whose account gets
+     * verified is decided entirely by whoever minted the token.
+     *
+     * The attack that put this here, from the final review: B sets A's
+     * address on B's own account. The partial unique index allows that,
+     * deliberately — an unverified claim must not block the real owner. The
+     * verification mail then goes to A's inbox, because that is the address
+     * on it. A, logged in as A, clicks the link, and the handler verified
+     * **B's** account, because the row said so. A saw "Correo verificado" and
+     * had verified nothing; A's own address was now taken by B for good,
+     * since only one account may ever verify it and `email` is not an
+     * administrator-editable field. Permanent, silent, and triggered by the
+     * victim.
+     *
+     * Scoping the `UPDATE` rather than comparing afterwards keeps the whole
+     * check inside the one atomic statement, and leaves the planted row
+     * untouched to expire on its own instead of being spent by the person it
+     * was aimed at.
+     */
+    soloDelUsuario?: number;
+  } = {},
 ): Promise<{ id_usuario: number; email_destino: string } | null> {
+  const transaction = opciones.transaction;
   const [count, rows] = await TokenUsoUnicoModel.update(
     { used_at: new Date() },
     {
       where: {
         token_hash: hashOpaqueToken(token),
         proposito,
+        ...(opciones.soloDelUsuario !== undefined ? { id_usuario: opciones.soloDelUsuario } : {}),
         // Equality against NULL, not "already redeemed" written as a
         // separate check afterwards: a second redemption of the same token
         // has to fail inside this same query, not in a follow-up read that a

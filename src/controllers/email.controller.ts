@@ -8,15 +8,23 @@
 //   gets written to.
 // - `POST /email/verify` does not. The account that gets `email_verified_at`
 //   set is whoever `consumirToken` says the token belongs to — never
-//   `req.user.id`, and never anything the request body says either. A
-//   verification link is meant to be opened from an email client, and
-//   `authenticate` here is a floor ("some session must exist to reach this
-//   endpoint at all") rather than a match check against the token's own
-//   owner — `consumirToken`'s single atomic UPDATE has no way to take an
-//   identity argument to compare against (see Global Constraint #4, and
-//   `tokenStore.ts`'s own comment on why redemption cannot accept one), so
-//   there is nothing here to compare `req.user.id` against even if the design
-//   wanted to.
+//   `req.user.id` alone, and never anything the request body says. The
+//   account written to is whoever `consumirToken` says the token belongs to —
+//   **and the redemption is scoped to the caller**, so those have to be the
+//   same account or nothing is redeemed at all.
+//
+//   This paragraph used to say the opposite: that `authenticate` here was a
+//   floor rather than a match check, because `consumirToken`'s atomic UPDATE
+//   "has no way to take an identity argument". That was false about its own
+//   code — the function returns `id_usuario`, and a `WHERE` clause can take
+//   one. The final review found what the false claim was covering: B sets A's
+//   address on B's account (the partial index allows unverified claims on
+//   purpose), the mail goes to A's inbox because that is the address on it,
+//   A clicks it while logged in as A, and **B's** account came out verified.
+//   A saw "Correo verificado" and had verified nothing, while A's own address
+//   became permanently unusable — only one account may ever verify it, and
+//   `email` is not an administrator-editable field. Silent, permanent, and
+//   carried out by the victim.
 //
 // `handler()` used to be its own small copy here rather than an import from
 // `auth.controller.ts`, which already had one — importing it would have
@@ -469,7 +477,7 @@ export const verifyEmail = handler("verifyEmail", async (req: Request, res: Resp
     return res.status(400).json({ message: TOKEN_REQUERIDO });
   }
 
-  const redeemed = await consumirToken(token, "verify_email");
+  const redeemed = await consumirToken(token, "verify_email", { soloDelUsuario: caller.id });
   if (!redeemed) {
     return res.status(400).json({ message: TOKEN_INVALIDO });
   }

@@ -390,7 +390,7 @@ describe("POST /auth/password/reset", () => {
     const c = call({ token: "un-token", pass: CLAVE_VALIDA });
     await resetPassword(c.req, c.res);
 
-    expect(consumirToken).toHaveBeenCalledWith("un-token", "reset_password", TRANSACCION);
+    expect(consumirToken).toHaveBeenCalledWith("un-token", "reset_password", { transaction: TRANSACCION });
     const [, options] = update.mock.calls[0] as [unknown, { transaction: unknown }];
     expect(options.transaction).toBe(TRANSACCION);
     expect(revokeAllSessionsOf.mock.calls[0][1]).toMatchObject({ transaction: TRANSACCION });

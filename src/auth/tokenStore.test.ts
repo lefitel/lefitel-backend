@@ -360,12 +360,47 @@ describe("consumirToken with a caller-provided transaction", () => {
     expect(options.transaction).toBeUndefined();
   });
 
+  /**
+   * The scope that stops a token being redeemed by the wrong account.
+   *
+   * The attack it closes, from the final review: B puts A's address on B's own
+   * account — which the partial unique index allows on purpose, because an
+   * unverified claim must not block the real owner of a mailbox. The
+   * verification mail then goes to A's inbox, since that is the address on it.
+   * A clicks the link while logged in as A, and the handler verified **B's**
+   * account, because the token's row said so. A saw "Correo verificado" and
+   * had verified nothing, while A's own address became permanently
+   * unclaimable: only one account may ever verify it, and `email` is not an
+   * administrator-editable field. Silent, permanent, and performed by the
+   * victim.
+   */
+  it("scopes the UPDATE to one account when asked, so a planted token cannot be redeemed by its target", async () => {
+    update.mockResolvedValue([0, []]);
+    await consumirToken("t", "verify_email", { soloDelUsuario: 7 });
+
+    const [, options] = update.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
+    expect(options.where).toMatchObject({ id_usuario: 7 });
+  });
+
+  it("leaves the scope out entirely when nobody asked, rather than guessing an account", async () => {
+    update.mockResolvedValue([0, []]);
+    await consumirToken("t", "reset_password");
+
+    const [, options] = update.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
+    // `/password/reset` is public: there is no session to scope it to, and the
+    // token's own row is the only thing that says whose account it is. A
+    // `id_usuario: undefined` slipped into the `where` would be far worse than
+    // its absence — Sequelize renders that as `IS NULL`, and the column is NOT
+    // NULL, so every redemption would silently match nothing.
+    expect(options.where).not.toHaveProperty("id_usuario");
+  });
+
   it("passes a given transaction straight through to the same UPDATE", async () => {
     const DEL_LLAMADOR = { id: "la-transaccion-de-quien-llama" };
     await consumirToken(
       "t",
       "verify_email",
-      DEL_LLAMADOR as unknown as Parameters<typeof consumirToken>[2],
+      { transaction: DEL_LLAMADOR as unknown as never },
     );
     const [, options] = update.mock.calls[0] as [unknown, { transaction?: unknown }];
     expect(options.transaction).toBe(DEL_LLAMADOR);
@@ -452,7 +487,7 @@ describe("consumirToken with a caller-provided transaction", () => {
         const result = await consumirToken(
           "un-token",
           "reset_password",
-          t as unknown as Parameters<typeof consumirToken>[2],
+          { transaction: t as unknown as never },
         );
         expect(result).not.toBeNull();
         // The case this parameter exists for: something after the

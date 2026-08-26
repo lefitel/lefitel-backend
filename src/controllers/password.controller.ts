@@ -289,7 +289,7 @@ export const resetPassword = handler("resetPassword", async (req: Request, res: 
   const hashed = await bcryptjs.hash(passRaw, BCRYPT_COST);
 
   const redeemed = await sequelize.transaction(async (transaction) => {
-    const result = await consumirToken(token, "reset_password", transaction);
+    const result = await consumirToken(token, "reset_password", { transaction });
     if (!result) return null;
 
     await UsuarioModel.update(

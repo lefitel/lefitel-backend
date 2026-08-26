@@ -467,15 +467,20 @@ describe("POST /auth/email/verify", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  it("consumes the token with no transaction — the design tokenStore.ts documents", async () => {
+  it("redeems the token only for the account holding the session, and in no transaction", async () => {
     const c = call(YO_CON_SESION, { token: "un-token" });
     await verifyEmail(c.req, c.res);
 
-    expect(consumirToken).toHaveBeenCalledWith("un-token", "verify_email");
-    // Exactly two arguments: a third (a transaction) would change the
-    // failure semantics tokenStore.ts's own comment argues against for this
-    // endpoint specifically.
-    expect(consumirToken.mock.calls[0]).toHaveLength(2);
+    // `soloDelUsuario` is what closes the attack the final review found: B
+    // could put A's address on B's own account, the mail went to A's inbox,
+    // and A clicking the link verified **B's** account — permanently taking
+    // A's address, since only one account may ever verify it. The id comes
+    // from the session `authenticate` established, never from the body.
+    expect(consumirToken).toHaveBeenCalledWith("un-token", "verify_email", { soloDelUsuario: A });
+    // And no transaction, deliberately: burning the token on the unique-index
+    // collision is the correct outcome here — retrying would not help, the
+    // address genuinely belongs to somebody else.
+    expect(consumirToken.mock.calls[0][2]).not.toHaveProperty("transaction");
   });
 
   it("refuses when the account's current email no longer matches the token's own address", async () => {
