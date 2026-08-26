@@ -109,6 +109,18 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 export const PASSWORD_CONFIRM_LIMIT = 5;
 
 /**
+ * How long a proved factor keeps opening the sensitive operations.
+ *
+ * Ten minutes is long enough to create three users in a row without
+ * re-authenticating, and short enough that an unlocked laptop left on a desk is
+ * not a standing authorisation to edit the permission matrix.
+ */
+export const STEP_UP_WINDOW_MINUTES = 10;
+
+/** The field a caller re-enters their password in when they have no factor yet. */
+export const STEP_UP_PASSWORD_FIELD = "stepup_password";
+
+/**
  * How long a browser must refuse to reach this host over plain HTTP, in
  * seconds. Two years, which is what the preload list asks for.
  *

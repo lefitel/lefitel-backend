@@ -149,6 +149,20 @@ export function passwordConfirmKey(req: Request): string {
  * answers apart.
  */
 export function confirmCostsNothing(_req: Request, res: Response): boolean {
+  // `requireStepUp` (`middleware/requireStepUp.ts`) shares this exact bucket
+  // for its own password fallback — the same secret, the same account, so it
+  // has to be the same budget rather than a second one that doubles a
+  // guesser's allowance. But it cannot answer a wrong password with 401: every
+  // refusal it makes is uniformly `403 { code: CODIGO_STEP_UP }`, on purpose,
+  // so the frontend can react to a stale window, a missing factor and a wrong
+  // password all the same way. That uniformity is exactly what breaks the rule
+  // below — reading only the status code would refund every wrong guess made
+  // through that gate, leaving it with no real budget behind it at all.
+  // `res.locals` is the one place a caller can say "this was the
+  // wrong-password answer" without changing what the client sees on the wire.
+  if (res.locals.stepUpPasswordWrong === true) {
+    return false;
+  }
   return res.statusCode !== 401;
 }
 
@@ -183,6 +197,17 @@ export const passwordConfirmLimiter = rateLimit({
   message: { message: "Demasiados intentos. Espere unos minutos antes de volver a confirmar." },
   standardHeaders: true,
   legacyHeaders: false,
+  // `requireStepUp` now calls this same limiter directly, ahead of
+  // `chargeConfirmBudgetOnSelfChange`, on `PUT /usuario/username/:id` and
+  // `PUT /usuario/userpass/:id`: a self-edit with no factor registered yet
+  // confirms the caller's password twice in one request — once for the gate,
+  // once for the route's own `oldPass` — against the shared `pc:<id>` bucket.
+  // express-rate-limit's default `singleCount` validation assumes a key is
+  // only ever touched once per request and otherwise only logs a warning
+  // (`ERR_ERL_DOUBLE_COUNT`) rather than refusing anything, but there is
+  // nothing to warn about here: two genuine confirmations of the same secret
+  // in one request is the intended shape now, not a bug to be flagged.
+  validate: { singleCount: false },
 });
 
 /**

@@ -67,6 +67,7 @@ const { CURRENT_PASSWORD_REQUIRED_MESSAGE, CURRENT_PASSWORD_WRONG_MESSAGE } = aw
  * permission guard before the budget on both routes".
  */
 const usuarioRouter = (await import("./routes/usuario.routes.js")).default;
+const { CODIGO_STEP_UP } = await import("./middleware/requireStepUp.js");
 
 /**
  * The two response header names the frontend hard-codes, written out here.
@@ -87,6 +88,9 @@ const { loginIpLimiter, loginAccountIpLimiter, passwordConfirmLimiter } = await 
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { SesionModel } = await import("./models/sesion.model.js");
 const { TokenUsoUnicoModel } = await import("./models/tokenUsoUnico.model.js");
+const { CredencialWebauthnModel } = await import("./models/credencialWebauthn.model.js");
+const { FactorTotpModel } = await import("./models/factorTotp.model.js");
+const { CodigoRecuperacionModel } = await import("./models/codigoRecuperacion.model.js");
 
 /**
  * The models are real, and only their query methods are replaced.
@@ -135,6 +139,19 @@ const tokenUsoUnicoDestroy = vi.spyOn(TokenUsoUnicoModel, "destroy");
  */
 const usuarioUpdate = vi.spyOn(UsuarioModel, "update");
 const tokenUsoUnicoUpdate = vi.spyOn(TokenUsoUnicoModel, "update");
+/**
+ * Three more, added for Task 6's `requireStepUp`. `authenticate`'s default
+ * session below satisfies that gate's window for almost every test in this
+ * file, so these three are never actually reached except by the describe
+ * block that puts the account back in the unsatisfied state on purpose —
+ * but they still have to be spied rather than left real: `tieneAlgunFactor`
+ * is a genuine query with no fixture data behind it here, and a route that
+ * reached it unmocked would fail on a live connection this file's own header
+ * promises none of its tests need.
+ */
+const passkeyCount = vi.spyOn(CredencialWebauthnModel, "count");
+const totpCount = vi.spyOn(FactorTotpModel, "count");
+const codigoCount = vi.spyOn(CodigoRecuperacionModel, "count");
 
 const YO = 7;
 const MI_ROL = 2;
@@ -190,6 +207,16 @@ beforeEach(() => {
   // A live session belonging to YO. `last_used_at` is now on purpose: the touch
   // is throttled, so a fresh timestamp keeps `touchSession` from firing and
   // adding an UPDATE that the assertions below would read as theirs.
+  //
+  // `mfa_satisfied_at` is "just now" rather than `null` since Task 6: this
+  // file's default account is what almost every test below acts as, and none
+  // of them are about `requireStepUp` — they predate it. A factor proved this
+  // instant satisfies that gate's window outright, so it never reaches
+  // `tieneAlgunFactor` or the shared password budget for any of them, exactly
+  // as if the gate were not there. The handful of tests that need the
+  // *unsatisfied* case — this file's own step-up describe block below, plus
+  // the two `GET /api/auth/me` tests about session expiry that never touch a
+  // write route — override it themselves.
   sesionFindOne.mockResolvedValue({
     dataValues: {
       id: MI_SESION,
@@ -198,7 +225,7 @@ beforeEach(() => {
       expires_at: SESION_EXPIRA_FILA,
       last_used_at: new Date(),
       estado: "completa",
-      mfa_satisfied_at: null,
+      mfa_satisfied_at: new Date(),
     },
   } as never);
   sesionFindAll.mockResolvedValue([] as never);
@@ -216,6 +243,11 @@ beforeEach(() => {
   tokenUsoUnicoDestroy.mockResolvedValue(0);
   usuarioUpdate.mockResolvedValue([1] as never);
   tokenUsoUnicoUpdate.mockResolvedValue([0, []] as never);
+  // No factor registered, by default — matching every other fixture in this
+  // file, which models an ordinary account under plan 4A.
+  passkeyCount.mockResolvedValue(0);
+  totpCount.mockResolvedValue(0);
+  codigoCount.mockResolvedValue(0);
 });
 
 /** The `where` of the nth UPDATE the store sent to the sessions table. */
@@ -1227,6 +1259,194 @@ describe("changing your own credentials spends the budget for a wrong password, 
     expect(res.status).toBe(200);
     expect(res.body.user).toBe("isalas");
     expect(await gastado()).toBe(0);
+  });
+});
+
+/**
+ * `requireStepUp`, on the real routes it is mounted behind.
+ *
+ * `requireStepUp.test.ts` already proves the gate's own decisions against a
+ * hand-built `req`/`res` — every branch, every refusal. What only a real
+ * mount can show is the wiring around it: that the permission check truly
+ * runs first (a caller without the permission spends no bcrypt comparison
+ * and never queries the factor tables), that `PATCH /:id/desbloquear` really
+ * has no gate on it, and that the real `factorInventory.js` module — not a
+ * stub some other test replaced it with — is what decides whether the
+ * password fallback is reachable at all.
+ */
+describe("requireStepUp, mounted on the real routes", () => {
+  const CLAVE_YO = `pc:${YO}`;
+
+  /** Puts the caller's own session back in the unsatisfied state this whole
+   *  gate exists for — the shared default above satisfies its window. */
+  function sinFactorReciente() {
+    sesionFindOne.mockResolvedValue({
+      dataValues: {
+        id: MI_SESION, id_usuario: YO, created_at: SESION_CREADA, expires_at: SESION_EXPIRA_FILA,
+        last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null,
+      },
+    } as never);
+  }
+
+  beforeEach(async () => {
+    await passwordConfirmLimiter.resetKey(CLAVE_YO);
+  });
+
+  it("refuses without the permission before ever asking whether a factor exists", async () => {
+    // `puede` stays false, the default for this whole file. If requireStepUp
+    // ran first, a caller with no factor and no password would see its 403
+    // and STEP_UP_REQUIRED instead of the permission's plain refusal — and
+    // would have cost a query to the factor tables to get there.
+    sinFactorReciente();
+    const res = await request(app)
+      .post("/api/usuario")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ user: "nuevo" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).not.toBe(CODIGO_STEP_UP);
+    expect(passkeyCount).not.toHaveBeenCalled();
+    expect(totpCount).not.toHaveBeenCalled();
+  });
+
+  it("refuses to create a user with no factor and no password once the permission is held", async () => {
+    sinFactorReciente();
+    puede = true;
+    try {
+      const res = await request(app)
+        .post("/api/usuario")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "nuevo" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe(CODIGO_STEP_UP);
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("lets the same request through once the caller's own current password is supplied", async () => {
+    sinFactorReciente();
+    puede = true;
+    try {
+      const res = await request(app)
+        .post("/api/usuario")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "nuevo", stepup_password: "la-de-verdad" });
+
+      // Not a clean 200 — createUsuario needs more fields than this test
+      // supplies, and its own downstream checks are not what is under test.
+      // What matters is that the gate itself stopped blocking.
+      expect(res.status).not.toBe(403);
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("refuses the password once the real factorInventory module reports one", async () => {
+    // The real module, not a mock of it: this is what proves the mount reads
+    // the genuine `tieneAlgunFactor`, not a stand-in some other file left
+    // behind.
+    sinFactorReciente();
+    passkeyCount.mockResolvedValue(1);
+    puede = true;
+    try {
+      const res = await request(app)
+        .post("/api/usuario")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "nuevo", stepup_password: "la-de-verdad" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe(CODIGO_STEP_UP);
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("does not gate PATCH /:id/desbloquear, on purpose", async () => {
+    // Lifting a lockout is what an administrator does because somebody
+    // cannot get in, often in a hurry — see the comment beside the route in
+    // usuario.routes.ts. No stepup_password at all, and the account has no
+    // factor and an unsatisfied window: if this route carried the gate, that
+    // combination would answer 403 STEP_UP_REQUIRED before ever reaching the
+    // permission check below it.
+    sinFactorReciente();
+    puede = true;
+    try {
+      const res = await request(app)
+        .patch(`/api/usuario/${YO}/desbloquear`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({});
+
+      expect(res.status).not.toBe(403);
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("gates the permission matrix the same way", async () => {
+    sinFactorReciente();
+    puede = true;
+    try {
+      const res = await request(app)
+        .put("/api/permisos/2")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({});
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe(CODIGO_STEP_UP);
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("survives confirming the same password twice in one request — this gate's own check, then the rename's own — without crashing or double-charging a right answer", async () => {
+    /**
+     * The trickiest shape this mount produces. With no factor registered and
+     * an unsatisfied window, a self-rename on `/username/:id` confirms the
+     * caller's password twice in the same request: once for this gate, once
+     * for `updateUserName`'s own `oldPass` check — both against the very same
+     * `pc:7` bucket, since both are `chargeConfirmBudgetOnSelfChange`'s
+     * `passwordConfirmLimiter` and this gate's own call to it.
+     * express-rate-limit's default `singleCount` validation assumes a key is
+     * touched once per request; `passwordConfirmLimiter`'s `validate: {
+     * singleCount: false }` (loginLimiters.ts) is what keeps that assumption
+     * from doing anything worse than log once. Both confirmations are correct
+     * here, so both are refunded and the budget ends the request where it
+     * started.
+     */
+    sinFactorReciente();
+    usuarioFindOne.mockResolvedValue({
+      dataValues: {
+        id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
+        name: "Isaias", lastname: "Salas", image: null,
+      },
+      set(patch: Record<string, unknown>) {
+        Object.assign(this.dataValues, patch);
+      },
+      save: async () => undefined,
+      toJSON() {
+        return { ...this.dataValues };
+      },
+    } as never);
+
+    const res = await request(app)
+      .put(`/api/usuario/username/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ user: "isalas-dos-veces", stepup_password: "la-de-verdad", oldPass: "la-de-verdad" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(res.status).toBe(200);
+    expect(await passwordConfirmLimiter.getKey(CLAVE_YO)).toEqual(
+      expect.objectContaining({ totalHits: 0 }),
+    );
   });
 });
 

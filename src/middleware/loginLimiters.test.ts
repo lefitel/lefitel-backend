@@ -490,6 +490,72 @@ describe("what the confirmation bucket spends", () => {
   });
 });
 
+/**
+ * The one thing `requireStepUp` needed from this bucket that neither route
+ * above had a use for: a way to charge a wrong password that does not answer
+ * 401.
+ *
+ * `requireStepUp` (`middleware/requireStepUp.ts`) shares this exact limiter —
+ * same store, same `pc:<id>` key — for its own password fallback, but every
+ * refusal it makes is uniformly `403 { code: CODIGO_STEP_UP }`, on purpose, so
+ * the frontend reacts to a stale window, a missing factor and a wrong password
+ * the same way. `confirmCostsNothing`'s original rule ("only a 401 costs")
+ * would have refunded every one of those wrong guesses, leaving the gate with
+ * no real budget behind it — see the comment on `res.locals.stepUpPasswordWrong`
+ * in `confirmCostsNothing` itself for the fix. These two tests are what pin
+ * that fix in place, through the real limiter, the way the rest of this
+ * describe block pins the 401 rule.
+ */
+describe("the flag a caller sets when its own answer cannot be a 401", () => {
+  const CLAVE_CUENTA = "pc:42";
+  const conSesion = { id: 42, id_rol: 3, id_sesion: "s", expires_at: new Date() };
+
+  /** Same shape as `appConSesion` above, except the route answers 403 and
+   *  optionally marks that 403 as a wrong password before sending it — which
+   *  is exactly what `requireStepUp` does right before calling `denegar`. */
+  function appConBandera(marca: boolean) {
+    const bare = express();
+    bare.set("trust proxy", 1);
+    bare.use(express.json());
+    bare.post(
+      "/",
+      (req, _res, next) => {
+        req.user = conSesion;
+        next();
+      },
+      passwordConfirmLimiter,
+      (_req, res) => {
+        if (marca) res.locals.stepUpPasswordWrong = true;
+        res.status(403).json({ message: "Esta operación necesita que confirmes tu identidad.", code: "STEP_UP_REQUIRED" });
+      },
+    );
+    return bare;
+  }
+
+  beforeEach(async () => {
+    await passwordConfirmLimiter.resetKey(CLAVE_CUENTA);
+  });
+
+  it("charges a 403 marked as a wrong password, exactly like it would charge a 401", async () => {
+    const bare = appConBandera(true);
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(1);
+  });
+
+  it("still refunds an ordinary 403 that carries no such flag", async () => {
+    // The regression this guards against: the original rule — only a 401
+    // costs — has to keep holding for every caller that never sets the flag,
+    // which is both routes this bucket guarded before requireStepUp existed.
+    const bare = appConBandera(false);
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(passwordConfirmLimiter, CLAVE_CUENTA)).toBe(0);
+  });
+});
+
 describe("the chain the real login endpoint is mounted behind", () => {
   beforeEach(async () => {
     await loginIpLimiter.resetKey(CLAVE_IP);

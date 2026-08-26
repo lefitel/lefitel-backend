@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getPermisos, putPermisos } from "../controllers/permiso.controller.js";
 import { requirePermission } from "../middleware/requirePermission.js";
+import { requireStepUp } from "../middleware/requireStepUp.js";
 
 const router = Router();
 
@@ -24,8 +25,11 @@ const router = Router();
  * answers 401 whether the route exists or not and would prove nothing.
  */
 
-// The whole matrix, and the screen that edits it.
+// The whole matrix, and the screen that edits it. `requireStepUp()` sits
+// behind the permission on the write — see `middleware/requireStepUp.ts` —
+// so a stolen session cannot rewrite who may do what without also proving a
+// factor, or the caller's own password while nobody has registered one yet.
 router.get("/", requirePermission("roles", "ver"), getPermisos);
-router.put("/:id_rol", requirePermission("roles", "editar"), putPermisos);
+router.put("/:id_rol", requirePermission("roles", "editar"), requireStepUp(), putPermisos);
 
 export default router;

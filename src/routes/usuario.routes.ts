@@ -14,6 +14,7 @@ import {
   updateUsuario,
 } from "../controllers/usuario.controller.js";
 import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
+import { requireStepUp } from "../middleware/requireStepUp.js";
 import { passwordConfirmLimiter } from "../middleware/loginLimiters.js";
 
 const router = Router();
@@ -91,12 +92,27 @@ function chargeConfirmBudgetOnSelfChange(req: Request, res: Response, next: Next
 // Everything here belongs to the Seguridad module, and which action a route
 // needs is the point: creating an account and reading one are not the same
 // permission even though they live behind the same screen.
-router.post("/", requirePermission("seguridad", "crear"), createUsuario);
-router.delete("/:id", requirePermission("seguridad", "archivar"), deleteUsuario);
-router.patch("/:id/desarchivar", requirePermission("seguridad", "archivar"), desarchivarUsuario);
+// `requireStepUp()` sits behind every permission check below, never in
+// front: somebody without the permission gets 403 from the permission,
+// spends no bcrypt comparison, and learns nothing about the route existing.
+// See `middleware/requireStepUp.ts` for what it asks of the caller.
+router.post("/", requirePermission("seguridad", "crear"), requireStepUp(), createUsuario);
+router.delete("/:id", requirePermission("seguridad", "archivar"), requireStepUp(), deleteUsuario);
+router.patch(
+  "/:id/desarchivar",
+  requirePermission("seguridad", "archivar"),
+  requireStepUp(),
+  desarchivarUsuario,
+);
 // `editar` and not `archivar`: lifting a lockout is the same kind of act as
 // resetting a password, which is the other way out of one. PATCH like its
 // neighbour above — both flip a state on a row that already exists.
+//
+// **This one deliberately does NOT get `requireStepUp()`.** Lifting a lockout
+// is what an administrator does *because* somebody cannot get in, often in a
+// hurry; demanding step-up adds a step to the recovery path without closing
+// anything — whoever already holds `seguridad.editar` and a live session can
+// do far greater damage through the routes above, which do require it.
 router.patch("/:id/desbloquear", requirePermission("seguridad", "editar"), desbloquearUsuario);
 router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);
 
@@ -108,16 +124,18 @@ router.get("/", requirePermission("seguridad", "ver"), getUsuario);
 // stop people changing their own password. Ownership is not a role permission
 // and has no checkbox — see requirePermission.ts.
 router.get("/:id", requireSelfOrPermission("seguridad", "ver"), searchUsuario);
-router.put("/:id", requireSelfOrPermission("seguridad", "editar"), updateUsuario);
+router.put("/:id", requireSelfOrPermission("seguridad", "editar"), requireStepUp(), updateUsuario);
 router.put(
   "/username/:id",
   requireSelfOrPermission("seguridad", "editar"),
+  requireStepUp(),
   chargeConfirmBudgetOnSelfChange,
   updateUserName,
 );
 router.put(
   "/userpass/:id",
   requireSelfOrPermission("seguridad", "editar"),
+  requireStepUp(),
   chargeConfirmBudgetOnSelfChange,
   updateUserPass,
 );
