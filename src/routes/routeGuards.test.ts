@@ -135,18 +135,32 @@ const routes = mountedRoutes();
  * A list of exact routes cannot grow by accident, and the honesty check below
  * makes it shrink when a route stops needing to be here.
  *
- * All three are the same case: they are what a credential is produced or
- * checked by, so they cannot ask for one.
+ * Both are the same case: they are what a credential is produced by, so they
+ * cannot ask for one. There was a third — `GET /api/login/`, the JWT verifier
+ * the app used to ask on every reload — and it was exempt for a different
+ * reason: it checked the token itself, so going through `authenticate` would
+ * have meant answering 401 instead of answering the question. It is retired, and
+ * `app.auth.test.ts` pins its address at 404.
  */
 const AUTHENTICATION_NOT_APPLICABLE = [
-  // The old door. Hands out a JWT and, since this plan, a session cookie too.
+  // The old door. Hands out a session cookie; it used to hand out a JWT too.
   "POST /api/login/",
-  // `comprobarToken` — the app asks on every reload whether its token is still
-  // good. It verifies the token itself; going through `authenticate` would mean
-  // answering 401 instead of answering the question.
-  "GET /api/login/",
   // The new door. Same reason as the first: it is what produces the session.
   "POST /api/auth/login",
+
+  // ── The way back in ────────────────────────────────────────────────────
+  // These two are the only routes in the application that exist *for* the
+  // person who cannot authenticate. Asking them for a session would be
+  // asking somebody who forgot their password to log in first.
+  //
+  // What stands in for `authenticate` here is not nothing, and it is worth
+  // naming so the next reader does not mistake this for a gap: `/forgot`
+  // acts only on an address that already has a verified account and answers
+  // identically when it does not, and `/reset` takes a single-use token whose
+  // row carries the account — `token_uso_unico.id_usuario` — so neither can
+  // be aimed at a chosen victim. See `password.controller.ts`.
+  "POST /api/auth/password/forgot",
+  "POST /api/auth/password/reset",
 ];
 
 describe("the route table we are actually asserting about", () => {
@@ -188,9 +202,12 @@ describe("the route table we are actually asserting about", () => {
 /**
  * Write routes that deliberately ask for no permission.
  *
- * Two, and each has a reason written next to it in its own router. Anything else
- * that appears here without a gate fails the test below, which is the point:
- * a new endpoint has to decide who may call it instead of inheriting the gap.
+ * Each has a reason written next to it, and the same reason again in its own
+ * router. Deliberately not counted in this sentence: the count said "two" while
+ * the list held six, which is what a number in a comment does the moment
+ * anything is added below it. Anything that appears here without a gate fails
+ * the test below, which is the point: a new endpoint has to decide who may call
+ * it instead of inheriting the gap.
  */
 const GATE_NOT_APPLICABLE = [
   // Logging in cannot require a permission: it is what produces one.
@@ -215,6 +232,33 @@ const GATE_NOT_APPLICABLE = [
   // `auth.controller.ts`, and `app.auth.test.ts` for the assertion that the
   // filter is really in the query.
   "DELETE /api/auth/sessions/:id",
+
+  // ── Your own recovery address ───────────────────────────────────────────
+  // The same argument as the session endpoints above, and it is worth
+  // spelling out because these two *write* to a `usuarios` row, which is
+  // normally exactly what a permission gates.
+  //
+  // What they write is the caller's own recovery address, and the account is
+  // taken from `req.user`, never from the request body — see
+  // `email.controller.ts`. So there is no other person's record these could
+  // be pointed at, and no role that may or may not be allowed to hold an
+  // email of its own: gating them would mean an administrator could lock
+  // somebody out of their own way back in.
+  //
+  // `/verify` takes only a token. The account it verifies comes out of the
+  // token's row, so a caller cannot aim it at anyone — that is the property
+  // `token_uso_unico.id_usuario` exists for, and it is asserted in
+  // `email.controller.test.ts`, not here.
+  "POST /api/auth/email/send",
+  "POST /api/auth/email/verify",
+
+  // ── The way back in ────────────────────────────────────────────────────
+  // A permission is something an account holds, and the whole point of these
+  // two is that the caller has no account in hand yet. There is nobody to
+  // ask "may you?" of. See the note beside them in
+  // AUTHENTICATION_NOT_APPLICABLE for what stands in for a gate instead.
+  "POST /api/auth/password/forgot",
+  "POST /api/auth/password/reset",
 ];
 
 describe("who may change data", () => {
@@ -264,14 +308,12 @@ const READ_GATE_NOT_APPLICABLE = [
   // Two that genuinely cannot ask for a permission, each for the same reason:
   // they are what the answer to "may I?" is built from.
   //
-  // Checking whether the session is still good, which the app does on every
-  // reload before it knows what the account may do.
-  "GET /api/login/",
-  // Your own permission matrix. Gating this would need a permission to learn
-  // which permissions you hold.
-  "GET /api/permisos/mias",
-  // Who you are and what you may do — the same argument as the line above, and
-  // the endpoint the new frontend asks on every reload.
+  // Who you are and what you may do. Gating this would need a permission to
+  // learn which permissions you hold, and it is what the frontend asks on every
+  // reload before it knows what the account may do. Three lines stood here
+  // until `GET /api/login/` and `GET /api/permisos/mias` were retired: this
+  // endpoint replaced both of them, answering in one round trip what they
+  // answered in two.
   "GET /api/auth/me",
   // The devices *you* are logged in on. `listSessionsOf` takes the id from
   // `req.user`, never from the request, so there is no other person's list this
@@ -280,11 +322,10 @@ const READ_GATE_NOT_APPLICABLE = [
 
   // ── Everything below is the debt ────────────────────────────────────────
   // Reads that any logged-in account may call, whatever its role. Counted:
-  // twenty-five. `GET /api/dashboard/` used to be the twenty-sixth and the
+  // twenty. `GET /api/dashboard/` used to be one of them and the
   // worst of them — no `where`, no `limit`, the whole asset register in one
   // response — which is why it was gated first.
   "GET /api/adss/",
-  "GET /api/adss/stats",
   "GET /api/adssposte/:id_poste",
   "GET /api/ciudad/",
   "GET /api/ciudad/:id",
@@ -294,20 +335,16 @@ const READ_GATE_NOT_APPLICABLE = [
   "GET /api/evento/usuario/:id_usuario",
   "GET /api/eventoObs/:id_evento",
   "GET /api/material/",
-  "GET /api/material/stats",
   "GET /api/obs/",
-  "GET /api/obs/stats",
   "GET /api/poste/",
   "GET /api/poste/:id",
   "GET /api/poste/tramos",
   "GET /api/propietario/",
-  "GET /api/propietario/stats",
   "GET /api/revision/:id_evento",
   "GET /api/rol/",
   "GET /api/solucion/",
   "GET /api/solucion/evento/:id_evento",
   "GET /api/tipoObs/",
-  "GET /api/tipoObs/stats",
 ];
 
 describe("who may read data", () => {
@@ -395,10 +432,37 @@ const EVENTOS_GATES: Record<string, string> = {
   "GET /api/dashboard/": "eventos.ver",
 };
 
+/**
+ * The five summary reads, which are not the harmless counters they look like.
+ *
+ * Every one of them is rendered by a section of the Parámetros screen and
+ * nowhere else, and every write on those same five routers already asks for
+ * `parametros`. Only the reads were left out, and one of them matters a great
+ * deal more than the rest: `GET /api/propietario/stats` returns the **name** of
+ * the owner company with the most poles and the **name** of the one with the
+ * largest pending backlog, with both counts. Osefi maintains poles for several
+ * companies at once, so that is one client being told which of the others is in
+ * the worst shape — by name — and role 3, the one called Cliente, holds
+ * `parametros: NADA` yet could call it.
+ *
+ * `parametros.ver` is therefore the pair, matching the writes beside them and
+ * the screen that draws them. Deliberately narrow: the plain list reads on the
+ * same routers stay open, because the pole and incident forms need the
+ * catalogues and the Cliente's own report screen reads four of them. Those need
+ * a decision about what a client may see, which is a different piece of work.
+ */
+const PARAMETROS_GATES: Record<string, string> = {
+  "GET /api/propietario/stats": "parametros.ver",
+  "GET /api/adss/stats": "parametros.ver",
+  "GET /api/material/stats": "parametros.ver",
+  "GET /api/obs/stats": "parametros.ver",
+  "GET /api/tipoObs/stats": "parametros.ver",
+};
+
 describe("which permission each gate asks for", () => {
   it("asks for the one the route is about, not merely for one", () => {
     const wrong: string[] = [];
-    for (const [route, expected] of Object.entries({ ...GENERADOR_GATES, ...EVENTOS_GATES })) {
+    for (const [route, expected] of Object.entries({ ...GENERADOR_GATES, ...EVENTOS_GATES, ...PARAMETROS_GATES })) {
       const [method, path] = route.split(" ");
       const found = routes.find((r) => r.method === method && r.path === path);
       if (!found) {
