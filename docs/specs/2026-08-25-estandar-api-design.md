@@ -891,7 +891,7 @@ aplicación instalada. Una caja así no se puede desplegar de ninguna manera
 correcta.
 
 **El corte nuevo es por radio de daño al desplegar**, no por materia. Salen
-catorce tareas en cuatro familias, y las tres primeras familias se pueden hacer
+dieciséis tareas en cuatro familias, y las tres primeras familias se pueden hacer
 en cualquier orden dentro de la suya.
 
 ### Las dos reglas que gobiernan la lista
@@ -933,7 +933,34 @@ exacto que hay que ejecutar y en qué repositorio.
 Ninguna necesita que el cliente se entere. Se despliegan cuando convenga, sin
 coordinar con Vercel.
 
-**A1 · Borrar las siete rutas muertas.** Las de §7. Arrastra tres cosas que no
+**A0 · La bitácora deja de apuntar lo que el servidor rechazó.** Va primera, y no
+estaba en la primera versión de esta lista: la encontró la auditoría previa de
+A1, que es exactamente para lo que sirve auditar antes de empezar.
+
+El commit `ce91b1b` cerró la puerta y dejó el recibo. Metió `assignable()` y
+`withoutAuthor()` en el `set()` de cada edición, así que un cuerpo que traiga
+`deletedAt` o `id_usuario` ya no toca la fila — pero el `logAction` de al lado
+sigue construyendo su `before`/`after` desde `req.body` sin filtrar. Hoy un
+`PUT /api/ciudad/5` con `deletedAt` responde 200, no archiva nada, y **deja
+escrito en la bitácora que se archivó**, en el único registro que existe para
+comprobar si ocurrió. Son **nueve** controladores; en seis de ellos el `after` es
+`req.body` literal, de modo que cualquier clave inventada del cuerpo entra tal
+cual.
+
+Ocho se arreglan aquí. El noveno es `rol.controller.ts`, de la sesión de roles:
+queda como excepción escrita en el test, con su motivo, y se les avisa.
+
+Y va **antes de A1** por una razón dura: los dos únicos sitios que hoy lo hacen
+bien son `updateRevision` y `updateSolucion`, que A1 borra junto con los dos
+tests que lo vigilan. Sin A0 delante, A1 no es una limpieza, es una regresión.
+Plan: [`docs/plans/2026-08-26-a0-bitacora-no-apunta-lo-rechazado.md`](../plans/2026-08-26-a0-bitacora-no-apunta-lo-rechazado.md).
+
+```
+cd api && npx vitest run src/controllers/logShape.test.ts
+```
+
+**A1 · Borrar las siete rutas muertas.** Las de §7. **Requiere A0 hecho.**
+Arrastra tres cosas que no
 son opcionales: tres entradas de `routeGuards.test.ts` (`READ_GATE_NOT_APPLICABLE`
 y `EVENTOS_GATES`) que dejan la suite roja si no se quitan, cinco casos de
 `authorship.test.ts` que llaman directamente a los controladores que se van, y
@@ -964,6 +991,22 @@ que el test lo prohíba.
 
 ```
 cd api && npx vitest run src/controllers/errorShape.test.ts
+```
+
+**A4 · `ARCHITECTURE.md` al día.** Se quedó sin dueño al cortar esta lista —
+estaba en el antiguo tramo 1 y no entró en ninguna de las catorce—, y lleva
+desactualizado desde antes de este trabajo: documenta `/api/postes` y
+`/api/eventos` en plural, montajes que no existen (son singulares), dice que
+`limit` tiene un mínimo de 10 cuando el código pone 15, y nombra `RevicionModel`
+donde el modelo se llama `RevisionModel`. Y hay **dos** ficheros con ese nombre,
+uno en `api/docs/` y otro en `web/docs/`: el de esta tarea es el de `api`.
+
+No entra en la familia C aunque describa contratos: es documentación, no
+despliega nada. Se hace cuando A0 a A3 hayan asentado, para no escribirlo dos
+veces.
+
+```
+cd api && grep -cE '/api/(postes|eventos)|RevicionModel' docs/ARCHITECTURE.md   # 0
 ```
 
 ### Familia B — aditivas, no cambian nada existente
@@ -1038,7 +1081,7 @@ cd api && npx vitest run src/routes/listShape.test.ts
 ```
 
 **C4 · `201`/`204` y la capa cliente (§3.5, §4.1).** La tarea más grande de las
-catorce. **La cifra de la primera versión estaba muy corta:** hay 57
+dieciséis. **La cifra de la primera versión estaba muy corta:** hay 57
 comparaciones literales con `200` repartidas en 25 ficheros de `web/src`, de las
 cuales las que rompen de verdad son al menos quince, cada una con su mensaje
 falso — «No se pudo archivar» sobre una fila que sí se archivó, «No se pudo
