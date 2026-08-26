@@ -393,6 +393,41 @@ describe("closing one session", () => {
   });
 });
 
+describe("what a session's own estado lets it reach, through the real app", () => {
+  /**
+   * Task 5's cut (`authenticate.ts`'s `puedeAlcanzar` gate), proven against a
+   * real row instead of a hand-built `req`.
+   *
+   * Every proof of that cut in `authenticate.test.ts` builds `req.originalUrl`
+   * by hand and mocks `findLiveSession` outright, which leaves two premises
+   * asserted but never actually exercised: that Express really puts the full
+   * mounted path on `req.originalUrl` at the mount points this gate runs
+   * at — `app.use("/api/usuario", authenticate, ...)` and
+   * `router.get("/me", authenticate, me)` mounted at `/api/auth` — and that a
+   * real `estado` column, written by a real `createSession` INSERT, survives
+   * `findLiveSession`'s real SELECT into the gate. `app.auth.test.ts` does
+   * drive the real stack, but its default session is always `estado:
+   * "completa"`, the one state where the gate is a no-op, so it proves
+   * nothing about either premise either.
+   *
+   * This file's harness closes both at once: a real app, a real
+   * `createSession`, and a table that actually stores and returns what it is
+   * given, rather than a mock told what to say. That is also why it lives
+   * here rather than in a new file or in `app.auth.test.ts` — the harness
+   * that makes this cheap already exists in this file and nowhere else.
+   */
+  it("refuses a parcial session the ERP but lets it finish logging in", async () => {
+    const { token } = await createSession(YO, { userAgent: "Chrome", ip: "1.2.3.4" }, "parcial");
+    const cookie = `${SESSION_COOKIE_NAME}=${token}`;
+
+    const erp = await request(app).get("/api/usuario").set("Cookie", cookie);
+    expect(erp.status).toBe(401);
+
+    const me = await vivo(cookie);
+    expect(me.status).toBe(200);
+  });
+});
+
 describe("the two ways a session dies without anybody revoking it", () => {
   it("stops authenticating once its idle expiry has passed", async () => {
     // The condition `findLiveSession` checks second. Exercised here as behaviour
