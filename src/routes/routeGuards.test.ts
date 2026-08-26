@@ -304,9 +304,9 @@ describe("who may change data", () => {
  * not hypothetical here: three tests used to cover `DELETE /api/usuario/:id`'s
  * mount as a side effect, a fix round moved them to `DELETE /api/rol/:id` for
  * an unrelated and correct reason, and from then on `requireStepUp()` could be
- * deleted from that route with the whole suite — 73 files, 1163 tests — still
- * green. Eleven mounts held up by side effects of tests about something else is
- * how one of them goes missing without anybody noticing.
+ * deleted from that route with the whole suite still green. Eleven mounts held
+ * up by side effects of tests about something else is how one of them goes
+ * missing without anybody noticing.
  *
  * **Written out rather than derived**, for the same reason `GENERADOR_GATES`
  * below is: a list computed from the routers would only assert that the code

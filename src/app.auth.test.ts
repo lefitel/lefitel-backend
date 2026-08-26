@@ -1664,7 +1664,7 @@ describe("requireStepUp, mounted on the real routes", () => {
    * unnoticed for a round: while these three sent their DELETEs to
    * `/api/usuario/:id`, they were the only thing in the suite that would
    * notice `requireStepUp()` disappearing from that route. Afterwards the gate
-   * could be deleted from `usuario.routes.ts` with all 1163 tests still green.
+   * could be deleted from `usuario.routes.ts` with the whole suite still green.
    * Mount coverage is not this trio's job and never should have been: it now
    * lives in `routes/routeGuards.test.ts`, which pins all eleven gated routes
    * against the app Express actually assembled.

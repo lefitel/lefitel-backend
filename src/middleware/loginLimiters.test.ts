@@ -570,7 +570,20 @@ describe("confirmCostsNothing reads the flag directly, as a pure function", () =
  */
 describe("the flag a caller sets when its own answer cannot be a 401", () => {
   const CLAVE_CUENTA = "pc:42";
-  const conSesion = { id: 42, id_rol: 3, id_sesion: "s", expires_at: new Date() };
+  // `estado` and `mfa_satisfied_at` are not what this block is about — it is
+  // about the budget — but `req.user` requires both (see the interface in
+  // `app.ts` and why they are not optional there), so leaving them out was a
+  // type error on the two `req.user = conSesion` lines below. The values are
+  // the shipped ones for a live account rather than whatever compiles: a
+  // completed session that has proved no factor.
+  const conSesion = {
+    id: 42,
+    id_rol: 3,
+    id_sesion: "s",
+    expires_at: new Date(),
+    estado: "completa" as const,
+    mfa_satisfied_at: null,
+  };
 
   /** Same shape as `appConSesion` above, except the route answers 403 and
    *  optionally marks that 403 as a wrong (or right) password before sending

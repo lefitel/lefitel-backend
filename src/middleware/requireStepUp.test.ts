@@ -17,6 +17,7 @@
 // "confirmCostsNothing" there.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { Response } from "express";
 
 const verifyOwnPassword = vi.fn();
 const tieneAlgunFactor = vi.fn();
@@ -49,7 +50,24 @@ const haceMinutos = (m: number) => new Date(Date.now() - m * 60_000);
 
 function contexto(user: Record<string, unknown> | undefined, body: unknown = {}) {
   const req = { user, body, ip: "::1", originalUrl: "/api/rol/1" } as never;
-  const res = { status: vi.fn().mockReturnThis(), json: vi.fn(), locals: {} } as never;
+  // `as unknown as Response & typeof r`, the idiom `evento.lifecycle.test.ts`
+  // already uses, and not the `as never` this file was written with.
+  //
+  // `never` is assignable to everything, so the handler call in every test
+  // below compiled — but it is also assignable *from* nothing, so every
+  // `expect(res.status)` and `expect(res.json)` in this file was the error
+  // "Property 'status' does not exist on type 'never'". Seventeen of them,
+  // from the day the file was written. They stayed invisible because
+  // `npx tsc --noEmit` reads `tsconfig.json`, which excludes tests so
+  // `npm run build` does not emit them; the test sources are only compiled by
+  // `tsconfig.test.json`, which only `npm run typecheck` runs. Four review
+  // rounds reported a clean typecheck truthfully and incompletely.
+  //
+  // The intersection keeps both halves honest: the object is a `Response` as
+  // far as the handler is concerned, and `status`/`json` keep their mock types
+  // so the assertions are checked rather than merely accepted.
+  const r = { status: vi.fn().mockReturnThis(), json: vi.fn(), locals: {} };
+  const res = r as unknown as Response & typeof r;
   return { req, res, next: vi.fn() };
 }
 
