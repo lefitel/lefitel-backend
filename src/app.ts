@@ -227,7 +227,6 @@ app.use(
 app.use(requireSameOrigin(ORIGINS));
 
 // Routes
-app.use(express.static(process.env.IMAGES_DIR ?? "/images"));
 // Both login buckets and the POST-only rule live in loginLimiters.ts, as one
 // named middleware. Written out here it was an anonymous arrow nothing could
 // assert about.
@@ -263,6 +262,44 @@ app.use("/api/permisos", authenticate, permisoRoutes);
 // The gate is inside files.routes.ts now, one per action: listing the folder and
 // emptying it are not the same permission.
 app.use("/api/files", authenticate, filesRoutes);
+
+/**
+ * The field photographs, behind the session.
+ *
+ * This mount used to sit above every `/api/...` router and eleven lines above
+ * the first `authenticate`, which made a stored file name the entire
+ * credential: `GET /1712428860328_210.jpg` answered 200 with the image to
+ * anybody on the internet, no cookie required. The names are not a secret
+ * either — `upload.controller.ts` writes `${Date.now()}_${originalName}`, and
+ * the original names in this database are `Imagen1`..`Imagen26`, WhatsApp names
+ * carrying their own date, and in some rows the pole number itself. The only
+ * unguessable component is a millisecond, and a naming session's photographs
+ * sit seconds apart.
+ *
+ * It has to move *below* the API routers rather than be wrapped where it stood:
+ * `app.use(authenticate, ...)` carries no path, so it would have run for
+ * everything mounted underneath it — a session in front of `POST /api/login`.
+ *
+ * `/api/...` is skipped rather than authenticated so an unknown API path stays
+ * a 404. Letting `authenticate` answer it would turn every client typo into
+ * "su sesión expiró", which is a different bug report.
+ *
+ * No URL changes and the frontend is untouched. The cookie is host-only on the
+ * API's host with `SameSite=Lax`, and www and api share a registrable domain,
+ * so it rides an `<img>` exactly as it already rides XHR — see
+ * `auth/sessionCookie.ts`, which spells out why there is no `domain`. Every
+ * screen that renders one of these is inside `/app/...` and already holds a
+ * session; the public pages use bundled logos, not stored files.
+ *
+ * What this does not fix: a photograph is still reachable by anyone with *a*
+ * session, whatever pole it belongs to. Scoping it to the owner is the separate
+ * piece of work this unblocks rather than replaces.
+ */
+const imagenesEstaticas = express.static(process.env.IMAGES_DIR ?? "/images");
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.path.startsWith("/api/")) return next();
+  void authenticate(req, res, () => imagenesEstaticas(req, res, next));
+});
 
 /**
  * Terminal error handler.
