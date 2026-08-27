@@ -128,7 +128,7 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
  *
  * ⚠️ **`parcial` is a dead end until the plan after this one, and this is the
  * comment for whoever deploys.** Reaching it needs a row in
- * `credenciales_webauthn` or a confirmed one in `factor_totp`, and as of this
+ * `credencial_webauthn` or a confirmed one in `factor_totp`, and as of this
  * plan nothing anywhere in `src/` inserts into either — the only statements
  * against those tables are the COUNTs in this file, and neither migration
  * seeds a row. So on deploy day `tieneAlgunFactor` is false for every account
@@ -146,9 +146,47 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
  * verifies a factor has to be live before, or in the same deploy as, the first
  * endpoint that registers one.** Shipping registration first locks out
  * whoever registers first — starting with whoever tests it.
+ *
+ * ⚠️ **And `onboarding` is the branch that fires on its own — read this one
+ * before deploying.** `parcial` above cannot happen today. This one happens to
+ * **everybody**, deterministically, `MFA_GRACE_DAYS` after each account's own
+ * first login. No row has to be inserted and nobody has to do anything: the
+ * clock this function starts runs out by itself.
+ *
+ * When it does, the login still answers 200 and the cookie is still set — and
+ * then `authenticate` refuses everything outside the allowlist in
+ * `sessionState.ts`. The six doors that allowlist opens are meant to be the way
+ * out, and **four of them are not mounted**: `auth.routes.ts` has no `/totp`,
+ * no `/webauthn/register`, no `/webauthn/credentials` and no
+ * `/recovery-codes`. The two that are mounted, `/email` and `/sessions`,
+ * cannot register a factor, and a registered factor is the only thing that
+ * changes this answer. So there is no way out of `onboarding` from inside the
+ * API until plan 4B ships one.
+ *
+ * **The deadline this commit creates: 4B has to be live within
+ * `MFA_GRACE_DAYS` of this deploy.** Not "soon" — fourteen days from the day
+ * each person first logs in, and the earliest of those is the day of the
+ * deploy itself.
+ *
+ * **The manual reprieve, if that date is going to be missed:**
+ *
+ * ```sql
+ * UPDATE usuarios SET mfa_grace_until = NULL;
+ * ```
+ *
+ * That is not a workaround, it is this function's own first branch: a null
+ * deadline is the "never started" case, so each account's next login stamps a
+ * fresh `MFA_GRACE_DAYS` and everybody is back to `completa`. It buys another
+ * full grace period and can be run as many times as needed. Note it re-stamps
+ * on *login*, not on the UPDATE, so somebody who does not log in again stays
+ * out until they do.
  */
 export async function estadoInicialDeSesion(
-  usuario: { id: number; mfa_grace_until: Date | null },
+  // `undefined` as well as `null`, and spelled out rather than left to
+  // `strict: false` to permit it silently: `IUsuario` declares
+  // `mfa_grace_until?: Date | null`, so an account object assembled without
+  // the key is a normal caller of this function and not a mistake.
+  usuario: { id: number; mfa_grace_until: Date | null | undefined },
   ahora: Date,
 ): Promise<{ estado: EstadoSesion; graceUntil: Date | null }> {
   if (await tieneAlgunFactor(usuario.id)) {
@@ -158,16 +196,21 @@ export async function estadoInicialDeSesion(
     return { estado: "parcial", graceUntil: null };
   }
 
-  // `== null`, loosely, and not `=== null`. `IUsuario` declares
-  // `mfa_grace_until?: Date | null` and `tsconfig.json` has `strict: false`,
-  // so an account object built without the key type-checks and arrives here as
-  // `undefined`. Under a strict test that falls through to the comparison
-  // below, where `new Date(undefined)` is an Invalid Date and every comparison
-  // against NaN is false — handing back `completa` with nothing to write, on
-  // every login for ever. The same reasoning covers a stored value that cannot
-  // be parsed, which is why NaN is folded in here rather than compared later:
-  // re-stamping a fresh deadline costs the account fourteen more days, while
-  // the alternative costs the ERP its closing date altogether.
+  // **`Number.isNaN` is the guard that matters here; the loose `== null` is
+  // only a shortcut.** Tightening it to `=== null` changes no behaviour and
+  // fails no test — `undefined` would fall through to `new Date(undefined)`,
+  // which is an Invalid Date, whose `getTime()` is NaN, which lands in exactly
+  // the same branch. Said plainly because the first version of this comment
+  // claimed the opposite and a review caught it.
+  //
+  // What the NaN branch is actually for is any deadline this function cannot
+  // read: absent (`IUsuario` declares the column optional, so an account
+  // object built without the key is a normal caller), or stored as something
+  // unparseable. Both are treated as "never started", so a fresh deadline is
+  // stamped. That is the safe direction to be wrong in: it costs the account
+  // another `MFA_GRACE_DAYS`, where falling through to a comparison against
+  // NaN — every one of which is false — would return `completa` with nothing
+  // to write, on every login for ever, and the ERP would never close.
   const limite = usuario.mfa_grace_until == null ? NaN : new Date(usuario.mfa_grace_until).getTime();
   if (Number.isNaN(limite)) {
     return { estado: "completa", graceUntil: new Date(ahora.getTime() + MFA_GRACE_DAYS * DIA_MS) };

@@ -151,14 +151,23 @@ describe("estadoInicialDeSesion", () => {
   });
 
   it("treats a missing mfa_grace_until the same as an unset one", async () => {
-    // Not hypothetical, and not caught by the compiler: `IUsuario` declares
+    // Not hypothetical and not caught by the compiler: `IUsuario` declares
     // `mfa_grace_until?: Date | null` and `tsconfig.json` has `strict: false`,
     // so an object built without the key type-checks fine and arrives here as
-    // `undefined`. A strict `=== null` test would fall through to the deadline
-    // branch, `new Date(undefined)` is an Invalid Date, and every comparison
-    // against NaN is false — so the account would be handed `completa` with
-    // `graceUntil: null` on every login it ever made. That is a grace period
-    // that never starts and therefore never ends: the ERP would never close.
+    // `undefined`.
+    //
+    // **What this test guards is the `Number.isNaN` branch, not the loose
+    // `== null` beside it.** Tightening that to `=== null` leaves this green,
+    // because `undefined` then reaches `new Date(undefined)` and comes back
+    // NaN into the same branch. Delete the NaN check and this goes red. An
+    // earlier version of this comment credited the wrong line; a review caught
+    // it, and the distinction is written down now so the next reader does not
+    // trust the shortcut instead of the guard.
+    //
+    // What it costs to get wrong: every comparison against NaN is false, so
+    // the account would be handed `completa` with `graceUntil: null` on every
+    // login it ever made — a grace period that never starts and so never ends,
+    // and an ERP that never closes.
     const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: undefined }, ahora);
     expect(r.estado).toBe("completa");
     expect(r.graceUntil?.getTime()).toBe(ahora.getTime() + MFA_GRACE_DAYS * DIA);
@@ -201,13 +210,36 @@ describe("estadoInicialDeSesion", () => {
     expect(r.estado).toBe("onboarding");
   });
 
-  it("never refuses the login outright, however long the grace has been over", async () => {
+  it("answers instead of throwing, for every shape of deadline it can be handed", async () => {
     // "El día 15 existe y no echa a nadie." A technician in the field on day
-    // 15 gets a screen telling them what to do, never a closed door — so this
-    // function has no fourth answer and no throw of its own.
-    const vencida = new Date(ahora.getTime() - 30 * DIA);
-    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: vencida }, ahora);
-    expect(["onboarding", "completa", "parcial"]).toContain(r.estado);
+    // 15 gets a screen telling them what to do, never a closed door.
+    //
+    // **What this can actually catch is a throw, and nothing else** — worth
+    // saying rather than leaving to be discovered. `EstadoSesion` has exactly
+    // three members, so asserting the answer is one of them is satisfied by
+    // the return type alone; as the plan first wrote this test, against a
+    // single input, it could not fail. It earns its place by being run over
+    // the inputs most likely to blow up instead: a deadline long past, the
+    // epoch, an absent column and an unparseable one. A `throw` here is a
+    // login that 500s, which is the closed door the rule forbids.
+    const hostiles = [
+      new Date(ahora.getTime() - 30 * DIA),
+      new Date(0),
+      null,
+      undefined,
+      new Date("no es una fecha"),
+    ];
+    for (const mfa_grace_until of hostiles) {
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until }, ahora);
+      expect(["onboarding", "completa", "parcial"], String(mfa_grace_until)).toContain(r.estado);
+      // And an answer that is actually usable: `graceUntil` is either a real
+      // date to store or an explicit null, never an Invalid Date the caller
+      // would happily write into the column.
+      expect(
+        r.graceUntil === null || !Number.isNaN(r.graceUntil.getTime()),
+        String(mfa_grace_until),
+      ).toBe(true);
+    }
   });
 
   it("asks for the factor when there is one to ask for", async () => {
