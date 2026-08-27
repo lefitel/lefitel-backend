@@ -155,7 +155,7 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
  *
  * When it does, the login still answers 200 and the cookie is still set — and
  * then `authenticate` refuses everything outside the allowlist in
- * `sessionState.ts`. The six doors that allowlist opens are meant to be the way
+ * `sessionState.ts`. The six extra doors `ONBOARDING_EXTRA` opens are the way
  * out, and **four of them are not mounted**: `auth.routes.ts` has no `/totp`,
  * no `/webauthn/register`, no `/webauthn/credentials` and no
  * `/recovery-codes`. The two that are mounted, `/email` and `/sessions`,
