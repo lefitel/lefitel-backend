@@ -147,6 +147,26 @@ describe("saving", () => {
     expect(c.message).toMatch(/exportar/);
   });
 
+  it("refuses a real action against a module that does not have it", async () => {
+    // Both halves are legal — `bitacora` is a module, `archivar` is an action —
+    // and checking them one at a time lets the pair through. The row would be
+    // written, read by nobody, and would start granting the day `bitacora`
+    // gained `archivar`, with no record of anybody ticking it.
+    //
+    // The message names both halves on purpose: "la acción archivar no existe"
+    // would be a lie in front of an administrator who can see `archivar` on the
+    // row above.
+    const c = call(
+      { id: 1, id_rol: ADMIN },
+      { params: { id_rol: "2" }, body: { permisos: { bitacora: { archivar: true } } } },
+    );
+    await putPermisos(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(c.message).toMatch(/bitacora/);
+    expect(c.message).toMatch(/archivar/);
+  });
+
   it("refuses a value that is not yes or no", async () => {
     // "true" is not true. A string would be stored and read back as truthy,
     // granting something nobody ticked.

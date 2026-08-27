@@ -22,7 +22,7 @@ vi.mock("../models/permiso.model.js", () => ({
 
 const { can, permissionsFor, allPermissions, invalidatePermissions, seedRolePermissions } =
   await import("./store.js");
-const { MODULES, ACTIONS } = await import("./matrix.js");
+const { MODULES, ACTIONS, actionsOf } = await import("./matrix.js");
 
 const ADMIN = 1;
 const CLIENTE = 3;
@@ -109,20 +109,52 @@ describe("answering a question", () => {
     expect(await can(ADMIN, "eventos", "editar")).toBe(false);
     expect(await can(ADMIN, "eventos", "ver")).toBe(false);
   });
+
+  it("grants nothing from a real action named against a module that does not have it", async () => {
+    // The trapdoor. Every module used to carry all four verbs, so a row was
+    // checked one half at a time — "is `bitacora` a module" and "is `archivar`
+    // an action" — and both halves of `bitacora.archivar` answer yes. Nothing
+    // asked whether the pair existed, because until now every pair did.
+    //
+    // Now that modules declare their own actions, that stops being true, and a
+    // half-checked row is a permission nobody granted: it can be written today,
+    // is read by nobody, and starts meaning yes the day that module gains that
+    // action for real. The test above covers names the code does not know at
+    // all; this one covers two names it knows perfectly well in the wrong
+    // combination, which is the case that survives a `isAction()` check.
+    findAll.mockResolvedValue([
+      row(ADMIN, "bitacora", "archivar"),
+      row(ADMIN, "reportes", "crear"),
+      row(ADMIN, "archivos", "editar"),
+    ]);
+
+    expect(await can(ADMIN, "bitacora", "archivar")).toBe(false);
+    expect(await can(ADMIN, "reportes", "crear")).toBe(false);
+    expect(await can(ADMIN, "archivos", "editar")).toBe(false);
+  });
 });
 
 describe("the shape handed to the client", () => {
-  it("fills in every module and action, granted or not", async () => {
+  it("fills in each module's own actions, granted or not, and nothing else", async () => {
+    // This used to walk `MODULES × ACTIONS` and demand a boolean in all forty
+    // cells. Now a module carries only what it declares, and the second half of
+    // the assertion is the half that matters: a cell that is absent has to read
+    // as absent, not as a quietly denied one the screen would draw a box for.
     findAll.mockResolvedValue([row(CLIENTE, "eventos", "ver")]);
 
     const permissions = await permissionsFor(CLIENTE);
     for (const modulo of MODULES) {
-      for (const accion of ACTIONS) {
+      for (const accion of actionsOf(modulo)) {
         expect(typeof permissions[modulo][accion], `${modulo}.${accion}`).toBe("boolean");
+      }
+      for (const accion of ACTIONS) {
+        if (actionsOf(modulo).includes(accion)) continue;
+        expect(permissions[modulo][accion], `${modulo}.${accion}`).toBeUndefined();
       }
     }
     expect(permissions.eventos.ver).toBe(true);
     expect(permissions.eventos.crear).toBe(false);
+    expect(permissions.bitacora.archivar).toBeUndefined();
   });
 
   it("gives an unknown role a complete set of denials, not an empty object", async () => {
@@ -184,7 +216,12 @@ describe("seeding a new role", () => {
     await seedRolePermissions(4);
 
     const [rows] = bulkCreate.mock.calls[0] as [Record<string, unknown>[]];
-    expect(rows).toHaveLength(MODULES.length * ACTIONS.length);
+    // Not `MODULES.length * ACTIONS.length` any more: that product counts the
+    // eight cells no module has, and seeding them is how a freshly created role
+    // would put back exactly what the cleanup migration deletes.
+    const esperadas = MODULES.reduce((n, m) => n + actionsOf(m).length, 0);
+    expect(rows).toHaveLength(esperadas);
+    expect(rows.some((r) => r.modulo === "bitacora" && r.accion === "archivar")).toBe(false);
     expect(rows.every((r) => r.id_rol === 4 && r.permitido === false)).toBe(true);
     expect(new Set(rows.map((r) => r.modulo))).toEqual(new Set(MODULES));
   });

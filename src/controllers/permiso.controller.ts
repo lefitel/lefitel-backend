@@ -8,7 +8,9 @@ import {
   ACTION_LABELS,
   MODULES,
   MODULE_LABELS,
+  actionsOf,
   isAction,
+  isActionOf,
   isModule,
 } from "../permissions/matrix.js";
 import { allPermissions, invalidatePermissions, permissionsFor } from "../permissions/store.js";
@@ -30,7 +32,19 @@ export async function getPermisos(_req: Request, res: Response) {
     });
     res.status(200).json({
       roles,
-      modulos: MODULES.map((key) => ({ key, label: MODULE_LABELS[key] })),
+      // `acciones` per module is the new half; the flat list stays as the
+      // dictionary of labels, and staying is not politeness. The frontend is a
+      // PWA registered with `registerType: "prompt"`, so a bundle that predates
+      // this deploy can sit in a tab for days, and `web/src` has no
+      // ErrorBoundary anywhere — a `PermisosPanel` that mapped over a missing
+      // `acciones` would blank the whole application, not the panel. Additive,
+      // the old bundle keeps drawing its full grid; a cell it offers that no
+      // longer exists is refused by name in `changesFrom`.
+      modulos: MODULES.map((key) => ({
+        key,
+        label: MODULE_LABELS[key],
+        acciones: actionsOf(key),
+      })),
       acciones: ACTIONS.map((key) => ({ key, label: ACTION_LABELS[key] })),
       permisos: await allPermissions(),
     });
@@ -68,6 +82,16 @@ function changesFrom(body: unknown): Change[] | { error: string } {
     }
     for (const [accion, permitido] of Object.entries(actions as Record<string, unknown>)) {
       if (!isAction(accion)) return { error: `La acción "${accion}" no existe.` };
+      // The pair, and it is a separate check from the one above on purpose.
+      // `bitacora` is a module and `archivar` is an action, so checking each
+      // half in turn accepts a combination that does not exist — the row gets
+      // written, nothing reads it, and it starts granting the day that module
+      // gains that action. Naming both halves in the message matters too: an
+      // administrator looking at a screen with `archivar` on it would not
+      // believe "la acción archivar no existe".
+      if (!isActionOf(modulo, accion)) {
+        return { error: `El módulo "${modulo}" no tiene la acción "${accion}".` };
+      }
       if (typeof permitido !== "boolean") {
         return { error: `"${modulo}.${accion}" debe ser verdadero o falso.` };
       }

@@ -1,9 +1,9 @@
 import { PermisoModel } from "../models/permiso.model.js";
 import {
-  ACTIONS,
+  actionsOf,
   MODULES,
   emptyPermissions,
-  isAction,
+  isActionOf,
   isModule,
   type Action,
   type Module,
@@ -34,7 +34,13 @@ function buildMatrix(rows: { id_rol: number; modulo: string; accion: string; per
   for (const row of rows) {
     // A row naming a module or action the code no longer knows about is history,
     // not permission. Ignoring it beats letting it grant something unnamed.
-    if (!isModule(row.modulo) || !isAction(row.accion)) continue;
+    //
+    // The pair, not each half. `isModule("bitacora")` and `isAction("archivar")`
+    // both answer yes to a combination that does not exist, and a row like that
+    // grants nothing today only because nothing reads it — until `bitacora`
+    // gains `archivar` for real, at which point it grants it, and nobody
+    // remembers writing it.
+    if (!isModule(row.modulo) || !isActionOf(row.modulo, row.accion)) continue;
     let role = matrix.get(row.id_rol);
     if (!role) {
       role = emptyPermissions();
@@ -103,15 +109,20 @@ export async function allPermissions(): Promise<Record<number, RolePermissions>>
 }
 
 /**
- * Give a brand-new role a full set of rows, all denied.
+ * Give a brand-new role a row for every cell it can have, all denied.
  *
  * Without this a role created from the Seguridad screen has no rows at all, and
  * the screen has no checkboxes to show — the administrator would see an empty
  * form and no way to grant anything.
+ *
+ * Each module's own actions, not the product of the two lists. The product
+ * writes the eight cells no module has, so the first role created from the
+ * screen would put back exactly what the cleanup migration deleted — and put it
+ * back for a role somebody is about to configure.
  */
 export async function seedRolePermissions(id_rol: number): Promise<void> {
   const rows = MODULES.flatMap((modulo) =>
-    ACTIONS.map((accion) => ({ id_rol, modulo, accion, permitido: false })),
+    actionsOf(modulo).map((accion) => ({ id_rol, modulo, accion, permitido: false })),
   );
   await PermisoModel.bulkCreate(rows, { ignoreDuplicates: true });
   invalidatePermissions();
