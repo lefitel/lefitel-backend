@@ -759,6 +759,16 @@ export async function updateUserPass(req: Request, res: Response) {
      * refresh itself into a step-up-authorised session indefinitely, without
      * ever touching a factor.
      *
+     * **A request already in flight across this rotation gets 401, by design.**
+     * Anything the page fired before this response landed authenticates against
+     * a row that is now revoked, and the window is real rather than theoretical:
+     * it runs from the commit to the response arriving, with two bcrypt
+     * operations sitting in front of it. The old `except` spared exactly that
+     * case, and giving it up is the price of the rule having no exceptions —
+     * paid deliberately, not overlooked. The client's part is to retry such a
+     * request once rather than treat the 401 as the end of the session; the new
+     * cookie is already on the response that raced it.
+     *
      * `estado` **is** carried across, from the session making the request.
      * Today only `completa` can reach this route at all — `sessionState.ts`
      * opens nothing outside `/api/auth/*` to the other two — so a literal

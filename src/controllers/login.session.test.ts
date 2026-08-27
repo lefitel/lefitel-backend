@@ -164,6 +164,7 @@ function call(body: unknown, cookies?: Record<string, unknown>) {
     statusCode: 0,
     body: undefined as unknown,
     cookie: vi.fn(),
+    setHeader: vi.fn(),
     // `handler()` in `auth.controller.ts` checks this before writing its 500,
     // so the stub has to have it rather than leave it undefined by luck.
     headersSent: false,
@@ -192,6 +193,9 @@ function call(body: unknown, cookies?: Record<string, unknown>) {
       return res.body as
         | { usuario?: Record<string, unknown>; permisos?: unknown; message?: string }
         | undefined;
+    },
+    get headerCall() {
+      return res.setHeader.mock.calls.at(-1) as [string, string] | undefined;
     },
     get cookieCall() {
       return res.cookie.mock.calls[0] as [string, string, Record<string, unknown>] | undefined;
@@ -332,6 +336,30 @@ describe("the login, once the credential is good", () => {
     // Written down at error level, not warn: this is an outage, and the log is
     // the only place it is visible to anyone who could fix it.
     expect(error).toHaveBeenCalled();
+  });
+
+  it("tells the client when the session it just opened expires, not only the cookie", async () => {
+    // The header is what the browser's countdown is armed from — `app.ts`
+    // exposes it through CORS for exactly that, and `/auth/me`'s own comment
+    // says a client should prefer it over the body. Until this, the one place
+    // that set it was `authenticate`, which does not run on the login: so the
+    // response that *creates* the deadline was the one response that never
+    // stated it, and the countdown stayed unarmed until the next request.
+    //
+    // The header name is written out rather than imported, the same reason
+    // `app.security.test.ts` does it: an expectation built from the source it
+    // is checking moves along with the change.
+    const c = call({ user: "isaias", pass: "secreta" });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    const [nombre, valor] = c.headerCall ?? [];
+    expect(nombre).toBe("x-osefi-session-expires");
+    // The same instant the cookie was given, in the ISO form the header
+    // documents — a header and a cookie disagreeing about when a session dies
+    // is worse than either one being absent.
+    const [, , opciones] = c.cookieCall ?? [];
+    expect(valor).toBe((opciones as { expires: Date }).expires.toISOString());
   });
 
   it("closes the session this browser was already holding", async () => {

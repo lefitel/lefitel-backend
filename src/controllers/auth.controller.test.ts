@@ -164,6 +164,10 @@ function call(
     body: undefined as unknown,
     cookie: vi.fn(),
     clearCookie: vi.fn(),
+    // `issueSession` sets `SESSION_EXPIRES_HEADER` beside the cookie, so a stub
+    // without this throws inside the login's own try and turns every successful
+    // login here into the 503 that means "the session store is down".
+    setHeader: vi.fn(),
     headersSent: false,
     status(code: number) {
       this.statusCode = code;

@@ -88,6 +88,7 @@ const { loginIpLimiter, loginAccountIpLimiter, passwordConfirmLimiter } = await 
 const { UsuarioModel } = await import("./models/usuario.model.js");
 const { logAction } = await import("./utils/logAction.js");
 const { SesionModel } = await import("./models/sesion.model.js");
+const { sequelize } = await import("./database/sequelize.js");
 const { RolModel } = await import("./models/rol.model.js");
 const { TokenUsoUnicoModel } = await import("./models/tokenUsoUnico.model.js");
 const { CredencialWebauthnModel } = await import("./models/credencialWebauthn.model.js");
@@ -167,6 +168,27 @@ const tokenUsoUnicoUpdate = vi.spyOn(TokenUsoUnicoModel, "update");
  * prove, let through — which is what most of the tests below that touch
  * those routes actually rely on, whether they say so or not.
  */
+/**
+ * The transaction, spied — which is what finally lets this file exercise a
+ * happy path that opens one.
+ *
+ * The rule this file keeps is "spy on the model methods, never `vi.mock` the
+ * `database/sequelize.js` module", because that mock breaks `sequelize.define`
+ * for every model `app.ts` loads. Spying one method on the already-constructed
+ * instance is not that: the models are defined long before this line runs, and
+ * this is the same kind of replacement as the model spies above.
+ *
+ * **The default throws on purpose.** Until now no test here reached a real
+ * transaction, and the file relied on that by arrangement rather than by
+ * enforcement — `deleteUsuario`'s tests spy `usuarioCount` instead of
+ * `UsuarioModel.destroy` precisely to stay away from one. A handler that opens
+ * a transaction reaches for a real connection *before* running any of the
+ * mocked queries inside it, so a test that wandered into one would hit the
+ * configured database, which in this environment is a copy of production. That
+ * used to be a silent hazard; it is now a loud failure, and a test that means
+ * to open one says so by giving the spy an implementation.
+ */
+const transaction = vi.spyOn(sequelize, "transaction");
 const passkeyCount = vi.spyOn(CredencialWebauthnModel, "count");
 const totpCount = vi.spyOn(FactorTotpModel, "count");
 const codigoCount = vi.spyOn(CodigoRecuperacionModel, "count");
@@ -263,6 +285,11 @@ beforeEach(() => {
   sesionFindAll.mockResolvedValue([] as never);
   sesionUpdate.mockResolvedValue([1] as never);
   sesionCreate.mockResolvedValue({ dataValues: {} } as never);
+  transaction.mockImplementation((() => {
+    throw new Error(
+      "este test alcanzó una transacción real; si es a propósito, dale una implementación al spy",
+    );
+  }) as never);
   usuarioFindByPk.mockResolvedValue({
     dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null, pass_changed_at: PASS_CAMBIADA },
   } as never);
@@ -1201,6 +1228,76 @@ describe("changing your own credentials spends the budget for a wrong password, 
     // missing current password, which is the test above.
     expect(res.body.message).toBe(DEMASIADO_CORTA);
     expect(await gastado()).toBe(0);
+  });
+
+  it("rotates the session and tells the client the NEW deadline, not the dying one", async () => {
+    /**
+     * The successful self password change, through the real stack — which
+     * nothing drove until now. Every other test on this route asserts a
+     * refusal, so the rotation `updateUserPass` performs had no integration
+     * coverage at all, and neither did the header it has to leave behind.
+     *
+     * The bug this pins is a genuine one and it is invisible from a unit test.
+     * `authenticate` is the only middleware that writes
+     * `SESSION_EXPIRES_HEADER`, it runs *before* the handler, and it computes
+     * the deadline from the session this request arrived on — the row the
+     * handler is about to revoke. `issueSession` then replaces the cookie. If
+     * it does not also replace the header, the response carries the dying
+     * session's remaining window beside a cookie good for a week.
+     *
+     * Twenty-nine days is what makes it visible. The old session is one day
+     * from its thirty-day ceiling, so the header `authenticate` wrote says
+     * roughly a day; the cookie the rotation hands over is good for seven. The
+     * header's contract is that a value means "reschedule on it", so a client
+     * would take the day — and log somebody out of a session opened seconds
+     * earlier, which is the exact failure `authenticate`'s own comment says
+     * this header exists to prevent.
+     */
+    const creada = new Date(Date.now() - 29 * DIA_MS);
+    sesionFindOne.mockResolvedValue({
+      dataValues: {
+        id: MI_SESION,
+        id_usuario: YO,
+        created_at: creada,
+        expires_at: new Date(Date.now() + 5 * DIA_MS),
+        last_used_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+      },
+    } as never);
+    usuarioFindOne.mockResolvedValue(escribible() as never);
+    // The one test in this file that means to open a transaction; see the spy's
+    // own comment for why the default throws instead.
+    transaction.mockImplementation((async (fn: (t: unknown) => Promise<unknown>) =>
+      fn({ id: "una-transaccion" })) as never);
+
+    const res = await request(app)
+      .put(`/api/usuario/userpass/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ pass: "una-clave-larguisima", oldPass: "la-mia", stepup_password: STEP_UP_OK });
+    await settled();
+
+    expect(res.status).toBe(200);
+
+    // A fresh cookie was handed over: the rotation really happened rather than
+    // the old session being spared.
+    const galletas = (res.headers["set-cookie"] ?? []) as unknown as string[];
+    const sesionNueva = galletas.find((c) => c.startsWith("osefi_session="));
+    expect(sesionNueva).toBeDefined();
+
+    // And the header describes *that* session. More than six days out is the
+    // whole assertion: the dying session could only have produced about one.
+    const anunciado = new Date(res.headers[CABECERA_VENCIMIENTO] as string).getTime();
+    expect(anunciado - Date.now()).toBeGreaterThan(6 * DIA_MS);
+
+    // Tighter still: the header and the cookie name the same instant. A client
+    // reading one and a browser obeying the other must not disagree about when
+    // this session dies. `Expires` on a cookie has second resolution, hence the
+    // tolerance rather than an equality.
+    const expira = /expires=([^;]+)/i.exec(sesionNueva as string)?.[1];
+    expect(expira).toBeDefined();
+    expect(Math.abs(anunciado - new Date(expira as string).getTime())).toBeLessThan(2000);
   });
 
   it("never runs out of budget on the password policy, however many times it refuses", async () => {

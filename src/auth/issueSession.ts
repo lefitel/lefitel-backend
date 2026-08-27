@@ -19,6 +19,7 @@
 import type { Request, Response } from "express";
 import { createSession, findLiveSession, revokeSessionOf } from "./sessionStore.js";
 import { readSessionCookie, setSessionCookie } from "./sessionCookie.js";
+import { SESSION_EXPIRES_HEADER } from "../config/security.js";
 import type { EstadoSesion } from "./sessionState.js";
 
 /**
@@ -37,6 +38,31 @@ import type { EstadoSesion } from "./sessionState.js";
  * `estado` is mandatory, same reasoning and no default, one level up from
  * `createSession`'s own: this is the last place before the row is written
  * where the caller — the login — still knows what it just decided.
+ *
+ * **`SESSION_EXPIRES_HEADER` goes out beside the cookie, and it has to be set
+ * here rather than left to `authenticate`.** That middleware is the only other
+ * place that writes the header, and it computes the deadline from the session
+ * the request arrived on — which, on a rotation, is the row the handler is
+ * about to revoke. `updateUserPass` is the case: `authenticate` writes the old
+ * session's remaining window early in the request, this function replaces the
+ * cookie, and nothing recomputes the header. Bounded by `slidingExpiry`, so a
+ * young session is harmless; a session at day twenty-nine reports **hours**
+ * while the cookie it is handed is good for a week. The header's contract is
+ * that a value means "reschedule on it", so the client takes the smaller
+ * number and logs somebody out of a session opened seconds earlier — the exact
+ * failure `authenticate`'s own comment says this header exists to prevent.
+ *
+ * It also closes a gap at the login, which is a gain rather than a surprise:
+ * the header is already exposed through CORS for the browser to read
+ * (`app.ts`), `/auth/me`'s comment already tells clients to prefer it over the
+ * body, and its documented contract is that absence means "no news" — so no
+ * conforming client can be broken by receiving it. Until now the one response
+ * that *creates* a deadline was the one response that never stated it, and the
+ * countdown stayed unarmed until the next request.
+ *
+ * No `cappedByCeiling` here, and none is needed: the row is new, so the
+ * absolute ceiling is thirty days from this instant and the idle window is
+ * seven. A fresh session cannot be capped by its own ceiling.
  */
 export async function issueSession(
   req: Request,
@@ -54,6 +80,7 @@ export async function issueSession(
     estado,
   );
   setSessionCookie(res, token, expiresAt);
+  res.setHeader(SESSION_EXPIRES_HEADER, expiresAt.toISOString());
 }
 
 /**

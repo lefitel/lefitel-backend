@@ -114,14 +114,22 @@ async function authenticateBySession(
    * schema that lost the column — is one where letting the request through is
    * the safe guess, because invalidating sessions is this check's only job.
    */
-  const marca: unknown = usuario.pass_changed_at;
-  // `marca == null` before the `Date`, and not folded into the `isFinite` below:
+  // `== null` before the `Date`, and not folded into the `isFinite` below:
   // `new Date(null)` is **the epoch**, not an invalid date, so a NULL stamp
   // would read as "this password last changed on 1 January 1970" and let every
   // session through — the same silent pass this guard exists to refuse, wearing
-  // a timestamp. `undefined` does give `NaN`; `null` is the one that lies.
-  const cambiadaEn = marca == null ? NaN : new Date(marca as Date).getTime();
-  if (!Number.isFinite(cambiadaEn) || new Date(sesion.created_at).getTime() < cambiadaEn) {
+  // a timestamp. `undefined` does give `NaN`; `null` is the one that lies, and
+  // `== null` catches both in one comparison.
+  const marca = usuario.pass_changed_at;
+  const cambiadaEn = marca == null ? NaN : new Date(marca).getTime();
+  // **Both** operands, not just the stamp. `NaN < x` is `false` exactly as
+  // `x < NaN` is, so closing one side and leaving the other is closing half a
+  // door: a session whose `created_at` will not parse walks past a rule that
+  // has already decided unreadable dates are refusals. Which operand the
+  // unreadable value lands on is not a reason to answer differently.
+  const creadaEn =
+    sesion.created_at == null ? NaN : new Date(sesion.created_at).getTime();
+  if (!Number.isFinite(cambiadaEn) || !Number.isFinite(creadaEn) || creadaEn < cambiadaEn) {
     res.status(401).json({ message: SESION_EXPIRADA });
     return;
   }
@@ -282,7 +290,7 @@ async function authenticateBySession(
  */
 async function currentUser(
   id: number,
-): Promise<{ id: number; id_rol: number; pass_changed_at: Date } | null> {
+): Promise<{ id: number; id_rol: number; pass_changed_at: Date | undefined } | null> {
   const found = await UsuarioModel.findByPk(id, {
     attributes: ["id", "id_rol", "pass_changed_at"],
   });
@@ -290,6 +298,18 @@ async function currentUser(
   return {
     id: found.dataValues.id as number,
     id_rol: found.dataValues.id_rol as number,
-    pass_changed_at: found.dataValues.pass_changed_at as Date,
+    // `Date | undefined` and **not** `as Date`. The column is `NOT NULL`, so
+    // the assertion looked free — but the caller's whole job is doubting that
+    // this value arrived, and a type promising "always a Date" is the compiler
+    // agreeing with the assumption the guard exists to check.
+    //
+    // It does not *enforce* anything yet, and saying so matters more than the
+    // change: this project compiles with `"strict": false`, so
+    // `strictNullChecks` is off and `Date | undefined` is assignable wherever
+    // `Date` is. Deleting the `== null` check below is measurably **not** a
+    // type error today — what catches it is the "refuses when the stamp cannot
+    // be read at all" test. The declaration is honest now and starts doing the
+    // work the day the project's type gate goes strict.
+    pass_changed_at: found.dataValues.pass_changed_at,
   };
 }

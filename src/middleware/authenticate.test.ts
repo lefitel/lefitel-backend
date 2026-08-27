@@ -45,6 +45,18 @@ const findByPk = vi.fn();
 // would let the touch-failure warning be deleted without any test noticing.
 const authWarn = vi.fn();
 
+/**
+ * When the session in these fixtures was opened.
+ *
+ * A real `sesiones` row always has one — the column is written by
+ * `createSession` and `findLiveSession` filters on it — and `authenticate` now
+ * refuses a session whose `created_at` it cannot read, on the same reasoning
+ * that made it refuse an unreadable `pass_changed_at`. Five fixtures here used
+ * to omit the column, which left the rule inert across them: `NaN < x` is
+ * `false`, so the comparison was being made and answering nothing.
+ */
+const SESION_CREADA = new Date("2024-01-01");
+
 // `slidingExpiry`'s own arithmetic — the idle window, the absolute cap, the
 // boundary between them — is `sessionStore.test.ts`'s job, against the real
 // function. Here it is mocked like `touchSession`: what this file is
@@ -171,7 +183,7 @@ beforeEach(() => {
 
 describe("with a session cookie", () => {
   it("lets a live session through and says who it is", async () => {
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, created_at: SESION_CREADA, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
     const c = call({ cookie: "buen-token" });
     await authenticate(c.req, c.res, c.next);
 
@@ -182,7 +194,7 @@ describe("with a session cookie", () => {
   it("reads the role from the database, not from anything the client sent", async () => {
     // A demoted person kept their old permissions for up to a week under the
     // old token. The role is re-read on every request for that reason.
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, created_at: SESION_CREADA, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
     findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 3, pass_changed_at: new Date("2020-01-01") } });
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
@@ -201,7 +213,7 @@ describe("with a session cookie", () => {
   });
 
   it("turns away someone whose account was archived since they logged in", async () => {
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, created_at: SESION_CREADA, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
     findByPk.mockResolvedValue(null);
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
@@ -285,6 +297,41 @@ describe("with a session cookie", () => {
           mfa_satisfied_at: null,
         });
         findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 2, pass_changed_at: valor } });
+
+        const c = call({ cookie: "t" });
+        await authenticate(c.req, c.res, c.next);
+
+        expect(c.status, caso).toBe(401);
+        expect(c.next, caso).not.toHaveBeenCalled();
+      }
+    });
+
+    it("refuses when the session's own created_at cannot be read either", async () => {
+      // The same mechanism as the test above, on the other operand, and it was
+      // left open when that one was closed: `NaN < x` is `false` just as
+      // `x < NaN` is, so a session whose `created_at` will not parse walked
+      // straight past a rule that had already decided to distrust unreadable
+      // dates. Which side of the comparison the unreadable value lands on is
+      // not a reason to answer differently.
+      const ilegibles: [string, unknown][] = [
+        ["ausente", undefined],
+        ["null", null],
+        ["no es una fecha", "el martes"],
+      ];
+
+      for (const [caso, valor] of ilegibles) {
+        findLiveSession.mockResolvedValue({
+          id: "s1",
+          id_usuario: 7,
+          created_at: valor,
+          expires_at: new Date(Date.now() + 1e6),
+          last_used_at: new Date(),
+          estado: "completa",
+          mfa_satisfied_at: null,
+        });
+        findByPk.mockResolvedValue({
+          dataValues: { id: 7, id_rol: 2, pass_changed_at: new Date("2020-01-01") },
+        });
 
         const c = call({ cookie: "t" });
         await authenticate(c.req, c.res, c.next);
@@ -631,7 +678,7 @@ describe("the current-role header", () => {
   // credential now.
 
   it("is set on the cookie path, from the database", async () => {
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, created_at: SESION_CREADA, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
     findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 4, pass_changed_at: new Date("2020-01-01") } });
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
@@ -728,7 +775,7 @@ describe("when the backend itself is unwell", () => {
   });
 
   it("answers 500 instead of hanging when the user lookup throws, cookie path", async () => {
-    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
+    findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, created_at: SESION_CREADA, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date() });
     findByPk.mockRejectedValue(new Error("pool agotado"));
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
