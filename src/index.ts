@@ -148,12 +148,22 @@ async function main() {
    * calls, two `.catch`es, two messages: either sweep can fail on a given
    * midnight without touching the other, and the log names the one that did.
    *
-   * Nor is this opportunistic on login the way `purgeExpiredTokens` is. That
-   * one is written the way it is because `token_uso_unico` had *no* scheduled
-   * job at all and adding one would have been a new moving part; here the job
-   * already exists and already runs, so a second table costs nothing to add to
-   * it. And this table is the one holding personal data, which wants a
-   * predictable schedule rather than one that stops for a quiet week.
+   * Nor is this opportunistic on login the way `purgeExpiredTokens` is. The
+   * reason written beside that one (`tokenStore.ts`) is that a daily interval
+   * is one more moving part that can stop running without anyone noticing,
+   * where a login happens constantly and for free — and it was written when
+   * this very interval already existed and was already wired here, so it is an
+   * argument about intervals in general, not about a job that had yet to be
+   * built.
+   *
+   * Taken at its word, it still does not carry to this table, because what the
+   * two sweeps bound is not the same thing. A token nobody purges is a row that
+   * can no longer be redeemed; a device nobody purges is an IP address and a
+   * user agent still sitting on disk. How long personal data is kept cannot
+   * depend on how busy the ERP is — a quiet fortnight is precisely when no
+   * login arrives to carry the sweep, and it is not a fortnight in which the
+   * reason for deleting the rows goes away. The interval runs whether anybody
+   * works that day or not.
    *
    * Both intervals are `unref`'d by `schedulePurge`, so this does not give the
    * process a second reason to stay alive.

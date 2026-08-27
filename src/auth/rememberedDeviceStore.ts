@@ -15,7 +15,7 @@
 
 import { Op, type Transaction } from "sequelize";
 import { DispositivoRecordadoModel } from "../models/dispositivoRecordado.model.js";
-import { REMEMBERED_DEVICE_REVOKED_RETENTION_DAYS } from "../config/security.js";
+import { REMEMBERED_DEVICE_REVOKED_MAX_AGE_DAYS } from "../config/security.js";
 
 const DAY_MS = 86_400_000;
 
@@ -30,16 +30,20 @@ const DAY_MS = 86_400_000;
  *
  * - **Expired.** `expires_at` already in the past. The acceptance condition
  *   refuses the row from that instant, so there is nothing left to keep it for.
- * - **Revoked longer ago than the retention window.** A revocation is swept
- *   late rather than at once, because "that laptop was cut off, and here is
- *   when" is the answer somebody wants after a phone is lost or an employee
- *   leaves. See `REMEMBERED_DEVICE_REVOKED_RETENTION_DAYS`.
+ * - **Revoked longer ago than the cap.** This branch only ever makes a row go
+ *   *sooner*. A device cut off while still valid would otherwise sit here until
+ *   its own `expires_at`, and a device cookie is long-lived on purpose, so
+ *   without this branch a laptop revoked in January keeps its IP address and its
+ *   user agent on disk until March. See `REMEMBERED_DEVICE_REVOKED_MAX_AGE_DAYS`.
  *
- * The two are an OR, so a device revoked yesterday that has *also* since
- * expired goes on the first pass rather than waiting out the window. That is
- * the intended reading and not an oversight: the window exists to keep a still-
- * live device's revocation legible, not to extend the life of a row that had
- * died of old age anyway.
+ * Neither branch carries a grace margin, so **nothing here promises a revoked
+ * row will survive any particular length of time**: a device revoked yesterday
+ * that also expires today goes today. What a revoked row actually gets is
+ * `min(its own expiry, revocation + thirty days)`. That is deliberate — an
+ * expired row is dead weight holding personal data whether or not anybody
+ * revoked it first — and it is why this table is the wrong place to look for a
+ * durable record of a revocation. That record is the bitácora line
+ * `deleteUsuario` writes.
  *
  * `revoked_at: { [Op.lt]: cutoff }` carries the "and is not null" for free —
  * SQL compares NULL with nothing, so a device that was never revoked never
@@ -48,7 +52,7 @@ const DAY_MS = 86_400_000;
  * as `purgeExpiredSessions`.
  */
 export async function purgeExpiredRememberedDevices(): Promise<number> {
-  const cutoff = new Date(Date.now() - REMEMBERED_DEVICE_REVOKED_RETENTION_DAYS * DAY_MS);
+  const cutoff = new Date(Date.now() - REMEMBERED_DEVICE_REVOKED_MAX_AGE_DAYS * DAY_MS);
   return DispositivoRecordadoModel.destroy({
     where: {
       [Op.or]: [{ expires_at: { [Op.lt]: new Date() } }, { revoked_at: { [Op.lt]: cutoff } }],
@@ -66,9 +70,10 @@ export async function purgeExpiredRememberedDevices(): Promise<number> {
  * `desarchivarUsuario` brings the account back. See `deleteUsuario` for why that
  * undo, and not the archived stretch itself, is where the hole would be.
  *
- * Revoked, not deleted — which is what makes the retention window above mean
- * anything: the row stays long enough for the sessions screen and an audit to
- * say the device existed and when it was cut off.
+ * Revoked, not deleted: the row stays until the sweep takes it, so the sessions
+ * screen can still show that the device existed and when it was cut off. How
+ * long that is — and why it is a ceiling rather than a guarantee — is written on
+ * `purgeExpiredRememberedDevices` above.
  *
  * `revoked_at: null` in the WHERE leaves an already-revoked device's stamp
  * exactly where it was. Overwriting it would move the record of when the device

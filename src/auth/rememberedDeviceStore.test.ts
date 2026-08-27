@@ -13,8 +13,12 @@
 // So what each test names is which rows survive the call, which is the only
 // thing the rest of the system will ever notice.
 //
-// The transaction is not pinned here but in `usuario.controller.test.ts`,
-// where it is actually decided — same division as `revokeAllSessionsOf`.
+// The transaction is pinned here *and* in `usuario.controller.test.ts`, the
+// same way `revokeAllSessionsOf` is covered from both sides
+// (`sessionStore.test.ts`). Neither side is enough alone: the controller test
+// only sees the argument this module is handed, so deleting the `transaction:`
+// line inside the query leaves it green, and this one only sees the forwarding,
+// not whether the controller ever opens a transaction to forward.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Op } from "sequelize";
@@ -32,7 +36,7 @@ vi.mock("../models/dispositivoRecordado.model.js", () => ({
 const { purgeExpiredRememberedDevices, revokeAllRememberedDevicesOf } = await import(
   "./rememberedDeviceStore.js"
 );
-const { REMEMBERED_DEVICE_REVOKED_RETENTION_DAYS } = await import("../config/security.js");
+const { REMEMBERED_DEVICE_REVOKED_MAX_AGE_DAYS } = await import("../config/security.js");
 
 type Fila = Record<string, unknown>;
 
@@ -100,7 +104,7 @@ const FIXTURES: Fila[] = [
     id: "revocado-hace-mucho",
     id_usuario: DUENO,
     expires_at: dentroDe(10),
-    revoked_at: hace(REMEMBERED_DEVICE_REVOKED_RETENTION_DAYS + 1),
+    revoked_at: hace(REMEMBERED_DEVICE_REVOKED_MAX_AGE_DAYS + 1),
   },
   { id: "de-otra-cuenta", id_usuario: AJENO, expires_at: dentroDe(10), revoked_at: null },
 ];
@@ -185,5 +189,24 @@ describe("revokeAllRememberedDevicesOf", () => {
 
   it("returns how many devices it revoked", async () => {
     expect(await revokeAllRememberedDevicesOf(DUENO)).toBe(2);
+  });
+
+  it("runs inside the caller's transaction when it is given one", async () => {
+    // `deleteUsuario` archives an account, ends its sessions and cuts off its
+    // remembered devices, and any one of the three on its own is worse than
+    // none. Without the option reaching the query, this revocation commits by
+    // itself: an archive that then rolls back leaves an account that looks
+    // perfectly fine and whose devices have already been cut off.
+    //
+    // This is the half `usuario.controller.test.ts` cannot see. That file
+    // asserts the argument this module is *handed*; delete the `transaction:`
+    // line inside the query here and it stays green while the write escapes the
+    // transaction entirely. Same two-sided cover `revokeAllSessionsOf` has.
+    const transaction = { id: "una-transaccion" } as unknown as Parameters<
+      typeof revokeAllRememberedDevicesOf
+    >[1]["transaction"];
+    await revokeAllRememberedDevicesOf(DUENO, { transaction });
+    const [, options] = update.mock.calls[0] as [unknown, { transaction?: unknown }];
+    expect(options.transaction).toBe(transaction);
   });
 });

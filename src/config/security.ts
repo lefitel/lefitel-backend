@@ -450,18 +450,27 @@ export const SESSION_ABSOLUTE_DAYS = 30;
 export const SESSION_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * How long a revoked remembered device stays in the table before the sweep
- * takes it.
+ * The oldest a *revoked* remembered device is allowed to get before the sweep
+ * takes it, however much life its own `expires_at` had left.
  *
- * Neither zero nor for ever. Every row of `dispositivo_recordado` carries an IP
- * address and a user agent, so keeping one that can no longer let anybody past
- * a factor is personal data held for no remaining purpose — but deleting it the
- * instant it is revoked erases the only record that answers "was that laptop
- * cut off, and when", which is exactly what gets asked right after a device is
- * lost or somebody leaves. Thirty days is the window `purgeExpiredSessions`
- * already gives a revoked session, for the same trade.
+ * A ceiling, not a promise, and the distinction is the whole of it. Revoking
+ * does not delete the row — it stays for the sessions screen and for anyone
+ * asking what was cut off — but a device cookie is deliberately long-lived,
+ * which is the entire point of "do not ask me again on this machine", and a
+ * device that has been cut off has no business holding an IP address and a user
+ * agent for the rest of a lifetime measured in months. So a revoked row goes at
+ * its own expiry or thirty days after the revocation, **whichever comes first**.
+ *
+ * Which makes it emphatically not a floor: a device revoked five days before
+ * its cookie was going to lapse anyway is gone in five days, not thirty.
+ * `purgeExpiredSessions` reads differently — it applies its cutoff to all three
+ * of its branches — and the difference is deliberate rather than an omission: an
+ * expired device is dead weight holding personal data, and there is no reason to
+ * keep it one day past the day it stopped working. If a durable record of a
+ * revocation is ever wanted it belongs in the bitácora, which `deleteUsuario`
+ * already writes, and not in a table every row of which deletes itself.
  */
-export const REMEMBERED_DEVICE_REVOKED_RETENTION_DAYS = 30;
+export const REMEMBERED_DEVICE_REVOKED_MAX_AGE_DAYS = 30;
 
 /**
  * How often `purgeExpiredRememberedDevices` runs once the process has booted.
