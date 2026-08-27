@@ -7,6 +7,7 @@ import {
   requiredEnv,
   fillerHash,
   SESSION_PURGE_INTERVAL_MS,
+  REMEMBERED_DEVICE_PURGE_INTERVAL_MS,
   cookieNameCarriesHostPrefix,
   SESSION_COOKIE_NAME,
   SESSION_COOKIE_SECURE,
@@ -14,6 +15,7 @@ import {
 import { createShutdown } from "./lifecycle.js";
 import { schedulePurge } from "./auth/purgeJob.js";
 import { purgeExpiredSessions } from "./auth/sessionStore.js";
+import { purgeExpiredRememberedDevices } from "./auth/rememberedDeviceStore.js";
 
 // `quiet` because dotenv 17 prints a line of its own on every load — an
 // "injected env (13) from .env" with a tip appended. Everything else this
@@ -131,6 +133,35 @@ async function main() {
     purge: purgeExpiredSessions,
     intervalMs: SESSION_PURGE_INTERVAL_MS,
     onError: (err) => bootLog.warn({ err }, "no se pudo purgar las sesiones caducadas"),
+  });
+
+  /**
+   * And the sweep of `dispositivo_recordado`, on its own timer rather than
+   * chained behind the one above.
+   *
+   * `schedulePurge` takes exactly one `purge`, so the obvious alternative was
+   * to hand it a function that awaits both. That version has a failure mode
+   * this one does not: a session sweep that throws — a lock timeout, a database
+   * that blinked — takes the device sweep down with it and reports the failure
+   * under the sessions' message, so the table quietly holding IP addresses and
+   * user agents keeps growing while the log talks about something else. Two
+   * calls, two `.catch`es, two messages: either sweep can fail on a given
+   * midnight without touching the other, and the log names the one that did.
+   *
+   * Nor is this opportunistic on login the way `purgeExpiredTokens` is. That
+   * one is written the way it is because `token_uso_unico` had *no* scheduled
+   * job at all and adding one would have been a new moving part; here the job
+   * already exists and already runs, so a second table costs nothing to add to
+   * it. And this table is the one holding personal data, which wants a
+   * predictable schedule rather than one that stops for a quiet week.
+   *
+   * Both intervals are `unref`'d by `schedulePurge`, so this does not give the
+   * process a second reason to stay alive.
+   */
+  schedulePurge({
+    purge: purgeExpiredRememberedDevices,
+    intervalMs: REMEMBERED_DEVICE_PURGE_INTERVAL_MS,
+    onError: (err) => bootLog.warn({ err }, "no se pudo purgar los dispositivos recordados"),
   });
 
   /**

@@ -450,6 +450,30 @@ export const SESSION_ABSOLUTE_DAYS = 30;
 export const SESSION_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * How long a revoked remembered device stays in the table before the sweep
+ * takes it.
+ *
+ * Neither zero nor for ever. Every row of `dispositivo_recordado` carries an IP
+ * address and a user agent, so keeping one that can no longer let anybody past
+ * a factor is personal data held for no remaining purpose — but deleting it the
+ * instant it is revoked erases the only record that answers "was that laptop
+ * cut off, and when", which is exactly what gets asked right after a device is
+ * lost or somebody leaves. Thirty days is the window `purgeExpiredSessions`
+ * already gives a revoked session, for the same trade.
+ */
+export const REMEMBERED_DEVICE_REVOKED_RETENTION_DAYS = 30;
+
+/**
+ * How often `purgeExpiredRememberedDevices` runs once the process has booted.
+ *
+ * Its own constant rather than a reuse of `SESSION_PURGE_INTERVAL_MS`, because
+ * the two sweeps are scheduled independently (see `index.ts`) and only one of
+ * them holds personal data. The day this one needs to run more often, it can —
+ * without that being a decision about sessions.
+ */
+export const REMEMBERED_DEVICE_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
  * How stale `last_used_at` is allowed to get before it is worth a write.
  *
  * Writing it on every request turns every read into a write: one report export

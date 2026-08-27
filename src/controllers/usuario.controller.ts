@@ -4,6 +4,7 @@ import { sequelize } from "../database/sequelize.js";
 import { RolModel } from "../models/rol.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
+import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { issueSession } from "../auth/issueSession.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
 import bcryptjs from "bcryptjs";
@@ -796,29 +797,50 @@ export async function deleteUsuario(req: Request, res: Response) {
   }
   try {
     /**
-     * Archiving an account and ending its sessions, or neither.
+     * Archiving an account, ending its sessions and cutting off its remembered
+     * devices — all three, or none.
      *
-     * The `ON DELETE RESTRICT` on `sesiones.id_usuario` does nothing here and
-     * never will: this is a soft delete, the row stays where it is with a
-     * `deletedAt` on it, and no foreign key fires on an UPDATE. So archiving
-     * somebody used to leave every browser they were logged in on working
-     * until the session hit its own expiry — up to thirty days for the person
-     * whose access you just took away. `authenticate` refuses an archived
-     * account on the next request, which covers it from the moment this
-     * commits; revoking the rows is what makes the sessions screen honest and
-     * what closes the gap if that check is ever moved or cached.
+     * The `ON DELETE RESTRICT` on `sesiones.id_usuario` and on
+     * `dispositivo_recordado.id_usuario` does nothing here and never will: this
+     * is a soft delete, the row stays where it is with a `deletedAt` on it, and
+     * no foreign key fires on an UPDATE. So archiving somebody used to leave
+     * every browser they were logged in on working until the session hit its
+     * own expiry — up to thirty days for the person whose access you just took
+     * away. `authenticate` refuses an archived account on the next request,
+     * which covers the sessions from the moment this commits; revoking the rows
+     * is what makes the sessions screen honest and what closes the gap if that
+     * check is ever moved or cached.
+     *
+     * **The remembered devices are not covered by that check, and they outlive
+     * the archive.** A remembered device is what lets a login *skip* the second
+     * factor, so it is read before there is any session for `authenticate` to
+     * refuse. While the account is archived that does not matter — `UsuarioModel`
+     * is `paranoid`, so the login's own `findOne` never finds the row and nobody
+     * gets that far. What matters is the undo: `desarchivarUsuario` restores the
+     * row and touches nothing else, so every unexpired device cookie comes back
+     * with the account, still good for skipping the factor. Revoking them here
+     * is what makes an archive survive being reversed.
+     *
+     * And it is the deliberate asymmetry with `factor_totp`,
+     * `credencial_webauthn` and `codigo_recuperacion`, which are left alone for
+     * exactly that reason — so un-archiving gives somebody their account back
+     * with their factors intact. A factor is something only that person has; a
+     * remembered device is a machine that may since have changed hands.
      *
      * One transaction, because half of this is worse than none. Archived with
      * live sessions is the hole itself; sessions killed without the archive is
-     * an account that looks fine to an administrator and cannot be used. If the
-     * revocation fails the archive rolls back, the caller gets a 500, and
-     * retrying does the whole thing.
+     * an account that looks fine to an administrator and cannot be used; and an
+     * account archived whose devices still work looks closed on the screen and
+     * is open in the field. If any of the three fails the whole thing rolls
+     * back, the caller gets a 500, and retrying does all of it.
      */
     const revocadas = await sequelize.transaction(async (transaction) => {
       await UsuarioModel.destroy({ where: { id }, transaction });
-      return revokeAllSessionsOf(Number(id), { transaction });
+      const sesiones = await revokeAllSessionsOf(Number(id), { transaction });
+      const dispositivos = await revokeAllRememberedDevicesOf(Number(id), { transaction });
+      return { sesiones, dispositivos };
     });
-    logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, metadata: { sesiones_revocadas: revocadas }, severity: 'critical' });
+    logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, metadata: { sesiones_revocadas: revocadas.sesiones, dispositivos_revocados: revocadas.dispositivos }, severity: 'critical' });
     return res.sendStatus(200);
   } catch (error) {
     return res.status(500).json({ message: error.message });

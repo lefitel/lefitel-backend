@@ -43,6 +43,16 @@ const revokeAllSessionsOf = vi.fn();
 vi.mock("../auth/sessionStore.js", () => ({
   revokeAllSessionsOf: (...args: unknown[]) => revokeAllSessionsOf(...args),
 }));
+// Archiving an account also has to cut off the browsers it told to stop asking
+// for a second factor. Mocked for the same two reasons as the session store
+// above: what is under test is which devices this controller asks to revoke and
+// inside what, not the SQL — `rememberedDeviceStore.test.ts` owns that — and the
+// real module imports `dispositivoRecordado.model.ts`, which calls
+// `UsuarioModel.hasMany` on the plain object standing in for the model here.
+const revokeAllRememberedDevicesOf = vi.fn();
+vi.mock("../auth/rememberedDeviceStore.js", () => ({
+  revokeAllRememberedDevicesOf: (...args: unknown[]) => revokeAllRememberedDevicesOf(...args),
+}));
 // Changing your own password now rotates the session rather than sparing it,
 // so this controller opens one. Mocked whole rather than let through: the real
 // `issueSession` writes a row, reads the request's cookie and sets a header,
@@ -228,6 +238,7 @@ beforeEach(() => {
   can.mockImplementation(async (rol: number) => rol === ADMIN);
   destroy.mockResolvedValue(1);
   revokeAllSessionsOf.mockResolvedValue(0);
+  revokeAllRememberedDevicesOf.mockResolvedValue(0);
   // A default, so that the one test which makes the rotation fail cannot leak
   // its rejection into the tests after it: `vi.clearAllMocks()` clears the
   // recorded calls but keeps the implementation, and a leaked
@@ -1386,19 +1397,25 @@ describe("a new password ends the old sessions", () => {
 });
 
 /**
- * Archiving an account ends its sessions, in the same transaction.
+ * Archiving an account ends its sessions and its remembered devices, in the
+ * same transaction.
  *
- * The `ON DELETE RESTRICT` on `sesiones.id_usuario` does nothing here and never
- * will: this is a soft delete, the row stays where it is with a `deletedAt` on
- * it, and no foreign key fires on an UPDATE. So archiving the technician who
- * was let go used to leave his laptop working until the session reached its own
- * expiry — up to thirty days.
+ * The `ON DELETE RESTRICT` on `sesiones.id_usuario` and on
+ * `dispositivo_recordado.id_usuario` does nothing here and never will: this is a
+ * soft delete, the row stays where it is with a `deletedAt` on it, and no
+ * foreign key fires on an UPDATE. So archiving the technician who was let go
+ * used to leave his laptop working until the session reached its own expiry —
+ * up to thirty days — and, once remembered devices exist, would leave every
+ * device cookie on that account intact for `desarchivarUsuario` to hand back
+ * along with the account.
  *
  * One transaction because half of this is worse than none. Archived with live
  * sessions is the hole itself; sessions killed without the archive is an
- * account that looks fine to an administrator and cannot be used.
+ * account that looks fine to an administrator and cannot be used; and an
+ * account archived whose devices still work looks closed on the screen and is
+ * open in the field.
  */
-describe("archiving an account ends its sessions", () => {
+describe("archiving an account ends its sessions and its remembered devices", () => {
   it("archives and revokes inside one transaction", async () => {
     revokeAllSessionsOf.mockResolvedValue(2);
 
@@ -1407,11 +1424,30 @@ describe("archiving an account ends its sessions", () => {
 
     expect(c.status).toBe(200);
     expect(transaction).toHaveBeenCalledTimes(1);
-    // Both writes, and both carrying the *same* transaction. Either of them
-    // outside it would commit on its own, which is precisely the half-done
+    // All three writes, and all three carrying the *same* transaction. Any of
+    // them outside it would commit on its own, which is precisely the half-done
     // state this is meant to make impossible.
     expect(destroy).toHaveBeenCalledWith({ where: { id: String(OTHER) }, transaction: TRANSACCION });
     expect(revokeAllSessionsOf).toHaveBeenCalledWith(OTHER, { transaction: TRANSACCION });
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(OTHER, { transaction: TRANSACCION });
+  });
+
+  it("revokes the remembered devices of the account it archives", async () => {
+    // Nothing else in the system does this. The delete is logical, so no
+    // cascade fires now or ever, and `authenticate` refusing an archived
+    // account never reaches a device cookie — a remembered device is what lets
+    // a login *skip* the factor, read before there is any session to refuse.
+    // The archived stretch is covered anyway, because a paranoid `findOne`
+    // cannot find the account to log in as; what is not covered is the undo.
+    // Without this call, `desarchivarUsuario` hands the account back together
+    // with every unexpired device cookie ever issued on it.
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    // The account's own id, as a number — the same argument `revokeAllSessionsOf`
+    // gets. Whose devices these are is this table's entire security property.
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(OTHER, expect.anything());
   });
 
   it("answers 500 rather than archiving an account whose sessions are still live", async () => {
@@ -1426,6 +1462,19 @@ describe("archiving an account ends its sessions", () => {
     expect(c.status).toBe(500);
   });
 
+  it("answers 500 rather than archiving an account whose devices still skip the factor", async () => {
+    // Same rule as the line above, for the write added after it. Swallowing
+    // this one would answer 200 to an archive that left the leaver's laptop
+    // able to skip the second factor — the worst of the three outcomes,
+    // because it is the one that looks like success.
+    revokeAllRememberedDevicesOf.mockRejectedValue(new Error("no se pudo revocar el dispositivo"));
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(500);
+  });
+
   it("revokes nothing when the caller may not archive", async () => {
     const c = call({ id: SELF, id_rol: TECNICO }, { params: { id: String(OTHER) } });
     await deleteUsuario(c.req, c.res);
@@ -1433,6 +1482,7 @@ describe("archiving an account ends its sessions", () => {
     expect(c.status).toBe(403);
     expect(transaction).not.toHaveBeenCalled();
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+    expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
   });
 });
 
