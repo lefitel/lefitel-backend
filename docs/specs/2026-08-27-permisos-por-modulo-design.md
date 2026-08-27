@@ -1,6 +1,6 @@
 # Permisos por módulo — Diseño
 
-**Fecha:** 2026-08-26
+**Fecha:** 2026-08-27
 **Estado:** pendiente de aprobación
 **Repos:** `api` y `web`, rama `isaias`
 
@@ -136,7 +136,7 @@ Once puntos. Ni uno más.
 
 ## 5. Las tres trampas, y por qué van en el mismo commit
 
-Estas tres salieron de una auditoría con cuatro agentes adversariales el 2026-08-26. Las tres
+Estas tres salieron de una auditoría con cuatro agentes adversariales el 2026-08-26 (la auditoría previa). Las tres
 convierten este cambio en algo peor que no hacerlo si se dejan a medias.
 
 ### 5.1 La trampilla — la más grave
@@ -314,3 +314,15 @@ no haya que tocarlos.
 
 Donde un módulo no tiene una acción, la celda queda **vacía**. Una casilla deshabilitada siempre
 parece «desmarcada, se puede marcar», que es justo la confusión que este trabajo viene a quitar.
+
+---
+
+## 11. Nota sobre las fechas
+
+El fichero de la migración se llama `20260826000004-drop-dead-permission-cells` y el trabajo es del
+**27**. El desfase es real y se queda así a propósito: ese nombre es la clave con la que umzug tiene
+registrada la migración en `SequelizeMeta`, ya aplicada. Renombrarlo la haría aparecer como
+pendiente, volvería a ejecutarse —sin efecto, porque las filas ya no están— y dejaría una fila
+huérfana en el registro. El número es una clave de orden, no una afirmación sobre el calendario.
+
+Este documento sí se renombró, porque no lo lee ninguna máquina.
