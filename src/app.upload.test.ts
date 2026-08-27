@@ -94,8 +94,12 @@ beforeEach(async () => {
     },
   } as never);
   sesionUpdate.mockResolvedValue([1] as never);
+  // `pass_changed_at` a year back, older than any session these tests build.
+  // `authenticate` refuses a session opened before it, and without the column
+  // the rule compares against `NaN` and passes everything — which is how a
+  // mutation test found this whole surface covering nothing.
   usuarioFindByPk.mockResolvedValue({
-    dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null },
+    dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null, pass_changed_at: new Date(Date.now() - 365 * 86_400_000) },
   } as never);
 });
 

@@ -56,8 +56,36 @@ vi.mock("../auth/sessionStore.js", () => ({
   slidingExpiry: (...a: unknown[]) => slidingExpiry(...a),
   cappedByCeiling: (...a: unknown[]) => cappedByCeiling(...a),
 }));
+/**
+ * The projection is applied here, and that is the whole point of this seam.
+ *
+ * A mutation test deleted `"pass_changed_at"` from `currentUser`'s `attributes`
+ * and **the entire suite stayed green**. The reason was this mock: it handed
+ * back whatever a test had set, whatever the production code had actually asked
+ * for. Both tests of the rule below were therefore asserting the fixture's
+ * shape rather than the handler's behaviour — and with the column absent the
+ * comparison is against `NaN`, which is `false`, so the rule failed **open** and
+ * silently stopped applying.
+ *
+ * Real `findByPk` returns the columns in `attributes` and no others. Doing the
+ * same here is what makes "the query stopped asking for the column" and "the
+ * column is not there" the same event in a test, which is what they are in
+ * production.
+ */
+function proyectar(fila: unknown, atributos?: string[]): unknown {
+  if (!fila || !atributos) return fila;
+  const { dataValues } = fila as { dataValues: Record<string, unknown> };
+  const pedidas: Record<string, unknown> = {};
+  for (const columna of atributos) {
+    if (columna in dataValues) pedidas[columna] = dataValues[columna];
+  }
+  return { ...(fila as object), dataValues: pedidas };
+}
 vi.mock("../models/usuario.model.js", () => ({
-  UsuarioModel: { findByPk: (...a: unknown[]) => findByPk(...a) },
+  UsuarioModel: {
+    findByPk: async (id: unknown, opciones?: { attributes?: string[] }) =>
+      proyectar(await findByPk(id, opciones), opciones?.attributes),
+  },
 }));
 // `jsonwebtoken` is deliberately **not** mocked, and the absence is a tripwire
 // rather than an omission — the same one `auth/credentials.test.ts` and
@@ -125,7 +153,12 @@ function call(opts: { cookie?: string; authorization?: string; originalUrl?: str
 
 beforeEach(() => {
   vi.clearAllMocks();
-  findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 2 } });
+  // `pass_changed_at` is `NOT NULL` in the database and named in `currentUser`'s
+  // `attributes`, so a row without it does not exist in production — and since
+  // the guard now refuses what it cannot read, a fixture without it would turn
+  // every test in this file into a 401 about a password nobody changed. Far
+  // enough back to sit below any `created_at` these tests build.
+  findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 2, pass_changed_at: new Date("2020-01-01") } });
   touchSession.mockResolvedValue(undefined);
   slidingExpiry.mockReturnValue(new Date(0));
   // Stands in for the real cap the same way `slidingExpiry` above stands in for
@@ -150,7 +183,7 @@ describe("with a session cookie", () => {
     // A demoted person kept their old permissions for up to a week under the
     // old token. The role is re-read on every request for that reason.
     findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
-    findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 3 } });
+    findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 3, pass_changed_at: new Date("2020-01-01") } });
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
     expect(c.req.user?.id_rol).toBe(3);
@@ -215,6 +248,50 @@ describe("with a session cookie", () => {
       await authenticate(c.req, c.res, c.next);
 
       expect(c.next).toHaveBeenCalled();
+    });
+
+    it("refuses when the stamp cannot be read at all, rather than letting it through", async () => {
+      // Fail closed, and this is the half a mutation test caught missing.
+      // With `pass_changed_at` absent the right-hand side is `NaN`, and
+      // `x < NaN` is `false` — so a rule whose entire job is to invalidate
+      // sessions quietly stopped applying, and every session older than its
+      // password went on working. A comparison that cannot be made is not a
+      // comparison that passed.
+      //
+      // The column is `NOT NULL` in the database and named in `attributes`, so
+      // none of these should be reachable. That is exactly the point: the only
+      // ways to get here are a projection that stopped asking for the column or
+      // a schema that lost it, and those are precisely when a silent pass is
+      // worst.
+      const ilegibles: [string, unknown][] = [
+        ["ausente", undefined],
+        ["null", null],
+        ["no es una fecha", "cuando sea"],
+      ];
+
+      for (const [caso, valor] of ilegibles) {
+        // No `vi.clearAllMocks()` here: it would also wipe the `slidingExpiry`
+        // and `touchSession` defaults the outer `beforeEach` sets, and this
+        // middleware would then fall over on an undefined expiry and answer
+        // 500 — a green-looking red for entirely the wrong reason. Each
+        // `call()` brings its own `next`, so there is nothing to reset.
+        findLiveSession.mockResolvedValue({
+          id: "s1",
+          id_usuario: 7,
+          created_at: new Date("2026-07-01"),
+          expires_at: new Date(Date.now() + 1e6),
+          last_used_at: new Date(),
+          estado: "completa",
+          mfa_satisfied_at: null,
+        });
+        findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 2, pass_changed_at: valor } });
+
+        const c = call({ cookie: "t" });
+        await authenticate(c.req, c.res, c.next);
+
+        expect(c.status, caso).toBe(401);
+        expect(c.next, caso).not.toHaveBeenCalled();
+      }
     });
 
     it("keeps a session opened at the very instant of the change", async () => {
@@ -555,7 +632,7 @@ describe("the current-role header", () => {
 
   it("is set on the cookie path, from the database", async () => {
     findLiveSession.mockResolvedValue({ id: "s1", id_usuario: 7, expires_at: new Date(Date.now() + 1e6), last_used_at: new Date(), estado: "completa", mfa_satisfied_at: null });
-    findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 4 } });
+    findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 4, pass_changed_at: new Date("2020-01-01") } });
     const c = call({ cookie: "t" });
     await authenticate(c.req, c.res, c.next);
 

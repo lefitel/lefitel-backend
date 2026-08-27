@@ -218,8 +218,16 @@ beforeEach(() => {
   // request to notice a demotion or an archived account, and `paranoid` is what
   // makes an archived one answer nothing — not this test's subject, so it is a
   // live account throughout.
+  //
+  // `pass_changed_at` a year back, older than any session these tests open.
+  // `authenticate` refuses a session opened before that stamp, and refuses one
+  // whose stamp it cannot read at all — so without this the whole file answers
+  // 401 about a password nobody here changes. Supplying it is also what makes
+  // these tests exercise the rule instead of skipping past it: a fixture
+  // missing the column used to make the comparison `NaN`, which passes
+  // everything.
   vi.spyOn(UsuarioModel, "findByPk").mockResolvedValue({
-    dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null },
+    dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null, pass_changed_at: new Date(Date.now() - 365 * 86_400_000) },
   } as never);
 });
 

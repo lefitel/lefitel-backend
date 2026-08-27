@@ -217,6 +217,20 @@ let SESION_EXPIRA_FILA: Date;
  */
 let SESION_CREADA: Date;
 const DIA_MS = 86_400_000;
+/**
+ * When this account's password last changed, for every fixture below.
+ *
+ * A year back, and deliberately older than the oldest session any test here
+ * builds — one of them opens a session twenty-nine days ago to exercise the
+ * absolute ceiling. `authenticate` refuses a session opened before this stamp,
+ * so a value nearer than that would turn unrelated tests into 401s about a
+ * password nobody in them changed.
+ *
+ * It is supplied at all because a mutation test showed what its absence
+ * costs: with the column missing the rule compares against `NaN`, passes
+ * everything, and the whole integration surface silently stops covering it.
+ */
+const PASS_CAMBIADA = new Date(Date.now() - 365 * 86_400_000);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -250,7 +264,7 @@ beforeEach(() => {
   sesionUpdate.mockResolvedValue([1] as never);
   sesionCreate.mockResolvedValue({ dataValues: {} } as never);
   usuarioFindByPk.mockResolvedValue({
-    dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null },
+    dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null, pass_changed_at: PASS_CAMBIADA },
   } as never);
   usuarioFindOne.mockResolvedValue({
     dataValues: {
@@ -864,7 +878,7 @@ describe("changing your own credentials spends the budget for a wrong password, 
     dataValues: {
       id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
       name: "Isaias", lastname: "Salas", image: null,
-      failed_attempts: 0, locked_until: null, ...extra,
+      failed_attempts: 0, locked_until: null, pass_changed_at: PASS_CAMBIADA, ...extra,
     },
   });
 
@@ -2064,7 +2078,7 @@ describe("email verification, through the real stack", () => {
       [{ dataValues: { id_usuario: YO, email_destino: "isaias@osefi.net" } }],
     ] as never);
     usuarioFindByPk.mockResolvedValue({
-      dataValues: { id: YO, email: "isaias@osefi.net" },
+      dataValues: { id: YO, id_rol: MI_ROL, email: "isaias@osefi.net", pass_changed_at: PASS_CAMBIADA },
     } as never);
 
     const res = await request(app)

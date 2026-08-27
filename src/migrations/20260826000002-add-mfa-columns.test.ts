@@ -116,6 +116,35 @@ describe("add-mfa-columns", () => {
     expect((estado?.args[2] as { defaultValue?: string })?.defaultValue).toBe("completa");
   });
 
+  it("gives pass_changed_at a now() default, without which the deploy aborts", async () => {
+    // `estado`'s default is pinned above; this one was not, and losing it does
+    // not merely weaken the migration — it stops it.
+    //
+    // `ALTER TABLE usuarios ADD COLUMN pass_changed_at TIMESTAMPTZ NOT NULL`
+    // with no default is rejected outright by Postgres against a non-empty
+    // table: there is no value to put in the existing rows. The migration
+    // aborts on the deploy, before the back-fill on the next line ever runs,
+    // and the whole MFA arc stops at the door. A mutation test deleted this
+    // default and 1207 tests stayed green.
+    //
+    // `allowNull` is pinned in the same breath because the two only mean
+    // anything together: NOT NULL is what makes the default load-bearing, and a
+    // silent drop to nullable would let the column exist holding NULLs, which
+    // `authenticate` refuses since it stopped trusting an unreadable stamp.
+    const qi = fakeQueryInterface();
+    await up({ context: qi as never });
+
+    const columna = qi.calls.find(
+      (c) => c.fn === "addColumn" && c.args[0] === "usuarios" && c.args[1] === "pass_changed_at",
+    );
+    const spec = columna?.args[2] as { allowNull?: boolean; defaultValue?: unknown } | undefined;
+    expect(spec?.allowNull).toBe(false);
+    expect(spec?.defaultValue).toBeDefined();
+    // The literal itself, not merely "something truthy": a default of the
+    // string "now()" would be written into every row verbatim.
+    expect(JSON.stringify(spec?.defaultValue)).toMatch(/now\(\)/i);
+  });
+
   it("gives the three timestamp columns a timezone, like every other timestamp in this schema", async () => {
     // TIMESTAMPTZ is a hard constraint on this project; DataTypes.DATE is what
     // Sequelize maps to it. A naive TIMESTAMP here would drift by however many

@@ -103,8 +103,25 @@ async function authenticateBySession(
    * migration back-fills `pass_changed_at` from each account's own `createdAt`
    * rather than from `now()`, so every session alive on deploy day was opened
    * after its own stamp. See `20260826000002-add-mfa-columns.ts`.
+   *
+   * **A stamp that cannot be read is a refusal, not a pass**, and that is worth
+   * the two extra lines. Written as a bare comparison, an unreadable stamp made
+   * the right-hand side `NaN`, and `x < NaN` is `false` — so the rule went on
+   * being called and quietly stopped applying, and every session older than its
+   * password kept working. A mutation test proved it: deleting
+   * `"pass_changed_at"` from the `attributes` below broke nothing anywhere in
+   * the suite. Neither reachable state — a projection that stopped asking, a
+   * schema that lost the column — is one where letting the request through is
+   * the safe guess, because invalidating sessions is this check's only job.
    */
-  if (new Date(sesion.created_at).getTime() < new Date(usuario.pass_changed_at).getTime()) {
+  const marca: unknown = usuario.pass_changed_at;
+  // `marca == null` before the `Date`, and not folded into the `isFinite` below:
+  // `new Date(null)` is **the epoch**, not an invalid date, so a NULL stamp
+  // would read as "this password last changed on 1 January 1970" and let every
+  // session through — the same silent pass this guard exists to refuse, wearing
+  // a timestamp. `undefined` does give `NaN`; `null` is the one that lies.
+  const cambiadaEn = marca == null ? NaN : new Date(marca as Date).getTime();
+  if (!Number.isFinite(cambiadaEn) || new Date(sesion.created_at).getTime() < cambiadaEn) {
     res.status(401).json({ message: SESION_EXPIRADA });
     return;
   }
