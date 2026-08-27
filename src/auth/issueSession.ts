@@ -52,13 +52,19 @@ import type { EstadoSesion } from "./sessionState.js";
  * number and logs somebody out of a session opened seconds earlier — the exact
  * failure `authenticate`'s own comment says this header exists to prevent.
  *
- * It also closes a gap at the login, which is a gain rather than a surprise:
- * the header is already exposed through CORS for the browser to read
+ * The login now states its deadline too, which is a gain rather than a
+ * surprise: the header is already exposed through CORS for the browser to read
  * (`app.ts`), `/auth/me`'s comment already tells clients to prefer it over the
  * body, and its documented contract is that absence means "no news" — so no
  * conforming client can be broken by receiving it. Until now the one response
- * that *creates* a deadline was the one response that never stated it, and the
- * countdown stayed unarmed until the next request.
+ * that *creates* a deadline was the one response that never stated it.
+ *
+ * It does **not** follow that the countdown now arms at the login. `web`'s
+ * `learnDeadline` returns early while `hasSessionRef` is false, and that ref
+ * only becomes true after the login response has been handled — so today's
+ * client discards this particular header and still arms on the first ordinary
+ * response. Stated here rather than fixed: a client that wants the deadline at
+ * the login can now have it, and the one we ship does not ask.
  *
  * No `cappedByCeiling` here, and none is needed: the row is new, so the
  * absolute ceiling is thirty days from this instant and the idle window is
