@@ -282,7 +282,8 @@ describe("what a body may never set at all", () => {
   // archive.
   //
   // Which turns a column of the permission matrix into a decoration. The
-  // Coordinador role is defined with `archivar: false` in all ten modules and
+  // Coordinador role is defined with `archivar: false` in every module that has
+  // an `archivar` at all — `reportes` and `bitacora` no longer do — and
   // `editar: true` in four of them, so `requirePermission("eventos",
   // "archivar")` on the DELETE route guards a door that the PUT next to it
   // walks straight past. `editar` is not `archivar`, and the matrix says so.

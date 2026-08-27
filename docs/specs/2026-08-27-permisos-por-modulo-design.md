@@ -326,3 +326,51 @@ pendiente, volvería a ejecutarse —sin efecto, porque las filas ya no están�
 huérfana en el registro. El número es una clave de orden, no una afirmación sobre el calendario.
 
 Este documento sí se renombró, porque no lo lee ninguna máquina.
+
+---
+
+## 12. Lo que la auditoría posterior cambió
+
+Tres agentes adversariales revisaron el trabajo ya commiteado. El núcleo aguantó —dieciocho
+mutaciones contra `isActionOf` y sus dos validaciones, todas cazadas— pero encontraron tres cosas
+que este documento afirmaba y no eran ciertas, y un agujero que el propio cambio creaba.
+
+**§6 estaba a medias.** El documento razona la dirección «bundle viejo contra API nueva» y despacha
+la contraria con «ninguno de los dos órdenes es inseguro». Es falso, y se reprodujo: el panel leía
+`modulo.acciones.includes(...)` sin guarda, así que contra una API anterior lanza `TypeError`
+durante el dibujado y —sin `ErrorBoundary` en todo `web/src`— React desmonta la raíz. **La
+aplicación entera en blanco**, barra lateral incluida. Y no es solo un error de orden: una vuelta
+atrás de la API con el bundle nuevo ya en un navegador llega igual, y ahí no hay orden que acertar.
+Ahora es `modulo.acciones?.includes(...) ?? true`: el peor caso pasa a ser el comportamiento
+anterior al cambio, una casilla que el servidor rechaza por su nombre.
+
+**El `satisfies` no ataba nada.** `Record<string, readonly string[]>` aceptaba
+`postes: [..., "exportar"]` sin un solo error — comprobado. El resultado habría sido un permiso que
+el lector honra y concede, que el endpoint se niega a cambiar porque `isAction` lo rechaza, y que la
+pantalla nunca dibuja porque no tiene etiqueta. **Concedido, invisible e irrevocable desde la
+interfaz** — exactamente la clase de fallo que este trabajo venía a cerrar. `ACTIONS` se declara
+ahora antes que `PERMISSIONS`, y el `satisfies` va contra ella.
+
+**El agujero que creaba el cambio, y que nada vigilaba.** Antes todos los pares existían por
+construcción, así que `requirePermission("bitacora","archivar")` era solo inútil. Ahora es una
+puerta que no puede abrirse nunca. Quitar `editar` de `seguridad` en la constante tumba editar una
+cuenta, desbloquearla y resetear su contraseña — **y la batería entera pasaba: 1.199 de 1.199.** No
+era descuido: `requirePermission` toma módulo y acción como parámetros independientes a propósito, y
+doce ficheros de test simulan el lector. `permissions/vocabulary.test.ts` lo cierra recorriendo la
+aplicación montada y las llamadas directas del código, y nombra los endpoints que morirían.
+
+**Tres pruebas mías eran malas.** Una pasaba por el motivo equivocado (pulsaba la casilla del índice
+0, que es `ver` haya hueco o no). Otra era vacua: `every()` sobre el objeto vacío es cierto, así que
+pasaba devolviendo exactamente lo que su nombre decía descartar. Y la de la migración comprobaba las
+palabras sueltas en vez de los pares, de modo que intercambiar módulo y acción en el `down()` —que
+inserta filas basura permanentes que ningún `up()` limpia— la dejaba en verde.
+
+**Y una afirmación de método que no se sostenía.** El documento citaba «`tsc --noEmit` limpio» como
+prueba de que el `Partial` protegía. La API tiene `strict: false`, así que ahí el tipo es
+documentación y habría compilado igual mintiendo. En `web`, con `strict: true`, sí protege.
+
+## 13. Despliegue
+
+Decidido: **todo de una vez al terminar**, no progresivo. Eso elimina la ventana en la que una
+réplica antigua de la API vuelve a sembrar las cuarenta celdas o acepta un par muerto, que era el
+único riesgo operativo que quedaba. Con despliegue atómico no hay dos versiones conviviendo.

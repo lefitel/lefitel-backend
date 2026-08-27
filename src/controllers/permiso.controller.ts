@@ -132,7 +132,7 @@ export async function putPermisos(req: Request, res: Response) {
     const before = await permissionsFor(id_rol);
     // Only what actually moves goes to the database and to the audit log. A
     // screen that sends its whole state on every save would otherwise write
-    // forty rows and log "changed permissions" for a single tick.
+    // thirty-two rows and log "changed permissions" for a single tick.
     const moved = changes.filter((c) => before[c.modulo][c.accion] !== c.permitido);
     if (moved.length === 0) {
       return res.status(200).json({ permisos: before, message: "Sin cambios." });

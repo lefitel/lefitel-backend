@@ -74,8 +74,13 @@ describe("answering a question", () => {
   it("refuses everything when the table is empty", async () => {
     // What a deployment looks like between the code landing and the migration
     // running. Closed, not open.
+    //
+    // Walks each module's own actions rather than the cartesian product. Over
+    // the product, eight of the forty assertions ask about pairs that no longer
+    // exist and are false by construction — they would pass with the table full,
+    // which is not what this test claims to be checking.
     for (const modulo of MODULES) {
-      for (const accion of ACTIONS) {
+      for (const accion of actionsOf(modulo)) {
         expect(await can(ADMIN, modulo, accion), `${modulo}.${accion}`).toBe(false);
       }
     }
@@ -160,8 +165,19 @@ describe("the shape handed to the client", () => {
   it("gives an unknown role a complete set of denials, not an empty object", async () => {
     // The interface reads this to decide what to draw. Undefined would crash it;
     // an all-false matrix renders an empty application, which is the truth.
+    //
+    // The count is asserted before the values, and that order is the point: the
+    // old version of this test only had the `every(... === false)` line, and
+    // `every` on an empty object is `true` — so it passed on exactly the empty
+    // object its own name says it is there to reject. An audit proved that by
+    // making `emptyPermissions()` return `{postes:{}, eventos:{}, …}` and
+    // watching this test stay green.
     const permissions = await permissionsFor(999);
+
     expect(Object.keys(permissions).sort()).toEqual([...MODULES].sort());
+    for (const modulo of MODULES) {
+      expect(Object.keys(permissions[modulo]).sort(), modulo).toEqual([...actionsOf(modulo)].sort());
+    }
     expect(Object.values(permissions).every((m) => Object.values(m).every((v) => v === false)))
       .toBe(true);
   });

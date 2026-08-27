@@ -82,7 +82,8 @@ export const authoredBy = <T extends object>(body: T, req: Request): Omit<T, typ
  * archive: a role holding `editar` could archive rows with no `archivar`
  * anywhere in its matrix, and `requirePermission(module, "archivar")` on the
  * DELETE beside it guarded a door the PUT walked past. The Coordinador role is
- * defined with `archivar: false` in all ten modules, so that was not a
+ * defined with `archivar: false` in every module that has an `archivar` at all,
+ * so that was not a
  * hypothetical shape of role — it is the one in the seed.
  *
  * Sequelize is what makes it reachable: `set()` marks any own column present in

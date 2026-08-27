@@ -15,7 +15,8 @@
 // `paranoid: true`, which makes that column the archive — so a role holding
 // `editar` could archive rows without `archivar` appearing anywhere in its
 // matrix, and a create could mint a row already archived. The Coordinador role
-// in the seed is `archivar: false` in all ten modules and `editar: true` in
+// in the seed is `archivar: false` in every module that has an `archivar` —
+// `reportes` and `bitacora` no longer do — and `editar: true` in
 // four, so the shape of role that this affects is not hypothetical: it is the
 // one that ships. `requirePermission(module, "archivar")` on the DELETE guarded
 // a door the PUT beside it walked past.

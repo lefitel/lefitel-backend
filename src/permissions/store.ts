@@ -13,7 +13,7 @@ import {
 /**
  * The permission matrix, kept in memory.
  *
- * It is asked on every request that writes anything, and it is 108 rows that
+ * It is asked on every request that writes anything, and it is 96 rows that
  * change perhaps twice a year — going to Postgres each time would be paying a
  * round trip for an answer that never moves. So it is read once and cached.
  *

@@ -10,6 +10,24 @@
  */
 
 /**
+ * Every action name the system knows, across all modules.
+ *
+ * Declared before `PERMISSIONS` rather than after it, and that order is the
+ * whole point: it is what lets the `satisfies` below refuse a module that
+ * declares an action nobody can translate or tick. An audit proved the earlier
+ * `readonly string[]` let `postes: [..., "exportar"]` compile with no error at
+ * all — and the result would have been a permission the reader honours and
+ * grants, the endpoint refuses to change because `isAction` rejects it, and the
+ * screen never draws because `ACTION_LABELS` has no label for it. Granted,
+ * invisible, and unrevocable from the interface. Adding an action means adding
+ * it here first.
+ *
+ * Its meaning has changed with this file: it is no longer "what every module
+ * has", it is the vocabulary.
+ */
+export const ACTIONS = ["ver", "crear", "editar", "archivar"] as const;
+
+/**
  * What each module can be asked, module by module.
  *
  * This used to be two flat lists — ten modules and four actions — and every
@@ -33,6 +51,10 @@ export const PERMISSIONS = {
   eventos: ["ver", "crear", "editar", "archivar"],
   ciudades: ["ver", "crear", "editar", "archivar"],
   parametros: ["ver", "crear", "editar", "archivar"],
+  // `reportes` sits fifth because that is where the screen has always drawn it.
+  // `MODULES` is `Object.keys` of this object now, so this order *is* the order
+  // of the rows — moving an entry here moves a row for everybody.
+  reportes: ["ver"],
   generador: ["ver", "crear", "editar", "archivar"],
   seguridad: ["ver", "crear", "editar", "archivar"],
   roles: ["ver", "crear", "editar", "archivar"],
@@ -42,22 +64,11 @@ export const PERMISSIONS = {
   // no gate at all. Giving `archivos` a `crear` is how that route gets closed,
   // and it changes who may upload field photographs — its own decision.
   archivos: ["ver", "archivar"],
-  reportes: ["ver"],
   // A log that could be edited would not be a log.
   bitacora: ["ver"],
-} as const satisfies Record<string, readonly string[]>;
+} as const satisfies Record<string, readonly (typeof ACTIONS)[number][]>;
 
 export const MODULES = Object.keys(PERMISSIONS) as readonly Module[];
-
-/**
- * Every action name the system knows, across all modules.
- *
- * Kept as its own list rather than derived, and its meaning has changed: it is
- * no longer "what every module has", it is the vocabulary — the set of names
- * `ACTION_LABELS` must be able to translate. A new action is added here and to
- * whichever modules actually have it.
- */
-export const ACTIONS = ["ver", "crear", "editar", "archivar"] as const;
 
 export type Module = keyof typeof PERMISSIONS;
 export type Action = (typeof ACTIONS)[number];

@@ -136,10 +136,18 @@ describe("drop-dead-permission-cells: down", () => {
     const sql = sqlOf(qi);
     expect(sql).toMatch(/INSERT INTO\s+"?permisos"?/i);
     expect(sql).toMatch(/SELECT DISTINCT/i);
-    for (const [modulo, accion] of MUERTAS) {
-      expect(sql, `${modulo}.${accion}`).toContain(`'${modulo}'`);
-      expect(sql, `${modulo}.${accion}`).toContain(`'${accion}'`);
-    }
+
+    // The pairs, parsed out of the VALUES list — not `toContain('archivos')`
+    // and `toContain('crear')` separately, which is what this used to do. That
+    // version only proved the eight module names and the four action names
+    // appeared *somewhere* in the statement, so swapping the two halves of every
+    // tuple survived it: a rollback would insert eight rows per role reading
+    // `modulo='crear', accion='archivos'`, and no later `up()` would clean them
+    // because they match nothing in CELDAS_MUERTAS. Permanent rubbish, green
+    // suite. An audit found it by making exactly that swap.
+    const pares = [...sql.matchAll(/\('([a-z]+)',\s*'([a-z]+)'\)/g)].map((m) => [m[1], m[2]]);
+
+    expect(pares.sort()).toEqual([...MUERTAS].sort());
   });
 
   it("restores them denied, never granted", async () => {

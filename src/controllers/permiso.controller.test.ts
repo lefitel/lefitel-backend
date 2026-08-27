@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
+import type { Module } from "../permissions/matrix.js";
 
 const findByPk = vi.fn();
 const findAll = vi.fn();
@@ -41,7 +42,7 @@ vi.mock("../permissions/store.js", () => ({
 }));
 
 const { getPermisos, putPermisos } = await import("./permiso.controller.js");
-const { MODULES, ACTIONS, emptyPermissions } = await import("../permissions/matrix.js");
+const { MODULES, ACTIONS, actionsOf, emptyPermissions } = await import("../permissions/matrix.js");
 
 const ADMIN = 1;
 const COORDINADOR = 2;
@@ -101,6 +102,27 @@ describe("reading the matrix", () => {
     expect((c.payload.acciones as { key: string }[]).map((a) => a.key)).toEqual([...ACTIONS]);
   });
 
+  it("sends each module its own actions, which is what the screen draws from", async () => {
+    // The half this endpoint gained, and the half nothing was watching: an audit
+    // deleted `acciones: actionsOf(key)` from the response and all 1.199 tests
+    // stayed green, while the panel — which reads it to know where to leave a
+    // hole — threw during render.
+    //
+    // Asserted as `actionsOf(key)` rather than "some array": handing every
+    // module the flat list also passed, and that is the case where the screen
+    // draws a box the server then refuses by name, telling the administrator off
+    // for something this endpoint offered them.
+    const c = call({ id: 1, id_rol: ADMIN });
+    await getPermisos(c.req, c.res);
+
+    const modulos = c.payload.modulos as { key: Module; acciones: string[] }[];
+    for (const modulo of modulos) {
+      expect(modulo.acciones, modulo.key).toEqual([...actionsOf(modulo.key)]);
+    }
+    expect(modulos.find((m) => m.key === "bitacora")?.acciones).toEqual(["ver"]);
+    expect(modulos.find((m) => m.key === "archivos")?.acciones).toEqual(["ver", "archivar"]);
+  });
+
   // `getMisPermisos` was asserted here — "reports only the caller's own
   // permissions on the personal route" — until `GET /api/permisos/mias` was
   // retired and the handler went with it. Nothing called that route: the matrix
@@ -144,7 +166,12 @@ describe("saving", () => {
     await putPermisos(c.req, c.res);
 
     expect(c.status).toBe(400);
-    expect(c.message).toMatch(/exportar/);
+    // The exact sentence, not just the word. `isActionOf` two lines below also
+    // catches this pair and answers "el módulo eventos no tiene la acción
+    // exportar" — which contains "exportar" too, so the looser assertion stayed
+    // green with the `isAction` check deleted. An audit proved it. The two
+    // branches exist to say different things and the test has to pin which.
+    expect(c.message).toMatch(/la acción "exportar" no existe/i);
   });
 
   it("refuses a real action against a module that does not have it", async () => {

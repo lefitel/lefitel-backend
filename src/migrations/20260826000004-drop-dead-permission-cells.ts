@@ -28,7 +28,7 @@ import { QueryInterface, Op } from "sequelize";
 // what happened on a day. `20260818000001-create-permisos.ts` froze its own
 // snapshot for the same reason.
 
-/** The eight pairs no module has, as of 2026-08-26. Frozen on purpose. */
+/** The eight pairs no module has, as of 2026-08-27. Frozen on purpose. */
 const CELDAS_MUERTAS = [
   { modulo: "archivos", accion: "crear" },
   { modulo: "archivos", accion: "editar" },
