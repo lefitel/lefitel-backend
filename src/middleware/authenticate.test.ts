@@ -176,6 +176,61 @@ describe("with a session cookie", () => {
     expect(c.next).not.toHaveBeenCalled();
   });
 
+  describe("a session older than the password it was opened with", () => {
+    /**
+     * The belt to the braces of explicit revocation.
+     *
+     * Every path that changes a password today also revokes the sessions —
+     * but "today" is the word doing the work: the next path somebody writes
+     * will not, and this catches it without that person having to know it
+     * exists.
+     */
+    const conFechas = (creada: Date, cambiada: Date) => {
+      findLiveSession.mockResolvedValue({
+        id: "s1",
+        id_usuario: 7,
+        created_at: creada,
+        expires_at: new Date(Date.now() + 1e6),
+        last_used_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+      });
+      findByPk.mockResolvedValue({
+        dataValues: { id: 7, id_rol: 2, pass_changed_at: cambiada },
+      });
+    };
+
+    it("refuses a session opened before the password was last changed", async () => {
+      conFechas(new Date("2026-01-01"), new Date("2026-06-01"));
+      const c = call({ cookie: "t" });
+      await authenticate(c.req, c.res, c.next);
+
+      expect(c.status).toBe(401);
+      expect(c.next).not.toHaveBeenCalled();
+    });
+
+    it("keeps a session opened after the change", async () => {
+      conFechas(new Date("2026-07-01"), new Date("2026-06-01"));
+      const c = call({ cookie: "t" });
+      await authenticate(c.req, c.res, c.next);
+
+      expect(c.next).toHaveBeenCalled();
+    });
+
+    it("keeps a session opened at the very instant of the change", async () => {
+      // `<` and not `<=`, and this is the test that pins it. A session opened
+      // by the password change itself — if one ever is — carries the same
+      // timestamp as the stamp it is being measured against, and refusing it
+      // would log somebody out of the session that was just handed to them.
+      const instante = new Date("2026-06-01T10:00:00.000Z");
+      conFechas(instante, new Date(instante));
+      const c = call({ cookie: "t" });
+      await authenticate(c.req, c.res, c.next);
+
+      expect(c.next).toHaveBeenCalled();
+    });
+  });
+
   describe("touching last_used_at", () => {
     // A pair of tests that only bracket 0 minutes and 60 minutes cannot tell a
     // 5-minute throttle from a 30-second one — both pass either way. The window

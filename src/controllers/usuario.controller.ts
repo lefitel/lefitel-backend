@@ -674,13 +674,22 @@ export async function updateUserPass(req: Request, res: Response) {
      * Changing a password — the thing you do *because* somebody else may know
      * the old one — left every browser that knew it logged in, for up to thirty
      * days. An administrator resetting the password of a leaver was doing
-     * nothing whatsoever to the laptop in their bag. The design plans a
-     * `pass_changed_at` column and a `sesion.created_at >= u.pass_changed_at`
-     * check on top of this, as belt and braces; **that column does not exist
-     * yet** — the Plan 1 migration created only `failed_attempts` and
-     * `locked_until` — and it is not added here on purpose: a column nobody
-     * writes is worse than no column, so it arrives together with its write and
-     * the query that reads it, or not at all.
+     * nothing whatsoever to the laptop in their bag. The belt over these
+     * braces is `usuarios.pass_changed_at`: the column exists now, and
+     * `authenticate` refuses any session opened before it — so an endpoint
+     * that changes a password and forgets to revoke still cannot leave a live
+     * session behind it.
+     *
+     * **This handler does not write that column yet, and the exception below
+     * is why.** Stamping it here would refuse the very session the exception
+     * spares — the session was opened on Tuesday, the stamp says Thursday,
+     * and `authenticate` reads Tuesday < Thursday and answers 401 — so the
+     * exception would survive in the source and be dead in fact. `/auth/
+     * password/reset` writes the stamp today because it revokes every session
+     * with no exception at all and opens none, so there is nothing there for
+     * the stamp to contradict. The two are reconciled by a decision that has
+     * not been taken yet; whoever takes it writes the stamp here in the same
+     * change.
      *
      * One exception, and only one: your own current session survives. Without
      * it, changing your own password answers 200 and then refuses your very

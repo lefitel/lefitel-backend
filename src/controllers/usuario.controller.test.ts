@@ -1131,11 +1131,15 @@ describe("username collisions", () => {
  * for up to thirty days. An administrator resetting the password of somebody who
  * has left the company was doing nothing whatsoever to the laptop in their bag.
  *
- * The design plans a `pass_changed_at` column and a check against it on top of
- * this. **That column does not exist**: the Plan 1 migration created only
- * `failed_attempts` and `locked_until`, and it is deliberately not added here —
- * a column nobody writes is worse than no column, so it comes with its write
- * and its reader or not at all.
+ * The belt over these braces is `usuarios.pass_changed_at`, and it exists now:
+ * `authenticate` refuses any session opened before that stamp, whatever else is
+ * true about it.
+ *
+ * **This handler does not write the stamp yet**, and the exception below is
+ * why — stamping it here would refuse the very session the exception spares,
+ * so the exception would go on passing this test while being dead in fact. See
+ * the comment on the transaction in `updateUserPass` for the decision that is
+ * still open.
  *
  * The exception is the interesting half. Your own current session has to
  * survive, or changing your own password answers 200 and then refuses your very

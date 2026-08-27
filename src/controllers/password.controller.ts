@@ -299,7 +299,14 @@ export const resetPassword = handler("resetPassword", async (req: Request, res: 
       // `task-5-brief.md`: a locked account has to be able to leave the
       // lockout through this door, or the lockout and "I forgot my
       // password" combine into a trap nobody can open.
-      { pass: hashed, failed_attempts: 0, locked_until: null },
+      //
+      // `pass_changed_at` is the stamp `authenticate` measures every session
+      // against, and it goes in *this* UPDATE rather than a second one so
+      // there is no instant in which the password is the new one and the
+      // stamp still names the old. The `revokeAllSessionsOf` below already
+      // ends every session of this account; the stamp is the second,
+      // independent answer, for the day a third door does not.
+      { pass: hashed, failed_attempts: 0, locked_until: null, pass_changed_at: new Date() },
       { where: { id: result.id_usuario }, transaction },
     );
     // No `except`: whoever asks for a reset is not inside any of these

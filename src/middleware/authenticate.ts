@@ -83,6 +83,31 @@ async function authenticateBySession(
   }
 
   /**
+   * A session older than the current password does not work, whatever else is
+   * true about it.
+   *
+   * Every path that changes a password today also revokes the sessions
+   * explicitly, and this is deliberately a second, independent answer to the
+   * same question — one that a future password-changing endpoint gets for free
+   * without its author knowing this rule exists. Explicit revocation is a
+   * promise every caller has to keep; this is a fact of the data.
+   *
+   * `<` and not `<=`: a session opened at the very instant of the stamp — the
+   * one the change itself hands back, if a change ever does — carries the same
+   * timestamp it is being measured against, and refusing it would log somebody
+   * out of the session they were just given.
+   *
+   * The rows that existed before this shipped are not caught by it: the
+   * migration back-fills `pass_changed_at` from each account's own `createdAt`
+   * rather than from `now()`, so every session alive on deploy day was opened
+   * after its own stamp. See `20260826000002-add-mfa-columns.ts`.
+   */
+  if (new Date(sesion.created_at).getTime() < new Date(usuario.pass_changed_at).getTime()) {
+    res.status(401).json({ message: SESION_EXPIRADA });
+    return;
+  }
+
+  /**
    * What this session may reach, on top of whether it exists.
    *
    * Until this block, `authenticate` answered one question — is this cookie a
@@ -231,9 +256,21 @@ async function authenticateBySession(
  * token, somebody moved to another role kept the old one — and the old buttons
  * with it — for up to a week. `findByPk` is paranoid, so an archived account
  * returns nothing and the session ends here.
+ *
+ * `pass_changed_at` rides along on the same read for the same reason and at
+ * the same price: the row is being fetched anyway, so the column costs one
+ * more name in `attributes` rather than a second query per request.
  */
-async function currentUser(id: number): Promise<{ id: number; id_rol: number } | null> {
-  const found = await UsuarioModel.findByPk(id, { attributes: ["id", "id_rol"] });
+async function currentUser(
+  id: number,
+): Promise<{ id: number; id_rol: number; pass_changed_at: Date } | null> {
+  const found = await UsuarioModel.findByPk(id, {
+    attributes: ["id", "id_rol", "pass_changed_at"],
+  });
   if (!found) return null;
-  return { id: found.dataValues.id as number, id_rol: found.dataValues.id_rol as number };
+  return {
+    id: found.dataValues.id as number,
+    id_rol: found.dataValues.id_rol as number,
+    pass_changed_at: found.dataValues.pass_changed_at as Date,
+  };
 }

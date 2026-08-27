@@ -489,4 +489,25 @@ describe("POST /auth/password/reset", () => {
     expect(values.failed_attempts).toBe(0);
     expect(values.locked_until).toBeNull();
   });
+
+  /**
+   * The stamp `authenticate` reads, written in the same UPDATE as the hash.
+   *
+   * `revokeAllSessionsOf` two lines below already ends every session of this
+   * account, so nothing here depends on this column to be safe today. It is
+   * the second, independent answer: the day somebody adds a third door that
+   * changes a password and forgets to revoke, this is what still refuses the
+   * sessions that knew the old one.
+   *
+   * Same UPDATE and not a second one, so there is no order in which the
+   * password is new and the stamp is not.
+   */
+  it("stamps pass_changed_at in the same write as the new hash", async () => {
+    const c = call({ token: "un-token", pass: CLAVE_VALIDA });
+    await resetPassword(c.req, c.res);
+
+    const [values] = update.mock.calls[0] as [Record<string, unknown>];
+    expect(values.pass).toBe("$2a$12$hasheada");
+    expect(values.pass_changed_at).toBeInstanceOf(Date);
+  });
 });
