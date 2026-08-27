@@ -48,6 +48,31 @@ vi.mock("../auth/sessionStore.js", () => ({
   revokeAllSessionsOf: (...a: unknown[]) => revokeAllSessionsOf(...a),
 }));
 
+// The three factor tables, mocked at the model rather than mocking
+// `factorInventory.js` wholesale: what the login does with the state is the
+// wiring under test here, so the function that decides it stays real and only
+// the tables under it are replaced — the same split that keeps
+// `verifyCredentials` real in `auth.controller.test.ts`.
+//
+// They also cannot be left alone. Each of these modules calls
+// `UsuarioModel.hasMany` as it is imported, and `UsuarioModel` is the stub
+// above, so without these three the file fails to load before running an
+// assertion.
+const passkeyCount = vi.fn();
+const totpCount = vi.fn();
+vi.mock("../models/credencialWebauthn.model.js", () => ({
+  CredencialWebauthnModel: { count: (...a: unknown[]) => passkeyCount(...a) },
+}));
+vi.mock("../models/factorTotp.model.js", () => ({
+  FactorTotpModel: { count: (...a: unknown[]) => totpCount(...a) },
+}));
+// Never called — `estadoInicialDeSesion` goes through `tieneAlgunFactor`, which
+// deliberately never asks about recovery codes. On the mock because
+// `factorInventory.ts` imports the name, and a named import missing from a
+// `vi.mock` factory fails the whole file at load rather than when it is reached.
+vi.mock("../models/codigoRecuperacion.model.js", () => ({
+  CodigoRecuperacionModel: { count: vi.fn() },
+}));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 // `login` calls this opportunistically after a successful login (see
 // `tokenStore.ts`). Mocked wholesale like `sessionStore.js` above: without
@@ -203,6 +228,10 @@ beforeEach(() => {
   revokeAllSessionsOf.mockResolvedValue(0);
   permissionsFor.mockResolvedValue(PERMISOS);
   purgeExpiredTokens.mockResolvedValue(0);
+  // Nothing registered, which is every account on the day this deploys.
+  passkeyCount.mockResolvedValue(0);
+  totpCount.mockResolvedValue(0);
+  update.mockResolvedValue([1]);
 });
 
 describe("POST /api/auth/login", () => {

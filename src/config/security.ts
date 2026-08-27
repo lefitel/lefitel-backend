@@ -121,6 +121,26 @@ export const STEP_UP_WINDOW_MINUTES = 10;
 export const STEP_UP_PASSWORD_FIELD = "stepup_password";
 
 /**
+ * How long somebody has to set up a second factor before the ERP closes to
+ * them, counted from their **first login after the deploy** and not from the
+ * deploy itself.
+ *
+ * From the deploy would mean whoever is on holiday comes back on day 30 to a
+ * grace period that expired without them ever seeing a screen: zero of their
+ * fourteen days. Counting from their own first login also spreads the setup
+ * across the days people actually come back, instead of concentrating every
+ * verification email on the Saturday the deploy happened.
+ *
+ * Read in exactly one place — `estadoInicialDeSesion` in
+ * `auth/factorInventory.ts`, which stamps `usuarios.mfa_grace_until` on the
+ * first login and never again. Because the deadline is a stored date and not
+ * this number applied at read time, shortening or lengthening the constant
+ * later moves nobody who has already logged in once: their fourteen days were
+ * fixed the day they started.
+ */
+export const MFA_GRACE_DAYS = 14;
+
+/**
  * How long a browser must refuse to reach this host over plain HTTP, in
  * seconds. Two years, which is what the preload list asks for.
  *

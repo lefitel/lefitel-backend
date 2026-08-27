@@ -73,6 +73,31 @@ vi.mock("../auth/sessionStore.js", () => ({
   revokeAllSessionsOf: vi.fn(),
 }));
 
+// The three factor tables, mocked at the model rather than mocking
+// `factorInventory.js` wholesale: what the login does with the state is the
+// wiring under test here, so the function that decides it stays real and only
+// the tables under it are replaced — the same split that keeps
+// `verifyCredentials` real in `auth.controller.test.ts`.
+//
+// They also cannot be left alone. Each of these modules calls
+// `UsuarioModel.hasMany` as it is imported, and `UsuarioModel` is the stub
+// above, so without these three the file fails to load before running an
+// assertion.
+const passkeyCount = vi.fn();
+const totpCount = vi.fn();
+vi.mock("../models/credencialWebauthn.model.js", () => ({
+  CredencialWebauthnModel: { count: (...a: unknown[]) => passkeyCount(...a) },
+}));
+vi.mock("../models/factorTotp.model.js", () => ({
+  FactorTotpModel: { count: (...a: unknown[]) => totpCount(...a) },
+}));
+// Never called — `estadoInicialDeSesion` goes through `tieneAlgunFactor`, which
+// deliberately never asks about recovery codes. On the mock because
+// `factorInventory.ts` imports the name, and a named import missing from a
+// `vi.mock` factory fails the whole file at load rather than when it is reached.
+vi.mock("../models/codigoRecuperacion.model.js", () => ({
+  CodigoRecuperacionModel: { count: vi.fn() },
+}));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 // `login` sweeps `token_uso_unico` opportunistically after a successful
 // login (see `tokenStore.ts`). Mocked wholesale for the same reason
@@ -108,13 +133,14 @@ vi.mock("../utils/logger.js", () => ({
 // `login.routes.ts`.
 const { login } = await import("./auth.controller.js");
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
+const bcryptjs = (await import("bcryptjs")).default;
 
 const TOKEN = "un-token-opaco-de-sesion";
 const CADUCA = new Date("2026-09-01T00:00:00.000Z");
 const NAVEGADOR = "Mozilla/5.0 (Windows NT 10.0) TestRunner";
 
 /** An account whose password is right, stored at the current cost. */
-function storedUser() {
+function storedUser(overrides: Record<string, unknown> = {}) {
   return {
     dataValues: {
       id: 7,
@@ -126,6 +152,9 @@ function storedUser() {
       image: null,
       failed_attempts: 0,
       locked_until: null as Date | null,
+      // Absent by default, exactly as it is for every account the migration
+      // added the column to: nobody has logged in past it yet.
+      ...overrides,
     },
   };
 }
@@ -172,11 +201,22 @@ function call(body: unknown, cookies?: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `clearAllMocks` forgets the calls, not the resolved values. The
+  // wrong-credential test below pins `compare` to false, and without this line
+  // that leaks into every test declared after it: they get a 400 from a
+  // password the fixture says is correct, for a reason nothing in them
+  // mentions. `auth.controller.test.ts` carries the same line and the same
+  // note, and this file was one test away from needing it.
+  vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
   findOne.mockResolvedValue(storedUser());
   createSession.mockResolvedValue({ token: TOKEN, expiresAt: CADUCA });
   findLiveSession.mockResolvedValue(null);
   revokeSessionOf.mockResolvedValue(true);
   purgeExpiredTokens.mockResolvedValue(0);
+  // Nothing registered, which is every account on the day this deploys.
+  passkeyCount.mockResolvedValue(0);
+  totpCount.mockResolvedValue(0);
+  update.mockResolvedValue([1]);
 });
 
 describe("the login, once the credential is good", () => {
@@ -195,8 +235,10 @@ describe("the login, once the credential is good", () => {
         userAgent: NAVEGADOR,
         ip: "203.0.113.9",
       },
-      // "completa": nothing yet decides otherwise (that is a later task in
-      // this plan) — see the comment on this call site in auth.controller.ts.
+      // "completa", and now decided rather than hardcoded: this account has
+      // no factor registered and no grace deadline stored, which is every
+      // account on deploy day. The state block below covers the other
+      // answers `estadoInicialDeSesion` can give.
       "completa",
     );
   });
@@ -372,7 +414,6 @@ describe("the login, once the credential is good", () => {
   });
 
   it("opens nothing when the credential is wrong", async () => {
-    const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockResolvedValue(false as never);
 
     const c = call({ user: "isaias", pass: "equivocada" });
@@ -390,5 +431,123 @@ describe("the login, once the credential is good", () => {
     expect(c.status).toBe(400);
     expect(findOne).not.toHaveBeenCalled();
     expect(createSession).not.toHaveBeenCalled();
+  });
+});
+
+// Which state the session opens in, and the one column the login writes.
+//
+// The decision itself is `auth/factorInventory.test.ts`'s subject and is not
+// re-tested here. What is only testable here is the wiring: that the answer
+// reaches `createSession` instead of a literal, that the deadline is written
+// after the session row and never before it, and that a failure to write it
+// does not cost somebody a login they had already earned.
+describe("the state the login opens the session in", () => {
+  const CATORCE_DIAS = 14 * 24 * 60 * 60 * 1000;
+
+  it("starts the grace clock on the first login, and writes it after the session", async () => {
+    // Order is the assertion, not decoration. Written before `createSession`,
+    // this deadline would start running on a request that went on to answer
+    // 503 — fourteen days counted from a login the person never got, with no
+    // screen to spend any of them on.
+    const c = call({ user: "isaias", pass: "secreta" });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(update).toHaveBeenCalledWith(
+      { mfa_grace_until: expect.any(Date) },
+      { where: { id: 7 } },
+    );
+    const [{ mfa_grace_until }] = update.mock.calls[0] as [{ mfa_grace_until: Date }];
+    expect(mfa_grace_until.getTime()).toBeGreaterThan(Date.now() + CATORCE_DIAS - 60_000);
+    expect(createSession.mock.invocationCallOrder[0]).toBeLessThan(
+      update.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("writes nothing when the session could not be opened", async () => {
+    // The other half of the same rule, and the one that fails if somebody
+    // moves the write above the try/catch: a login that ends in 503 must
+    // leave the column exactly as it found it, so the next attempt still
+    // gets its full fourteen days.
+    createSession.mockRejectedValue(new Error("la base de datos no responde"));
+    const c = call({ user: "isaias", pass: "secreta" });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(503);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("does not touch the column again once a deadline is already stored", async () => {
+    // Re-stamping it on every login is a grace period that never ends.
+    findOne.mockResolvedValue(
+      storedUser({ mfa_grace_until: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000) }),
+    );
+    const c = call({ user: "isaias", pass: "secreta" });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "completa");
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("opens the session in onboarding once the grace has run out", async () => {
+    // The day the ERP closes. They still get in — the login is 200 and the
+    // cookie is set — and `authenticate` is what answers 403 to everything
+    // except the doors that let them finish setting up.
+    findOne.mockResolvedValue(
+      storedUser({ mfa_grace_until: new Date(Date.now() - 24 * 60 * 60 * 1000) }),
+    );
+    const c = call({ user: "isaias", pass: "secreta" });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.cookieCall?.[0]).toBe(SESSION_COOKIE_NAME);
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "onboarding");
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("opens the session in parcial when the account has a factor to prove", async () => {
+    // Unreachable today: nothing in the API writes a row to the passkey
+    // table, so this count is zero for everybody. Driven from the mock here
+    // so the wiring is proved now rather than the first time a later plan
+    // inserts a row in production.
+    passkeyCount.mockResolvedValue(1);
+    const c = call({ user: "isaias", pass: "secreta" });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "parcial");
+    // No deadline for somebody who has already registered something.
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("still logs the person in when the grace deadline cannot be written, and says so", async () => {
+    // The session row and the cookie already exist by the time this write is
+    // attempted. Turning its failure into a 503 would send somebody back to
+    // the login form holding a perfectly good session, and their retry would
+    // hit the same failing UPDATE. So: 200, and a line in the log loud enough
+    // to act on, because a write that keeps failing is an ERP that never
+    // closes for that account.
+    update.mockRejectedValue(new Error("la base de datos no responde"));
+    const c = call({ user: "isaias", pass: "secreta" });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.cookieCall?.[0]).toBe(SESSION_COOKIE_NAME);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(String(error.mock.calls[0][1])).toContain("plazo de gracia");
+  });
+
+  it("keeps the grace deadline out of the response body", async () => {
+    // `UsuarioAutenticado` is published verbatim, so anything added to it is
+    // added to the API's public answer. The deadline is read by the server to
+    // decide the state and is not part of that answer yet — when a screen
+    // needs a countdown, putting it here should be a decision somebody takes
+    // rather than one this wiring already took for them.
+    const c = call({ user: "isaias", pass: "secreta" });
+    await login(c.req, c.res);
+
+    expect(c.payload?.usuario).not.toHaveProperty("mfa_grace_until");
+    expect(JSON.stringify(c.payload)).not.toContain("mfa_grace_until");
   });
 });

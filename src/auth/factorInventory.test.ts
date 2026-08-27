@@ -23,9 +23,13 @@ vi.mock("../models/codigoRecuperacion.model.js", () => ({
   CodigoRecuperacionModel: { count: (...args: unknown[]) => codigoCount(...args) },
 }));
 
-const { factoresDe, tieneAlgunFactor } = await import("./factorInventory.js");
+const { factoresDe, tieneAlgunFactor, estadoInicialDeSesion } = await import(
+  "./factorInventory.js"
+);
+const { MFA_GRACE_DAYS } = await import("../config/security.js");
 
 const YO = 1;
+const DIA = 24 * 60 * 60 * 1000;
 
 beforeEach(() => {
   passkeyCount.mockReset().mockResolvedValue(0);
@@ -124,5 +128,149 @@ describe("tieneAlgunFactor", () => {
     // sent in the first place, which is the round trip this fix removed.
     await tieneAlgunFactor(YO);
     expect(codigoCount).not.toHaveBeenCalled();
+  });
+});
+
+// Which of the three states a session opens in, and whether this login is the
+// one that starts the fourteen-day clock.
+//
+// Every test here leaves the factor tables empty except where it says
+// otherwise, because that is production on the day this deploys: the branch
+// that matters today is the grace one, and the `parcial` pair below are
+// written now precisely because nothing exercises them yet.
+describe("estadoInicialDeSesion", () => {
+  const ahora = new Date("2026-09-01T10:00:00.000Z");
+
+  it("starts the grace clock on this login and lets the person work", async () => {
+    // Day one for this account, whenever their day one happens to be. The
+    // deadline is handed back for the caller to store; the state is
+    // `completa`, so nothing about the ERP changes for them today.
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+    expect(r.estado).toBe("completa");
+    expect(r.graceUntil?.getTime()).toBe(ahora.getTime() + MFA_GRACE_DAYS * DIA);
+  });
+
+  it("treats a missing mfa_grace_until the same as an unset one", async () => {
+    // Not hypothetical, and not caught by the compiler: `IUsuario` declares
+    // `mfa_grace_until?: Date | null` and `tsconfig.json` has `strict: false`,
+    // so an object built without the key type-checks fine and arrives here as
+    // `undefined`. A strict `=== null` test would fall through to the deadline
+    // branch, `new Date(undefined)` is an Invalid Date, and every comparison
+    // against NaN is false — so the account would be handed `completa` with
+    // `graceUntil: null` on every login it ever made. That is a grace period
+    // that never starts and therefore never ends: the ERP would never close.
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: undefined }, ahora);
+    expect(r.estado).toBe("completa");
+    expect(r.graceUntil?.getTime()).toBe(ahora.getTime() + MFA_GRACE_DAYS * DIA);
+  });
+
+  it("restarts the clock rather than granting forever when the stored deadline is unusable", async () => {
+    // The same failure from a different direction: a column that came back as
+    // something `new Date()` cannot parse. Re-stamping a fresh deadline is the
+    // safe way to be wrong — it costs the account fourteen more days, where
+    // the alternative costs the ERP its closing date altogether.
+    const r = await estadoInicialDeSesion(
+      { id: YO, mfa_grace_until: new Date("no es una fecha") },
+      ahora,
+    );
+    expect(r.estado).toBe("completa");
+    expect(r.graceUntil?.getTime()).toBe(ahora.getTime() + MFA_GRACE_DAYS * DIA);
+  });
+
+  it("does not restart a grace period that is already running", async () => {
+    // Restarting it on every login is a grace period that never ends, which
+    // is the same bug as never starting one — arrived at by being helpful.
+    const enCurso = new Date(ahora.getTime() + 3 * DIA);
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: enCurso }, ahora);
+    expect(r.estado).toBe("completa");
+    expect(r.graceUntil).toBeNull();
+  });
+
+  it("drops to onboarding once the grace has run out with nothing configured", async () => {
+    const vencida = new Date(ahora.getTime() - 1);
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: vencida }, ahora);
+    expect(r.estado).toBe("onboarding");
+    expect(r.graceUntil).toBeNull();
+  });
+
+  it("closes the ERP at the deadline itself, not a login later", async () => {
+    // Pins which side of the boundary the comparison sits on. With `<`
+    // instead of `<=` this returns `completa`, and the only way to notice
+    // would be somebody logging in at exactly the stored millisecond.
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: new Date(ahora) }, ahora);
+    expect(r.estado).toBe("onboarding");
+  });
+
+  it("never refuses the login outright, however long the grace has been over", async () => {
+    // "El día 15 existe y no echa a nadie." A technician in the field on day
+    // 15 gets a screen telling them what to do, never a closed door — so this
+    // function has no fourth answer and no throw of its own.
+    const vencida = new Date(ahora.getTime() - 30 * DIA);
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: vencida }, ahora);
+    expect(["onboarding", "completa", "parcial"]).toContain(r.estado);
+  });
+
+  it("asks for the factor when there is one to ask for", async () => {
+    // Unreachable in this plan — nothing writes to the three tables yet, so
+    // `tieneAlgunFactor` is false for everybody. Written and tested now
+    // because the plan that inserts the first row turns this branch on, and a
+    // branch first exercised in production is a branch nobody has run.
+    passkeyCount.mockResolvedValue(1);
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+    expect(r.estado).toBe("parcial");
+  });
+
+  it("does not start the grace clock for somebody who already has a factor", async () => {
+    // They have nothing to be given fourteen days for. Stamping a deadline on
+    // them would put a date in the column that means "this account is still
+    // being chased", which is the opposite of the truth.
+    passkeyCount.mockResolvedValue(1);
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+    expect(r.graceUntil).toBeNull();
+  });
+
+  it("asks for the factor even after the grace has expired", async () => {
+    // Order matters: the factor check comes first, so an expired grace does
+    // not send somebody who *has* a passkey to the onboarding screen instead
+    // of the one asking them to use it.
+    passkeyCount.mockResolvedValue(1);
+    const r = await estadoInicialDeSesion(
+      { id: YO, mfa_grace_until: new Date(ahora.getTime() - DIA) },
+      ahora,
+    );
+    expect(r.estado).toBe("parcial");
+  });
+
+  it("counts a confirmed TOTP as a factor to ask for, not only a passkey", async () => {
+    totpCount.mockResolvedValue(1);
+    const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+    expect(r.estado).toBe("parcial");
+  });
+
+  it("does not let a pile of recovery codes stand in for a factor", async () => {
+    // The rule `tieneAlgunFactor` enforces, pinned again at the level that
+    // actually decides what somebody sees: codes alone must not lift an
+    // account out of onboarding, or the sheet of paper becomes the factor.
+    codigoCount.mockResolvedValue(10);
+    const r = await estadoInicialDeSesion(
+      { id: YO, mfa_grace_until: new Date(ahora.getTime() - DIA) },
+      ahora,
+    );
+    expect(r.estado).toBe("onboarding");
+  });
+
+  it("asks the two factor tables once each, on the hot path of every login", async () => {
+    // This runs on every entry to the system, so the number of round trips it
+    // adds is worth pinning rather than re-deriving by reading the call chain
+    // each time somebody wonders. Two, and never the recovery-code table.
+    await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+    expect(passkeyCount).toHaveBeenCalledTimes(1);
+    expect(totpCount).toHaveBeenCalledTimes(1);
+    expect(codigoCount).not.toHaveBeenCalled();
+  });
+
+  it("asks about the account logging in and not about anyone else", async () => {
+    await estadoInicialDeSesion({ id: 99, mfa_grace_until: null }, ahora);
+    expect(passkeyCount).toHaveBeenCalledWith({ where: { id_usuario: 99 } });
   });
 });

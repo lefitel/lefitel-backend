@@ -32,6 +32,7 @@ import { UsuarioModel } from "../models/usuario.model.js";
 import { permissionsFor } from "../permissions/store.js";
 import { logLogin, verifyCredentials } from "../auth/credentials.js";
 import { issueSession } from "../auth/issueSession.js";
+import { estadoInicialDeSesion } from "../auth/factorInventory.js";
 import { purgeExpiredTokens } from "../auth/tokenStore.js";
 import { clearSessionCookie } from "../auth/sessionCookie.js";
 import {
@@ -141,6 +142,29 @@ export const login = handler("login", async (req: Request, res: Response) => {
   }
 
   /**
+   * Which of the three states this session opens in, decided before it is
+   * opened. `graceUntil` comes back non-null only when this is the first
+   * login this account has ever made past the MFA migration, and it means
+   * "stamp this deadline on them" — see the write below the try/catch.
+   *
+   * Outside the try, and that is on purpose: what the 503 below means is "the
+   * session could not be opened", and widening it to cover this would make
+   * the status say something it does not mean. A database failure here
+   * behaves exactly like a database failure in `verifyCredentials` one line
+   * above — it propagates, and `handler()` answers 500 — which is the
+   * behaviour a login has had all along when the database is unreachable.
+   *
+   * `mfa_grace_until` rides beside `check.usuario` rather than inside it
+   * because `UsuarioAutenticado` is published verbatim in the response body;
+   * see `ResultadoCredenciales` in `auth/credentials.ts`.
+   */
+  const ahora = new Date();
+  const { estado, graceUntil } = await estadoInicialDeSesion(
+    { id: check.usuario.id, mfa_grace_until: check.mfa_grace_until },
+    ahora,
+  );
+
+  /**
    * A session this endpoint cannot open is a login it cannot grant. There is
    * no credential other than the cookie, so a 200 without one tells the
    * browser "Bienvenido", navigates the person into the ERP, gets 401 on the
@@ -167,19 +191,70 @@ export const login = handler("login", async (req: Request, res: Response) => {
    * reasoning, including why that cannot be turned into a free guess.
    */
   try {
-    // "completa" for now: nothing yet decides whether this login should land
-    // in "parcial" or "onboarding" instead — that wiring is a later task in
-    // this same plan. Passing it explicitly here, rather than letting
-    // `issueSession` default it, is what keeps today's behaviour ("a normal
-    // user sees the ERP exactly as before") a decision made at the call site
-    // instead of one made silently by the storage layer.
-    await issueSession(req, res, check.usuario.id, "completa");
+    // The state is decided above and passed explicitly, rather than left to a
+    // default inside `issueSession`: which doors a session opens is the login's
+    // decision to make and the storage layer's to record, and a default there
+    // would be the kind that stays correct until the day somebody adds a
+    // second caller.
+    await issueSession(req, res, check.usuario.id, estado);
   } catch (err) {
     authLog.error(
       { err, id_usuario: check.usuario.id },
       "no se pudo abrir la sesión de cookie: se rechaza el login, porque la cookie es la única credencial",
     );
     return res.status(503).json({ message: SESION_NO_DISPONIBLE });
+  }
+
+  /**
+   * The grace clock starts here, after the session and never before it.
+   *
+   * Written first, this would start somebody's fourteen days on a request
+   * that ended in the 503 above — a deadline running from a login they never
+   * got, and days they had no way to spend, since there is no screen to
+   * configure anything on without a session.
+   *
+   * **What happens when this write fails, decided rather than defaulted.** It
+   * is caught, written to the log, and the login still answers 200. Three
+   * things settle that:
+   *
+   * - **Failing the login would be a lie and a worse outcome.** By this point
+   *   `issueSession` has already set the cookie and the session row exists.
+   *   Answering 503 now would send somebody back to the login form holding a
+   *   perfectly good session, and they would log in again — into the same
+   *   failing UPDATE.
+   * - **It is not lost, and this is the part worth knowing.** The column stays
+   *   null, so the *next* login runs `estadoInicialDeSesion` against a null
+   *   deadline, takes the same branch and tries the same write again. The
+   *   retry is the next login, and it costs nothing to wait for it. What a
+   *   failure actually costs is that this account's fourteen days start from
+   *   a later login than they should have — generous, never premature, and
+   *   never a lockout.
+   * - **A failure that keeps repeating is not survivable in silence**, because
+   *   the thing that stops working is the ERP's ability to ever close on
+   *   anybody: `mfa_grace_until` null for ever is `completa` for ever. So it
+   *   is logged at `error` with the sentence spelling that out, rather than
+   *   at `warn` where it would read as noise. That matches how this handler
+   *   already treats the other write it must not fail on — `purgeExpiredTokens`
+   *   below is fire-and-forget with a logged error, for the same reason.
+   *
+   * Awaited rather than fire-and-forget, which is where it differs from that
+   * purge: this one runs at most once in an account's lifetime, so it is not
+   * latency charged to every login, and the ordering it guarantees is what
+   * `login.session.test.ts` asserts when it pins the write as happening after
+   * the session and not before.
+   */
+  if (graceUntil !== null) {
+    try {
+      await UsuarioModel.update(
+        { mfa_grace_until: graceUntil },
+        { where: { id: check.usuario.id } },
+      );
+    } catch (err) {
+      authLog.error(
+        { err, id_usuario: check.usuario.id, graceUntil },
+        "no se pudo iniciar el plazo de gracia de MFA: la sesión sigue abierta y el próximo login lo reintenta, pero mientras la columna siga vacía el ERP no se cerrará nunca para esta cuenta",
+      );
+    }
   }
 
   const permisos = await permissionsFor(check.usuario.id_rol);

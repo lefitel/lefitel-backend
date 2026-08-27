@@ -27,6 +27,10 @@ import { Op } from "sequelize";
 import { CredencialWebauthnModel } from "../models/credencialWebauthn.model.js";
 import { FactorTotpModel } from "../models/factorTotp.model.js";
 import { CodigoRecuperacionModel } from "../models/codigoRecuperacion.model.js";
+import { MFA_GRACE_DAYS } from "../config/security.js";
+import type { EstadoSesion } from "./sessionState.js";
+
+const DIA_MS = 24 * 60 * 60 * 1000;
 
 /** The raw inventory: how many of each thing this account has registered. */
 export interface InventarioFactores {
@@ -78,4 +82,98 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
     FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } } }),
   ]);
   return passkeys > 0 || totp > 0;
+}
+
+/**
+ * What state a session opens in, and whether this login is the one that has to
+ * start the fourteen-day clock.
+ *
+ * `graceUntil` is an instruction to the caller, not a fact about the account:
+ * a date means "write this into `usuarios.mfa_grace_until`", `null` means
+ * "leave that column alone". It is returned rather than written here because
+ * the write must not happen until the session actually exists — see the call
+ * site in `auth.controller.ts` for what starting somebody's fourteen days on a
+ * request that ended in a 503 would cost them.
+ *
+ * Three branches, in this order, and the order is the load-bearing part:
+ *
+ * 1. **There is a factor to prove** → `parcial`. The password got them this
+ *    far and no further. First, so that somebody who *has* a passkey is asked
+ *    to use it rather than sent to a setup screen for a factor they already
+ *    registered.
+ * 2. **No usable deadline stored** → stamp one, and `completa`. Started at
+ *    their first login *after* the deploy rather than filled in by the
+ *    migration: from the deploy, somebody on holiday comes back on day 30 to a
+ *    grace period that expired without them ever seeing a screen.
+ * 3. **Deadline still ahead** → `completa`. **Deadline reached or passed** →
+ *    `onboarding`: they get in, and the ERP answers 403 until they configure
+ *    something.
+ *
+ * **Nobody is ever refused.** There is no fourth answer and no throw of this
+ * function's own — "el día 15 existe y no echa a nadie". Day 15 is a screen
+ * that says what to do, not a closed door, because a technician in the field
+ * on day 15 would otherwise get a generic red toast with no button and no
+ * instruction.
+ *
+ * **A verified email deliberately does not appear here.** The specification
+ * says both that `onboarding` means "todo lo demás: 403" and, three paragraphs
+ * later, that in `onboarding` "se puede trabajar"; those cannot both hold, and
+ * the rule this plan settled on is that email verification closes step-up
+ * operations rather than the state of the session. Requiring it here would put
+ * the whole payroll — who today have neither an email nor a factor — in front
+ * of a setup screen on deploy day, which is the outcome the specification
+ * spends two paragraphs avoiding.
+ *
+ * ---
+ *
+ * ⚠️ **`parcial` is a dead end until the plan after this one, and this is the
+ * comment for whoever deploys.** Reaching it needs a row in
+ * `credenciales_webauthn` or a confirmed one in `factor_totp`, and as of this
+ * plan nothing anywhere in `src/` inserts into either — the only statements
+ * against those tables are the COUNTs in this file, and neither migration
+ * seeds a row. So on deploy day `tieneAlgunFactor` is false for every account
+ * and this branch cannot fire.
+ *
+ * That matters because there is nothing on the other side of it yet.
+ * `sessionState.ts` allows a `parcial` session to reach `/api/auth/mfa` and
+ * `/api/auth/webauthn/login`, and **neither route is mounted** — `auth.routes.ts`
+ * has no `/mfa` and no `/webauthn/*`. Anybody who did land in `parcial` today
+ * would hold a session that can log out and read `/me` and nothing else, with
+ * no endpoint anywhere in the API able to lift them out of it, on every login,
+ * permanently.
+ *
+ * **So the ordering is a hard constraint, not a preference: the endpoint that
+ * verifies a factor has to be live before, or in the same deploy as, the first
+ * endpoint that registers one.** Shipping registration first locks out
+ * whoever registers first — starting with whoever tests it.
+ */
+export async function estadoInicialDeSesion(
+  usuario: { id: number; mfa_grace_until: Date | null },
+  ahora: Date,
+): Promise<{ estado: EstadoSesion; graceUntil: Date | null }> {
+  if (await tieneAlgunFactor(usuario.id)) {
+    // No deadline is stamped on them: they have nothing left to be given
+    // fourteen days for, and a date in that column reads as "this account is
+    // still being chased".
+    return { estado: "parcial", graceUntil: null };
+  }
+
+  // `== null`, loosely, and not `=== null`. `IUsuario` declares
+  // `mfa_grace_until?: Date | null` and `tsconfig.json` has `strict: false`,
+  // so an account object built without the key type-checks and arrives here as
+  // `undefined`. Under a strict test that falls through to the comparison
+  // below, where `new Date(undefined)` is an Invalid Date and every comparison
+  // against NaN is false — handing back `completa` with nothing to write, on
+  // every login for ever. The same reasoning covers a stored value that cannot
+  // be parsed, which is why NaN is folded in here rather than compared later:
+  // re-stamping a fresh deadline costs the account fourteen more days, while
+  // the alternative costs the ERP its closing date altogether.
+  const limite = usuario.mfa_grace_until == null ? NaN : new Date(usuario.mfa_grace_until).getTime();
+  if (Number.isNaN(limite)) {
+    return { estado: "completa", graceUntil: new Date(ahora.getTime() + MFA_GRACE_DAYS * DIA_MS) };
+  }
+
+  // `<=` and not `<`: the stored instant is when the grace is over, so a login
+  // at exactly that millisecond is already past it.
+  return { estado: limite <= ahora.getTime() ? "onboarding" : "completa", graceUntil: null };
 }

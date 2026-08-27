@@ -88,6 +88,23 @@ vi.mock("./sessionStore.js", () => ({
 // `login` calls this opportunistically after a successful credential check
 // (see `tokenStore.ts`), which is no part of what this file is testing.
 vi.mock("./tokenStore.js", () => ({ purgeExpiredTokens: vi.fn().mockResolvedValue(0) }));
+// And the fifth, for the same reason and one more. `auth.controller.ts` now
+// asks `estadoInicialDeSesion` which state the session should open in, and
+// that module imports the three factor models — each of which calls
+// `UsuarioModel.hasMany` on import, on the same stub above that does not have
+// it. Mocked rather than given three more model stubs because which state a
+// session opens in is not what this file is about: it is
+// `auth/factorInventory.test.ts`'s subject, and the wiring between the two is
+// `controllers/login.session.test.ts`'s.
+//
+// `graceUntil: null` on purpose. A date here would make every successful login
+// in this file write `mfa_grace_until`, and three tests below assert that
+// `UsuarioModel.update` was *not* called — they are about the credential check
+// touching nothing, and a grace write landing in the same spy would break them
+// for a reason that has nothing to do with what they test.
+vi.mock("./factorInventory.js", () => ({
+  estadoInicialDeSesion: vi.fn().mockResolvedValue({ estado: "completa", graceUntil: null }),
+}));
 
 // The handler both `POST /api/login` and `POST /api/auth/login` are mounted on.
 const { login } = await import("../controllers/auth.controller.js");

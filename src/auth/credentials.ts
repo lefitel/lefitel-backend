@@ -84,8 +84,34 @@ export interface UsuarioAutenticado {
  * the exclusivity is still written down for whoever reads it.
  */
 export type ResultadoCredenciales =
-  | { ok: true; usuario: UsuarioAutenticado; message?: undefined }
-  | { ok: false; usuario?: undefined; message: string };
+  | {
+      ok: true;
+      usuario: UsuarioAutenticado;
+      /**
+       * The account's MFA grace deadline, straight off the row, `null` when it
+       * has never been stamped.
+       *
+       * **Beside `usuario` and deliberately not inside it.** `UsuarioAutenticado`
+       * is the object the login puts into `res.json` verbatim, and its whole
+       * job — see its own comment — is to be a list of what may be published
+       * rather than whatever `usuarios` happens to contain. Adding a column to
+       * it publishes that column. This one is read by the server, by
+       * `estadoInicialDeSesion`, to decide which state the session opens in;
+       * nothing on the client needs it yet, and when plan 4D does need a
+       * countdown on screen, putting it in the body should be a decision
+       * somebody takes on purpose rather than one this line already took for
+       * them.
+       *
+       * Carried here rather than re-read in the controller because the row is
+       * already in hand: `verifyCredentials` does a `findOne` with no
+       * `attributes` restriction, so the column arrived with it. A second
+       * `findByPk` in the controller would be one more round trip on every
+       * single login to fetch a value this function was holding and threw away.
+       */
+      mfa_grace_until: Date | null;
+      message?: undefined;
+    }
+  | { ok: false; usuario?: undefined; mfa_grace_until?: undefined; message: string };
 
 /**
  * What a wrong password costs the account it was aimed at.
@@ -435,7 +461,12 @@ async function checkAgainstRow(input: {
     image: data.image,
   };
 
-  return { ok: true, usuario };
+  // `?? null` and not the raw value: `IUsuario` declares the column optional,
+  // so a row assembled without the key — every fixture in the test suite that
+  // predates the MFA migration, among others — would hand `undefined` to the
+  // caller, and `estadoInicialDeSesion` would have to decide what an absent
+  // deadline means all over again. Normalised once, here, where the row is.
+  return { ok: true, usuario, mfa_grace_until: data.mfa_grace_until ?? null };
 }
 
 /**
