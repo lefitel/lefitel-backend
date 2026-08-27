@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { findLiveSession, touchSession, slidingExpiry, cappedByCeiling } from "../auth/sessionStore.js";
-import { puedeAlcanzar, MENSAJE_FACTOR_PENDIENTE } from "../auth/sessionState.js";
+import { puedeAlcanzar, estadoEfectivo, MENSAJE_FACTOR_PENDIENTE } from "../auth/sessionState.js";
 import { readSessionCookie, setSessionCookie } from "../auth/sessionCookie.js";
 import { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER, SESSION_EXPIRES_HEADER } from "../config/security.js";
 import { log } from "../utils/logger.js";
@@ -135,6 +135,49 @@ async function authenticateBySession(
   }
 
   /**
+   * When this request is happening.
+   *
+   * Moved up from the touch block below, because the state gate is now the first
+   * thing that needs it. One reading rather than two, so the instant this
+   * request is judged against is the same one its session is renewed to: the
+   * touch throttle, the sliding expiry, the cookie and the response header all
+   * take this value. Two readings would agree to the millisecond on a fast
+   * request and stop agreeing under a slow query, which is the kind of
+   * disagreement that only shows up in production.
+   */
+  const now = new Date();
+
+  /**
+   * The state actually in force, which is **not** the one in the session row.
+   *
+   * `estado` is written once, at login, by `estadoInicialDeSesion`. Until this
+   * line, `authenticate` believed that value for the rest of the session's
+   * life: nothing rewrote it, and nothing revoked a session when its account's
+   * `mfa_grace_until` went by. Somebody who logged in on day 13 of their grace
+   * period was still `completa` on day 15 — and since the block further down
+   * keeps pushing the idle expiry back for as long as the session goes on being
+   * used, that session and any cookie stolen from it kept the whole ERP right up
+   * to the absolute ceiling: `SESSION_ABSOLUTE_DAYS` from the day it was
+   * **opened**, which for one opened inside the grace period lands a fortnight to
+   * a month past the deadline, on an account with no second factor. The only
+   * thing that closed the door was the next login, and nobody has a reason to log
+   * out. The state machine exists to impose a date; the date was imposed on
+   * nobody who was already inside.
+   *
+   * **This costs no query.** `currentUser` below already reads `usuarios` on
+   * every request for the role, so `mfa_grace_until` is one more column name in
+   * a projection that was being fetched anyway. Nothing here counts factors:
+   * see `estadoEfectivo` for why the reverse transition — an `onboarding`
+   * session that has since registered one — is deliberately not asked about,
+   * and what it would have cost every request in the API to ask.
+   *
+   * **And nothing is written back.** The row keeps what the login decided; this
+   * is recomputed from it on each request and discarded. Storing it would make
+   * it a second photograph, which is the defect being fixed.
+   */
+  const estado = estadoEfectivo(sesion.estado, usuario.mfa_grace_until, now);
+
+  /**
    * What this session may reach, on top of whether it exists.
    *
    * Until this block, `authenticate` answered one question — is this cookie a
@@ -161,8 +204,8 @@ async function authenticateBySession(
    * this one has not become.
    */
   const ruta = req.originalUrl;
-  if (!puedeAlcanzar(sesion.estado, ruta)) {
-    if (sesion.estado === "parcial") {
+  if (!puedeAlcanzar(estado, ruta)) {
+    if (estado === "parcial") {
       res.status(401).json({ message: SESION_INCOMPLETA });
       return;
     }
@@ -183,7 +226,9 @@ async function authenticateBySession(
   // requests: that would be two thousand UPDATEs and two thousand dead tuples
   // on a single row.
   const staleAfterMs = SESSION_TOUCH_THROTTLE_MINUTES * 60_000;
-  const now = new Date();
+  // `now` is the one read at the top of this function, before the state gate —
+  // not a second reading of the clock. The instant this request is judged
+  // against and the instant its session is renewed to have to be the same one.
   const createdAt = new Date(sesion.created_at);
   const slides = now.getTime() - new Date(sesion.last_used_at).getTime() > staleAfterMs;
 
@@ -270,7 +315,22 @@ async function authenticateBySession(
     id_rol: usuario.id_rol,
     id_sesion: sesion.id,
     expires_at: expiresAt,
-    estado: sesion.estado,
+    // The recomputed one, not `sesion.estado`. `requireStepUp` reads this field
+    // and refuses anything that is not `completa`, so the stored value would
+    // leave the step-up gate believing a session the check above has already
+    // decided is past its deadline.
+    //
+    // On today's mounts nothing reaches it either way: all eleven routes
+    // `requireStepUp` guards live under `/api/usuario`, `/api/rol` and
+    // `/api/permiso`, none of which the `onboarding` allowlist opens, so
+    // `puedeAlcanzar` refused them before this line ran and the gate never
+    // executes. So today this line is correctness the allowlist happens to be
+    // covering for — the kind that rots quietly. It stops being covered for in
+    // the very next task of this plan, which puts `requireStepUp` on `DELETE
+    // /api/auth/sessions/:id`: a gated write behind `/api/auth/sessions`, which
+    // `ONBOARDING_EXTRA` **does** open. From that commit on, this field is the
+    // only thing between that write and a session past its deadline.
+    estado,
     mfa_satisfied_at: sesion.mfa_satisfied_at,
   };
   next();
@@ -284,15 +344,21 @@ async function authenticateBySession(
  * with it — for up to a week. `findByPk` is paranoid, so an archived account
  * returns nothing and the session ends here.
  *
- * `pass_changed_at` rides along on the same read for the same reason and at
- * the same price: the row is being fetched anyway, so the column costs one
- * more name in `attributes` rather than a second query per request.
+ * `pass_changed_at` and `mfa_grace_until` ride along on the same read for the
+ * same reason and at the same price: the row is being fetched anyway, so each
+ * column costs one more name in `attributes` rather than a second query per
+ * request. That price is what makes the state recomputation above free —
+ * `authenticate` still makes exactly two reads per request, the session row and
+ * this one, and the fourteen-day deadline arrives on the second of them.
  */
-async function currentUser(
-  id: number,
-): Promise<{ id: number; id_rol: number; pass_changed_at: Date | undefined } | null> {
+async function currentUser(id: number): Promise<{
+  id: number;
+  id_rol: number;
+  pass_changed_at: Date | undefined;
+  mfa_grace_until: Date | null | undefined;
+} | null> {
   const found = await UsuarioModel.findByPk(id, {
-    attributes: ["id", "id_rol", "pass_changed_at"],
+    attributes: ["id", "id_rol", "pass_changed_at", "mfa_grace_until"],
   });
   if (!found) return null;
   return {
@@ -311,5 +377,13 @@ async function currentUser(
     // be read at all" test. The declaration is honest now and starts doing the
     // work the day the project's type gate goes strict.
     pass_changed_at: found.dataValues.pass_changed_at,
+    // `null` as well as `undefined`, and the two mean different things even
+    // though `estadoEfectivo` answers both the same way. NULL is the column's
+    // real, common value — every account has it until its first login after the
+    // deploy, and again after the documented reprieve. `undefined` is what a
+    // projection that stopped naming the column would produce, which is not a
+    // state the database can be in; the type says so rather than flattening
+    // both into one.
+    mfa_grace_until: found.dataValues.mfa_grace_until,
   };
 }

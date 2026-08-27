@@ -88,6 +88,21 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
  * What state a session opens in, and whether this login is the one that has to
  * start the fourteen-day clock.
  *
+ * **This answer is a photograph, and its twin is `estadoEfectivo` in
+ * `auth/sessionState.js`.** What this function decides is written into the
+ * session row once and never rewritten, so on its own it imposes the deadline
+ * only on people who log in after it. `authenticate` recomputes the part that
+ * can go stale — `completa` becoming `onboarding` when the deadline passes — on
+ * every request, from the account's own `mfa_grace_until`. Read them together:
+ * this one is the full decision and pays for the factor queries below; that one
+ * is the free half, and deliberately does not ask about factors at all.
+ *
+ * The consequence for whoever writes the endpoints that register a factor
+ * (plan 4B): **`estadoEfectivo` will not lift anybody out of `onboarding`.** It
+ * only narrows. A session that registers a factor mid-flight either has its row
+ * updated by the endpoint that did it, or stays in `onboarding` until the next
+ * login brings it back through here.
+ *
  * `graceUntil` is an instruction to the caller, not a fact about the account:
  * a date means "write this into `usuarios.mfa_grace_until`", `null` means
  * "leave that column alone". It is returned rather than written here because

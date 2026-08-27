@@ -170,7 +170,14 @@ beforeEach(() => {
   // the guard now refuses what it cannot read, a fixture without it would turn
   // every test in this file into a 401 about a password nobody changed. Far
   // enough back to sit below any `created_at` these tests build.
-  findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 2, pass_changed_at: new Date("2020-01-01") } });
+  //
+  // `mfa_grace_until` is `null` because that is what a real row carries for an
+  // account whose fourteen-day clock has not been started — which is every
+  // account until its first login after the deploy, and every account again
+  // after the reprieve. It is the value that leaves `estadoEfectivo` returning
+  // the stored state untouched, so no test in this file above notices the
+  // recomputation; the block at the bottom that does notice sets its own.
+  findByPk.mockResolvedValue({ dataValues: { id: 7, id_rol: 2, pass_changed_at: new Date("2020-01-01"), mfa_grace_until: null } });
   touchSession.mockResolvedValue(undefined);
   slidingExpiry.mockReturnValue(new Date(0));
   // Stands in for the real cap the same way `slidingExpiry` above stands in for
@@ -782,5 +789,162 @@ describe("when the backend itself is unwell", () => {
 
     expect(c.status).toBe(500);
     expect(c.next).not.toHaveBeenCalled();
+  });
+});
+
+describe("the deadline a live session cannot outrun", () => {
+  // `estadoEfectivo`'s own arithmetic belongs to `auth/sessionState.test.ts`,
+  // against the real function. What this block is responsible for is the wiring
+  // that was missing: that `authenticate` recomputes the state on **every**
+  // request from the account's own deadline, instead of believing the value the
+  // login wrote into the session row however many days ago.
+  //
+  // Every fixture here has `estado: "completa"` in the row, because that is the
+  // shape of the defect: on day 15 the row still says `completa`, and it is the
+  // account's `mfa_grace_until` — not the row — that has moved.
+  //
+  // **The `findByPk` mock at the top of this file applies the projection**, so
+  // these tests also stand as the tripwire for the column silently leaving
+  // `currentUser`'s `attributes`: dropping `"mfa_grace_until"` from that list
+  // and dropping it from the row are the same event here, and the deadline
+  // stops being read at all. That is the mutation that went unnoticed for
+  // `pass_changed_at` across the whole suite before this mock existed.
+
+  const AHORA = new Date("2026-01-15T12:00:00.000Z");
+
+  /** A live session row shaped like `findLiveSession`'s real return. */
+  const sesionCompleta = () => ({
+    id: "s1",
+    id_usuario: 7,
+    created_at: new Date(AHORA.getTime() - 1e6),
+    expires_at: new Date(AHORA.getTime() + 1e6),
+    last_used_at: new Date(AHORA.getTime()),
+    estado: "completa" as EstadoSesion,
+    mfa_satisfied_at: null,
+  });
+
+  /** The account row `currentUser` reads, with the deadline each test needs. */
+  const cuentaConPlazo = (mfa_grace_until: Date | null) => {
+    findByPk.mockResolvedValue({
+      dataValues: { id: 7, id_rol: 2, pass_changed_at: new Date("2020-01-01"), mfa_grace_until },
+    });
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(AHORA);
+    findLiveSession.mockResolvedValue(sesionCompleta());
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refuses the ERP to a complete session whose grace period has passed", async () => {
+    // The finding this task exists for. The row says `completa` — nothing has
+    // rewritten it and nothing has revoked the session — and the account's
+    // fourteen days ran out yesterday.
+    cuentaConPlazo(new Date(AHORA.getTime() - 86_400_000));
+    const c = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.status).toBe(403);
+    expect((c.res as unknown as { body: { message: string } }).body).toEqual({
+      message: MENSAJE_FACTOR_PENDIENTE,
+    });
+    expect(c.next).not.toHaveBeenCalled();
+  });
+
+  it("lets that same session through while the deadline is still ahead", async () => {
+    cuentaConPlazo(new Date(AHORA.getTime() + 86_400_000));
+    const c = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.next).toHaveBeenCalled();
+    expect(c.status).toBe(0);
+  });
+
+  it("recomputes on every request instead of trusting the row", async () => {
+    // The anti-snapshot assertion, and the one that would still fail if the
+    // recomputed answer were cached anywhere — written back into the session
+    // row, memoised, or read once per process. `findLiveSession` returns the
+    // identical `completa` row both times; the only thing that changes between
+    // the two requests is the clock crossing the account's deadline.
+    const limite = new Date(AHORA.getTime() + 60_000);
+    cuentaConPlazo(limite);
+
+    const antes = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(antes.req, antes.res, antes.next);
+    expect(antes.next).toHaveBeenCalled();
+
+    vi.setSystemTime(new Date(limite.getTime() + 1));
+
+    const despues = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(despues.req, despues.res, despues.next);
+
+    expect(despues.status).toBe(403);
+    expect(despues.next).not.toHaveBeenCalled();
+  });
+
+  it("puts the recomputed state on req.user, where the step-up gate reads it", async () => {
+    // `requireStepUp` refuses anything whose `estado` is not `completa`, and it
+    // reads that field off `req.user` — so handing it the stored value would
+    // leave the gated routes believing a session this middleware has already
+    // decided is past its deadline. The route here is one the `onboarding`
+    // allowlist opens, which is what lets the request reach `next()` at all and
+    // makes the field observable.
+    cuentaConPlazo(new Date(AHORA.getTime() - 86_400_000));
+    const c = call({ cookie: "t", originalUrl: "/api/auth/email/send" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.next).toHaveBeenCalled();
+    expect(c.req.user).toMatchObject({ estado: "onboarding" });
+  });
+
+  it("does not widen what a partial session reaches when the deadline passes", async () => {
+    // `onboarding` opens six doors `parcial` does not, so a recomputation that
+    // moved `parcial` on a passed deadline would hand a session that has not
+    // proved its factor the whole setup surface. The answer stays 401, which is
+    // `parcial`'s, not the 403 `onboarding` gets.
+    findLiveSession.mockResolvedValue({ ...sesionCompleta(), estado: "parcial" as EstadoSesion });
+    cuentaConPlazo(new Date(AHORA.getTime() - 86_400_000));
+
+    const erp = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(erp.req, erp.res, erp.next);
+    expect(erp.status).toBe(401);
+
+    const setup = call({ cookie: "t", originalUrl: "/api/auth/totp/setup" });
+    await authenticate(setup.req, setup.res, setup.next);
+    expect(setup.status).toBe(401);
+    expect(setup.next).not.toHaveBeenCalled();
+    expect(setup.req.user).toBeUndefined();
+  });
+
+  it("reads the deadline off the same account row it already fetches", async () => {
+    // The cost claim, checked rather than asserted in prose: one session read
+    // and one account read, the same two this middleware always made. Nothing
+    // asks a third time for the deadline.
+    cuentaConPlazo(new Date(AHORA.getTime() - 86_400_000));
+    const c = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(findLiveSession).toHaveBeenCalledTimes(1);
+    expect(findByPk).toHaveBeenCalledTimes(1);
+    const [, opciones] = findByPk.mock.calls[0] as [number, { attributes: string[] }];
+    expect(opciones.attributes).toContain("mfa_grace_until");
+  });
+
+  it("refuses before writing any header, the same as the other state refusals", async () => {
+    // A refused request must not carry `ROLE_HEADER` or
+    // `SESSION_EXPIRES_HEADER`: both are facts about an authenticated caller,
+    // and this one did not become one. The recomputation is placed inside the
+    // existing gate rather than after it precisely so this keeps holding.
+    cuentaConPlazo(new Date(AHORA.getTime() - 86_400_000));
+    const c = call({ cookie: "t", originalUrl: "/api/usuario" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.headers[ROLE_HEADER]).toBeUndefined();
+    expect(c.headers[SESSION_EXPIRES_HEADER]).toBeUndefined();
+    expect(c.cookieCalls).toHaveLength(0);
   });
 });

@@ -68,6 +68,16 @@ const { CURRENT_PASSWORD_REQUIRED_MESSAGE, CURRENT_PASSWORD_WRONG_MESSAGE } = aw
  */
 const usuarioRouter = (await import("./routes/usuario.routes.js")).default;
 const { CODIGO_STEP_UP } = await import("./middleware/requireStepUp.js");
+/**
+ * The sentence an `onboarding` session gets when it reaches for the ERP.
+ *
+ * Imported for the same reason as the two credential messages above, and it
+ * matters more here than anywhere else in this file: 403 is *also* what the
+ * permission gates answer, so a test that read only the number would pass
+ * against a refusal that had nothing to do with the grace period. The
+ * sentence is what makes it fail for the right reason.
+ */
+const { MENSAJE_FACTOR_PENDIENTE } = await import("./auth/sessionState.js");
 
 /**
  * The two response header names the frontend hard-codes, written out here.
@@ -2191,5 +2201,167 @@ describe("email verification, through the real stack", () => {
     ];
     expect(values.email_verified_at).toBeInstanceOf(Date);
     expect(options.where).toEqual({ id: YO });
+  });
+});
+
+describe("the fourteen-day deadline, against a session that was already open", () => {
+  // The hole this block exists to close, and the reason it is here rather than
+  // only in `middleware/authenticate.test.ts`.
+  //
+  // `estado` used to be decided once, at login, and written into the session
+  // row; `authenticate` read it from there for the rest of that session's life.
+  // Nothing rewrote it and nothing revoked sessions when `mfa_grace_until`
+  // passed. So somebody who logged in on day 13 of their grace period was still
+  // `completa` on day 15 — and because a session in use keeps having its idle
+  // expiry pushed back, that session, and a cookie stolen from it, kept the whole
+  // ERP right up to the absolute ceiling: `SESSION_ABSOLUTE_DAYS` from the day it
+  // was opened, which for one opened inside the grace period lands a fortnight to
+  // a month past the deadline, on an account with no factor at all. The state
+  // machine existed to impose a date, and the date was imposed on nobody who was
+  // already logged in.
+  //
+  // Every other test in this file runs on the shared fixture, whose session is
+  // `completa` — the one state where the gate in `authenticate` does nothing.
+  // So the 403 had never been exercised against the assembled application at
+  // all: not the mounted `authenticate`, not the real `sessionState.js`
+  // allowlist, not a real router. That is what this block does, in through
+  // `supertest` like the rest of the file.
+
+  /** Yesterday: this account's fourteen days are over. */
+  const VENCIDO = new Date(Date.now() - DIA_MS);
+  /** Tomorrow: still inside the grace period. */
+  const POR_VENCER = new Date(Date.now() + DIA_MS);
+
+  /**
+   * The account as `currentUser` reads it, with the deadline each test needs.
+   *
+   * Same shape as the shared fixture in `beforeEach`, plus `mfa_grace_until` —
+   * which the shared one leaves absent, i.e. "the clock never started", which
+   * is the state of every account in this file and the reason none of them
+   * notice this rule.
+   */
+  const conPlazo = (mfa_grace_until: Date | null) => {
+    usuarioFindByPk.mockResolvedValue({
+      dataValues: { id: YO, id_rol: MI_ROL, pass_changed_at: PASS_CAMBIADA, mfa_grace_until },
+    } as never);
+  };
+
+  it("refuses the ERP to a complete session whose grace period ran out mid-session", async () => {
+    // The session row is the shared fixture's: `estado: "completa"`, exactly as
+    // the login wrote it before the deadline arrived. Nothing has revoked it
+    // and nothing has rewritten it — which is the whole point. The refusal has
+    // to come from re-reading the account's deadline on this request.
+    //
+    // `GET /api/usuario/:id` with the caller's own id, deliberately: the
+    // permission gate on that route is `requireSelfOrPermission`, so it lets
+    // the caller through on their own row without needing a permission this
+    // file's `can` mock refuses. Before this rule existed the request answered
+    // **200 with the account's row** — an ERP read, served past the deadline.
+    conPlazo(VENCIDO);
+
+    const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+    expect(res.status).toBe(403);
+    // The sentence, not just the number: see `MENSAJE_FACTOR_PENDIENTE`'s
+    // import above. A 403 from the permission gate would carry a different one.
+    expect(res.body).toEqual({ message: MENSAJE_FACTOR_PENDIENTE });
+    // And it stopped inside `authenticate`, before the controller read
+    // anything: `searchUsuario`'s own `UsuarioModel.findOne` never ran.
+    expect(usuarioFindOne).not.toHaveBeenCalled();
+  });
+
+  it("gives it 403 and not 401, so the setup screen stays reachable", async () => {
+    // The distinction the frontend acts on. A 401 ends the session and sends
+    // somebody back to a login they have already passed — and passing it again
+    // lands them in the same place, which is a loop with no way out. A 403
+    // keeps them inside the application, where the screen that finishes their
+    // setup is. Asserted apart from the test above because the number is a
+    // contract with the client, not an implementation detail of the refusal.
+    conPlazo(VENCIDO);
+
+    const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+    expect(res.status).not.toBe(401);
+    expect(res.status).toBe(403);
+  });
+
+  it("leaves the doors that finish the setup open to that same session", async () => {
+    // The other half, and the reason the answer is a narrower state rather than
+    // a dead session: `ONBOARDING_EXTRA` in `sessionState.ts` opens
+    // `/api/auth/email`, and this request has to get past `authenticate` and
+    // reach the handler — which then answers 400 for the password it was not
+    // given, its own business. What matters here is that the 400 is the
+    // handler's and not `authenticate`'s 403: a rule that closed everything
+    // would leave the account with no way out of onboarding from inside the API.
+    conPlazo(VENCIDO);
+
+    const res = await request(app)
+      .post("/api/auth/email/send")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ email: "a@osefi.net" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("still lets the ERP through while the deadline is ahead", async () => {
+    // The guard against over-refusing. This rule may only narrow what a session
+    // reaches once the date has actually passed; a version that refused a grace
+    // period still running would lock out the entire company on the day it
+    // deployed.
+    conPlazo(POR_VENCER);
+
+    const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+    expect(res.status).toBe(200);
+  });
+
+  it("treats an account with no deadline stored as one whose clock never started", async () => {
+    // `mfa_grace_until` is NULL for every account until its first login after
+    // the deploy, and NULL again after the documented reprieve
+    // (`UPDATE usuarios SET mfa_grace_until = NULL`, see `estadoInicialDeSesion`).
+    // Reading NULL as "the deadline has passed" would 403 the whole payroll the
+    // moment this shipped, and would make that reprieve do the opposite of what
+    // it is written down as doing.
+    conPlazo(null);
+
+    const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+    expect(res.status).toBe(200);
+  });
+
+  it("costs the hot path no extra query to work this out", async () => {
+    // The measurement, pinned rather than asserted in a comment. `authenticate`
+    // makes exactly two reads per request — the session row and the account —
+    // and the deadline arrives on the second of them, as one more column in a
+    // projection that was already being fetched. Nothing here counts factors:
+    // `tieneAlgunFactor` reads two more tables, and putting it in front of
+    // every request in the ERP to catch a transition that cannot happen yet
+    // would be two more round trips where the fix needs none.
+    conPlazo(VENCIDO);
+
+    await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+    expect(usuarioFindByPk).toHaveBeenCalledTimes(1);
+    expect(sesionFindOne).toHaveBeenCalledTimes(1);
+    expect(passkeyCount).not.toHaveBeenCalled();
+    expect(totpCount).not.toHaveBeenCalled();
+    expect(codigoCount).not.toHaveBeenCalled();
+  });
+
+  it("does not rewrite the session row to say so", async () => {
+    // The trap in this task, stated as a test. Writing the recomputed state
+    // back into `sesiones.estado` would turn it into a second snapshot — the
+    // exact defect being fixed — and would put an UPDATE on the read path of
+    // every request in the ERP. The row keeps what the login decided; the
+    // verdict is computed from it, on every request.
+    //
+    // `last_used_at` is fresh in the shared fixture, so the throttled touch
+    // does not fire either: no UPDATE against `sesiones` at all.
+    conPlazo(VENCIDO);
+
+    await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+    expect(sesionUpdate).not.toHaveBeenCalled();
   });
 });
