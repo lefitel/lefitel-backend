@@ -92,10 +92,12 @@ async function authenticateBySession(
    * without its author knowing this rule exists. Explicit revocation is a
    * promise every caller has to keep; this is a fact of the data.
    *
-   * `<` and not `<=`: a session opened at the very instant of the stamp — the
-   * one the change itself hands back, if a change ever does — carries the same
-   * timestamp it is being measured against, and refusing it would log somebody
-   * out of the session they were just given.
+   * `<` and not `<=`, and this is no longer hypothetical: `updateUserPass`
+   * rotates the caller's session when they change their own password, so the
+   * row it hands back can carry the very timestamp it is being measured
+   * against. Refusing that one would log somebody out of the session they were
+   * given a millisecond earlier — the exact failure the rotation exists to
+   * avoid.
    *
    * The rows that existed before this shipped are not caught by it: the
    * migration back-fills `pass_changed_at` from each account's own `createdAt`

@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
 import { LOCKOUT_AFTER_FAILURES } from "../config/security.js";
+import type { EstadoSesion } from "../auth/sessionState.js";
 
 const findOne = vi.fn();
 const create = vi.fn();
@@ -41,6 +42,14 @@ vi.mock("../models/usuario.model.js", () => ({
 const revokeAllSessionsOf = vi.fn();
 vi.mock("../auth/sessionStore.js", () => ({
   revokeAllSessionsOf: (...args: unknown[]) => revokeAllSessionsOf(...args),
+}));
+// Changing your own password now rotates the session rather than sparing it,
+// so this controller opens one. Mocked whole rather than let through: the real
+// `issueSession` writes a row, reads the request's cookie and sets a header,
+// none of which is what this file is about — `issueSession.ts`'s own tests are.
+const issueSession = vi.fn();
+vi.mock("../auth/issueSession.js", () => ({
+  issueSession: (...args: unknown[]) => issueSession(...args),
 }));
 const transaction = vi.fn();
 vi.mock("../database/sequelize.js", () => ({
@@ -121,7 +130,7 @@ const SESION_POR_DEFECTO = "eeeeeeee-11cd-4111-8111-eeeeeeeeeeee";
  * `id_rol`.
  */
 function call(
-  user: { id: number; id_rol: number; id_sesion?: string } | undefined,
+  user: { id: number; id_rol: number; id_sesion?: string; estado?: EstadoSesion } | undefined,
   { params = {}, body = {} }: { params?: Record<string, unknown>; body?: unknown } = {},
 ) {
   const res = {
@@ -145,7 +154,18 @@ function call(
   };
   return {
     req: {
-      user: user && { id_sesion: SESION_POR_DEFECTO, expires_at: new Date("2027-03-14T00:00:00.000Z"), ...user },
+      // `estado` and `mfa_satisfied_at` are as required on `req.user` as `id` is
+      // (see `app.ts`), so they are filled in here rather than left to each
+      // test. `completa` is the only state that can reach these routes at all:
+      // `sessionState.ts`'s allowlist opens nothing outside `/api/auth/*` to
+      // `parcial` or `onboarding`.
+      user: user && {
+        id_sesion: SESION_POR_DEFECTO,
+        expires_at: new Date("2027-03-14T00:00:00.000Z"),
+        estado: "completa" as EstadoSesion,
+        mfa_satisfied_at: null,
+        ...user,
+      },
       params,
       body,
       ip: "::1",
@@ -208,6 +228,11 @@ beforeEach(() => {
   can.mockImplementation(async (rol: number) => rol === ADMIN);
   destroy.mockResolvedValue(1);
   revokeAllSessionsOf.mockResolvedValue(0);
+  // A default, so that the one test which makes the rotation fail cannot leak
+  // its rejection into the tests after it: `vi.clearAllMocks()` clears the
+  // recorded calls but keeps the implementation, and a leaked
+  // `mockRejectedValue` here surfaces three tests later as an unexplained 500.
+  issueSession.mockResolvedValue(undefined);
   // Runs the callback and hands it the stand-in, which is what lets the tests
   // below check that the archive and the revocation received the *same* one.
   transaction.mockImplementation(async (fn: (t: unknown) => Promise<unknown>) => fn(TRANSACCION));
@@ -730,7 +755,12 @@ describe("changing your own password proves it is you", () => {
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(written(stored.set)).toEqual({ pass: "hashed", failed_attempts: 0, locked_until: null });
+    expect(written(stored.set)).toEqual({
+      pass: "hashed",
+      failed_attempts: 0,
+      locked_until: null,
+      pass_changed_at: expect.any(Date),
+    });
     // Swap the comparison to `verifyOwnPassword` and this is what breaks: these
     // two assertions are the decision, since the shared door is mocked in this
     // file and would happily answer `ok` to a locked row it would refuse in
@@ -796,7 +826,12 @@ describe("lifting a lockout", () => {
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(written(stored.set)).toEqual({ pass: "hashed", failed_attempts: 0, locked_until: null });
+    expect(written(stored.set)).toEqual({
+      pass: "hashed",
+      failed_attempts: 0,
+      locked_until: null,
+      pass_changed_at: expect.any(Date),
+    });
   });
 
   it("comes off on its own through the unlock endpoint", async () => {
@@ -1131,25 +1166,26 @@ describe("username collisions", () => {
  * for up to thirty days. An administrator resetting the password of somebody who
  * has left the company was doing nothing whatsoever to the laptop in their bag.
  *
- * The belt over these braces is `usuarios.pass_changed_at`, and it exists now:
- * `authenticate` refuses any session opened before that stamp, whatever else is
- * true about it.
+ * The belt over these braces is `usuarios.pass_changed_at`: `authenticate`
+ * refuses any session opened before that stamp, whatever else is true about it.
  *
- * **This handler does not write the stamp yet**, and the exception below is
- * why — stamping it here would refuse the very session the exception spares,
- * so the exception would go on passing this test while being dead in fact. See
- * the comment on the transaction in `updateUserPass` for the decision that is
- * still open.
+ * **There used to be an exception here and there is not any more.** Your own
+ * session was spared, because otherwise changing your own password answered 200
+ * and then refused your very next request — which reads as the change having
+ * failed and invites doing it again. That problem is real and these tests still
+ * cover it; what changed is the answer. The session is now **rotated**: every
+ * row goes, including the caller's own, and a fresh one is opened in its place.
  *
- * The exception is the interesting half. Your own current session has to
- * survive, or changing your own password answers 200 and then refuses your very
- * next request, which reads as the change having failed and invites doing it
- * again.
+ * Sparing a row and stamping the column cannot both be true — the spared
+ * session is older than the stamp, so `authenticate` refuses it and the
+ * exception survives in the source while being dead in fact. Rotating is what
+ * lets the rule in `authenticate` keep having **no exceptions**, which is the
+ * whole reason it is worth having.
  */
 describe("a new password ends the old sessions", () => {
   const MI_SESION = "aaaaaaaa-11cd-4111-8111-aaaaaaaaaaaa";
 
-  it("ends the others and keeps the one it was changed from", async () => {
+  it("ends every session including its own, and opens a fresh one in its place", async () => {
     const stored = storedUser();
     findOne.mockResolvedValue(stored.model);
     revokeAllSessionsOf.mockResolvedValue(2);
@@ -1161,10 +1197,89 @@ describe("a new password ends the old sessions", () => {
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(revokeAllSessionsOf).toHaveBeenCalledWith(SELF, {
-      except: MI_SESION,
-      transaction: TRANSACCION,
-    });
+    // No `except` key at all, not a key holding `undefined` — the same
+    // assertion `password.controller.test.ts` makes for the same reason.
+    const [id, opciones] = revokeAllSessionsOf.mock.calls[0] as [number, Record<string, unknown>];
+    expect(id).toBe(SELF);
+    expect(opciones).not.toHaveProperty("except");
+    expect(issueSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("stamps pass_changed_at in the same write as the hash", async () => {
+    // Same write, so there is no instant in which the password is the new one
+    // and the stamp still names the old. This is the write that makes the
+    // rotation necessary — and the rotation is what makes it safe.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO, id_sesion: MI_SESION },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    const valores = written(stored.set);
+    expect(valores.pass).toBe("hashed");
+    expect(valores.pass_changed_at).toBeInstanceOf(Date);
+  });
+
+  it("opens the new session in the state the old one was in, not a fresh `completa`", async () => {
+    // Read from the session rather than written as a literal. Today only
+    // `completa` can reach this route — `sessionState.ts`'s allowlist opens
+    // nothing outside `/api/auth/*` to the other two — so a hardcoded
+    // "completa" would pass every other test in this file. If that allowlist
+    // ever widens, a literal here would be a silent promotion: somebody
+    // half-way through setting up their second factor changes their password
+    // and lands in a session that has finished.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO, id_sesion: MI_SESION, estado: "onboarding" },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(issueSession).toHaveBeenCalledWith(c.req, c.res, SELF, "onboarding");
+  });
+
+  it("answers 200, not 500, when the password changed but the new session could not be opened", async () => {
+    // The one failure this handler must never report as a failure. The password
+    // is already committed by this point; a 500 says "it did not work", and the
+    // retry sends the same `oldPass`, which no longer matches the stored hash —
+    // so the second attempt answers 401 "La contraseña actual suministrada no
+    // es correcta" about a password that did in fact change. Losing the cookie
+    // means logging in again with the new password, which works.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+    issueSession.mockRejectedValue(new Error("no se pudo abrir la sesión nueva"));
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO, id_sesion: MI_SESION },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+  });
+
+  it("rotates nothing of the administrator's own when they change somebody else's", async () => {
+    // The rotation is about the caller's credential, and an administrator
+    // resetting a leaver has not changed their own password. Opening a session
+    // for them here would be minting a credential nobody asked for; opening one
+    // for the *target* would be handing the administrator that person's
+    // session.
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN, id_sesion: MI_SESION },
+      { params: { id: String(OTHER) }, body: { pass: "una-clave-de-prueba" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(issueSession).not.toHaveBeenCalled();
   });
 
   it("saves the hash and revokes inside one transaction", async () => {
@@ -1220,13 +1335,12 @@ describe("a new password ends the old sessions", () => {
     // session of the person being reset, chosen by an id belonging to the
     // administrator doing the resetting.
     //
-    // The only remaining way `undefined` reaches the store as "spare nothing",
-    // and therefore the only cover left for that branch — see
-    // `sessionStore.test.ts` for why writing the check the obvious way would
-    // revoke nothing at all. There used to be a second: a request on the old
-    // bearer token had no session row, so a caller changing their *own*
-    // password could arrive with `id_sesion` undefined too. That caller cannot
-    // exist now, and the test for it is gone.
+    // This handler no longer passes `except` on any path — the caller's own
+    // session is rotated rather than spared — so what used to be two branches
+    // here is one call with no exception in it. The `except: undefined` route
+    // into `revokeAllSessionsOf` is still covered, by `password.controller.ts`
+    // and by `sessionStore.test.ts` directly; see the latter for why writing
+    // that check the obvious way would revoke nothing at all.
     const stored = storedUser();
     findOne.mockResolvedValue(stored.model);
 
@@ -1237,10 +1351,10 @@ describe("a new password ends the old sessions", () => {
     await updateUserPass(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(revokeAllSessionsOf).toHaveBeenCalledWith(OTHER, {
-      except: undefined,
-      transaction: TRANSACCION,
-    });
+    const [id, opciones] = revokeAllSessionsOf.mock.calls[0] as [number, Record<string, unknown>];
+    expect(id).toBe(OTHER);
+    expect(opciones).not.toHaveProperty("except");
+    expect(opciones.transaction).toBe(TRANSACCION);
   });
 
   it("ends nothing when the password was refused", async () => {

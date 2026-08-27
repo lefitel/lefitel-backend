@@ -4,6 +4,7 @@ import { sequelize } from "../database/sequelize.js";
 import { RolModel } from "../models/rol.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
+import { issueSession } from "../auth/issueSession.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
 import bcryptjs from "bcryptjs";
 import { deleteImageFile } from "../utils/fileUtils.js";
@@ -665,7 +666,15 @@ export async function updateUserPass(req: Request, res: Response) {
      * "Usuario o contraseña incorrectos" for up to fifteen minutes, with neither
      * of them able to tell that apart from having heard it wrong.
      */
-    TempUsuario.set({ pass: hashedPass, failed_attempts: 0, locked_until: null });
+    TempUsuario.set({
+      pass: hashedPass,
+      failed_attempts: 0,
+      locked_until: null,
+      // The stamp `authenticate` measures every session against, in the same
+      // `set` as the hash so there is no ordering in which the password is the
+      // new one and the stamp still names the old.
+      pass_changed_at: new Date(),
+    });
 
     const isSelf = loggedUser.id === Number(id);
     /**
@@ -675,37 +684,35 @@ export async function updateUserPass(req: Request, res: Response) {
      * the old one — left every browser that knew it logged in, for up to thirty
      * days. An administrator resetting the password of a leaver was doing
      * nothing whatsoever to the laptop in their bag. The belt over these
-     * braces is `usuarios.pass_changed_at`: the column exists now, and
-     * `authenticate` refuses any session opened before it — so an endpoint
-     * that changes a password and forgets to revoke still cannot leave a live
+     * braces is `usuarios.pass_changed_at`, stamped in the `set` above:
+     * `authenticate` refuses any session opened before it, so an endpoint that
+     * changes a password and forgets to revoke still cannot leave a live
      * session behind it.
      *
-     * **This handler does not write that column yet, and the exception below
-     * is why.** Stamping it here would refuse the very session the exception
-     * spares — the session was opened on Tuesday, the stamp says Thursday,
-     * and `authenticate` reads Tuesday < Thursday and answers 401 — so the
-     * exception would survive in the source and be dead in fact. `/auth/
-     * password/reset` writes the stamp today because it revokes every session
-     * with no exception at all and opens none, so there is nothing there for
-     * the stamp to contradict. The two are reconciled by a decision that has
-     * not been taken yet; whoever takes it writes the stamp here in the same
-     * change.
+     * **Nothing is spared here, and that is a change.** This used to pass
+     * `except: isSelf ? loggedUser.id_sesion : undefined`, keeping the caller's
+     * own session alive — because otherwise changing your own password answers
+     * 200 and then refuses your very next request, which reads as the change
+     * having failed and invites doing it again. That reasoning was right and
+     * the problem it names is real; what replaced it is the rotation below.
      *
-     * One exception, and only one: your own current session survives. Without
-     * it, changing your own password answers 200 and then refuses your very
-     * next request, which reads as the change having failed and invites doing it
-     * again. `except` is only passed when the account being changed is the
-     * caller's own — an administrator resetting somebody else must not spare
-     * anything, and their own session id would not be among that person's rows
-     * anyway.
+     * Sparing a row and stamping the column cannot both be true. The spared
+     * session was opened on Tuesday, the stamp says Thursday, and
+     * `authenticate` reads Tuesday < Thursday and answers 401 — so the
+     * exception would have gone on being written here while being dead in
+     * fact, and no test of it would have noticed, because the thing killing it
+     * lives in another file.
      *
-     * `undefined` is what goes in whenever the account being changed is not the
-     * caller's own, and `revokeAllSessionsOf` reads that as "spare nothing" —
-     * see the truthiness note there for why writing that check the obvious way
-     * would silently revoke nothing at all. The caller's own `id_sesion` is
-     * always a real id: every authenticated request has a session row behind it
-     * since the old bearer token was retired, so the ternary above is the only
-     * thing that can produce the `undefined`.
+     * Of the ways to reconcile the two, rotating is the only one that does not
+     * buy the exception back in some other currency. Moving the spared
+     * session's `created_at` forward would corrupt the anchor of the thirty-day
+     * ceiling — change your password every twenty-nine days and the session
+     * never dies, which is a worse hole than the one being closed. A column
+     * recording that one session had acknowledged the change would be a column
+     * whose only job is to punch a hole in the rule this whole mechanism is.
+     * Simply logging the caller out is the UX failure the paragraph above
+     * describes. **The rule in `authenticate` is worth having precisely because
+     * it has no exceptions**, and rotation is what keeps that true.
      *
      * Both writes in one transaction, for the same reason `deleteUsuario` uses
      * one, and the failure it prevents is nastier than it looks. Saved outside a
@@ -722,11 +729,49 @@ export async function updateUserPass(req: Request, res: Response) {
      */
     const revocadas = await sequelize.transaction(async (transaction) => {
       await TempUsuario.save({ transaction });
-      return revokeAllSessionsOf(Number(id), {
-        except: isSelf ? loggedUser.id_sesion : undefined,
-        transaction,
-      });
+      return revokeAllSessionsOf(Number(id), { transaction });
     });
+
+    /**
+     * The replacement credential, for the caller only, and never at the cost of
+     * the answer.
+     *
+     * **Outside the transaction on purpose.** `createSession` takes no
+     * transaction, and the atomicity that matters is the pair above — a
+     * password changed with its old sessions still alive is the hole; a
+     * password changed with no new cookie is somebody logging in again.
+     *
+     * **The catch is load-bearing and must not become a rethrow.** By this line
+     * the password is committed. Answering 500 says "it did not work", and the
+     * retry sends the same `oldPass` against a hash that has already changed —
+     * so the second attempt answers "La contraseña actual suministrada no es
+     * correcta" about a change that succeeded. Swallowing this costs the caller
+     * their cookie and nothing else: they log in again, with the new password,
+     * and it works.
+     *
+     * **`mfa_satisfied_at` does not come across, and that is the point rather
+     * than an oversight to tidy up later.** The new row starts with no step-up
+     * proof, so a factor proved a minute ago has to be proved again for the
+     * next protected write. Changing a password is not evidence of possessing a
+     * second factor — it is evidence of knowing the password, which is what the
+     * new session has proved and all it has proved. Carrying the old proof
+     * across would mean a stolen session that also knows the password could
+     * refresh itself into a step-up-authorised session indefinitely, without
+     * ever touching a factor.
+     *
+     * `estado` **is** carried across, from the session making the request.
+     * Today only `completa` can reach this route at all — `sessionState.ts`
+     * opens nothing outside `/api/auth/*` to the other two — so a literal
+     * `"completa"` would behave identically and would be a silent promotion the
+     * day that allowlist widens.
+     */
+    if (isSelf) {
+      try {
+        await issueSession(req, res, loggedUser.id, loggedUser.estado);
+      } catch (err) {
+        logAction({ id_usuario: loggedUser.id, action: "SESSION_ROTATION_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: "Cambió su contraseña, pero no se pudo abrir la sesión nueva", metadata: { error: err instanceof Error ? err.message : String(err) }, severity: 'warning', ip_address: req.ip ?? null });
+      }
+    }
 
     logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf, sesiones_revocadas: revocadas }, severity: 'critical', ip_address: req.ip ?? null });
     res.status(200).json(withoutPass(TempUsuario));
