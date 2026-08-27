@@ -343,6 +343,35 @@ export const me = handler("me", async (req: Request, res: Response) => {
     usuario,
     permisos: await permissionsFor(usuario.id_rol),
     expires_at: caller.expires_at,
+    /**
+     * Which of the three states this session is in, so the client can say why.
+     *
+     * **Without this field, the day the grace period runs out is
+     * undebuggable.** The login answers 200, the browser navigates into the
+     * ERP, and from then on `authenticate` refuses everything outside the
+     * allowlist. A 200 followed by 403s with no distinguishable cause is
+     * indistinguishable — to the person, to the front end, and to whoever
+     * picks up the phone — from a server that has broken or a role whose
+     * permissions were changed. And this is not a failure that might happen:
+     * `estadoInicialDeSesion` guarantees every account arrives at it,
+     * `MFA_GRACE_DAYS` after its own first login. A datum that makes a
+     * guaranteed failure legible is the minimum that makes it supportable.
+     *
+     * Read off `req.user`, where `authenticate` already put it, exactly as
+     * `expires_at` above is. **No extra query**, and nothing added to the
+     * `attributes` list: this is the session's state, not a column of
+     * `usuarios`.
+     *
+     * **`estado` and nothing else.** Not `mfa_grace_until`, not the factor
+     * inventory. The state of your own session is something you are already
+     * living — it decides what you may reach this second, so publishing it to
+     * its owner reveals nothing they cannot discover by clicking. The grace
+     * deadline is scheduling data the client has no use for yet, and it was
+     * deliberately kept out of the login body for that reason (see
+     * `ResultadoCredenciales` in `auth/credentials.ts`); the same reasoning
+     * keeps it out of here.
+     */
+    estado: caller.estado,
   });
 });
 

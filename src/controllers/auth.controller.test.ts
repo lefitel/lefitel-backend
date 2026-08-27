@@ -213,6 +213,22 @@ function call(
  */
 const YO_CON_SESION = { id: YO, id_rol: MI_ROL, id_sesion: MI_SESION, expires_at: CADUCA };
 
+/**
+ * The same caller, with the two session fields `app.ts` declares required.
+ *
+ * `YO_CON_SESION` above predates them and is short by both, which is why the
+ * tests that use it are among the type errors this suite already carries. It is
+ * left exactly as it is — sweeping that is not this task's job and would put a
+ * hundred unrelated lines in one commit — but nothing added from here on should
+ * make the count worse, so anything new builds on this instead.
+ *
+ * `mfa_satisfied_at: null` is the honest value for a session that opened on a
+ * password alone, which is every session this plan can produce.
+ */
+function sesionCompleta(overrides: Partial<NonNullable<Request["user"]>> = {}) {
+  return { ...YO_CON_SESION, estado: "completa" as const, mfa_satisfied_at: null, ...overrides };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   // `clearAllMocks` forgets the calls, not the resolved values, so a test that
@@ -449,6 +465,61 @@ describe("GET /api/auth/me", () => {
     await me(c.req, c.res);
 
     expect(c.status).toBe(401);
+  });
+
+  it("tells the caller which state their session is in", async () => {
+    // The field the day-15 failure is unsupportable without. When the grace
+    // period runs out the login still answers 200 and everything afterwards
+    // is a 403; without this, the front end cannot tell that apart from a
+    // broken server or a permissions change, and neither can support.
+    //
+    // Driven from `req.user` with a value the fixture does not otherwise use,
+    // so a handler that hardcodes "completa" — or that recomputes the state
+    // from the account instead of reading the session — fails here.
+    const c = call(sesionCompleta({ estado: "onboarding" }));
+    await me(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.payload?.estado).toBe("onboarding");
+  });
+
+  it("reads the state off this session rather than assuming the usual one", async () => {
+    // The second half of the same guard: `completa` is what almost every
+    // session is, so a hardcoded literal would pass the common case for ever.
+    // Both non-default states are pinned so that only reading `req.user`
+    // satisfies both.
+    for (const estado of ["parcial", "onboarding", "completa"] as const) {
+      const c = call(sesionCompleta({ estado }));
+      await me(c.req, c.res);
+      expect(c.payload?.estado, estado).toBe(estado);
+    }
+  });
+
+  it("publishes the four things it means to and not whatever gets threaded through", async () => {
+    // This body is curated the same way `usuario` inside it is, and until now
+    // nothing said so: the exhaustive assertion in this file was on the
+    // *column list* handed to `findByPk`, which says nothing about what the
+    // envelope around it carries. `estado` was added here on purpose; the
+    // thing this stops is the next field arriving by accident.
+    //
+    // `mfa_grace_until` is the one worth naming. It travels beside `usuario`
+    // out of `verifyCredentials` and was deliberately kept out of the login
+    // body — scheduling data the client has no use for. A spread here, or a
+    // second field copied in "while we are here", would publish it from this
+    // endpoint instead, and nothing else in the suite would notice.
+    //
+    // **Scoped to the envelope on purpose.** What goes *inside* `usuario` is
+    // guarded by the `attributes` list, pinned by "asks only for the fields it
+    // publishes" above, and it cannot be re-checked from here: `findByPk` is a
+    // mock that returns whatever the fixture says regardless of `attributes`,
+    // so asserting on the contents of `usuario` would be asserting about the
+    // mock and would pass or fail for reasons the handler does not control.
+    const c = call(sesionCompleta());
+    await me(c.req, c.res);
+
+    expect(Object.keys(c.payload ?? {}).sort()).toEqual([
+      "estado", "expires_at", "permisos", "usuario",
+    ]);
   });
 
   it("answers with this session's own expiry, not one computed in the handler", async () => {
