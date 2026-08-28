@@ -34,7 +34,16 @@ function probe(id: number | undefined = USUARIO) {
   const app = express();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     if (id !== undefined) {
-      req.user = { id, id_rol: 1, id_sesion: "s", expires_at: new Date() };
+      // The limiter only reads `id`; the two session fields are here because
+      // `req.user` requires them, with the values a live session has today.
+      req.user = {
+        id,
+        id_rol: 1,
+        id_sesion: "s",
+        expires_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+      };
     }
     next();
   });
@@ -89,9 +98,19 @@ describe("the upload budget", () => {
     const sinSesion = { ip: "203.0.113.7" } as Request;
     expect(uploadBucketKey(sinSesion)).toBe("upload:ip:203.0.113.7");
 
+    // Every field `req.user` declares, though the key generator reads `id`
+    // alone: `as Request` is a cast, so a fixture short of the session fields
+    // compiles and `npm run typecheck` stays quiet about it.
     const conSesion = {
       ip: "203.0.113.7",
-      user: { id: USUARIO, id_rol: 1, id_sesion: "s", expires_at: new Date() },
+      user: {
+        id: USUARIO,
+        id_rol: 1,
+        id_sesion: "s",
+        expires_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+      },
     } as Request;
     expect(uploadBucketKey(conSesion)).toBe(CLAVE);
   });

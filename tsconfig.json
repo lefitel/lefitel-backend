@@ -1,3 +1,16 @@
+// 🔴 The project's type check is `npm run typecheck`, never `npx tsc --noEmit`.
+//
+// This config is the build config, and the `exclude` at the bottom leaves every
+// `*.test.ts` out on purpose so `npm run build` does not emit them into dist/.
+// `npx tsc --noEmit` resolves to this file, so it checks the source and none of
+// the tests — and answers "no errors" while the tests do not compile. That is
+// not a hypothetical: six tasks of plan 4A ran the bare command, reported clean
+// types truthfully, and left 56 `TS2739` errors sitting in the session fixtures
+// of five test files, because the tests were never in scope.
+//
+// `npm run typecheck` runs tsc twice, over this config and over
+// `tsconfig.test.json`, which is the half that sees the tests. Run that one
+// before calling a task done.
 {
   "compilerOptions": {
     "target": "ES2022",

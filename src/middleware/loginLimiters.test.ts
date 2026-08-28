@@ -308,9 +308,28 @@ describe("what each bucket spends", () => {
  * where `authenticate` put it — rather than from anything a caller writes.
  */
 describe("the key the confirmation bucket counts against", () => {
-  /** As `authenticate` leaves it: `req.user` filled in, all four fields. */
+  /**
+   * As `authenticate` leaves it: `req.user` filled in, all six fields.
+   *
+   * The last two are here for honesty rather than for the key generator, which
+   * reads `id` alone. The `as unknown as Request` below is a cast, so a fixture
+   * short of them compiles — which means a green `npm run typecheck` says
+   * nothing about this line, and the only thing keeping it a caller
+   * `authenticate` can really produce is writing it out.
+   */
   const conSesion = (id: number, body?: unknown) =>
-    ({ ip: DESDE, body, user: { id, id_rol: 3, id_sesion: "s", expires_at: new Date() } }) as unknown as Request;
+    ({
+      ip: DESDE,
+      body,
+      user: {
+        id,
+        id_rol: 3,
+        id_sesion: "s",
+        expires_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+      },
+    }) as unknown as Request;
 
   it("names the account, and keeps two accounts apart", () => {
     expect(passwordConfirmKey(conSesion(7))).toBe("pc:7");
@@ -376,7 +395,17 @@ describe("the key the confirmation bucket counts against", () => {
  */
 describe("what the confirmation bucket spends", () => {
   const CLAVE_CUENTA = "pc:41";
-  const conSesion = { id: 41, id_rol: 3, id_sesion: "s", expires_at: new Date() };
+  // `estado`/`mfa_satisfied_at` are what a real session carries today; the
+  // limiter only reads `id`, so they are here to match `req.user`'s declared
+  // shape, not because this test is about either of them.
+  const conSesion = {
+    id: 41,
+    id_rol: 3,
+    id_sesion: "s",
+    expires_at: new Date(),
+    estado: "completa" as const,
+    mfa_satisfied_at: null,
+  };
 
   /**
    * A one-route app that carries a `req.user` the way `authenticate` would, so

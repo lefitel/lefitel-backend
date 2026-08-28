@@ -146,7 +146,24 @@ function call(
   };
 }
 
-const YO_CON_SESION = { id: A, id_rol: 2, id_sesion: "aaaaaaaa-11cd-4111-8111-aaaaaaaaaaaa", expires_at: new Date() };
+/**
+ * The caller `authenticate` hands these handlers, with every field it declares
+ * required — the last two included, even though nothing in `email.controller.ts`
+ * reads either. A fixture short of them is a caller the middleware cannot
+ * produce, and this file has no business being the place that finds out what a
+ * handler does with one.
+ *
+ * `"completa"` and `null` are what a session opened on a password alone carries,
+ * which is every session there is today.
+ */
+const YO_CON_SESION = {
+  id: A,
+  id_rol: 2,
+  id_sesion: "aaaaaaaa-11cd-4111-8111-aaaaaaaaaaaa",
+  expires_at: new Date(),
+  estado: "completa" as const,
+  mfa_satisfied_at: null,
+};
 
 /** The current password, standing in for whatever the caller actually typed. */
 const PASS = "una-clave-de-prueba";
@@ -580,7 +597,13 @@ describe("POST /auth/email/verify", () => {
       // task-4-report.md for the pasted failure.
       consumirToken.mockResolvedValue({ id_usuario: A, email_destino: "a@osefi.net" });
       findByPk.mockResolvedValue(usuarioRow({ id: A, email: "a@osefi.net" }));
-      const callerEsB = { id: B, id_rol: 2, id_sesion: "bbbbbbbb-22de-4222-8222-bbbbbbbbbbbb", expires_at: new Date() };
+      // The same kind of caller as `YO_CON_SESION`, differing only in who it
+      // is: another account, on another session row.
+      const callerEsB = {
+        ...YO_CON_SESION,
+        id: B,
+        id_sesion: "bbbbbbbb-22de-4222-8222-bbbbbbbbbbbb",
+      };
       const c = call(callerEsB, { token: "el-token-de-A" });
       await verifyEmail(c.req, c.res);
 

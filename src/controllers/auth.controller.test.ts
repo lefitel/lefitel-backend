@@ -208,7 +208,7 @@ function call(
 }
 
 /**
- * The only shape of caller there is: `authenticate` fills all four fields in or
+ * The only shape of caller there is: `authenticate` fills all six fields in or
  * answers 401.
  *
  * `expires_at` is on it now, and was not before. It could be left off while the
@@ -216,23 +216,35 @@ function call(
  * `req.user` the middleware cannot actually produce — harmless for the handlers
  * that ignore the field, and the reason `me` had a test for an answer no caller
  * could ever receive.
+ *
+ * `estado` and `mfa_satisfied_at` are on it for the same reason, and arrived
+ * the same way: required in `app.ts` since the session state landed, and short
+ * here until the whole suite was swept. Leaving them off meant every `me` test
+ * built on this fixture was answering with `estado: undefined` — a value
+ * `authenticate` cannot produce, copied verbatim into the response body, and
+ * one that happens to fall on the withholding side of the permission-matrix
+ * gate. `"completa"` and `null` are what a session that opened on a password
+ * alone really carries, which is every session this plan can produce.
  */
-const YO_CON_SESION = { id: YO, id_rol: MI_ROL, id_sesion: MI_SESION, expires_at: CADUCA };
+const YO_CON_SESION = {
+  id: YO,
+  id_rol: MI_ROL,
+  id_sesion: MI_SESION,
+  expires_at: CADUCA,
+  estado: "completa" as const,
+  mfa_satisfied_at: null,
+};
 
 /**
- * The same caller, with the two session fields `app.ts` declares required.
+ * The same caller with a field or two moved, for the tests whose subject is one
+ * of them — another role, another expiry, another session state.
  *
- * `YO_CON_SESION` above predates them and is short by both, which is why the
- * tests that use it are among the type errors this suite already carries. It is
- * left exactly as it is — sweeping that is not this task's job and would put a
- * hundred unrelated lines in one commit — but nothing added from here on should
- * make the count worse, so anything new builds on this instead.
- *
- * `mfa_satisfied_at: null` is the honest value for a session that opened on a
- * password alone, which is every session this plan can produce.
+ * The overrides are typed against `Request["user"]` rather than left open, so
+ * one that misspells a field or invents a fourth state fails here instead of
+ * quietly building a caller `authenticate` cannot produce.
  */
 function sesionCompleta(overrides: Partial<NonNullable<Request["user"]>> = {}) {
-  return { ...YO_CON_SESION, estado: "completa" as const, mfa_satisfied_at: null, ...overrides };
+  return { ...YO_CON_SESION, ...overrides };
 }
 
 beforeEach(() => {
@@ -496,12 +508,11 @@ describe("GET /api/auth/me", () => {
     // `id_rol: 99` is the credential's claim and 1 is the database's, so only
     // reading the database passes.
     //
-    // Built on `sesionCompleta` since the matrix stopped being published to
-    // every state: the caller this test needs is one that gets a matrix at
-    // all, and `estado` is what decides that now. Spread over `YO_CON_SESION`
-    // — which predates `estado` and carries none — this asserted about a
-    // caller `authenticate` cannot produce, and the assertion below stopped
-    // being about the role at all.
+    // The caller has to be `completa`, which is what the fixture carries, since
+    // the matrix stopped being published to every state: `permissionsFor` is not
+    // called at all for any other one, so under any other state the last
+    // assertion below would stop being about the role and start being about the
+    // gate.
     findByPk.mockResolvedValue(storedUser({ id_rol: 1 }));
     const c = call(sesionCompleta({ id_rol: 99 }));
     await me(c.req, c.res);
@@ -650,7 +661,7 @@ describe("GET /api/auth/me", () => {
     // handler which starts inventing its own date (`Date.now() + 7 days`,
     // the cookie's own sliding expiry, anything computed) cannot happen to
     // match it. Only reading `req.user.expires_at` verbatim passes.
-    const c = call({ id: YO, id_rol: MI_ROL, id_sesion: MI_SESION, expires_at: SESION_EXPIRA });
+    const c = call(sesionCompleta({ expires_at: SESION_EXPIRA }));
     await me(c.req, c.res);
 
     expect(c.status).toBe(200);

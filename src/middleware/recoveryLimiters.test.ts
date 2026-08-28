@@ -91,7 +91,16 @@ function appConSesion(limiter: RateLimitRequestHandler, status: number, id: numb
   bare.post(
     "/",
     (req, _res, next) => {
-      req.user = { id, id_rol: 3, id_sesion: "s", expires_at: new Date() };
+      // The limiter only reads `id`; the two session fields are here because
+      // `req.user` requires them, with the values a live session has today.
+      req.user = {
+        id,
+        id_rol: 3,
+        id_sesion: "s",
+        expires_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+      };
       next();
     },
     limiter,
