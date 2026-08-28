@@ -21,7 +21,6 @@
 export type { EstadoSesion } from "../interfaces/index.js";
 import type { EstadoSesion } from "../interfaces/index.js";
 
-export const ESTADOS_SESION: readonly EstadoSesion[] = ["parcial", "onboarding", "completa"];
 
 /** What a session with a password behind it and no factor may reach. */
 const PARCIAL: readonly string[] = [
@@ -41,12 +40,35 @@ const ONBOARDING_EXTRA: readonly string[] = [
   "/api/auth/recovery-codes",
   "/api/auth/sessions",
 ];
-
 const PERMITIDAS: Record<EstadoSesion, readonly string[] | "todo"> = {
   parcial: PARCIAL,
   onboarding: [...PARCIAL, ...ONBOARDING_EXTRA],
   completa: "todo",
 };
+
+/**
+ * Every state there is — **derived from `PERMITIDAS`, not written out again.**
+ *
+ * This used to be a hand-written literal typed `readonly EstadoSesion[]`, and
+ * that type accepts being *incomplete*: adding a fourth member to
+ * `EstadoSesion` compiles perfectly well without anybody touching the list, and
+ * then everything iterating it skips the new state in silence. The victim is
+ * the containment test in `sessionState.test.ts`, whose entire job is to go red
+ * when a new state breaks the narrowing invariant — it would have kept passing
+ * while the property it names was already false, which is the exact failure
+ * that test was rewritten to stop having.
+ *
+ * `PERMITIDAS` is a `Record<EstadoSesion, …>`, so a fourth state is a
+ * compile error *there*, at the one place that must be updated anyway. Taking
+ * the keys from it means the list cannot go stale on its own.
+ *
+ * The `as EstadoSesion[]` is on `Object.keys`, which TypeScript types as
+ * `string[]` for sound reasons that do not apply to an object literal declared
+ * two lines up. It buys a compile-time guarantee rather than hiding one: the
+ * alternative is the literal that was here before, which had no cast and no
+ * guarantee either.
+ */
+export const ESTADOS_SESION: readonly EstadoSesion[] = Object.keys(PERMITIDAS) as EstadoSesion[];
 
 /**
  * Segment-aware prefix match. `/api/auth/me` opens `/api/auth/me` and
@@ -121,6 +143,20 @@ export function puedeAlcanzar(estado: EstadoSesion, ruta: string): boolean {
  *    only have been promoted there by something that verified a factor. **This
  *    clause needs nothing at all from 4B**, which is the point of it: it holds
  *    even if the endpoint that promotes the session writes nothing but `estado`.
+ *
+ *    **It is not hermetic, and the gap is written down rather than coded
+ *    around.** `estadoInicialDeSesion` is judged against an `ahora` read in the
+ *    controller, while `created_at` is a *second* reading of the clock, taken
+ *    inside `createSession` when the row is inserted. A login that begins a
+ *    hair before the deadline instant and inserts a hair after it comes out
+ *    `completa` with `created_at >= limite`, and this clause then exempts that
+ *    session for the rest of its life. The window is the microseconds between
+ *    those two reads, and aiming at it would mean knowing the account's
+ *    deadline to the millisecond, which nothing exposes — `/auth/me` publishes
+ *    `estado` and deliberately not `mfa_grace_until`. Closing it would mean
+ *    threading a single clock through the login for a gap nobody can aim at;
+ *    the honest trade is to leave it and say so, so that nobody later reads
+ *    this clause as a proof.
  * 3. **The row carries evidence that a factor was involved.**
  *    `mfa_satisfied_at` is stamped only by a live proof of a factor, and
  *    `mfa_source` names which kind — including `dispositivo`, a remembered
@@ -232,7 +268,17 @@ export function estadoEfectivo(
   // window on either — see the docstring for why borrowing `requireStepUp`'s
   // ten minutes here would throw people out of the session they had just
   // authenticated.
-  if (sesion.mfa_satisfied_at !== null || sesion.mfa_source !== null) return guardado;
+  //
+  // `!= null` and **not** `!== null`, the same loose comparison its two
+  // siblings above and below use, and for the same reason pointing the same
+  // way: a column that is *missing* rather than NULL must read as "no
+  // evidence" and let the row narrow. Written strictly, an absent column reads
+  // as evidence and switches this whole rule off — failing open, on the one
+  // check here whose job is to decide whether the rule applies at all.
+  // `strictNullChecks` is off in this project, so nothing stops such a row
+  // being built, and the shared fixture in `app.auth.test.ts` already omits
+  // `mfa_source`.
+  if (sesion.mfa_satisfied_at != null || sesion.mfa_source != null) return guardado;
 
   // Clause 2: opened after the deadline had already gone by, so its `completa`
   // cannot have come from a login that found grace left.

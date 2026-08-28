@@ -201,6 +201,35 @@ describe("the state actually in force, once a session has been open a while", ()
       expect(estadoEfectivo(sesion(), VENCIDO, AHORA)).toBe("onboarding");
     });
 
+    it("counts an absent evidence column as no evidence, rather than as evidence", () => {
+      // **The direction these two comparisons fail in.** Written strictly
+      // (`!== null`), a column that is *missing* rather than null reads as
+      // "there is evidence here" and switches the whole rule off — the one
+      // failure mode this function must not have, and the opposite of what its
+      // two siblings do: `mfa_grace_until` and `created_at` are both compared
+      // with `== null`, so an absent value narrows. `requireStepUp` leans the
+      // same way, where an undefined stamp gives `NaN <= x`, i.e. false, i.e.
+      // refuse.
+      //
+      // `strictNullChecks` is off in this project, so `undefined` is assignable
+      // to `Date | null` and the compiler will not stop anybody producing this
+      // row. The reachable way in is a projection that stops naming a column,
+      // which `sessionStore.test.ts` pins today — but the shared fixture in
+      // `app.auth.test.ts` already omits `mfa_source`, and is saved only by
+      // omitting `mfa_grace_until` too. A rule that switches itself off when a
+      // fixture is a field short is not a rule.
+      const sinSource = { ...sesion(), mfa_source: undefined };
+      const sinSello = { ...sesion(), mfa_satisfied_at: undefined };
+      const sinNinguna = {
+        estado: "completa" as EstadoSesion,
+        created_at: ABIERTA_ANTES,
+      } as Parameters<typeof estadoEfectivo>[0];
+
+      expect(estadoEfectivo(sinSource, VENCIDO, AHORA)).toBe("onboarding");
+      expect(estadoEfectivo(sinSello, VENCIDO, AHORA)).toBe("onboarding");
+      expect(estadoEfectivo(sinNinguna, VENCIDO, AHORA)).toBe("onboarding");
+    });
+
     it("gives an unreadable created_at no exemption", () => {
       // The safe direction, and the same both-sided reasoning as the
       // `pass_changed_at` guard in `authenticate`: `NaN >= limite` is `false`,
@@ -223,9 +252,17 @@ describe("the state actually in force, once a session has been open a while", ()
     // matrix of stored state × deadline × factor evidence, and not by iterating
     // `puedeAlcanzar` over a hand-written list of routes: the first version of
     // this test did the latter, which meant the test carrying the invariant's
-    // name never called the function the invariant is about. A fourth state, or
-    // a second movement inside `estadoEfectivo`, would have left it green with
-    // the property already false.
+    // name never called the function the invariant is about. A second movement
+    // inside `estadoEfectivo` would have left it green with the property already
+    // false.
+    //
+    // **And the state axis is complete by construction, not by care.**
+    // `ESTADOS_SESION` is derived from `PERMITIDAS`, which is a
+    // `Record<EstadoSesion, …>`, so a fourth state cannot be added to the union
+    // without a compile error — measured: adding one puts TS2741 on
+    // `sessionState.ts`. While that list was a hand-written literal, a fourth
+    // state compiled fine, this loop skipped it, and the test went on passing
+    // about a property it was no longer checking.
     const rutas = [
       "/api/usuario",
       "/api/poste/1",

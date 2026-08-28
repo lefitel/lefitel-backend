@@ -115,6 +115,18 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
  *   affect this**: `requireStepUp` reads `mfa_satisfied_at` and would refuse
  *   the next gated write on a session that had just authenticated.
  *
+ * **And a second duty 4B owns, this one not optional.** The endpoint that
+ * removes an account's *last* factor — deleting a passkey, unlinking TOTP, both
+ * of which the specification calls for — has to revoke or demote that account's
+ * live sessions. `estadoEfectivo`'s third clause reads `mfa_satisfied_at` and
+ * `mfa_source`, which record that a factor was proved **at the time**, and
+ * nothing walks them back: a session opened while the account had a factor goes
+ * on holding the whole ERP for up to `SESSION_ABSOLUTE_DAYS` after the last one
+ * is deleted. Only the next login answers `onboarding`. That is not something
+ * this function can fix from here — knowing it would mean counting factors on
+ * every request, which is the cost this whole design refuses — so it belongs to
+ * the endpoint that causes it, at the moment it causes it.
+ *
  * **And the tidying that is worth doing even though nothing depends on it:**
  * clear `usuarios.mfa_grace_until` when an account registers its first factor.
  * The first branch below already says a date in that column "reads as: this
