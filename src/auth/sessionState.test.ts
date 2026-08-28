@@ -214,10 +214,12 @@ describe("the state actually in force, once a session has been open a while", ()
       // `strictNullChecks` is off in this project, so `undefined` is assignable
       // to `Date | null` and the compiler will not stop anybody producing this
       // row. The reachable way in is a projection that stops naming a column,
-      // which `sessionStore.test.ts` pins today — but the shared fixture in
-      // `app.auth.test.ts` already omits `mfa_source`, and is saved only by
-      // omitting `mfa_grace_until` too. A rule that switches itself off when a
-      // fixture is a field short is not a rule.
+      // which `sessionStore.test.ts` pins today — and the shared fixture in
+      // `app.auth.test.ts` was itself a field short of `mfa_source` until Task
+      // 15, saved only by omitting `mfa_grace_until` too. A rule that switches
+      // itself off when a fixture is a field short is not a rule, which is why
+      // the short row is exercised here rather than left to a fixture that
+      // happens to be one.
       const sinSource = { ...sesion(), mfa_source: undefined };
       const sinSello = { ...sesion(), mfa_satisfied_at: undefined };
       const sinNinguna = {

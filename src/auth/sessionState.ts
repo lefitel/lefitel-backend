@@ -276,8 +276,9 @@ export function estadoEfectivo(
   // as evidence and switches this whole rule off — failing open, on the one
   // check here whose job is to decide whether the rule applies at all.
   // `strictNullChecks` is off in this project, so nothing stops such a row
-  // being built, and the shared fixture in `app.auth.test.ts` already omits
-  // `mfa_source`.
+  // being built — the shared fixture in `app.auth.test.ts` omitted this very
+  // column until Task 15 filled it in, and 66 tests read that one object. The
+  // reachable way in is a projection that stops naming a column.
   if (sesion.mfa_satisfied_at != null || sesion.mfa_source != null) return guardado;
 
   // Clause 2: opened after the deadline had already gone by, so its `completa`

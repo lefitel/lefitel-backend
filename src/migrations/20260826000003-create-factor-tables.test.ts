@@ -55,7 +55,14 @@ const tableOf = (qi: ReturnType<typeof fakeQueryInterface>, name: string) =>
   qi.calls.find((c) => c.fn === "createTable" && c.args[0] === name)?.args[1] as
     | Record<
         string,
-        { type?: unknown; allowNull?: boolean; unique?: boolean; references?: unknown; onDelete?: string }
+        {
+          type?: unknown;
+          allowNull?: boolean;
+          unique?: boolean;
+          references?: unknown;
+          onDelete?: string;
+          onUpdate?: string;
+        }
       >
     | undefined;
 
@@ -81,6 +88,11 @@ describe("create-factor-tables", () => {
   it("carries the transaction on every single call", async () => {
     const qi = await withUp();
 
+    // The counter its own twin below already had, and this one did not: a
+    // `for` over an empty list asserts nothing and reports success. Measured
+    // with `up()` replaced by a no-op — every other test of the up path went
+    // red and this one stayed green, which is the whole failure mode.
+    expect(qi.calls.length).toBeGreaterThan(0);
     for (const call of qi.calls) {
       expect(transactionOf(call), `${call.fn}(${String(call.args[0])}) sin transacción`).toBeDefined();
     }
@@ -143,9 +155,21 @@ describe("create-factor-tables", () => {
     expect(tableOf(qi, "factor_totp")?.id_usuario?.unique).toBe(true);
   });
 
-  it("ties every table to usuarios with RESTRICT, never CASCADE", async () => {
-    // The delete here is logical (`paranoid`), so no cascade ever fires. A
-    // CASCADE written anyway reads as cleanup that happens and does not.
+  it("ties every table to usuarios with RESTRICT on delete and CASCADE on update", async () => {
+    // Two different rules on the same foreign key, and only one of them was
+    // asserted here.
+    //
+    // **ON DELETE RESTRICT:** the delete is logical (`paranoid`), so no cascade
+    // ever fires. A CASCADE written anyway reads as cleanup that happens and
+    // does not.
+    //
+    // **ON UPDATE CASCADE:** the constraint every foreign key in this schema
+    // carries, and the reason it is spelled out rather than left to the
+    // default: `NO ACTION` is what Postgres assumes, and under it a change to
+    // `usuarios.id` fails instead of following through — leaving the factor
+    // rows pointing at an id that no longer exists, which for these four
+    // tables means somebody's passkeys and TOTP secret orphaned from the
+    // account they belong to.
     const qi = await withUp();
 
     for (const name of [
@@ -158,7 +182,23 @@ describe("create-factor-tables", () => {
       expect(col?.allowNull, `${name}.id_usuario`).toBe(false);
       expect(col?.references, `${name}.id_usuario`).toBeDefined();
       expect(col?.onDelete, `${name}.id_usuario`).toBe("RESTRICT");
+      expect(col?.onUpdate, `${name}.id_usuario`).toBe("CASCADE");
     }
+  });
+
+  it("makes dispositivo_recordado.token_hash unique, which is what binds a device to one account", async () => {
+    // The lookup arrives with a cookie and nothing else, so the hash is what
+    // finds the row. Two rows sharing one hash means the lookup picks one of
+    // them, and the account it hands back may not be the one the cookie was
+    // issued to — the same failure `credencial_webauthn.credential_id` is
+    // unique to prevent, on the path that skips the second factor entirely.
+    //
+    // A UNIQUE index is also the only thing that turns a collision into a
+    // refused INSERT rather than a second valid row nobody notices.
+    const qi = await withUp();
+
+    expect(tableOf(qi, "dispositivo_recordado")?.token_hash?.unique).toBe(true);
+    expect(tableOf(qi, "dispositivo_recordado")?.token_hash?.allowNull).toBe(false);
   });
 
   it("indexes what the queries actually filter by", async () => {
