@@ -339,9 +339,8 @@ export const me = handler("me", async (req: Request, res: Response) => {
   if (!found) return res.status(401).json({ message: CUENTA_INACTIVA });
 
   const usuario = found.dataValues;
-  return res.status(200).json({
+  const cuerpo = {
     usuario,
-    permisos: await permissionsFor(usuario.id_rol),
     expires_at: caller.expires_at,
     /**
      * Which of the three states this session is in, so the client can say why.
@@ -372,7 +371,38 @@ export const me = handler("me", async (req: Request, res: Response) => {
      * keeps it out of here.
      */
     estado: caller.estado,
-  });
+  };
+
+  /**
+   * **The permission matrix is only published to a `completa` session.** The
+   * specification says it in five words — "en estado no `completa`, devuelve
+   * estado sin permisos" — and until now this endpoint sent the whole matrix
+   * to every state.
+   *
+   * What that gave away is the account's map of authority: every module, every
+   * action, for the caller's role. This endpoint is named in `PARCIAL`
+   * (`auth/sessionState.ts`), the narrowest allowlist there is, so it is one of
+   * the few addresses a session that has passed the password and **not** the
+   * second factor can reach at all — and from plan 4B on, that session belongs
+   * to somebody real: whoever has the password, and only the password. Such a
+   * session cannot *use* a single line of the matrix, since `authenticate`
+   * refuses everything outside that allowlist, which is exactly what made
+   * sending it free reconnaissance rather than a feature.
+   *
+   * **Absent, not empty.** `{}` would be a different sentence — "this account
+   * may do nothing" — and a client cannot tell that apart from an account
+   * whose role really is empty. Leaving the key out says what is true: not
+   * published in this state. The client already reads it that way (`permisos:
+   * response.data.permisos as Permisos | undefined`, and `if (sesion.permisos)`
+   * before it stores anything, in `web/src`), so nothing that works today
+   * starts crashing.
+   *
+   * And the query goes with it: `permissionsFor` is not called at all for a
+   * state that would not be shown the answer.
+   */
+  if (caller.estado !== "completa") return res.status(200).json(cuerpo);
+
+  return res.status(200).json({ ...cuerpo, permisos: await permissionsFor(usuario.id_rol) });
 });
 
 /**

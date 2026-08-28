@@ -110,7 +110,49 @@ const MENSAJE =
 const MENSAJE_ONBOARDING =
   "Termina de configurar tu segundo factor antes de realizar esta operación.";
 
-export function requireStepUp(): RequestHandler {
+export interface OpcionesStepUp {
+  /**
+   * Let an `onboarding` session past the state check — and past that check
+   * only. Off by default, and every administrative mount leaves it off.
+   *
+   * **For the doors `onboarding` opens in order to stop being `onboarding`.**
+   * `ONBOARDING_EXTRA` in `auth/sessionState.ts` opens six prefixes precisely
+   * so somebody past their deadline can finish setting up: the email, TOTP,
+   * WebAuthn registration, the recovery codes. The specification puts several
+   * of those same operations behind step-up — "cambiar el email propio", "dar
+   * de alta o de baja cualquier factor" — and, in the same section, says which
+   * of them `onboarding` is shut out of: "un usuario en `onboarding` no puede
+   * hacer las operaciones **administrativas** de la lista: responden 403, nunca
+   * pasan" (the emphasis is this comment's). Administrative. Setting up your
+   * own account is the other kind, and the two rules only contradict each other
+   * if that word is dropped.
+   *
+   * **Measured, not argued.** Mounting the gate without this option on `POST
+   * /api/auth/email/send` turns `app.auth.test.ts`'s "leaves the doors that
+   * finish the setup open to that same session" from 400 into 403. That is not
+   * a stricter gate, it is a sealed room: `/auth/totp/*` and
+   * `/auth/webauthn/register/*` answer 409 until the address is verified (§5
+   * of the design), the address cannot be registered without this route, and a
+   * registered factor is the only thing that ends `onboarding`. Every account
+   * reaches that state on its own, `MFA_GRACE_DAYS` after its first login —
+   * see `estadoInicialDeSesion` — so this would be the whole payroll, with no
+   * way out from inside the API. Plan 4B will need the same option on the
+   * registration routes for the same reason.
+   *
+   * **What it does not do.** `parcial` is still refused: that state means the
+   * account *has* a factor and has not proved it on this session, so the way
+   * through is proving it, not typing a password. And an `onboarding` session
+   * whose account does have a factor — which `estadoEfectivo` can produce for
+   * a session opened before the deadline and predating the registration — is
+   * refused one line further down by the factor check, which does not consult
+   * this option at all. So what this ever lets through is the case where the
+   * account has nothing to prove: the same treatment, and the same bitácora
+   * line, a factor-less `completa` session already gets.
+   */
+  permiteOnboarding?: boolean;
+}
+
+export function requireStepUp({ permiteOnboarding = false }: OpcionesStepUp = {}): RequestHandler {
   // Named, not anonymous: a later task walks the mounted Express stack the
   // way `routeGuards.test.ts` already does for `requirePermissionGate`, and it
   // can only tell this gate apart from an ordinary handler by this name
@@ -127,24 +169,57 @@ export function requireStepUp(): RequestHandler {
       }
 
       // An `onboarding` session is not a lesser version of a complete one for
-      // these routes: it is refused outright. Otherwise the password alone would
-      // edit the permission matrix for the whole of the grace period.
+      // the administrative routes: it is refused outright. Otherwise the
+      // password alone would edit the permission matrix for the whole of the
+      // grace period — the specification's own words, and the reason this is
+      // asked ahead of the window and the factor lookup rather than after
+      // them.
       //
-      // In practice this never fires: none of the routes this gate is mounted
-      // on appear in either the `parcial` or `onboarding` allowlist in
-      // `auth/sessionState.ts`, so `authenticate` — which runs first, on every
-      // one of these routes — has already answered 401 (`parcial`) or 403
-      // (`onboarding`, `MENSAJE_FACTOR_PENDIENTE`) before this gate is ever
-      // reached. Kept anyway, and closed rather than open, for the day a route
-      // in that allowlist grows a write this gate should also cover.
-      if (user.estado !== "completa") {
+      // **This refuses somebody for real, on one route today.** It used to be
+      // unreachable — every mount lived under `/api/usuario`, `/api/rol` or
+      // `/api/permisos`, none of which the `parcial` or `onboarding`
+      // allowlists in `auth/sessionState.ts` open, so `authenticate` had
+      // already answered 401 or 403 before this gate ran. `DELETE
+      // /api/auth/sessions/:id` changed that: `ONBOARDING_EXTRA` opens
+      // `/api/auth/sessions`, so an `onboarding` session reaches this line,
+      // and this line is the only thing that stops it. That is the whole of
+      // what closed the attack an audit demonstrated — see the route's own
+      // comment in `auth.routes.ts`.
+      //
+      // **And it is why `permiteOnboarding` exists**, for the opposite kind of
+      // route: the doors `onboarding` opens *in order to stop being*
+      // `onboarding`. See the option's own comment above for why refusing
+      // those is an outage rather than a stricter gate. `parcial` is refused
+      // either way — the option names one state and reads it, rather than
+      // meaning "any state below `completa`".
+      const estadoAceptable =
+        user.estado === "completa" || (permiteOnboarding && user.estado === "onboarding");
+      if (!estadoAceptable) {
         denegar(req, res, MENSAJE_ONBOARDING, MOTIVO_ESTADO_INCOMPLETO);
         return;
       }
 
-      const satisfecho =
-        user.mfa_satisfied_at !== null &&
-        Date.now() - new Date(user.mfa_satisfied_at).getTime() <= STEP_UP_WINDOW_MINUTES * 60_000;
+      // How long ago the factor was proved, in milliseconds — and it has to be
+      // *ago*. The window used to be bounded on one side only: anything not
+      // older than ten minutes satisfied it, so a stamp in the **future**
+      // satisfied it too, and went on doing so for as long as it stayed in the
+      // future. An hour-ahead mark is an hour of unlimited step-up on that
+      // session; a clock corrected backwards, or one bad write, is all it
+      // takes. `>= 0` is the missing side.
+      //
+      // Latent until plan 4B, which is the first thing that ever writes this
+      // column — and therefore the first thing that can write it wrong.
+      //
+      // NULL and an unreadable date both give `NaN`, and every comparison
+      // against `NaN` is false, so both refuse. That is the safe direction and
+      // it is why the null check is folded in here rather than left as a
+      // separate `!== null`: one expression, one answer, no second spelling of
+      // "there is no usable stamp" to keep in step with this one.
+      const probadoHace =
+        user.mfa_satisfied_at === null
+          ? NaN
+          : Date.now() - new Date(user.mfa_satisfied_at).getTime();
+      const satisfecho = probadoHace >= 0 && probadoHace <= STEP_UP_WINDOW_MINUTES * 60_000;
       if (satisfecho) {
         next();
         return;

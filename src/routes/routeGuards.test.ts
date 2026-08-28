@@ -295,8 +295,21 @@ describe("who may change data", () => {
  * `requireStepUp` (`middleware/requireStepUp.ts`) asks a second question after
  * the permission has already said yes: was a factor proved in the last ten
  * minutes — or, while the account has no factor to prove at all, is the
- * caller's own password supplied. Eleven routes ask it: creating and editing
- * accounts, and everything that touches roles or the permission matrix.
+ * caller's own password supplied. Fourteen routes ask it: creating, editing and
+ * unlocking accounts, everything that touches roles or the permission matrix,
+ * closing one of your own other sessions, and registering the address your
+ * password can be reset through.
+ *
+ * **Two of them have no permission in front of them, and the order test below
+ * says which may not.** `DELETE /api/auth/sessions/:id` and `POST
+ * /api/auth/email/send` are held to the caller's own account by `req.user`
+ * rather than by the matrix — there is no role that may or may not close its
+ * own sessions or hold an address of its own — so both carry step-up with no
+ * `requirePermissionGate` above them. What keeps that from becoming a hole
+ * anybody can widen is that the exemption is not a second list: it is
+ * `GATE_NOT_APPLICABLE` above, which "gates every route that writes behind a
+ * permission" already forces every ungated write into and "keeps the exception
+ * list honest" already empties of anything that turned out to be gated.
  *
  * **Why this list exists at all.** Whether a route *mounts* the gate is
  * invisible to every request-shaped test of the gate's own rules, because a
@@ -310,17 +323,29 @@ describe("who may change data", () => {
  *
  * **Written out rather than derived**, for the same reason `GENERADOR_GATES`
  * below is: a list computed from the routers would only assert that the code
- * agrees with itself. These eleven are the intent, and the comparison runs both
+ * agrees with itself. These fourteen are the intent, and the comparison runs both
  * ways — a mount that disappears fails, and so does one that appears.
  *
- * **The second direction is load-bearing, not symmetry for its own sake.**
- * `PATCH /api/usuario/:id/desbloquear` is a write on the same router, behind
- * the same module's permission, and is deliberately *not* here: lifting a
- * lockout is what an administrator does because somebody cannot get in, often
- * in a hurry, and step-up there adds a step to the recovery path without
- * closing anything. See the comment beside it in `usuario.routes.ts`. A list
- * that only checked for missing mounts would let that decision be reversed in
- * silence.
+ * **The second direction is load-bearing, not symmetry for its own sake, and
+ * `PATCH /api/usuario/:id/desbloquear` is the entry that proves it.** It was
+ * deliberately *outside* this list, with the reason written in three places:
+ * lifting a lockout is what an administrator does because somebody cannot get
+ * in, and whoever holds `seguridad.editar` can already do worse through the
+ * routes beside it. An audit found the second half of that sentence has an
+ * expiry date on it — plan 4B makes those neighbouring routes refuse a session
+ * with no proved factor, and this one would have gone on answering 200 while
+ * clearing the login lockout — the only brake against password guessing that
+ * survives a restart of the API, the rate limiters being in-memory. The
+ * decision was reversed here, in the table, which is where reversing it is
+ * visible; a list that only checked for missing mounts would have let it be
+ * reversed back in silence.
+ *
+ * **Mounted with an option is still mounted, and this table cannot see the
+ * difference.** `POST /api/auth/email/send` carries
+ * `requireStepUp({ permiteOnboarding: true })`, which returns the same
+ * `stepUpGate` function under a different closure, so the option is pinned
+ * where it is observable — through a request, in `app.auth.test.ts` — and not
+ * pretended at from here.
  *
  * Live here and not in `app.auth.test.ts`, which pins the gate's *behaviour*
  * through real requests: this file already walks the app as Express assembled
@@ -329,10 +354,13 @@ describe("who may change data", () => {
  * mean two half-tables, which is the shape the gap above came in.
  */
 const STEP_UP_GATED = [
-  // usuario.routes.ts — six of the eleven.
+  // usuario.routes.ts — seven.
   "POST /api/usuario/",
   "DELETE /api/usuario/:id",
   "PATCH /api/usuario/:id/desarchivar",
+  // The one that was outside this list until an audit read its reason again.
+  // See the paragraph above, and the rewritten comment beside the route.
+  "PATCH /api/usuario/:id/desbloquear",
   "PUT /api/usuario/:id",
   "PUT /api/usuario/username/:id",
   "PUT /api/usuario/userpass/:id",
@@ -344,6 +372,19 @@ const STEP_UP_GATED = [
   "PATCH /api/rol/:id/desarchivar",
   // permiso.routes.ts — one. The screen that edits who may do what.
   "PUT /api/permisos/:id_rol",
+  // auth.routes.ts — one of the two entries with no permission above them.
+  // «Step-up. Solo filas propias» in §5 of the design, and until this task
+  // only the second half was true: an audit closed every other session of an
+  // account from a stolen cookie in `onboarding`, keeping the stolen one
+  // alive. The neighbouring session routes stay ungated on purpose — see the
+  // comment beside this one in `auth.routes.ts`.
+  "DELETE /api/auth/sessions/:id",
+  // auth.routes.ts — and one more, the only mount that passes an option.
+  // The design's step-up list has "cambiar el email propio" on it, and this
+  // is the route that does it. The handler's own `pass` check is not the same
+  // thing: it goes on accepting a password after plan 4B registers a factor,
+  // which is precisely what the gate's second branch exists to stop.
+  "POST /api/auth/email/send",
 ];
 
 describe("which writes also demand a recently proved factor", () => {
@@ -352,7 +393,7 @@ describe("which writes also demand a recently proved factor", () => {
     .map((r) => `${r.method} ${r.path}`)
     .sort();
 
-  it("mounts requireStepUp on exactly those eleven routes and on no others", () => {
+  it("mounts requireStepUp on exactly those fourteen routes and on no others", () => {
     // `stepUpGate` is the name `requireStepUp()` gives the function it returns,
     // for exactly this — see the comment above the `return` in
     // `requireStepUp.ts`. An anonymous handler there would make this assertion
@@ -365,6 +406,14 @@ describe("which writes also demand a recently proved factor", () => {
     // somebody without the permission must be refused by the permission —
     // spending no bcrypt comparison, and learning nothing about the route
     // existing — instead of being asked to prove a factor first.
+    //
+    // The two routes with no permission at all are allowed through this check
+    // rather than exempted from the file: `sinPermiso` is `GATE_NOT_APPLICABLE`
+    // itself, so a gated route can only be missing its permission here if the
+    // same file already says, with a reason written next to it, that it asks
+    // for none — and "keeps the exception list honest" above deletes that line
+    // the day the route grows one.
+    const sinPermiso = new Set(GATE_NOT_APPLICABLE);
     const mal: string[] = [];
     for (const nombre of STEP_UP_GATED) {
       const [method, path] = nombre.split(" ");
@@ -379,12 +428,14 @@ describe("which writes also demand a recently proved factor", () => {
       // comparison below passes for a chain missing either name, because
       // `indexOf` answers -1 and -1 is less than everything — the exact shape
       // of assertion this file exists to stop.
-      if (permiso === -1) {
-        mal.push(`${nombre} → sin permiso: ${ruta.chain.join(" -> ")}`);
-        continue;
-      }
       if (step === -1) {
         mal.push(`${nombre} → sin stepUpGate: ${ruta.chain.join(" -> ")}`);
+        continue;
+      }
+      if (permiso === -1) {
+        if (!sinPermiso.has(nombre)) {
+          mal.push(`${nombre} → sin permiso: ${ruta.chain.join(" -> ")}`);
+        }
         continue;
       }
       if (permiso > step) mal.push(`${nombre} → ${ruta.chain.join(" -> ")}`);

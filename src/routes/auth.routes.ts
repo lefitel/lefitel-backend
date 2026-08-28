@@ -14,6 +14,7 @@
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
+import { requireStepUp } from "../middleware/requireStepUp.js";
 import { loginRateLimit, passwordConfirmLimiter } from "../middleware/loginLimiters.js";
 import {
   emailSendLimiter,
@@ -85,7 +86,54 @@ router.get("/me", authenticate, me);
 router.post("/logout", authenticate, logout);
 router.post("/logout-all", authenticate, logoutAll);
 router.get("/sessions", authenticate, sessions);
-router.delete("/sessions/:id", authenticate, endSession);
+
+/**
+ * Closing one of your other sessions is the one thing on this router a stolen
+ * cookie must not be enough for, and until now it was.
+ *
+ * The specification marks it «Step-up. Solo filas propias» (§5), and only the
+ * second half was implemented: `revokeSessionOf` puts `id_usuario` in the same
+ * `where` as the id, so nobody can close somebody else's row. That is what
+ * stops a caller reaching *outside* their own account; it says nothing about
+ * what a caller who is already inside one may do.
+ *
+ * An audit of this plan walked the rest end to end. From a session in
+ * `onboarding` — one that answers 403 to users, roles and the permission
+ * matrix — `GET /sessions` still listed the account's whole device inventory
+ * (`user_agent`, `ip_address` and the three dates, for every live session),
+ * and this route then closed them one call at a time: every id on that list
+ * except the one making the request. The victim is logged out everywhere, the
+ * stolen session survives, and the account's own way of noticing a second
+ * device is what performed it.
+ *
+ * `requireStepUp()` with no options, so an `onboarding` session is refused
+ * outright rather than falling to the password fallback. This is the route
+ * that made that branch reachable at all: `ONBOARDING_EXTRA` in
+ * `auth/sessionState.ts` opens `/api/auth/sessions`, so `authenticate` lets
+ * that state get this far, and the recomputed `req.user.estado` — see the
+ * field's own comment in `authenticate.ts` — is what the gate reads. Twelve of
+ * the fourteen mounts live under `/api/usuario`, `/api/rol` and
+ * `/api/permisos`, which no state below `completa` reaches at all; the
+ * fourteenth is `/email/send` below, and it is the opposite case — a door
+ * `onboarding` has to keep.
+ *
+ * No permission gate above it, unlike the other mounts: there is no role that
+ * may or may not close its own sessions, which is why the route also sits in
+ * `routeGuards.test.ts`'s `GATE_NOT_APPLICABLE`. Ownership is enforced in the
+ * query, not by the matrix.
+ *
+ * **`GET /sessions` and `POST /logout-all` are left as they are, and neither
+ * is an oversight of this task.** The specification lists neither behind
+ * step-up: the listing is a read of your own rows, and `logout-all` closes
+ * *this* session along with the rest, so it cannot be used to keep a stolen
+ * one alive. What the audit showed is that the listing makes the attack above
+ * *comfortable*, not that it is the attack — and gating a read the settings
+ * screen opens on load would ask for a password to look at a list. That the
+ * `parcial` and `onboarding` allowlists open both is a decision that lives in
+ * `auth/sessionState.ts`, and moving it belongs with the plan that gives those
+ * states a screen of their own.
+ */
+router.delete("/sessions/:id", authenticate, requireStepUp(), endSession);
 
 /**
  * Registering and confirming your own address. Task 4 of
@@ -114,7 +162,42 @@ router.delete("/sessions/:id", authenticate, endSession);
  * shared 100/day one — for a request that never had the right password to
  * begin with.
  */
-router.post("/email/send", authenticate, passwordConfirmLimiter, emailSendLimiter, sendVerificationEmail);
+/**
+ * `requireStepUp({ permiteOnboarding: true })` on `/email/send`, and the
+ * option is the whole point of the line.
+ *
+ * **Why the gate at all, when the handler already demands the password.** It
+ * does, and that is as strong as anything the other mounts accept today — but
+ * only because nobody has a factor yet. The gate's second branch exists to
+ * say "with a factor on the account, a password is not an acceptable answer";
+ * once plan 4B registers one, every gated route starts refusing passwords and
+ * this route, alone, would go on taking them — the route whose own comment
+ * calls itself "the fix for a real account-takeover chain". The `pass` check
+ * in `email.controller.ts` stays: it is what a caller sends today, and the
+ * gate's third branch lets a request with no `stepup_password` through while
+ * the account has nothing to prove, so nothing that works today stops working.
+ *
+ * **Why the option.** `ONBOARDING_EXTRA` opens `/api/auth/email` on purpose,
+ * and the plain gate would close it: measured, mounting `requireStepUp()`
+ * here turns `app.auth.test.ts`'s "leaves the doors that finish the setup open
+ * to that same session" from 400 to 403. Verifying an address is the
+ * prerequisite for registering a factor (§5: `/auth/totp/*` answers 409
+ * without it), and registering a factor is the only way out of `onboarding` —
+ * so the plain gate would seal in every account that reached its deadline.
+ * The option lets that one state past the state check and nothing else; an
+ * `onboarding` session on an account that *does* have a factor is still
+ * refused, by the factor check below it.
+ *
+ * **Before `passwordConfirmLimiter`, deliberately.** Both draw on the same
+ * `pc:<id>` budget. The gate reads it without spending and charges only a
+ * password it has already confirmed wrong — and then refuses, so the limiter
+ * never runs in that request. One wrong password therefore costs one of the
+ * five, whichever of the two compared it; mounted the other way round, a
+ * request carrying a wrong `stepup_password` would be charged twice for the
+ * same guess. Both still sit ahead of `emailSendLimiter`, which is the order
+ * the comment above is about and which this line does not disturb.
+ */
+router.post("/email/send", authenticate, requireStepUp({ permiteOnboarding: true }), passwordConfirmLimiter, emailSendLimiter, sendVerificationEmail);
 router.post("/email/verify", authenticate, emailVerifyLimiter, verifyEmail);
 
 /**

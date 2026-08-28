@@ -339,14 +339,14 @@ async function authenticateBySession(
     //
     // **`requireStepUp` reads it too**, and there the stored value would leave
     // the gate believing a session the check above has already decided is past
-    // its deadline. Nothing reaches it either way on today's mounts: all eleven
-    // routes it guards live under `/api/usuario`, `/api/rol` and `/api/permiso`,
-    // none of which the `onboarding` allowlist opens, so `puedeAlcanzar` refused
-    // them before this line ran. That stops being true in the very next task of
-    // this plan, which puts `requireStepUp` on `DELETE /api/auth/sessions/:id`:
-    // a gated write behind `/api/auth/sessions`, which `ONBOARDING_EXTRA`
-    // **does** open. From that commit on, this field is the only thing between
-    // that write and a session past its deadline.
+    // its deadline. That used to reach nothing: every route the gate guarded
+    // lived under `/api/usuario`, `/api/rol` and `/api/permiso`, none of which
+    // the `onboarding` allowlist opens, so `puedeAlcanzar` refused them before
+    // this line ran. It is no longer so. `DELETE /api/auth/sessions/:id` now
+    // carries the gate, and it sits behind `/api/auth/sessions`, which
+    // `ONBOARDING_EXTRA` **does** open — so this field, and not the row, is
+    // what stands between a session past its deadline and closing every other
+    // session of the account it was stolen from.
     estado,
     mfa_satisfied_at: sesion.mfa_satisfied_at,
   };

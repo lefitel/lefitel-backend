@@ -544,12 +544,24 @@ describe("mounted on the real routes, not merely built", () => {
     // it apart from `emailSendLimiter` by name is impossible — this compares
     // the actual middleware functions by reference instead, which is the
     // only way to pin that specific order.
+    //
+    // And a fifth, ahead of both: `stepUpGate`. Changing your own address is
+    // on the design's step-up list, and the handler's password check is not
+    // the same rule — it goes on accepting a password once plan 4B registers
+    // a factor, which is exactly what the gate refuses. It sits **in front of
+    // `passwordConfirmLimiter`** because both draw on the same `pc:<id>`
+    // budget: the gate reads it without spending and charges only a password
+    // it has confirmed wrong, then refuses, so one wrong password costs one
+    // guess rather than two. Which routes carry that gate is pinned as a
+    // table in `routes/routeGuards.test.ts`; what is pinned here is only its
+    // place in this chain.
     const send = stackFor("POST", "/email/send");
-    expect(send).toHaveLength(4);
+    expect(send).toHaveLength(5);
     expect(send[0].name).toBe("authenticate");
-    expect(send[1]).toBe(passwordConfirmLimiter);
-    expect(send[2]).toBe(emailSendLimiter);
-    expect(send[3].name).toBe("sendVerificationEmail");
+    expect(send[1].name).toBe("stepUpGate");
+    expect(send[2]).toBe(passwordConfirmLimiter);
+    expect(send[3]).toBe(emailSendLimiter);
+    expect(send[4].name).toBe("sendVerificationEmail");
 
     const verify = chainFor("POST", "/email/verify");
     expect(verify[0]).toBe("authenticate");

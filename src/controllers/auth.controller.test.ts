@@ -426,10 +426,16 @@ describe("GET /api/auth/me", () => {
     // draws itself from this answer.
     //
     // `id_rol: 99` is the credential's claim and 1 is the database's, so only
-    // reading the database passes. Spelt out rather than using `YO_CON_SESION`
-    // for that reason alone.
+    // reading the database passes.
+    //
+    // Built on `sesionCompleta` since the matrix stopped being published to
+    // every state: the caller this test needs is one that gets a matrix at
+    // all, and `estado` is what decides that now. Spread over `YO_CON_SESION`
+    // — which predates `estado` and carries none — this asserted about a
+    // caller `authenticate` cannot produce, and the assertion below stopped
+    // being about the role at all.
     findByPk.mockResolvedValue(storedUser({ id_rol: 1 }));
-    const c = call({ ...YO_CON_SESION, id_rol: 99 });
+    const c = call(sesionCompleta({ id_rol: 99 }));
     await me(c.req, c.res);
 
     expect(c.status).toBe(200);
@@ -524,6 +530,51 @@ describe("GET /api/auth/me", () => {
     expect(Object.keys(c.payload ?? {}).sort()).toEqual([
       "estado", "expires_at", "permisos", "usuario",
     ]);
+  });
+
+  it("withholds the permission matrix from a session that is not complete", async () => {
+    /**
+     * The specification, in five words: "en estado no `completa`, devuelve
+     * estado sin permisos". This endpoint is in `PARCIAL`, the narrowest
+     * allowlist there is, so from plan 4B on it is reachable by somebody who
+     * has the password and has not passed the second factor — and it was
+     * handing them the account's whole map of authority, module by module.
+     *
+     * Both non-complete states, not just one: `parcial` is the state that
+     * matters most (password only) and `onboarding` the one every account
+     * reaches on its own, `MFA_GRACE_DAYS` after its first login.
+     *
+     * Not called at all, rather than called and discarded: a state that will
+     * not be shown the answer should not pay for the query either.
+     */
+    for (const estado of ["parcial", "onboarding"] as const) {
+      const c = call(sesionCompleta({ estado }));
+      await me(c.req, c.res);
+
+      expect(c.status, estado).toBe(200);
+      expect(Object.keys(c.payload ?? {}).sort(), estado).toEqual([
+        "estado", "expires_at", "usuario",
+      ]);
+      // Absent, and absent because it was never asked for.
+      expect(permissionsFor, estado).not.toHaveBeenCalled();
+    }
+  });
+
+  it("still answers the caller who they are when it withholds the matrix", async () => {
+    // The half a "no permisos" rule can quietly take with it. This endpoint is
+    // what the front end asks on load, and in a non-complete state it is one
+    // of the few addresses that answer at all — so the account, its expiry and
+    // the state itself have to survive the narrowing. A version that answered
+    // `{ estado }` alone would satisfy the key assertion above by shrinking
+    // the body past what the setup screen needs to draw anything.
+    findByPk.mockResolvedValue(storedUser({ id_rol: 1 }));
+    const c = call(sesionCompleta({ estado: "onboarding" }));
+    await me(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect((c.payload?.usuario as { id: number }).id).toBe(YO);
+    expect(c.payload?.expires_at).toEqual(CADUCA);
+    expect(c.payload?.estado).toBe("onboarding");
   });
 
   it("answers with this session's own expiry, not one computed in the handler", async () => {

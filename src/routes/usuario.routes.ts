@@ -111,12 +111,40 @@ router.patch(
 // resetting a password, which is the other way out of one. PATCH like its
 // neighbour above — both flip a state on a row that already exists.
 //
-// **This one deliberately does NOT get `requireStepUp()`.** Lifting a lockout
-// is what an administrator does *because* somebody cannot get in, often in a
-// hurry; demanding step-up adds a step to the recovery path without closing
-// anything — whoever already holds `seguridad.editar` and a live session can
-// do far greater damage through the routes above, which do require it.
-router.patch("/:id/desbloquear", requirePermission("seguridad", "editar"), desbloquearUsuario);
+// **This one used to be the deliberate exception, and the exception went
+// stale.** The argument written here was that step-up "adds a step to the
+// recovery path without closing anything", because whoever holds
+// `seguridad.editar` and a live session "can do far greater damage through the
+// routes above, which do require it". That was true, and it was true only for
+// as long as the routes above accept exactly what this one accepts. They do
+// today: nobody has a factor, so the gate's third branch lets a request with no
+// `stepup_password` through on all of them alike.
+//
+// Plan 4B is what ends that. From the first registered factor, every route
+// above answers 403 to a session that has not proved one — and this route, left
+// ungated, would go on answering 200. That is the shape the argument cannot
+// survive: a stolen administrator cookie, refused everywhere else on this
+// router, still able to clear `failed_attempts` and `locked_until` on any
+// account it chooses. Those two columns are the login lockout, and they are the
+// only brake against guessing a password that lives in the database: the
+// rate limiters that also count per account (`loginLimiters.ts`) keep their
+// counters in a `MemoryStore`, so they reset with the process and never span
+// more than their own window. See `desbloquearUsuario` in
+// `usuario.controller.ts`, which writes both to zero and NULL and files a
+// `critical` line saying what it undid.
+//
+// The recovery path still works, and this is what it costs the administrator in
+// a hurry: nothing at all while no account has a factor, and one proof of their
+// own factor afterwards — the same one the neighbouring routes will ask them
+// for. `requireStepUp()` with no options, like every other administrative
+// mount: an `onboarding` session is refused outright rather than falling to
+// the password fallback.
+router.patch(
+  "/:id/desbloquear",
+  requirePermission("seguridad", "editar"),
+  requireStepUp(),
+  desbloquearUsuario,
+);
 router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);
 
 // The full directory backs the security and bitácora screens.

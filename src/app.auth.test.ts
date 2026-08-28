@@ -1645,13 +1645,26 @@ describe("requireStepUp, mounted on the real routes", () => {
     }
   });
 
-  it("does not gate PATCH /:id/desbloquear, on purpose", async () => {
-    // Lifting a lockout is what an administrator does because somebody
-    // cannot get in, often in a hurry — see the comment beside the route in
-    // usuario.routes.ts. No stepup_password at all, and the account has no
-    // factor and an unsatisfied window: if this route carried the gate, that
-    // combination would answer 403 STEP_UP_REQUIRED before ever reaching the
-    // permission check below it.
+  it("gates PATCH /:id/desbloquear too, once there is a factor to prove", async () => {
+    /**
+     * This route used to be the deliberate exception, and this test used to
+     * pin it as one. What changed is not the convenience argument — lifting a
+     * lockout really is what an administrator does in a hurry — but the claim
+     * underneath it: that whoever holds `seguridad.editar` "can already do
+     * worse through the routes above". From plan 4B's first registered
+     * factor those routes refuse a session that has not proved one, and this
+     * one would have gone on answering 200 while clearing `failed_attempts`
+     * and `locked_until` — the login lockout, and the only brake against
+     * password guessing that lives in the database rather than in a rate
+     * limiter's in-memory window.
+     *
+     * `passkeyCount` at 1 is the real `factorInventory` module answering that
+     * question, so this is 4B's condition reached today rather than a stub of
+     * the gate. Without the mount the request reaches `desbloquearUsuario`
+     * and answers 500 — the default fixture has no `.set`, so its write
+     * throws — which is what this assertion is measured against.
+     */
+    passkeyCount.mockResolvedValue(1);
     puede = true;
     try {
       const res = await request(app)
@@ -1660,13 +1673,35 @@ describe("requireStepUp, mounted on the real routes", () => {
         .set(DEL_FRONTEND)
         .send({});
 
-      // Pinned rather than merely excluding 403. `usuarioFindOne`'s default
-      // fixture has no `.set`, so `desbloquearUsuario`'s own write throws and
-      // the handler answers 500 — a fixture limit, not this route refusing
-      // step-up. `not.toBe(403)` alone proves only "not exactly 403", which
-      // stays green for a great many wrong reasons; the exact number is what
-      // actually says the gate never ran.
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe(CODIGO_STEP_UP);
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("still lifts a lockout with no password while no account has a factor", async () => {
+    // The other half, and the reason the recovery path does not become a
+    // ceremony the day this shipped: with nothing registered anywhere — the
+    // real, shipped state — the gate's third branch lets the request through
+    // untouched, so an administrator in a hurry types nothing extra. The 500
+    // is `desbloquearUsuario`'s own write against a fixture with no `.set`,
+    // i.e. the handler was reached; a gate refusing here would answer 403
+    // before it.
+    puede = true;
+    try {
+      const res = await request(app)
+        .patch(`/api/usuario/${YO}/desbloquear`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({});
+
       expect(res.status).toBe(500);
+      // And it went through the skip rather than around the gate: the two are
+      // indistinguishable by status code, which is how a gate goes missing.
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "STEP_UP_SKIPPED" }),
+      );
     } finally {
       puede = false;
     }
@@ -2161,6 +2196,40 @@ describe("email verification, through the real stack", () => {
     expect(usuarioUpdate).not.toHaveBeenCalled();
   });
 
+  it("stops taking a password for this address once the account has a factor", async () => {
+    /**
+     * The reason this route needed the gate, given that its handler already
+     * demands the current password.
+     *
+     * The handler's check is a password check and will always be one. The
+     * gate's second branch is the rule that a password stops being an
+     * acceptable answer at all once there is a factor to prove — the whole
+     * design's step-up list, and this route is on it ("cambiar el email
+     * propio"). Without the mount, the request below reaches the handler,
+     * the password is correct, and the address is changed by whoever holds
+     * the cookie and the password but no factor: the account-takeover chain
+     * this handler's own comment says it exists to break, re-opened by plan
+     * 4B rather than closed by it.
+     *
+     * `passkeyCount` at 1 is the real `factorInventory` module answering
+     * "this account has a factor" — the same lever plan 4B will pull for
+     * real, not a stub of the gate.
+     */
+    passkeyCount.mockResolvedValue(1);
+
+    const res = await request(app)
+      .post("/api/auth/email/send")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ email: "a@osefi.net", pass: "la-de-verdad" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe(CODIGO_STEP_UP);
+    // Refused in front of the handler, not by it: no write, and the address
+    // never reached `sendVerificationEmail` at all.
+    expect(usuarioUpdate).not.toHaveBeenCalled();
+  });
+
   it("answers the generic message, through the real tokenStore, for a token that does not redeem", async () => {
     // `tokenUsoUnicoUpdate` defaults to `[0, []]` — no row matched, which is
     // exactly what a made-up token looks like against the real `consumirToken`.
@@ -2333,6 +2402,58 @@ describe("the fourteen-day deadline, against a session that was already open", (
     expect(res.status).toBe(400);
   });
 
+  it("keeps that door shut for the same state once the account does have a factor", async () => {
+    // The other half of `permiteOnboarding`, and the line between the option
+    // and a hole: it lets `onboarding` past the *state* check and nothing
+    // else. An account with a factor can still hold an `onboarding` session —
+    // this fixture is one, a session opened before the deadline on an account
+    // that registered a factor afterwards — and for it, a password is not an
+    // acceptable answer here any more than anywhere else. The refusal comes
+    // from the factor check further down the gate, which the option does not
+    // touch.
+    passkeyCount.mockResolvedValue(1);
+
+    const res = await request(app)
+      .post("/api/auth/email/send")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ email: "a@osefi.net", pass: "la-de-verdad" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe(CODIGO_STEP_UP);
+  });
+
+  it("refuses to close another session for that same session, and revokes nothing", async () => {
+    /**
+     * The attack an audit of this plan demonstrated end to end, closed.
+     *
+     * From this exact fixture — a cookie whose account is past its deadline,
+     * so `onboarding`, refused on users, roles and the permission matrix —
+     * `DELETE /api/auth/sessions/:id` used to answer 200 and revoke the row.
+     * Run against every id `GET /api/auth/sessions` hands back except the
+     * caller's own, that logs the victim out of every device while the stolen
+     * cookie goes on working: the account's own way of noticing a second
+     * device is what performs it.
+     *
+     * The 403 has to be the **gate's**, and that is what `code` pins.
+     * `authenticate` also answers 403 to `onboarding`, but not here:
+     * `ONBOARDING_EXTRA` opens `/api/auth/sessions`, so this request gets
+     * past it and reaches `requireStepUp` — which is the only reason this
+     * route needed a gate of its own rather than the allowlist.
+     */
+    const res = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe(CODIGO_STEP_UP);
+    // Not merely refused: nothing was revoked. A 403 written after the
+    // revocation would answer the same number and still have logged the
+    // victim out.
+    expect(sesionUpdate).not.toHaveBeenCalled();
+  });
+
   it("tells /api/auth/me the state it is actually enforcing", async () => {
     // **The one thing this rule changes on a request it does not refuse**, and
     // the reason it matters: `/api/auth/me` is in `PARCIAL`, so every state
@@ -2346,6 +2467,22 @@ describe("the fourteen-day deadline, against a session that was already open", (
 
     expect(res.status).toBe(200);
     expect(res.body.estado).toBe("onboarding");
+  });
+
+  it("stops handing that session the permission matrix", async () => {
+    // The specification's "en estado no `completa`, devuelve estado sin
+    // permisos", through the real stack rather than a hand-built `req`: the
+    // state that reaches the handler here is the recomputed one, so this is
+    // also what proves the withholding keys off the state `authenticate`
+    // actually enforces and not the `completa` still written in the row.
+    //
+    // The rest of the body survives — this endpoint is what the front end
+    // asks on load, and in this state it is one of the few that answer at all.
+    const res = await request(app).get("/api/auth/me").set("Cookie", COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.permisos).toBeUndefined();
+    expect(res.body.usuario.id).toBe(YO);
   });
 
   it("still lets the ERP through while the deadline is ahead", async () => {

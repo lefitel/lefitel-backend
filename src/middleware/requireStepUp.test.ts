@@ -116,6 +116,33 @@ describe("requireStepUp", () => {
     );
   });
 
+  it("refuses a mark in the future, instead of treating it as freshly proved", async () => {
+    // The window had no lower bound: it measured "no more than ten minutes
+    // old" and nothing else, so a stamp *ahead* of now satisfied it for as
+    // long as it stayed ahead — a session authorised until the clock caught
+    // up, which for a mark an hour out is an hour of unlimited step-up.
+    //
+    // How a stamp gets there: a host whose clock is corrected backwards
+    // (NTP after a drift, a VM resumed from a snapshot), or a write that
+    // computes the instant wrongly. Latent today, because nothing writes the
+    // column until plan 4B — which is exactly when a bad write would land.
+    //
+    // Five minutes ahead, deliberately *inside* the ten-minute width: a bound
+    // written as `>= -WINDOW` instead of `>= 0` would pass this, and so would
+    // the old code.
+    tieneAlgunFactor.mockResolvedValue(true);
+    const { req, res, next } = contexto({
+      id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(-5),
+    });
+    await requireStepUp()(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }),
+    );
+  });
+
   it("refuses a session that came in on a remembered device", async () => {
     // A remembered login leaves `mfa_satisfied_at` NULL on purpose. If it did
     // not, stealing that cookie plus the password would be enough to edit the
@@ -175,6 +202,76 @@ describe("requireStepUp", () => {
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
     );
+  });
+
+  describe("permiteOnboarding, for the doors that let somebody stop being onboarding", () => {
+    // The option and its exact edges. `ONBOARDING_EXTRA` in
+    // `auth/sessionState.ts` opens six prefixes so an account past its
+    // deadline can finish setting up, and the design puts several of those
+    // same operations behind step-up — changing your own address, registering
+    // a factor. Without this option the two rules cancel out and the account
+    // is sealed in: measured on `POST /api/auth/email/send`, where the plain
+    // gate turns `app.auth.test.ts`'s "leaves the doors that finish the setup
+    // open to that same session" from 400 into 403.
+
+    it("lets an onboarding session past the state check when the route asks for it", async () => {
+      const { req, res, next } = contexto({ id: 1, estado: "onboarding", mfa_satisfied_at: null });
+      await requireStepUp({ permiteOnboarding: true })(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+      // Through branch 3, the same skip a factor-less `completa` session gets,
+      // and it says so in the bitácora. Not a silent exemption: without this
+      // assertion the test would also pass for a gate that let the state
+      // through and then skipped every check after it.
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "STEP_UP_SKIPPED" }),
+      );
+    });
+
+    it("still refuses an onboarding session whose account has a factor", async () => {
+      // The line between the option and a hole. `estadoEfectivo` can hand an
+      // `onboarding` state to a session on an account that does have a factor
+      // — one opened before the deadline, on an account that registered
+      // afterwards — and for that account a password is not an acceptable
+      // answer here any more than anywhere else. The option relaxes the state
+      // check and nothing below it.
+      //
+      // The mock reads its argument rather than answering a constant: a gate
+      // that asked about some other account would be refusing for the wrong
+      // reason and this would catch it.
+      tieneAlgunFactor.mockImplementation(async (id: number) => id === 1);
+      verifyOwnPassword.mockResolvedValue({ ok: true });
+      const { req, res, next } = contexto(
+        { id: 1, estado: "onboarding", mfa_satisfied_at: null },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp({ permiteOnboarding: true })(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }),
+      );
+      expect(next).not.toHaveBeenCalled();
+      // The password was never even compared: with a factor on the account
+      // there is no answer of that shape.
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+    });
+
+    it("never lets a parcial session through, whatever the option says", async () => {
+      // The option names one state and reads that state, rather than meaning
+      // "anything below `completa`". `parcial` means the account has a factor
+      // and has not proved it on this session, so the way through is proving
+      // it — and `PARCIAL` opens none of the setup doors this option is for.
+      const { req, res, next } = contexto({ id: 1, estado: "parcial", mfa_satisfied_at: null });
+      await requireStepUp({ permiteOnboarding: true })(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
+      );
+      expect(next).not.toHaveBeenCalled();
+    });
   });
 
   it("writes a bitácora line when it refuses", async () => {
