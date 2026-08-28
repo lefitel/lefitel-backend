@@ -2231,14 +2231,18 @@ describe("the fourteen-day deadline, against a session that was already open", (
   const VENCIDO = new Date(Date.now() - DIA_MS);
   /** Tomorrow: still inside the grace period. */
   const POR_VENCER = new Date(Date.now() + DIA_MS);
+  /** Opened three days ago, i.e. before `VENCIDO`: a session the deadline is about. */
+  const ABIERTA_ANTES = new Date(Date.now() - 3 * DIA_MS);
 
   /**
    * The account as `currentUser` reads it, with the deadline each test needs.
    *
-   * Same shape as the shared fixture in `beforeEach`, plus `mfa_grace_until` —
-   * which the shared one leaves absent, i.e. "the clock never started", which
-   * is the state of every account in this file and the reason none of them
-   * notice this rule.
+   * **Four fields fewer than the shared fixture in `beforeEach`, not one more.**
+   * That one carries `user`, `name`, `lastname` and `image` as well, which
+   * `currentUser`'s projection never asks for and nothing in this block reads.
+   * What it does *not* carry is `mfa_grace_until` — absent there means "the
+   * clock never started", which is why none of the other 66 tests in this file
+   * notice this rule at all.
    */
   const conPlazo = (mfa_grace_until: Date | null) => {
     usuarioFindByPk.mockResolvedValue({
@@ -2246,19 +2250,48 @@ describe("the fourteen-day deadline, against a session that was already open", (
     } as never);
   };
 
+  /**
+   * The session row, opened before the deadline unless a test says otherwise.
+   *
+   * The shared fixture opens its session *now*, which under this rule is a
+   * session the deadline cannot be about — a `completa` row created after its
+   * own deadline can only have been promoted there by something that verified a
+   * factor. So the block sets its own `created_at`, and that is not fixture
+   * decoration: it is the difference between the case this rule refuses and the
+   * case it must not.
+   */
+  const sesionAbierta = (extra: Record<string, unknown> = {}) => {
+    sesionFindOne.mockResolvedValue({
+      dataValues: {
+        id: MI_SESION,
+        id_usuario: YO,
+        created_at: ABIERTA_ANTES,
+        expires_at: SESION_EXPIRA_FILA,
+        last_used_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+        mfa_source: null,
+        ...extra,
+      },
+    } as never);
+  };
+
+  beforeEach(() => {
+    sesionAbierta();
+    conPlazo(VENCIDO);
+  });
+
   it("refuses the ERP to a complete session whose grace period ran out mid-session", async () => {
-    // The session row is the shared fixture's: `estado: "completa"`, exactly as
-    // the login wrote it before the deadline arrived. Nothing has revoked it
-    // and nothing has rewritten it — which is the whole point. The refusal has
-    // to come from re-reading the account's deadline on this request.
+    // The session row says `completa`, exactly as the login wrote it before the
+    // deadline arrived. Nothing has revoked it and nothing has rewritten it —
+    // which is the whole point. The refusal has to come from re-reading the
+    // account's deadline on this request.
     //
     // `GET /api/usuario/:id` with the caller's own id, deliberately: the
     // permission gate on that route is `requireSelfOrPermission`, so it lets
     // the caller through on their own row without needing a permission this
     // file's `can` mock refuses. Before this rule existed the request answered
     // **200 with the account's row** — an ERP read, served past the deadline.
-    conPlazo(VENCIDO);
-
     const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
 
     expect(res.status).toBe(403);
@@ -2277,8 +2310,6 @@ describe("the fourteen-day deadline, against a session that was already open", (
     // keeps them inside the application, where the screen that finishes their
     // setup is. Asserted apart from the test above because the number is a
     // contract with the client, not an implementation detail of the refusal.
-    conPlazo(VENCIDO);
-
     const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
 
     expect(res.status).not.toBe(401);
@@ -2293,8 +2324,6 @@ describe("the fourteen-day deadline, against a session that was already open", (
     // given, its own business. What matters here is that the 400 is the
     // handler's and not `authenticate`'s 403: a rule that closed everything
     // would leave the account with no way out of onboarding from inside the API.
-    conPlazo(VENCIDO);
-
     const res = await request(app)
       .post("/api/auth/email/send")
       .set("Cookie", COOKIE)
@@ -2302,6 +2331,21 @@ describe("the fourteen-day deadline, against a session that was already open", (
       .send({ email: "a@osefi.net" });
 
     expect(res.status).toBe(400);
+  });
+
+  it("tells /api/auth/me the state it is actually enforcing", async () => {
+    // **The one thing this rule changes on a request it does not refuse**, and
+    // the reason it matters: `/api/auth/me` is in `PARCIAL`, so every state
+    // reaches it, and it publishes `req.user.estado`. Until now it answered
+    // `completa` — the value in the row — while `authenticate` was answering
+    // 403 to the rest of the ERP, which is precisely the "a 200 followed by
+    // 403s with no distinguishable cause" that endpoint's own comment says the
+    // field exists to prevent. Both halves were tested separately and neither
+    // covered the pair.
+    const res = await request(app).get("/api/auth/me").set("Cookie", COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.estado).toBe("onboarding");
   });
 
   it("still lets the ERP through while the deadline is ahead", async () => {
@@ -2330,16 +2374,66 @@ describe("the fourteen-day deadline, against a session that was already open", (
     expect(res.status).toBe(200);
   });
 
+  describe("the sessions this deadline is not about", () => {
+    // **A permanent lockout, caught in review before it could ship.**
+    // `mfa_grace_until` is stamped once and never cleared, so "the deadline
+    // passed" is not the same fact as "this account still has nothing
+    // registered". A first version narrowed on the stamp alone, which meant
+    // that from the moment plan 4B let somebody register a factor after their
+    // own deadline, that account got 403 on the whole ERP for ever — on every
+    // request, with logging out and back in returning to the same place.
+    //
+    // These run through the assembled app because that is where the lockout
+    // would have been felt: a compliant account holding a cookie and being
+    // refused every screen.
+
+    it("keeps the ERP for a session opened after the deadline had gone by", async () => {
+      // Plan 4B's own path: log in on day 20, prove a factor, and the endpoint
+      // that verified it promotes the row to `completa`. The account's deadline
+      // is still sitting on day 14 and always will be. This clause asks nothing
+      // of 4B beyond the promotion it has to do anyway.
+      sesionAbierta({ created_at: new Date(VENCIDO.getTime() + 1_000) });
+
+      const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+      expect(res.status).toBe(200);
+    });
+
+    it("keeps the ERP for a session that has proved a factor", async () => {
+      // The other clause, for the session that predates the deadline and
+      // registers a factor from inside `onboarding`. No time window on the
+      // stamp: borrowing `requireStepUp`'s ten minutes here would drop somebody
+      // into `onboarding` ten minutes after they configured the very thing
+      // `onboarding` was asking them to configure.
+      sesionAbierta({ mfa_satisfied_at: new Date(Date.now() - 30 * 60_000) });
+
+      const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+      expect(res.status).toBe(200);
+    });
+
+    it("keeps the ERP for a session that got in on a remembered device", async () => {
+      // `mfa_satisfied_at` stays NULL on a remembered-device login on purpose —
+      // see the column's comment in the migration — so that login is invisible
+      // to the clause above. `mfa_source` names it, and a device can only have
+      // been remembered for an account that proved a factor once.
+      sesionAbierta({ mfa_source: "dispositivo" });
+
+      const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+      expect(res.status).toBe(200);
+    });
+  });
+
   it("costs the hot path no extra query to work this out", async () => {
     // The measurement, pinned rather than asserted in a comment. `authenticate`
     // makes exactly two reads per request — the session row and the account —
     // and the deadline arrives on the second of them, as one more column in a
-    // projection that was already being fetched. Nothing here counts factors:
-    // `tieneAlgunFactor` reads two more tables, and putting it in front of
-    // every request in the ERP to catch a transition that cannot happen yet
-    // would be two more round trips where the fix needs none.
-    conPlazo(VENCIDO);
-
+    // projection that was already being fetched. The three columns the scoping
+    // clauses read come off the session row, which was being fetched anyway
+    // too. Nothing here counts factors: `tieneAlgunFactor` reads two more
+    // tables, and putting it in front of every request in the ERP would be two
+    // more round trips where the fix needs none.
     await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
 
     expect(usuarioFindByPk).toHaveBeenCalledTimes(1);
@@ -2356,10 +2450,8 @@ describe("the fourteen-day deadline, against a session that was already open", (
     // every request in the ERP. The row keeps what the login decided; the
     // verdict is computed from it, on every request.
     //
-    // `last_used_at` is fresh in the shared fixture, so the throttled touch
+    // `last_used_at` is fresh in this block's fixture, so the throttled touch
     // does not fire either: no UPDATE against `sesiones` at all.
-    conPlazo(VENCIDO);
-
     await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
 
     expect(sesionUpdate).not.toHaveBeenCalled();

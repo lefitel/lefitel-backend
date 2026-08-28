@@ -92,16 +92,34 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
  * `auth/sessionState.js`.** What this function decides is written into the
  * session row once and never rewritten, so on its own it imposes the deadline
  * only on people who log in after it. `authenticate` recomputes the part that
- * can go stale — `completa` becoming `onboarding` when the deadline passes — on
- * every request, from the account's own `mfa_grace_until`. Read them together:
- * this one is the full decision and pays for the factor queries below; that one
- * is the free half, and deliberately does not ask about factors at all.
+ * can go stale on every request. Read them together: this one is the full
+ * decision and pays for the factor queries below; that one is the free half,
+ * and works from the session row alone.
  *
- * The consequence for whoever writes the endpoints that register a factor
- * (plan 4B): **`estadoEfectivo` will not lift anybody out of `onboarding`.** It
- * only narrows. A session that registers a factor mid-flight either has its row
- * updated by the endpoint that did it, or stays in `onboarding` until the next
- * login brings it back through here.
+ * **What plan 4B has to know, because getting it wrong here is a lockout.**
+ * `mfa_grace_until` is stamped once and **never cleared** — see `graceUntil`
+ * below: the branch for an account that already has a factor returns `null`,
+ * which means "leave the column alone", not "clear it". So once a deadline is
+ * in the past it stays in the past, on every account, including the ones that
+ * went and registered a factor afterwards.
+ *
+ * That is why `estadoEfectivo` does **not** narrow on the stamp alone. When the
+ * endpoint that verifies a factor promotes a session to `completa`, two things
+ * on the row keep it there, and the promotion is only one of them:
+ *
+ * - the session was opened after the deadline had already gone by — the case
+ *   for anybody who registers a factor *after* their own deadline, and the one
+ *   clause that needs nothing from 4B at all; or
+ * - the row carries `mfa_satisfied_at` or `mfa_source`, which the endpoint that
+ *   proved the factor should be writing anyway. **Skipping them does not just
+ *   affect this**: `requireStepUp` reads `mfa_satisfied_at` and would refuse
+ *   the next gated write on a session that had just authenticated.
+ *
+ * **And the tidying that is worth doing even though nothing depends on it:**
+ * clear `usuarios.mfa_grace_until` when an account registers its first factor.
+ * The first branch below already says a date in that column "reads as: this
+ * account is still being chased", and after registration it is not. Third line
+ * of defence, not the first.
  *
  * `graceUntil` is an instruction to the caller, not a fact about the account:
  * a date means "write this into `usuarios.mfa_grace_until`", `null` means

@@ -85,12 +85,82 @@ export function puedeAlcanzar(estado: EstadoSesion, ruta: string): boolean {
  * it. The whole point of the state machine is to impose a date; without this
  * function the date was imposed on nobody who was already logged in.
  *
+ * ---
+ *
+ * **`mfa_grace_until` in the past does not mean "this account has no factor".**
+ * It means "the configuration deadline went by", and **nothing in `src/` ever
+ * clears or moves that column again**: its only writer (`auth.controller.ts`)
+ * fires solely when `estadoInicialDeSesion` hands back a date, and the two
+ * branches that matter — an account that has a factor, and a deadline already
+ * decided — both hand back `null`, which means "leave the column alone". Once
+ * the stamp is in the past it is in the past for ever, on every account,
+ * including the ones that did exactly what was asked of them.
+ *
+ * A first version of this function narrowed on that stamp alone, and the
+ * consequence was a permanent lockout waiting for plan 4B to arm it: register a
+ * factor on day 20, prove it, have the session promoted to `completa` — and the
+ * next request reads a deadline still sitting on day 14 and answers 403 to the
+ * whole ERP, on an account that has complied in full. Logging out and back in
+ * returns to the same place. There is no way out from inside the API.
+ *
+ * **So the question is not "has the deadline passed" but "is this session one
+ * the deadline is even about".** The deadline chases accounts that have
+ * registered nothing; for an account that has a factor there is nothing left to
+ * onboard, and `onboarding` is not a narrower truth about it, it is a false one.
+ * Three things on the session row itself answer that, and every one of them is
+ * already in `findLiveSession`'s projection, so the answer still costs **zero
+ * queries**:
+ *
+ * 1. **The stored state is not `completa`.** Not this rule's business — see
+ *    below for why `parcial` in particular must never be moved.
+ * 2. **The session was opened after the deadline had already gone by.** Then its
+ *    own login cannot have concluded "no factor, still in grace": with the
+ *    deadline past, `estadoInicialDeSesion` answers `onboarding` for an account
+ *    with nothing registered and `parcial` for one with a factor — never
+ *    `completa`. A `completa` row created after its own deadline can therefore
+ *    only have been promoted there by something that verified a factor. **This
+ *    clause needs nothing at all from 4B**, which is the point of it: it holds
+ *    even if the endpoint that promotes the session writes nothing but `estado`.
+ * 3. **The row carries evidence that a factor was involved.**
+ *    `mfa_satisfied_at` is stamped only by a live proof of a factor, and
+ *    `mfa_source` names which kind — including `dispositivo`, a remembered
+ *    device, which can only exist for an account that proved a factor once to
+ *    have the device remembered. Either one present means the account has a
+ *    factor, and an account with a factor has nothing to onboard.
+ *
+ * **No time window on `mfa_satisfied_at`, and that is deliberate.**
+ * `requireStepUp` measures the same column against `STEP_UP_WINDOW_MINUTES`,
+ * and copying that here would be a disaster: ten minutes after proving their
+ * factor, a legitimately authenticated person would be dropped into
+ * `onboarding` and told to go configure the thing they had just configured. The
+ * two questions are different. Step-up asks "was a factor proved *recently
+ * enough* to authorise this write"; this asks "does this account have a factor
+ * at all", and the answer to that does not expire.
+ *
+ * **What this still leaves to 4B, said plainly.** Clause 3 depends on the
+ * endpoint that verifies a factor stamping `mfa_satisfied_at`, which is the
+ * column's entire declared purpose and which it cannot skip without breaking
+ * step-up loudly on the very next gated write. Clause 2 depends on nothing. And
+ * if both were somehow missed, the result is no longer the inescapable lockout
+ * described above: `onboarding` opens everything `parcial` opens **plus six**,
+ * `/api/auth/mfa` and `/api/auth/webauthn/login` among them, so the endpoint
+ * that verifies a factor is still reachable and a second attempt still gets out.
+ * Degraded, not sealed shut.
+ *
+ * **And a request to 4B that is not load-bearing:** when an account registers
+ * its first factor, clear `usuarios.mfa_grace_until`. `estadoInicialDeSesion`'s
+ * own first branch already says a date in that column "reads as: this account is
+ * still being chased", and after registration it is not. That is data hygiene
+ * and a third line of defence; the two clauses above do not wait for it.
+ *
+ * ---
+ *
  * **It only ever narrows, and that is the property that makes it safe to run in
  * front of the entire API.** The only move it makes is `completa` → `onboarding`,
  * and `PERMITIDAS` above makes that strictly a narrowing: `completa` is `"todo"`
  * and `onboarding` is a list. So the worst a bug in here can do is refuse
- * somebody who should have been let through — loud, and undone by logging out and
- * back in — never let somebody through who should have been refused.
+ * somebody who should have been let through, never let somebody through who
+ * should have been refused.
  *
  * **The other two states are returned untouched, and `parcial` especially must
  * be.** `onboarding` is `[...PARCIAL, ...ONBOARDING_EXTRA]`, i.e. a strict
@@ -98,19 +168,17 @@ export function puedeAlcanzar(estado: EstadoSesion, ruta: string): boolean {
  * what a `parcial` session reaches the moment a deadline it has nothing to do
  * with went by. `parcial` means the account has a factor and has not proved it,
  * which no clock changes. A stored `onboarding` is likewise left alone: it is
- * already the narrow answer, and the two ways out of it are registering a
- * factor — a write at the moment it happens, for plan 4B to make — or logging in
- * again, which is what the reprieve in `estadoInicialDeSesion` documents.
+ * already the narrow answer, and the way out of it is registering a factor and
+ * having the endpoint that did it promote the row — which clause 3 above then
+ * respects on every later request.
  *
- * **What it deliberately does not ask.** Whether the account has since
- * registered a factor, i.e. whether a stored `onboarding` has earned `completa`
- * back. Answering that means `tieneAlgunFactor`, which is two COUNTs against two
- * more tables, charged to **every request in the ERP**, to catch a transition
- * that happens at most once per account and that nothing in `src/` can even
- * cause yet (no code writes those tables until plan 4B). The deadline, by
- * contrast, costs nothing: `authenticate`'s `currentUser` already reads
- * `usuarios` on every request, so `mfa_grace_until` is one more name in a
- * projection that was being fetched anyway — zero extra round trips.
+ * **What it deliberately does not ask.** Whether the *account* has a factor,
+ * as opposed to whether this session shows signs of one. Answering that means
+ * `tieneAlgunFactor`, which is two COUNTs against two more tables, charged to
+ * **every request in the ERP**, to catch a transition that happens at most once
+ * per account. The deadline and the three clauses above cost nothing:
+ * `authenticate`'s `currentUser` already reads `usuarios`, and `findLiveSession`
+ * already reads every session column used here.
  *
  * **Nothing is written back.** The answer is computed from the row on each
  * request and thrown away. Storing it would make it a second photograph, which
@@ -122,13 +190,22 @@ export function puedeAlcanzar(estado: EstadoSesion, ruta: string): boolean {
  * it — and a login and a request landing on that same millisecond have to agree.
  */
 export function estadoEfectivo(
-  guardado: EstadoSesion,
+  // The session row as `findLiveSession` returns it, not four loose arguments:
+  // every field here is a fact about *this session*, and taking them together
+  // keeps a caller from supplying three of them and forgetting the fourth.
+  sesion: {
+    estado: EstadoSesion;
+    created_at: Date;
+    mfa_satisfied_at: Date | null;
+    mfa_source: string | null;
+  },
   // `undefined` as well as `null`, for the same reason `estadoInicialDeSesion`
   // spells both out: `IUsuario` declares `mfa_grace_until?: Date | null`, and
   // the projection this value arrives through can legitimately not carry it.
   mfa_grace_until: Date | null | undefined,
   ahora: Date,
 ): EstadoSesion {
+  const guardado = sesion.estado;
   if (guardado !== "completa") return guardado;
 
   // An unreadable deadline leaves the state alone, and that is the same answer
@@ -149,8 +226,32 @@ export function estadoEfectivo(
   // NULL, so the tripwire is at the seam instead.
   const limite = mfa_grace_until == null ? NaN : new Date(mfa_grace_until).getTime();
   if (Number.isNaN(limite)) return guardado;
+  if (limite > ahora.getTime()) return guardado;
 
-  return limite <= ahora.getTime() ? "onboarding" : guardado;
+  // Clause 3: any sign that a factor was involved in this session at all. No
+  // window on either — see the docstring for why borrowing `requireStepUp`'s
+  // ten minutes here would throw people out of the session they had just
+  // authenticated.
+  if (sesion.mfa_satisfied_at !== null || sesion.mfa_source !== null) return guardado;
+
+  // Clause 2: opened after the deadline had already gone by, so its `completa`
+  // cannot have come from a login that found grace left.
+  //
+  // **Written as the exemption and not as the refusal, and that is the whole
+  // safety of it.** An unreadable `created_at` gives `NaN`, and every
+  // comparison against `NaN` is `false` — so asking "is this session exempt"
+  // answers no and the row narrows, while the mirror-image spelling
+  // (`creadaEn < limite` → narrow) would answer no to *that* and let a row this
+  // function cannot read walk past the rule entirely. Same operands, opposite
+  // failure, and it is the direction rather than any guard that decides which:
+  // an explicit `Number.isFinite` in front of this changes nothing and was
+  // removed after a mutation proved it dead. `authenticate` refuses an
+  // unparseable `created_at` long before this runs, so the case is unreachable
+  // from there; this function is exported and does not get to assume that.
+  const creadaEn = sesion.created_at == null ? NaN : new Date(sesion.created_at).getTime();
+  if (creadaEn >= limite) return guardado;
+
+  return "onboarding";
 }
 
 /** Shown to somebody in `onboarding` who reached for the ERP. In Spanish: they read it. */

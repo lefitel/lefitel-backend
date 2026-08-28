@@ -166,16 +166,26 @@ async function authenticateBySession(
    *
    * **This costs no query.** `currentUser` below already reads `usuarios` on
    * every request for the role, so `mfa_grace_until` is one more column name in
-   * a projection that was being fetched anyway. Nothing here counts factors:
-   * see `estadoEfectivo` for why the reverse transition — an `onboarding`
-   * session that has since registered one — is deliberately not asked about,
-   * and what it would have cost every request in the API to ask.
+   * a projection that was being fetched anyway; `sesion` goes in whole because
+   * the other three fields the rule reads — `created_at`, `mfa_satisfied_at`,
+   * `mfa_source` — are already in `findLiveSession`'s projection too. Nothing
+   * here counts factors: see `estadoEfectivo` for what it would have cost every
+   * request in the API to ask the account-level question instead of the
+   * session-level one.
+   *
+   * **And the rule is narrower than "the deadline passed", on purpose.** That
+   * column is never cleared once stamped, so narrowing on it alone locks out
+   * for ever anybody who registers a factor after their own deadline — a
+   * permanent lockout with no way out from inside the API, armed here and fired
+   * by plan 4B. `estadoEfectivo` carries the three clauses that scope this to
+   * the sessions the deadline is actually about; read them there before
+   * changing anything here.
    *
    * **And nothing is written back.** The row keeps what the login decided; this
    * is recomputed from it on each request and discarded. Storing it would make
    * it a second photograph, which is the defect being fixed.
    */
-  const estado = estadoEfectivo(sesion.estado, usuario.mfa_grace_until, now);
+  const estado = estadoEfectivo(sesion, usuario.mfa_grace_until, now);
 
   /**
    * What this session may reach, on top of whether it exists.
@@ -315,21 +325,28 @@ async function authenticateBySession(
     id_rol: usuario.id_rol,
     id_sesion: sesion.id,
     expires_at: expiresAt,
-    // The recomputed one, not `sesion.estado`. `requireStepUp` reads this field
-    // and refuses anything that is not `completa`, so the stored value would
-    // leave the step-up gate believing a session the check above has already
-    // decided is past its deadline.
+    // The recomputed one, not `sesion.estado`, and two things read it.
     //
-    // On today's mounts nothing reaches it either way: all eleven routes
-    // `requireStepUp` guards live under `/api/usuario`, `/api/rol` and
-    // `/api/permiso`, none of which the `onboarding` allowlist opens, so
-    // `puedeAlcanzar` refused them before this line ran and the gate never
-    // executes. So today this line is correctness the allowlist happens to be
-    // covering for — the kind that rots quietly. It stops being covered for in
-    // the very next task of this plan, which puts `requireStepUp` on `DELETE
-    // /api/auth/sessions/:id`: a gated write behind `/api/auth/sessions`, which
-    // `ONBOARDING_EXTRA` **does** open. From that commit on, this field is the
-    // only thing between that write and a session past its deadline.
+    // **`GET /api/auth/me` publishes it today**, and that is the one visible
+    // change this rule makes to a request it does *not* refuse: `/api/auth/me`
+    // is in `PARCIAL`, so every state reaches it, and from here on it answers
+    // `onboarding` mid-session instead of the `completa` the row still holds.
+    // That is the improvement, not a side effect — the endpoint's own comment
+    // says this field exists because "the day the grace period runs out is
+    // undebuggable" without it, and until now it went on saying `completa`
+    // while the ERP answered 403, which is exactly the confusion it was added
+    // to prevent.
+    //
+    // **`requireStepUp` reads it too**, and there the stored value would leave
+    // the gate believing a session the check above has already decided is past
+    // its deadline. Nothing reaches it either way on today's mounts: all eleven
+    // routes it guards live under `/api/usuario`, `/api/rol` and `/api/permiso`,
+    // none of which the `onboarding` allowlist opens, so `puedeAlcanzar` refused
+    // them before this line ran. That stops being true in the very next task of
+    // this plan, which puts `requireStepUp` on `DELETE /api/auth/sessions/:id`:
+    // a gated write behind `/api/auth/sessions`, which `ONBOARDING_EXTRA`
+    // **does** open. From that commit on, this field is the only thing between
+    // that write and a session past its deadline.
     estado,
     mfa_satisfied_at: sesion.mfa_satisfied_at,
   };
