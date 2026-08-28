@@ -5,13 +5,33 @@ import { ISesion } from "../interfaces/index.js";
 
 // `revoked_at`, `user_agent`, `ip_address`, `mfa_satisfied_at` and
 // `mfa_source` are optional here even though `ISesion` requires them, so that
-// `createSession` (a later task) can create a row without naming all five —
-// they still resolve to `null` on both sides, since the columns below allow
-// it. `estado` is optional too, but for the opposite reason: it has a
-// default value below rather than allowing null.
+// `createSession` can create a row without naming all five — they still
+// resolve to `null` on both sides, since the columns below allow it.
+//
+// **`estado` is deliberately not on that list.** It used to be, because the
+// column had a `DEFAULT 'completa'` and the model mirrored it. That default
+// was correct for exactly one statement — the `ALTER TABLE` that added the
+// column to rows that predated states — and `20260827000001` has since
+// removed it from the database. Leaving it here would keep the hole open from
+// the other side: `estado` is what a session is allowed to do, and a creation
+// that forgets it must not quietly come out with the run of the whole ERP.
+//
+// ⚠️ **What this line does not buy is a compiler check.** `tsconfig.json` sets
+// `"strict": false`, which makes null and undefined assignable to everything
+// and collapses Sequelize's `MakeNullishOptional` into "every field optional":
+// `SesionModel.create({})`, with no fields at all, typechecks clean today.
+// Measured, not assumed. So the type here is documentation plus the check this
+// will become the day `strict` goes on — and it is `createSession`'s ordinary
+// required parameter, which the compiler does enforce, that asks each call
+// site the question.
+//
+// The two that actually refuse an omitted `estado` are Sequelize's notNull
+// validation, which works only while the attribute below carries no
+// `defaultValue`, and the column's own NOT NULL with nothing to fall back on.
+// Both are pinned by tests in `factorModels.test.ts`.
 type SesionCreation = Optional<
   ISesion,
-  "revoked_at" | "user_agent" | "ip_address" | "estado" | "mfa_satisfied_at" | "mfa_source"
+  "revoked_at" | "user_agent" | "ip_address" | "mfa_satisfied_at" | "mfa_source"
 >;
 
 /**
@@ -38,10 +58,11 @@ export const SesionModel: ModelDefined<ISesion, SesionCreation> = sequelize.defi
     last_used_at: { type: DataTypes.DATE, allowNull: false },
     expires_at: { type: DataTypes.DATE, allowNull: false },
     revoked_at: { type: DataTypes.DATE, allowNull: true },
-    // Mirrors the migration's DB-level default so a `.create(...)` that
-    // omits `estado` does not fail Sequelize's own `notNull` validation
-    // before ever reaching Postgres.
-    estado: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "completa" },
+    // No `defaultValue`, and that absence is the point — see the note on
+    // `SesionCreation` above. A `.create(...)` that omits `estado` now fails
+    // Sequelize's own `notNull` validation before any SQL is sent, which is
+    // the answer that names the mistake instead of granting it.
+    estado: { type: DataTypes.STRING(20), allowNull: false },
     // Written only by a live proof of a factor — null on a session opened
     // via a remembered device, on purpose.
     mfa_satisfied_at: { type: DataTypes.DATE, allowNull: true },

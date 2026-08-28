@@ -1,7 +1,43 @@
-import { QueryInterface, DataTypes } from "sequelize";
+import { QueryInterface, DataTypes, QueryTypes } from "sequelize";
 
-// The four tables the second factor lives in. Created empty; nothing reads
-// them until plans 4B and 4C.
+// The four tables the second factor lives in.
+//
+// ⚠️ **They are created empty, and they are read on every single login.** The
+// first version of this header said only the first half — "created empty;
+// nothing reads them until plans 4B and 4C" — and that stopped being true four
+// tasks later, inside this same plan. Whoever deploys reads this comment and
+// not `factorInventory.ts`, so the correction belongs here:
+//
+// `tieneAlgunFactor` (`auth/factorInventory.ts`) runs one COUNT against
+// `credencial_webauthn` and another against `factor_totp`.
+// `estadoInicialDeSesion` calls it to decide which state a session opens in,
+// and `POST /api/auth/login` calls that on every login.
+//
+// **So undoing this migration on its own takes the whole ERP down.** `umzug
+// down` with no arguments reverts exactly one migration, and this is the later
+// of the pair: the columns added by `20260826000002` stay, the deployed code
+// stays, and the next login COUNTs a table that is no longer there. Measured
+// on a scratch database: `no existe la relación credencial_webauthn`.
+//
+// That rejection is raised **outside** the try/catch that answers 503 — see
+// `auth.controller.ts`, where the call deliberately sits above it — so what
+// every login gets is a 500: no cookie, no session, and no sentence anybody
+// can act on. For all fifteen accounts, until somebody runs `up` again.
+//
+// **If this ever has to come out, the code goes first.** Either deploy a build
+// whose login path does not read these tables, or revert `20260826000002` in
+// the same window. On its own, with the API running, this migration is not
+// safely reversible — no matter how empty the tables are.
+//
+// `down` below refuses to destroy data. That is a *different* guard and it
+// does not cover this one: while the tables are still empty it lets the
+// rollback through, and the 500s start on the next login.
+//
+// Two things about the shape below have been corrected since, in
+// `20260827000001-harden-mfa-schema.ts` rather than by editing this file,
+// which has already run: `credential_id` is capped at 1364 characters (TEXT
+// under a unique btree breaks past ~2692 bytes of incompressible data), and
+// the four `created_at` columns gained a real `DEFAULT now()`.
 //
 // Table names are set explicitly, same reason as `sesiones` and
 // `token_uso_unico`: Sequelize's default pluralisation has already produced
@@ -136,12 +172,69 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
   });
 }
 
+/** The four, in the order `down` has to drop them. */
+const TABLAS = [
+  "dispositivo_recordado",
+  "codigo_recuperacion",
+  "factor_totp",
+  "credencial_webauthn",
+] as const;
+
+/**
+ * Drops the four tables — **unless any of them still holds a row.**
+ *
+ * `dropTable` asks nobody, and what is in these tables does not exist anywhere
+ * else. A TOTP secret was shown exactly once, as a QR code, and the plaintext
+ * was never stored: a dropped `factor_totp` is not a restore away, it is every
+ * one of those accounts locked out of their own second factor. Same for the
+ * passkeys, the unredeemed recovery codes and the remembered devices.
+ *
+ * And the rollback would be **half** a rollback anyway: the session columns
+ * that go with these tables live in `20260826000002`, so reverting this one
+ * leaves `sesiones.estado` in place. Nothing about this pair comes undone in
+ * one step.
+ *
+ * So the guard is a refusal rather than a warning. With the tables empty —
+ * which is the state 4A ships in — it lets the rollback through untouched, and
+ * 4A stays reversible. Once a single factor is registered, undoing this needs a
+ * person to decide, in writing, that the data goes. The failure says how.
+ *
+ * ⚠️ **An empty-table rollback still breaks every login.** That is the other
+ * hazard, it is not this guard's, and it is written at the top of this file.
+ */
 export async function down({ context: queryInterface }: { context: QueryInterface }) {
   await queryInterface.sequelize.transaction(async (transaction) => {
     await queryInterface.sequelize.query("SET LOCAL lock_timeout = '5s'", { transaction });
-    await queryInterface.dropTable("dispositivo_recordado", { transaction });
-    await queryInterface.dropTable("codigo_recuperacion", { transaction });
-    await queryInterface.dropTable("factor_totp", { transaction });
-    await queryInterface.dropTable("credencial_webauthn", { transaction });
+
+    // One statement for the four, so the answer is a single consistent
+    // snapshot inside this transaction rather than four that could disagree.
+    const conteos = (await queryInterface.sequelize.query(
+      TABLAS.map((t) => `SELECT '${t}' AS tabla, count(*) AS filas FROM ${t}`).join(" UNION ALL "),
+      { transaction, type: QueryTypes.SELECT },
+    )) as unknown as { tabla: string; filas: string | number }[];
+
+    // `Number(...)`, because `count(*)` is a BIGINT and node-postgres hands
+    // those back as strings. `"0" > 0` is false but `"0"` is truthy, so a
+    // guard written the obvious way refuses every rollback for ever.
+    const conFilas = conteos.filter((c) => Number(c.filas) > 0);
+    if (conFilas.length > 0) {
+      const detalle = conFilas.map((c) => `${c.tabla} (${c.filas})`).join(", ");
+      throw new Error(
+        `Deshacer esta migración destruiría datos irrecuperables: ${detalle}. ` +
+          "Los secretos TOTP no existen en ningún otro sitio — el texto plano se " +
+          "enseñó una sola vez, como código QR — y con ellos se van las passkeys, " +
+          "los códigos de recuperación sin usar y los dispositivos recordados. " +
+          "Si de verdad tienen que irse: exporta esas tablas primero " +
+          "(pg_dump -t credencial_webauthn -t factor_totp -t codigo_recuperacion " +
+          "-t dispositivo_recordado), bórralas a mano y vuelve a ejecutar el down. " +
+          "Y antes de deshacer nada, lee la cabecera de este fichero: con la API " +
+          "en marcha, deshacer esta migración sola hace que todos los logins " +
+          "respondan 500.",
+      );
+    }
+
+    for (const tabla of TABLAS) {
+      await queryInterface.dropTable(tabla, { transaction });
+    }
   });
 }

@@ -140,4 +140,52 @@ describe("the two tables that gained columns declare them too", () => {
     expect(attrs).toHaveProperty("mfa_satisfied_at");
     expect(attrs).toHaveProperty("mfa_source");
   });
+
+  it("leaves sesion.estado with no default, so nothing mints a session by omission", () => {
+    // `estado` decides what a session may reach. A default — here or in the
+    // column, and `20260827000001` removed it from the column — answers that
+    // question for a caller who never asked it, and the answer it gave was
+    // `completa`: the run of the whole ERP, with no error and no trace.
+    // `createSession` refuses a default for exactly this reason; the model has
+    // to refuse it too, or the argument only holds on one side.
+    expect(SesionModel.getAttributes().estado.defaultValue).toBeUndefined();
+  });
+
+  it("rejects a session built without an estado, instead of choosing one for it", async () => {
+    // The rule the test above only describes from the outside, asserted as
+    // behaviour — and it is the one that carries the weight, because **the
+    // compiler does not enforce this**. `tsconfig.json` sets `"strict": false`,
+    // which makes null and undefined assignable to everything and collapses
+    // Sequelize's `MakeNullishOptional`: `SesionModel.create({})`, with no
+    // fields at all, typechecks clean. Measured, not assumed.
+    //
+    // What does refuse is Sequelize's own notNull validation, and only while
+    // `estado` carries no `defaultValue`. Put one back and this goes green
+    // again while every session created by omission silently becomes
+    // `completa`.
+    const sinEstado = SesionModel.build({
+      id_usuario: 1,
+      token_hash: "x".repeat(64),
+      user_agent: null,
+      ip_address: null,
+      created_at: new Date(),
+      last_used_at: new Date(),
+      expires_at: new Date(),
+      revoked_at: null,
+      mfa_satisfied_at: null,
+      mfa_source: null,
+    } as never);
+
+    await expect(sinEstado.validate()).rejects.toThrow(/estado/);
+  });
+
+  it("declares credential_id with the length its column has, not an unbounded TEXT", () => {
+    // The column is `VARCHAR(1364)` — base64url of the 1023 bytes WebAuthn
+    // allows. A model still saying TEXT would let Sequelize build an INSERT
+    // Postgres then refuses, and the refusal comes from the unique btree
+    // (`index row size ... exceeds maximum 2704`), which reads like a database
+    // fault rather than an oversized credential.
+    const tipo = CredencialWebauthnModel.getAttributes().credential_id.type;
+    expect(String(tipo)).toBe("VARCHAR(1364)");
+  });
 });

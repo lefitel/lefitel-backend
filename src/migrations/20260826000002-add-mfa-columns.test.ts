@@ -9,7 +9,14 @@ import { describe, it, expect } from "vitest";
 import { DataTypes } from "sequelize";
 import { up, down } from "./20260826000002-add-mfa-columns.js";
 
-function fakeQueryInterface() {
+/**
+ * `divergentes` is what the guard in `down` sees: how many accounts carry a
+ * `pass_changed_at` that re-running `up` would not reproduce.
+ *
+ * A string, because `count(*)` is a BIGINT and node-postgres hands those back
+ * as strings.
+ */
+function fakeQueryInterface(divergentes = 0) {
   const calls: { fn: string; args: unknown[] }[] = [];
   const record = (fn: string) => (...args: unknown[]) => {
     calls.push({ fn, args });
@@ -20,7 +27,11 @@ function fakeQueryInterface() {
     addColumn: record("addColumn"),
     removeColumn: record("removeColumn"),
     sequelize: {
-      query: record("query"),
+      query: (...args: unknown[]) => {
+        calls.push({ fn: "query", args });
+        if (!String(args[0]).includes("count(*)")) return Promise.resolve(undefined);
+        return Promise.resolve([{ divergentes: String(divergentes) }]);
+      },
       literal: (s: string) => ({ val: s }),
       transaction: (cb: (t: unknown) => Promise<void>) => cb({ id: "t" }),
     },
@@ -221,5 +232,43 @@ describe("add-mfa-columns", () => {
       lastDropConstraintIndex,
       "a DROP CONSTRAINT ran after removeColumn(sesiones, ...): against a real database that removeColumn would fail outright, since Postgres refuses to drop a column a CHECK still references",
     ).toBeLessThan(firstSesionesRemoveColumnIndex);
+  });
+
+  it("refuses to undo once somebody has changed their password", async () => {
+    // `removeColumn` takes `pass_changed_at` and its data; a re-run `up` writes
+    // `pass_changed_at = "createdAt"` back into every row. A down and an up in
+    // the same deploy window would therefore move every stamp back to the day
+    // the account was created — disarming, silently and for the whole table,
+    // the one column whose job is to invalidate sessions older than a password
+    // change.
+    const qi = fakeQueryInterface(4);
+
+    await expect(down({ context: qi as never })).rejects.toThrow(/4/);
+    expect(qi.calls.filter((c) => c.fn === "removeColumn")).toHaveLength(0);
+  });
+
+  it("undoes when every stamp is still the one the back-fill wrote", async () => {
+    // The guard exists to stop data loss, not rollbacks. While nobody has
+    // changed a password, re-running `up` reproduces the column exactly, so
+    // there is nothing to lose and 4A stays reversible.
+    const qi = fakeQueryInterface(0);
+
+    await expect(down({ context: qi as never })).resolves.toBeUndefined();
+    expect(qi.calls.filter((c) => c.fn === "removeColumn")).toHaveLength(5);
+  });
+
+  it("does not read the gap between two clocks as a password change", async () => {
+    // An account created after this migration gets `createdAt` from Sequelize
+    // and `pass_changed_at` from the model's own `NOW`, a few milliseconds
+    // apart in the same INSERT. A guard comparing the two for exact equality
+    // would refuse every rollback from the first new account onwards, having
+    // protected nothing: re-deriving that stamp from `createdAt` loses
+    // milliseconds, not a password change.
+    const qi = fakeQueryInterface(0);
+    await down({ context: qi as never });
+
+    const conteo = qi.calls.find((c) => c.fn === "query" && String(c.args[0]).includes("count(*)"));
+    expect(conteo, "down() no cuenta las marcas divergentes antes de borrar la columna").toBeDefined();
+    expect(String(conteo?.args[0])).toMatch(/interval\s+'1 second'/i);
   });
 });

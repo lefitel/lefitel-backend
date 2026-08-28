@@ -31,7 +31,12 @@ export const CredencialWebauthnModel: ModelDefined<ICredencialWebauthn, Credenci
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
       id_usuario: { type: DataTypes.INTEGER, allowNull: false },
-      credential_id: { type: DataTypes.TEXT, allowNull: false, unique: true },
+      // `STRING(1364)`, not `TEXT`, matching what `20260827000001` made of the
+      // column: base64url of the 1023 bytes the WebAuthn specification allows.
+      // TEXT under a unique btree accepts values the index cannot hold — past
+      // ~2692 bytes of incompressible data Postgres refuses the INSERT with a
+      // message about index row size that names nothing recognisable.
+      credential_id: { type: DataTypes.STRING(1364), allowNull: false, unique: true },
       public_key: { type: DataTypes.BLOB, allowNull: false },
       // Declared here too, not only as the migration's DB-level DEFAULT:
       // Sequelize's own `allowNull: false` validation runs before a query

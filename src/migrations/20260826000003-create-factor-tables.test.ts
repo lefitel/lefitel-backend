@@ -10,7 +10,21 @@ import { describe, it, expect } from "vitest";
 import { DataTypes } from "sequelize";
 import { up, down } from "./20260826000003-create-factor-tables.js";
 
-function fakeQueryInterface() {
+const TABLAS = [
+  "credencial_webauthn",
+  "factor_totp",
+  "codigo_recuperacion",
+  "dispositivo_recordado",
+];
+
+/**
+ * `filasPorTabla` is what the guard in `down` sees when it counts.
+ *
+ * The counts come back as **strings**, which is not pedantry: `count(*)` is a
+ * BIGINT and node-postgres hands those over as strings, so a guard written as
+ * `filas > 0` is true for "0" and would refuse every rollback for ever.
+ */
+function fakeQueryInterface(filasPorTabla: Record<string, number> = {}) {
   const calls: { fn: string; args: unknown[] }[] = [];
   const record = (fn: string) => (...args: unknown[]) => {
     calls.push({ fn, args });
@@ -22,7 +36,13 @@ function fakeQueryInterface() {
     dropTable: record("dropTable"),
     addIndex: record("addIndex"),
     sequelize: {
-      query: record("query"),
+      query: (...args: unknown[]) => {
+        calls.push({ fn: "query", args });
+        if (!String(args[0]).includes("count(*)")) return Promise.resolve(undefined);
+        return Promise.resolve(
+          TABLAS.map((tabla) => ({ tabla, filas: String(filasPorTabla[tabla] ?? 0) })),
+        );
+      },
       transaction: (cb: (t: unknown) => Promise<void>) => cb({ id: "t" }),
     },
   };
@@ -209,5 +229,48 @@ describe("create-factor-tables", () => {
     await down({ context: qi as never });
 
     expect(String(qi.calls[0].args[0])).toContain("lock_timeout");
+  });
+
+  it("refuses to undo when any of the four tables still has rows", async () => {
+    // What a rollback would take with it is not recoverable from anywhere
+    // else: a TOTP secret was shown once, as a QR code, and the plaintext was
+    // never stored. Same for the passkeys, the unused recovery codes and the
+    // remembered devices. `dropTable` asks nobody.
+    const qi = fakeQueryInterface({ factor_totp: 3 });
+
+    await expect(down({ context: qi as never })).rejects.toThrow();
+    expect(qi.calls.filter((c) => c.fn === "dropTable")).toHaveLength(0);
+  });
+
+  it("names the tables that still have rows, and how many, in the refusal", async () => {
+    // A refusal that does not say what is in the way sends the operator to
+    // read the migration source during an incident.
+    const qi = fakeQueryInterface({ factor_totp: 3, codigo_recuperacion: 40 });
+
+    await expect(down({ context: qi as never })).rejects.toThrow(/factor_totp \(3\)/);
+    await expect(down({ context: qi as never })).rejects.toThrow(/codigo_recuperacion \(40\)/);
+  });
+
+  it("counts every one of the four tables, not just the first one it finds", async () => {
+    // A guard that stops at `credencial_webauthn` would wave through the
+    // rollback of a database whose only rows are TOTP secrets.
+    const qi = fakeQueryInterface();
+    await down({ context: qi as never });
+
+    const conteo = qi.calls.find((c) => c.fn === "query" && String(c.args[0]).includes("count(*)"));
+    expect(conteo, "down() no cuenta las filas antes de borrar").toBeDefined();
+    for (const tabla of TABLAS) {
+      expect(String(conteo?.args[0]), `${tabla} no se cuenta`).toContain(tabla);
+    }
+  });
+
+  it("lets the rollback through when the four tables are empty", async () => {
+    // The guard is about data loss, not about forbidding rollbacks. With
+    // nothing in the tables there is nothing to lose, and 4A has to stay
+    // reversible.
+    const qi = fakeQueryInterface();
+
+    await expect(down({ context: qi as never })).resolves.toBeUndefined();
+    expect(qi.calls.filter((c) => c.fn === "dropTable")).toHaveLength(4);
   });
 });
