@@ -296,6 +296,25 @@ viajara de vuelta en el cuerpo de la petición, el atacante elegiría el reto y
 podría reproducir una aserción capturada. Para el login con passkey, donde aún no
 hay sesión, se crea antes una fila `estado = parcial` sin `id_usuario`.
 
+**⚠️ Dos de las columnas de esta tabla no existen todavía: `webauthn_challenge`
+y `challenge_expires_at`.** El Plan 4A crea `estado`, `mfa_satisfied_at` y
+`mfa_source` —migración `20260826000002`— y **no crea estas dos**. No es un
+olvido: el reto de WebAuthn solo tiene sentido cuando existe la ceremonia que lo
+genera y la que lo verifica, y las dos son del 4B (registro de passkey) y del 4C
+(entrada sin contraseña). Una columna que nadie escribe ni lee es una promesa de
+que algo está construido, y el resto de esta sección se lee como inventario de lo
+que hay. Las crea el plan que las use, en su propia migración.
+
+**Y un obstáculo que ese plan se va a encontrar, dicho aquí para que no lo
+descubra el día que escriba el código.** El párrafo de arriba dice que para el
+login con passkey «se crea antes una fila `estado = parcial` sin `id_usuario`».
+Eso hoy no se puede: `sesiones.id_usuario` es `NOT NULL` con clave foránea a
+`usuarios` (migración `20260822000001`), así que ese `INSERT` falla. El plan que
+construya la entrada sin contraseña tiene que decidir una de dos —relajar la
+columna a `NULL`, o guardar el reto fuera de `sesiones`— y ninguna de las dos es
+gratis: la primera hace que toda consulta que agrupe sesiones por usuario tenga
+que contar con filas huérfanas.
+
 **Cuánto dura una sesión.** Siete días sin usarla y caduca; cada petición empuja
 `last_used_at` y estira el vencimiento otros siete. Con un tope absoluto de
 **treinta días desde `created_at`**, se use lo que se use. Al llegar al tope se
@@ -447,14 +466,33 @@ Esto es lo que faltaba en la revisión 1 y hacía que el MFA fuera decorativo.
 
 | `estado` | Cuándo | Qué puede hacer |
 |---|---|---|
-| `parcial` | Contraseña validada, factor pendiente | **Solo** `/auth/mfa/*`, `/auth/webauthn/login/*`, `/auth/logout` y `/auth/me`. Todo lo demás: **401**. |
-| `onboarding` | Factor pasado, falta email o factor por registrar | Lo anterior más `/auth/email/*`, `/auth/totp/*`, `/auth/webauthn/register/*`, `/auth/recovery-codes`. Todo lo demás: **403 "configura tu segundo factor para continuar"**. |
-| `completa` | Todo en regla | El ERP. |
+| `parcial` | Contraseña validada, factor pendiente | **Solo** `/auth/mfa/*`, `/auth/webauthn/login/*`, `/auth/logout`, `/auth/logout-all` y `/auth/me`. Todo lo demás: **401**. |
+| `onboarding` | **Sin ningún factor registrado y con el plazo de gracia ya vencido** | Lo anterior más `/auth/email/*`, `/auth/totp/*`, `/auth/webauthn/register/*`, `/auth/webauthn/credentials/*`, `/auth/recovery-codes` y `/auth/sessions`. Todo lo demás: **403 "configura tu segundo factor para continuar"**. |
+| `completa` | Todo lo demás, **incluido no tener ningún factor mientras quede gracia** | El ERP. |
+
+**La contradicción que tenía esta tabla, resuelta.** La fila de `onboarding`
+decía «todo lo demás: 403» y tres párrafos más abajo el documento decía que en
+`onboarding` «se puede trabajar». Las dos no pueden ser ciertas, y la regla que
+se construyó —y que está en el código, en `estadoInicialDeSesion`
+(`src/auth/factorInventory.ts`)— es esta: **mientras a la cuenta le quede
+gracia, su sesión abre en `completa` y trabaja con normalidad.** Solo cuando el
+plazo vence sin ningún factor registrado se pasa a `onboarding`, que es cuando
+el 403 empieza a valer. Así que las dos frases eran ciertas en momentos
+distintos y ninguna decía cuál.
+
+**El email no entra en esta decisión, ni siquiera en `onboarding`.** No aparece
+en la función: no tener dirección verificada nunca cambia el estado de la
+sesión. Lo que el email cierra son las operaciones de la lista de step-up de más
+abajo, que es otra puerta. Meterlo aquí pondría a toda la plantilla —que hoy no
+tiene ni dirección ni factor— delante de una pantalla de configuración el día del
+despliegue, que es justo lo que «La gracia se cuenta desde el primer login» y «El
+email no bloquea la entrada» se dedican a evitar.
 
 `/auth/me` en estado `parcial` u `onboarding` devuelve **estado, nunca
 permisos**. La allowlist es explícita y va en una constante, no dispersa en
-`if`. Y `GET /permisos/mias` y `GET /rol`, que hoy no piden permiso, quedan
-detrás del mismo corte.
+`if`. Y `GET /rol`, que sigue sin pedir permiso, queda detrás del mismo corte.
+(Aquí se nombraba también `GET /permisos/mias`; se retiró en el Plan 2C y hoy
+responde 404.)
 
 ### El día 15 existe y no echa a nadie
 
@@ -486,8 +524,13 @@ columna no existe—, eso ponía al 100% de la plantilla delante de una pantalla
 depende de que Resend, el DNS de `osefi.net`, el buzón del técnico y su memoria
 de la contraseña de Gmail funcionen todos a la vez, el sábado por la noche.
 
-Queda así: se entra en `onboarding` y se puede trabajar. Lo que exige email
-verificado son las operaciones de la lista de step-up.
+Queda así: se entra y se puede trabajar. Lo que exige email verificado son las
+operaciones de la lista de step-up. **Y el estado con el que se entra es
+`completa`, no `onboarding`** — ver la tabla de arriba: la falta de email no
+mueve el estado, y mientras quede gracia la falta de factor tampoco. La primera
+redacción de este párrafo decía `onboarding`, que es el estado que sí responde
+403 a casi todo, y así el documento se contradecía a sí mismo tres párrafos más
+arriba.
 
 **No hay precarga posible.** Son entre 20 y 60 usuarios y la empresa no tiene sus
 direcciones recogidas, así que cada uno escribirá la suya. Lo que saca a Resend
@@ -895,10 +938,13 @@ No basta con añadir; estos fallan el día del despliegue:
 
 ## 11. Despliegue y vuelta atrás
 
-**El rollback real no es `down`, es el dump.** Las tres migraciones existentes
-tienen `down`, pero `runMigrations()` solo llama a `up()` y no hay ningún
-`migrate:down` expuesto; y aunque lo hubiera, deshacer `removeColumn("usuarios",
-"email")` **se lleva todos los emails verificados durante el fin de semana**.
+**El rollback real no es `down`, es el dump.** Todas las migraciones tienen
+`down`, pero `runMigrations()` solo llama a `up()` y **no hay ningún
+`migrate:down` expuesto** —deshacer una es ejecutar `umzug` a mano—; y aunque lo
+hubiera, deshacer `removeColumn("usuarios", "email")` **se lleva todos los emails
+verificados durante el fin de semana**. Desde el Plan 4A hay además un caso en el
+que el `down` por sí solo tumba el ERP aunque no borre un solo dato: ver «La
+vuelta atrás **no** es segura» más abajo.
 
 ```
 0. ENSAYO EN LOCAL. La base local de desarrollo es una copia de producción,
@@ -1160,6 +1206,161 @@ dirección fija de la empresa en todo reset) **se construyen igual**. No eran so
 para la ventana: siguen valiendo con el MFA puesto, cuando un reset legítimo tiene
 que ser visible para alguien que no sea quien lo pidió.
 
+### Qué hay que hacer para desplegar el Plan 4A
+
+Esto es lo que hay que leer a las ocho de la mañana con el ERP parado. El resto
+de esta sección explica por qué; esta subsección dice qué se teclea y en qué
+orden.
+
+**Lo que el 4A cambia en la base de datos son tres migraciones**, y
+`npm run migrate:deploy` las aplica en este orden él solo:
+
+| Migración | Qué hace |
+|---|---|
+| `20260826000002-add-mfa-columns` | Añade `usuarios.mfa_grace_until`, `usuarios.pass_changed_at` y `sesiones.estado`, `sesiones.mfa_satisfied_at`, `sesiones.mfa_source`. |
+| `20260826000003-create-factor-tables` | Crea `credencial_webauthn`, `factor_totp`, `codigo_recuperacion` y `dispositivo_recordado`, vacías. |
+| `20260827000001-harden-mfa-schema` | Correcciones a las dos anteriores, que ya habían corrido: quita el `DEFAULT` de `sesiones.estado`, acota `credential_id` a 1364 caracteres, pone `DEFAULT now()` en los `created_at`, añade un índice de purga y renombra los índices a la convención del arco. |
+
+Son tres y no dos: la tercera se escribió después, en un fichero aparte, porque
+las dos primeras ya habían corrido contra la copia de producción, y editar un
+`up` que ya se ha ejecutado hace que el código deje de describir la base que
+construyó. Y ojo con una cuarta: por nombre, entre la segunda y la tercera queda
+`20260826000004-drop-dead-permission-cells`, que **no es del 4A**. `migrate:deploy`
+aplica **todo lo que esté pendiente** en una sola pasada, así que si esa todavía
+no ha corrido, correrá aquí. El comando enumera por su nombre las que aplicó;
+conviene leer esa línea y no darla por supuesta.
+
+**No hay variables de entorno nuevas.** Ninguna. `MFA_ENCRYPTION_KEY` y las de
+WebAuthn son del 4B y del 4C, y hasta entonces no las lee nadie. Los tres números
+que gobiernan el comportamiento nuevo —14 días de gracia, ventana de step-up de
+10 minutos, 5 confirmaciones de contraseña por cuarto de hora— son constantes de
+`src/config/security.ts`, así que cambiarlos es desplegar, no editar Coolify.
+
+#### 🔴 El orden es crítico, no hay guardia, y el fallo no se lee
+
+**Primero las migraciones, después la imagen. Siempre, y esta vez sin excepción.**
+
+Hasta ahora el orden era una preferencia: el código nuevo contra el esquema viejo
+funcionaba en su mayor parte y fallaba solo en lo nuevo. **El 4A es el primer
+arco cuyo código nuevo no sirve ni una sola petición contra el esquema
+anterior.** `findLiveSession` (`src/auth/sessionStore.ts`) nombra `estado`,
+`mfa_satisfied_at` y `mfa_source` explícitamente en su `attributes`, esa consulta
+corre en **cada petición autenticada**, y `authenticate` convierte el fallo en un
+**500**. El login tampoco se salva: `estadoInicialDeSesion` hace COUNT contra dos
+tablas que no existirían, y esa llamada está deliberadamente **fuera** del
+`try/catch` que responde 503, así que también acaba en 500 — sin cookie, sin
+sesión y sin una frase con la que nadie pueda hacer nada.
+
+Y **las migraciones ya no corren al arrancar el contenedor**: el `CMD` del
+Dockerfile es solo `node dist/index.js`. Se quitaron a propósito —encadenadas con
+`&&`, una migración que fallaba dejaba la API caída reiniciándose para siempre— y
+la consecuencia es que **nada** comprueba el esquema al arrancar. La imagen nueva
+levanta tan contenta contra la base vieja y empieza a responder 500 a todo el
+mundo.
+
+Traducido a lo que ve la gente: el ERP entero deja de funcionar y no dice por
+qué. Si eso pasa, la salida es ejecutar `migrate:deploy`; no hace falta volver
+atrás.
+
+#### 🔴 La vuelta atrás **no** es segura, al contrario de lo que se dijo antes
+
+Esto contradice a propósito lo que el plan del 4A escribió en su día —«la vuelta
+atrás son las dos migraciones `down` en orden inverso, y **es segura**»—, que era
+falso y lo midió la auditoría.
+
+**Deshacer `20260826000003` sola tumba todos los logins.** `umzug down` sin
+argumentos deshace exactamente una migración, y esa es la última de las dos que
+crean esquema. Las cuatro tablas se van, el código sigue desplegado, y
+`tieneAlgunFactor` —que corre en **cada login**— hace un COUNT contra una tabla
+que ya no está. Medido: «no existe la relación credencial_webauthn», y un 500 en
+cada intento de entrar, para toda la plantilla, hasta que alguien vuelva a
+ejecutar el `up`. La cabecera de esa migración decía «se crean vacías, nadie las
+lee», que invitaba exactamente a ese movimiento; está reescrita.
+
+**La regla, entonces: el código sale antes que el esquema.** Volver a la imagen
+anterior en Coolify y **dejar el esquema nuevo puesto** es seguro —el código
+viejo ignora las columnas que no conoce— y es lo que hay que hacer si algo va
+mal. Solo si el problema **es** el esquema se toca el esquema, y entonces se
+deshacen las tres en orden inverso con el código viejo ya desplegado.
+
+El `down` de `20260826000003` se niega si alguna de las cuatro tablas tiene
+filas, y dice cuáles y cuántas. Eso es una segunda guardia, pensada para después
+del 4B: un secreto TOTP no existe en ningún otro sitio —el texto en claro se
+enseñó una vez, como QR— así que un `dropTable` con datos dentro es una pérdida
+irrecuperable. **No cubre lo de arriba**: mientras las tablas estén vacías el
+`down` pasa sin protestar, y los 500 empiezan en el siguiente login.
+
+#### 🔴 El 4A arma una mecha de 14 días, y el 4B es lo único que la apaga
+
+Esto es lo más importante de toda la subsección, y no se ve en ninguna pantalla
+el día del despliegue.
+
+`estadoInicialDeSesion` estampa `mfa_grace_until` en el primer login de cada
+persona posterior al despliegue. Pasados **`MFA_GRACE_DAYS` = 14 días**, esa
+cuenta abre sesión en `onboarding` y el ERP le responde **403** a todo lo que no
+esté en la lista de §4. No hay que insertar nada ni hacer nada para que ocurra:
+el reloj corre solo, y llega para **todo el mundo**.
+
+Y hoy **no hay salida desde dentro de la API**. Lo único que saca a una cuenta de
+`onboarding` es registrar un factor, y las rutas que registran factores
+—`/totp`, `/webauthn/register`, `/webauthn/credentials`, `/recovery-codes`— **no
+están montadas**: son del 4B. Las dos que sí lo están, `/email` y `/sessions`, no
+registran ningún factor.
+
+> **Regla de despliegue: el 4A no se despliega más de `MFA_GRACE_DAYS` antes que
+> el 4B.** No «pronto»: catorce días contados desde el primer login de cada
+> persona, y el más temprano de esos es el día mismo del despliegue.
+
+**La salida de emergencia, si esa fecha se va a incumplir:**
+
+```sql
+UPDATE usuarios SET mfa_grace_until = NULL;
+```
+
+No es un apaño, es la segunda rama de la propia función: un plazo nulo es el caso
+«esto nunca empezó», así que a cada cuenta se le vuelven a dar catorce días
+completos. Se puede repetir tantas veces como haga falta. **Pero hay que saber
+cuándo surte efecto, porque no es inmediato para todo el mundo:**
+
+- Quien tenga `completa` guardado en su fila de sesión y esté siendo degradado en
+  caliente por `estadoEfectivo` vuelve a la normalidad **en su siguiente
+  petición**, sin hacer nada.
+- Quien haya **entrado** ya después del vencimiento tiene `onboarding` escrito en
+  su fila, y eso no lo reevalúa nadie: sigue con 403 **hasta que cierre sesión y
+  vuelva a entrar**. A esa gente hay que decírselo, porque desde su lado se ve
+  como que el arreglo no ha funcionado.
+
+Y el `UPDATE` no estampa la fecha nueva por sí mismo: eso pasa en el siguiente
+login de cada persona. Quien no vuelva a entrar sigue sin plazo.
+
+#### Un reloj que salta hacia atrás convierte «he cambiado mi contraseña» en un bucle
+
+El 4A arma el cinturón que invalida las sesiones anteriores a un cambio de
+contraseña: `authenticate` rechaza con 401 cualquier sesión cuyo `created_at` sea
+anterior a `usuarios.pass_changed_at`. Los dos instantes salen de **dos lecturas
+distintas del reloj de la aplicación** —`new Date()` al escribir la contraseña,
+y otro `new Date()` dentro de `createSession`—, no del reloj de la base.
+
+Si NTP corrige el reloj **hacia atrás** entre una y otra, el login responde 200 y
+**la siguiente petición responde 401**, en bucle, hasta que el reloj alcance el
+sello. Y como el reset revoca todas las sesiones antes, no hay ninguna sesión
+anterior a la que volver: la persona se queda fuera del ERP sin nada que pueda
+hacer.
+
+No hay arreglo en el 4A y la dirección está anotada para quien lo tome: sellar
+las dos cosas desde `now()` de la base, que es un solo reloj. Mientras tanto, si
+alguien informa de ese bucle justo después de cambiar su contraseña, **mirar la
+sincronización horaria del servidor antes de mirar cualquier otra cosa**.
+
+#### El 4A no cierra la ventana del Plan 3
+
+Sigue en pie la regla de más arriba: **nada de este arco sale a producción hasta
+que esté terminado.** El 4A trae el esqueleto —los tres estados, la puerta de
+step-up y las tablas donde enchufar los factores— pero **no trae ningún factor**:
+no hay forma de registrar una passkey ni un TOTP, así que no hay segundo factor
+que poner detrás del «he olvidado mi contraseña» del Plan 3. La ventana que esa
+regla existe para cerrar sigue abierta exactamente igual con el 4A desplegado.
+
 ### La detección de cambio de rol se rompe entre el Plan 1 y el Plan 2B
 
 Esto se descubrió revisando el Plan 2B y **no estaba previsto**. El backend dejó
@@ -1237,6 +1438,111 @@ lo construyó.
   frontend compara ids de rol, no permisos, así que conceder un módulo a un rol no
   se nota hasta que la persona recarga. No es una regresión: el mecanismo anterior
   tenía el mismo punto ciego.
+
+### Lo que el Plan 4A deja abierto y el 4B tiene que cerrar
+
+Reunido aquí y no en el plan del 4A, porque **el 4B se diseña leyendo este
+documento** y un plan terminado es lo primero que nadie vuelve a abrir. Todo lo
+de esta lista está medido contra el código del 4A, no supuesto.
+
+Las cuatro primeras son **requisitos de entrada**: no se dan por diseñadas hasta
+que el 4B las conteste. Hoy ninguna es explotable, porque el código que las
+consumiría todavía no existe — que es exactamente lo que las hace fáciles de
+pasar por alto.
+
+**1. `counter` y `ultimo_paso` son `BIGINT` y llegan a Node como cadenas,
+mientras `src/interfaces/index.ts` los declara `number`.** Comprobado en un
+viaje de ida y vuelta real: sale `"0"`, y `"0" + 1` es `"01"`.
+
+Por qué importa: la regla anti-repetición del TOTP se escribe como «si el paso
+que me mandan es el mismo que guardé, lo rechazo». Contra una cadena esa
+comparación es **siempre falsa**, así que los mismos seis dígitos se aceptan dos
+veces dentro de la misma ventana de 30 segundos — justo la repetición que la
+columna existe para impedir. Lo mismo con `counter = guardado + 1` en la
+detección de passkeys clonadas. **Lo que lo convierte en trampa es la
+declaración de tipo**: TypeScript acepta la comparación y la suma encantado,
+porque la interfaz miente sobre lo que hay dentro.
+
+**2. Los cuatro modelos nuevos publican sus secretos al serializarse.** Sin
+`defaultScope`, sin `toJSON` propio, y con `hasMany` declarado desde `usuarios`
+hacia los cuatro. Medido: convertir un factor a JSON saca `secreto_cifrado`, `iv`
+y `auth_tag`.
+
+**Este repositorio ya envió este mismo fallo una vez**, y está escrito al lado
+del remedio en `src/models/usuario.model.ts` (la constante `USUARIO_AS_AUTHOR`):
+un `include` sin `attributes` publicaba el hash bcrypt de la contraseña a
+cualquier cuenta con sesión, rol Cliente incluido. Basta un `include` para
+repetirlo.
+
+**3. El cupo de contraseñas del step-up rechaza una contraseña correcta.** Se
+arma con el frontend del 4D, que es lo primero que enviará el campo. Cinco
+intentos fallidos en la pantalla de cambiar contraseña y, durante quince minutos,
+**las catorce rutas con step-up responden 429 a una contraseña bien escrita**,
+porque la puerta lee el cupo **antes** de verificar nada.
+
+Y lo que agrava: en ese camino una contraseña correcta **no descuenta ni
+reinicia** el contador —`requireStepUp` sencillamente no cobra cuando acierta—,
+así que dentro de la ventana no hay nada que la persona pueda hacer para bajarlo.
+Solo esperar a que caduque.
+
+**4. Nada en el cliente sabe qué es `onboarding`.** El estado se publica en
+`/auth/me` con el argumento de que sin él el día 15 es imposible de depurar, y
+**no tiene consumidor**. La secuencia real para el técnico: entra, la aplicación
+carga, **todas las pantallas salen vacías, todo guardado falla, y no hay un solo
+aviso en ninguna parte**.
+
+Y un detalle que hay que ver antes de construir la pantalla: **la lista blanca de
+`onboarding` solo entiende rutas que empiezan por `/api/`**, y las imágenes se
+sirven desde la raíz (`src/app.ts`, detrás de `authenticate`). Así que la
+pantalla de configuración que monte el 4B tendrá **el avatar y las imágenes
+rotos**, y nadie va a pensar en añadir la raíz de imágenes a esa lista.
+
+---
+
+Y estas son las que el propio código del 4A pide, escritas al lado de la función
+que depende de ellas. **Las dos primeras no son opcionales: saltárselas es un
+bloqueo.**
+
+- 🔴 **El orden dentro del 4B: el endpoint que *verifica* un factor tiene que
+  estar vivo antes que —o en el mismo despliegue que— el primero que *registra*
+  uno.** Registrar un factor pone la siguiente sesión de esa cuenta en `parcial`,
+  y de `parcial` solo se sale verificando. Desplegar el registro primero encierra
+  a quien lo estrene, empezando por quien lo pruebe.
+- 🔴 **El endpoint que verifica un factor tiene que escribir `mfa_satisfied_at` y
+  `mfa_source`.** Es el propósito declarado de esas columnas, y de ellas depende
+  la tercera cláusula de `estadoEfectivo` (que una sesión promovida a `completa`
+  siga siéndolo) además de `requireStepUp`, que si no rechazaría la siguiente
+  escritura sensible de una sesión que acaba de autenticarse.
+- 🔴 **El endpoint que borra el *último* factor de una cuenta tiene que revocar o
+  degradar las sesiones vivas de esa cuenta.** Nada lo hace por él: una sesión
+  abierta cuando la cuenta sí tenía factor conserva el ERP entero hasta
+  `SESSION_ABSOLUTE_DAYS` después de borrar el último. Solo el siguiente login
+  responde `onboarding`.
+- 🔴 **El step-up de las rutas de registro de factor va con
+  `permiteOnboarding: true`**, la misma opción que ya lleva `POST
+  /auth/email/send`. §4 exige reintroducir la contraseña en la primera alta, así
+  que esas rutas llevarán la puerta; montada sin la opción, es una habitación
+  sellada — una sesión en `onboarding` no podría registrar el factor que es lo
+  único que la saca de `onboarding`, y a `onboarding` llega todo el mundo solo.
+- **Un test que demuestre que la vía de la contraseña se cierra sola.** El
+  `requireStepUp` del 4A acepta la contraseña propia mientras la cuenta no tenga
+  ningún factor, y deja de aceptarla en cuanto tenga uno. El 4A no puede probar
+  esa segunda mitad porque no puede registrar factores; el 4B sí, y le toca:
+  registrar un factor y verificar que la contraseña deja de abrir la puerta.
+- **Limpiar `usuarios.mfa_grace_until` cuando una cuenta registra su primer
+  factor.** Tercera línea de defensa, no la primera: nada depende de ello hoy.
+  Pero ese plazo **no se borra nunca solo**, así que se queda en el pasado incluso
+  en las cuentas que hicieron justo lo que se les pidió.
+- **Decidir qué pasa con `factoresDe` y `InventarioFactores`.** No los llama nadie
+  en `src/`: solo sus propios tests. Se dejaron a propósito porque su
+  documentación promete que son la consulta detrás de una pantalla de ajustes que
+  dice «2 passkeys, ningún TOTP, quedan 5 códigos», y esa pantalla la construye el
+  4B. Así que el 4B decide una de dos y ninguna por omisión: o esa función pasa a
+  ser la consulta de esa pantalla, o se va con su interfaz y sus tests. Código
+  muerto que describe una pantalla que nadie ha construido es una promesa con
+  fecha de caducidad.
+- **El aviso por correo en toda alta y baja de factor** (§4) es del 4B: en el 4A
+  no hay altas.
 
 ## 12. Riesgos
 

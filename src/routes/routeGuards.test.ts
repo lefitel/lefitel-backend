@@ -615,10 +615,96 @@ const PARAMETROS_GATES: Record<string, string> = {
   "GET /api/tipoObs/stats": "parametros.ver",
 };
 
+/**
+ * What each route of the Seguridad module must ask for, exactly.
+ *
+ * This is the table the file was missing, and its absence was measurable rather
+ * than theoretical: `DELETE /api/usuario/:id` was re-gated from
+ * `seguridad.archivar` to `seguridad.ver` — so that an account allowed only to
+ * *look* at the security screen could archive anybody's account — and the whole
+ * suite stayed green. Nothing anywhere read the pair. The chain of names says a
+ * gate is there; `requirePermission("seguridad", "ver")` and `("seguridad",
+ * "archivar")` are both called `requirePermissionGate`, so "there" was all that
+ * was ever asserted about the module that hands out and takes away accounts.
+ *
+ * Written out rather than derived, for the same reason `GENERADOR_GATES` above
+ * is: a list computed from the routers would assert only that the code agrees
+ * with itself.
+ *
+ * **The four `requireSelfOrPermission` routes are here on the same footing as
+ * the rest, and the pair means the same thing.** That middleware stamps the
+ * pair it would ask the matrix for — see `label` in `requirePermission.ts` — so
+ * what this table pins is the permission a *stranger* needs. The other half of
+ * that gate, "or it is your own row", is ownership rather than a checkbox and is
+ * asserted in `requirePermission.test.ts`, where a request can actually be
+ * aimed at somebody else's id.
+ *
+ * `GET /api/usuario/:id` is a read and still belongs here: gated reads are not
+ * covered by `READ_GATE_NOT_APPLICABLE`, which by construction only ever names
+ * the ungated ones.
+ */
+const SEGURIDAD_GATES: Record<string, string> = {
+  // Creating an account and reading one are not the same permission even though
+  // they live behind the same screen.
+  "POST /api/usuario/": "seguridad.crear",
+  "DELETE /api/usuario/:id": "seguridad.archivar",
+  "PATCH /api/usuario/:id/desarchivar": "seguridad.archivar",
+  // `editar` and not `archivar`, and the reason is written beside the route:
+  // lifting a lockout is the same kind of act as resetting a password, which is
+  // the other way out of one. It is the one pair on this table that a reader
+  // could plausibly talk themselves into changing.
+  "PATCH /api/usuario/:id/desbloquear": "seguridad.editar",
+  "GET /api/usuario/": "seguridad.ver",
+  "GET /api/usuario/user/:user": "seguridad.ver",
+  // The four that a person may also call for their own row.
+  "GET /api/usuario/:id": "seguridad.ver",
+  "PUT /api/usuario/:id": "seguridad.editar",
+  "PUT /api/usuario/username/:id": "seguridad.editar",
+  "PUT /api/usuario/userpass/:id": "seguridad.editar",
+};
+
+/**
+ * What each route of the Roles module must ask for, exactly.
+ *
+ * `roles` is its own module and not part of `seguridad`, because managing
+ * accounts and handing out authority are different powers: whoever may edit a
+ * user must not thereby be able to promote themselves. That separation is the
+ * thing this table protects — a single mistyped module name here would quietly
+ * merge the two, and every other test in the repository would go on passing.
+ *
+ * The matrix editor is the sharpest entry. `PUT /api/permisos/:id_rol` writes
+ * who may do what for the role it names — `putPermisos` refuses your own role
+ * with a 409, so the one thing it cannot do is promote the caller directly. What
+ * it can do is grant those cells to some other role, and `roles.editar` is the
+ * only thing deciding who may.
+ *
+ * `GET /api/rol/` is deliberately not here: it carries no gate at all, because
+ * every screen that shows a person needs the name of their role. It is named in
+ * `READ_GATE_NOT_APPLICABLE` above, which is where an ungated route's reason
+ * belongs.
+ */
+const ROLES_GATES: Record<string, string> = {
+  "POST /api/rol/": "roles.crear",
+  "PUT /api/rol/:id": "roles.editar",
+  "DELETE /api/rol/:id": "roles.archivar",
+  "PATCH /api/rol/:id/desarchivar": "roles.archivar",
+  "GET /api/permisos/": "roles.ver",
+  "PUT /api/permisos/:id_rol": "roles.editar",
+};
+
+/** The three routers the two tables above claim to describe completely. */
+const MODULOS_TABULADOS = /^\/api\/(usuario|rol|permisos)\b/;
+
 describe("which permission each gate asks for", () => {
   it("asks for the one the route is about, not merely for one", () => {
     const wrong: string[] = [];
-    for (const [route, expected] of Object.entries({ ...GENERADOR_GATES, ...EVENTOS_GATES, ...PARAMETROS_GATES })) {
+    for (const [route, expected] of Object.entries({
+      ...GENERADOR_GATES,
+      ...EVENTOS_GATES,
+      ...PARAMETROS_GATES,
+      ...SEGURIDAD_GATES,
+      ...ROLES_GATES,
+    })) {
       const [method, path] = route.split(" ");
       const found = routes.find((r) => r.method === method && r.path === path);
       if (!found) {
@@ -630,6 +716,35 @@ describe("which permission each gate asks for", () => {
       }
     }
     expect(wrong, `puertas que piden otra cosa: ${wrong.join(" | ")}`).toEqual([]);
+  });
+
+  it("names every gated route of usuario, rol and permisos, so a new one cannot join unlisted", () => {
+    // The assertion above runs table → code, so it can only catch a pair that
+    // changed under a route somebody already wrote down. A route added
+    // tomorrow is invisible to it, and on these three routers that is the
+    // expensive direction: they are the ones that create accounts, archive
+    // them, and rewrite the permission matrix itself.
+    //
+    // Only these three routers, and not every router in the file, because the
+    // two tables above are the only ones written as complete descriptions.
+    // `PARAMETROS_GATES` is deliberately partial and says so: it names the five
+    // `/stats` reads and none of the `parametros.crear`, `editar` and
+    // `archivar` writes sitting beside them on those same five routers, so
+    // demanding completeness of it would assert the opposite of what its own
+    // comment decided. `GENERADOR_GATES` and `EVENTOS_GATES` do happen to name
+    // every gated route of theirs today, and nothing here holds them to it.
+    const tabuladas = new Set([...Object.keys(SEGURIDAD_GATES), ...Object.keys(ROLES_GATES)]);
+    const faltan = routes
+      .filter((r) => MODULOS_TABULADOS.test(r.path))
+      .filter((r) => r.chain.some((name) => GATES.includes(name)))
+      .map((r) => `${r.method} ${r.path}`)
+      .filter((r) => !tabuladas.has(r))
+      .sort();
+
+    expect(
+      faltan,
+      `rutas con puerta y sin permiso declarado; añádelas a SEGURIDAD_GATES o ROLES_GATES:\n  ${faltan.join("\n  ")}`,
+    ).toEqual([]);
   });
 
   it("reads a permission off every gate it finds", () => {
