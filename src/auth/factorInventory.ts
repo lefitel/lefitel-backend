@@ -133,6 +133,18 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
  * account is still being chased", and after registration it is not. Third line
  * of defence, not the first.
  *
+ * **And a decision 4B has to take rather than inherit: `factoresDe` and
+ * `InventarioFactores` above have no caller anywhere in `src/`.** Only their
+ * own tests reach them; every live path goes through `tieneAlgunFactor`, which
+ * is two COUNTs rather than three precisely because it refuses to pay for a
+ * table it does not read. They were left in place on purpose — the docblock on
+ * `factoresDe` promises it is the query behind a settings screen showing "2
+ * passkeys, no TOTP, 5 recovery codes left", and 4B is what builds that screen.
+ * So 4B decides one of two things and neither by default: either that function
+ * becomes that screen's query, or it goes, along with the interface and the
+ * tests standing on it. Dead code that describes a screen nobody has built yet
+ * is a promise with an expiry date.
+ *
  * `graceUntil` is an instruction to the caller, not a fact about the account:
  * a date means "write this into `usuarios.mfa_grace_until`", `null` means
  * "leave that column alone". It is returned rather than written here because

@@ -206,6 +206,24 @@ export async function down({ context: queryInterface }: { context: QueryInterfac
   await queryInterface.sequelize.transaction(async (transaction) => {
     await queryInterface.sequelize.query("SET LOCAL lock_timeout = '5s'", { transaction });
 
+    // **Before the count, not between the count and the drops.** Counting takes
+    // ACCESS SHARE and dropping takes ACCESS EXCLUSIVE; on its own, nothing
+    // holds the tables in the gap between them, and the guard below is then
+    // deciding on a number that can already be stale. Reproduced against a
+    // scratch database with a second connection in that window: the guard saw
+    // `factor_totp=0`, a TOTP secret was registered and committed after the
+    // count, and the drop took it. Milliseconds wide, and it needs the API
+    // alive during a rollback — which the header of this file already calls a
+    // total outage — but "small window" is not the same as "closed".
+    //
+    // Taking the strongest lock first also puts `lock_timeout` to work at the
+    // right moment: if anything is using these tables, this fails fast and gets
+    // retried instead of counting a table it is about to lose a race with.
+    await queryInterface.sequelize.query(
+      `LOCK TABLE ${TABLAS.join(", ")} IN ACCESS EXCLUSIVE MODE`,
+      { transaction },
+    );
+
     // One statement for the four, so the answer is a single consistent
     // snapshot inside this transaction rather than four that could disagree.
     const conteos = (await queryInterface.sequelize.query(

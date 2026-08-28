@@ -247,6 +247,21 @@ describe("add-mfa-columns", () => {
     expect(qi.calls.filter((c) => c.fn === "removeColumn")).toHaveLength(0);
   });
 
+  it("spells the step that actually gets past the refusal, not only the backup", async () => {
+    // A reviewer followed this message to the letter against a real database
+    // and hit the same wall a second time: it gave the backup, the restore and
+    // the session revocation, and skipped the one statement that lets the
+    // rollback through. There is no flag and no environment variable, so an
+    // operator mid-incident who is not told this ends up reading the migration
+    // source — which is the exact failure the header of `20260826000003` was
+    // rewritten to prevent.
+    const qi = fakeQueryInterface(2);
+
+    await expect(down({ context: qi as never })).rejects.toThrow(
+      /UPDATE usuarios SET pass_changed_at = "createdAt"/,
+    );
+  });
+
   it("undoes when every stamp is still the one the back-fill wrote", async () => {
     // The guard exists to stop data loss, not rollbacks. While nobody has
     // changed a password, re-running `up` reproduces the column exactly, so
@@ -257,13 +272,17 @@ describe("add-mfa-columns", () => {
     expect(qi.calls.filter((c) => c.fn === "removeColumn")).toHaveLength(5);
   });
 
-  it("does not read the gap between two clocks as a password change", async () => {
-    // An account created after this migration gets `createdAt` from Sequelize
-    // and `pass_changed_at` from the model's own `NOW`, a few milliseconds
-    // apart in the same INSERT. A guard comparing the two for exact equality
-    // would refuse every rollback from the first new account onwards, having
-    // protected nothing: re-deriving that stamp from `createdAt` loses
-    // milliseconds, not a password change.
+  it("does not read the sub-millisecond gap between the two stamps as a password change", async () => {
+    // Both stamps come from Node, in the same process: the model default when
+    // the instance is built, `createdAt` when it is saved. Measured over three
+    // real `create()` calls the gap is −0.001, 0.000 and 0.000 seconds — and
+    // that negative one is the point. A guard comparing the two for exact
+    // equality would refuse every rollback from the first new account onwards,
+    // having protected nothing: re-deriving a stamp a millisecond off
+    // `createdAt` loses no password change.
+    //
+    // The name of this test used to say "between two clocks". There is one
+    // clock; `DataTypes.NOW` never reaches SQL.
     const qi = fakeQueryInterface(0);
     await down({ context: qi as never });
 

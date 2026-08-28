@@ -264,6 +264,25 @@ describe("create-factor-tables", () => {
     }
   });
 
+  it("locks the four tables before counting them, so the count cannot go stale", async () => {
+    // Counting takes ACCESS SHARE and dropping takes ACCESS EXCLUSIVE. With
+    // nothing holding the tables in between, a factor registered in that gap is
+    // counted as absent and dropped anyway — reproduced against a real database
+    // with a second connection: the guard saw `factor_totp=0` and destroyed the
+    // secret that had been committed after the count.
+    const qi = fakeQueryInterface();
+    await down({ context: qi as never });
+
+    const lock = qi.calls.findIndex((c) => String(c.args[0]).includes("ACCESS EXCLUSIVE MODE"));
+    const conteo = qi.calls.findIndex((c) => String(c.args[0]).includes("count(*)"));
+
+    expect(lock, "down() no bloquea las tablas antes de contar").toBeGreaterThanOrEqual(0);
+    expect(conteo).toBeGreaterThan(lock);
+    for (const tabla of TABLAS) {
+      expect(String(qi.calls[lock].args[0]), `${tabla} se queda sin bloquear`).toContain(tabla);
+    }
+  });
+
   it("lets the rollback through when the four tables are empty", async () => {
     // The guard is about data loss, not about forbidding rollbacks. With
     // nothing in the tables there is nothing to lose, and 4A has to stay

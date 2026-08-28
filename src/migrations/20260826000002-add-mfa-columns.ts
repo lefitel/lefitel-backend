@@ -133,14 +133,33 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
  * stale stamps into a later `up`, which is the same disarming this guard
  * exists to stop, only harder to see.
  *
- * The comparison carries a **one-second tolerance** on purpose. An account
- * created after this migration takes `createdAt` from Sequelize and
- * `pass_changed_at` from the model's own `NOW`: the same INSERT, two clocks,
- * a few milliseconds apart. Compared for exact equality, this guard would
- * refuse every rollback from the first new account onwards while protecting
- * nothing — re-deriving a stamp that is milliseconds off `createdAt` loses no
- * password change. Anything further apart than a second is somebody typing a
- * new password, which no human does within a second of the account existing.
+ * The comparison carries a **one-second tolerance**, and the tolerance is
+ * load-bearing while its width is headroom. Both halves are measured, and an
+ * earlier version of this comment got the mechanism wrong in a way worth
+ * spelling out, since this whole commit is about comments that describe what
+ * their code does not do.
+ *
+ * **There is one clock, not two.** The first version said `createdAt` came
+ * from Sequelize and `pass_changed_at` from the column's own `NOW` — but
+ * `DataTypes.NOW` never reaches SQL at all (see the header of
+ * `20260827000001`: Sequelize drops it from `createTable`). Node fills both,
+ * in the same process: the model default when the instance is built, and
+ * `createdAt` when it is saved. So the gap is sub-millisecond and can be
+ * **negative**. Measured over three real `create()` calls: −0.001, 0.000 and
+ * 0.000 seconds.
+ *
+ * That −1 ms is why exact equality is wrong: it would refuse every rollback
+ * from the first new account onwards, having protected nothing. The measured
+ * need is about one millisecond; one second is a thousand times that, kept as
+ * headroom for the things that widen the gap without meaning anything — a GC
+ * pause between build and save, a clock stepped by NTP in between.
+ *
+ * **What the headroom costs, measured rather than assumed:** a password change
+ * within half a second of the account being created is re-derived silently.
+ * No human types one that fast, and it would be harmless if they did —
+ * `authenticate` refuses sessions older than the stamp, so the only sessions
+ * such a re-derivation could revive are from a sub-second window before
+ * anybody could have logged in at all.
  *
  * Measured on the production copy on 2026-08-27: 15 accounts, 0 divergent. As
  * of today this refuses nothing.
@@ -171,9 +190,13 @@ export async function down({ context: queryInterface }: { context: QueryInterfac
           `${divergentes} cuenta(s), y volver a aplicarla la reescribiría con la fecha ` +
           "de creación de cada cuenta. El efecto es que las sesiones anteriores a un " +
           "cambio de contraseña vuelven a valer, en silencio y para toda la tabla. " +
-          "Si aun así hay que deshacerla, guarda la columna primero: " +
+          "Si aun así hay que deshacerla, son tres pasos y ninguno se puede saltar. " +
+          "1) Guarda la columna: " +
           'CREATE TABLE usuarios_pass_changed_at_bak AS SELECT id, pass_changed_at FROM usuarios; ' +
-          "y, después del siguiente up, devuélvela: " +
+          "2) Iguala las marcas para que esta comprobación deje pasar — no hay ninguna otra " +
+          "salida, ni opción ni variable de entorno: " +
+          'UPDATE usuarios SET pass_changed_at = "createdAt"; ' +
+          "3) vuelve a ejecutar el down. Y después del siguiente up, devuelve lo guardado: " +
           'UPDATE usuarios u SET pass_changed_at = b.pass_changed_at ' +
           "FROM usuarios_pass_changed_at_bak b WHERE b.id = u.id; " +
           "Revoca además las sesiones vivas de esas cuentas, porque entre el down y " +

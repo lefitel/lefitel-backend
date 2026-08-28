@@ -79,9 +79,17 @@ import { QueryInterface } from "sequelize";
 // `dispositivo_recordado (expires_at)` with the comment "the purge filters by
 // this one". Task 9 then wrote the purge, and it filters by
 // `expires_at < now() OR revoked_at < cutoff` — an OR across two columns, only
-// one of them indexed, which Postgres answers with a sequential scan. Measured
-// on 100,000 rows: seq scan, 2124 buffers, 28.0 ms; with this index, a BitmapOr
-// over both, 1038 buffers, 3.4 ms. Only now is that comment's claim true.
+// one of them indexed, which Postgres answers with a sequential scan. With this
+// index the plan becomes a BitmapOr over both, and only now is that comment's
+// claim true.
+//
+// **What the index buys is latency, and only latency.** Measured on 100,000
+// rows, twice, with the matching rows spread differently each time: 28.0 ms →
+// 3.4 ms, and 23.6 ms → 5.2 ms. Buffer counts are *not* the reason and must not
+// be quoted as one — an earlier version of this comment said 2124 → 1038, which
+// was true of one distribution and not of the other, where they stayed flat
+// (1640 → 1645). The heap blocks dominate either way; what the index removes is
+// the filtering, not the reading.
 //
 // Partial (`WHERE revoked_at IS NOT NULL`) because a revoked device is the rare
 // row: the index holds only what the second branch of the OR can match.

@@ -78,10 +78,20 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
         created_at: {
           type: DataTypes.DATE,
           allowNull: false,
-          // A real column default, unlike `sesiones.created_at`: nothing in
-          // this plan writes `token_uso_unico` rows through raw SQL, but a
-          // rescue script or a later task's `INSERT` that forgets the column
-          // still gets a correct timestamp instead of a NOT NULL violation.
+          // ⚠️ **This line does not produce a column default, and this comment
+          // used to claim it did.** Sequelize 6.37.8 drops `DataTypes.NOW` from
+          // `createTable` without a word — only `sequelize.literal("now()")`
+          // survives into the SQL. Verified by running this same `createTable`
+          // against a scratch database and reading the statement back, so the
+          // column shipped with no DEFAULT and this paragraph described a
+          // safety net that was not there.
+          //
+          // The intent was right and it is now real, in raw SQL, in
+          // `20260827000001-harden-mfa-schema`: a rescue script or a later
+          // task's `INSERT` that forgets the column gets a correct timestamp
+          // instead of a NOT NULL violation. Left declared here rather than
+          // deleted because this migration has already run and its `up` must
+          // keep saying what it did.
           defaultValue: DataTypes.NOW,
         },
       },

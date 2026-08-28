@@ -130,13 +130,22 @@ describe("create-token-uso-unico", () => {
     expect(String(columnOf(qi, "proposito").type)).toBe("VARCHAR(32)");
   });
 
-  it("gives created_at a real column default, unlike sesiones.created_at", async () => {
-    // The plan's diagram writes `created_at TIMESTAMPTZ NOT NULL DEFAULT
-    // now()` for this table specifically — `sesiones.created_at` has no such
-    // default, because the session store always sets it by hand. This table
-    // gets a real default so a row inserted without naming the column (a
-    // rescue script, a later task's raw INSERT) still lands with a correct
-    // timestamp instead of failing a NOT NULL check.
+  it("asks for a created_at default that Sequelize drops on the way to SQL", async () => {
+    // ⚠️ **This test used to be called "gives created_at a real column
+    // default", and it was green while the database had no such default.** The
+    // name was the claim, the claim was false, and a green test asserting it is
+    // more dangerous than the comment that says the same thing: nobody
+    // re-checks a rule a test is standing on.
+    //
+    // What is true: `createTable` with `defaultValue: DataTypes.NOW` emits no
+    // DEFAULT at all in Sequelize 6.37.8 — only `sequelize.literal("now()")`
+    // does. Verified by running this very `createTable` against a scratch
+    // database and reading back the SQL. So what this line pins is the
+    // *intent* declared here, nothing the column actually had.
+    //
+    // The real `DEFAULT now()` arrives in `20260827000001-harden-mfa-schema`,
+    // in raw SQL, for this table and for the four factor tables. Its header
+    // has the measurement.
     const qi = fakeQueryInterface();
     await up({ context: qi as never });
     expect(columnOf(qi, "created_at").defaultValue).toBe(DataTypes.NOW);

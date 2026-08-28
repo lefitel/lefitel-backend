@@ -104,8 +104,10 @@ describe("harden-mfa-schema", () => {
     // `dispositivo_recordado (expires_at)` alone does not serve
     // `purgeExpiredRememberedDevices`: it filters by
     // `expires_at < now() OR revoked_at < cutoff`, and an OR with one indexed
-    // side is a sequential scan. Measured on 100,000 rows: 2124 buffers and
-    // 28.0 ms, against 1038 buffers and 3.4 ms once both sides are indexed.
+    // side is a sequential scan. Measured on 100,000 rows, under two different
+    // spreads of the matching rows: 28.0 ms → 3.4 ms and 23.6 ms → 5.2 ms. The
+    // win is latency; buffer counts depend on the spread and stayed flat in one
+    // of the two, so they are not the argument.
     const sql = sqlOf(await ran(up));
 
     expect(sql).toMatch(/CREATE INDEX dispositivo_recordado_revoked_at_idx/i);
