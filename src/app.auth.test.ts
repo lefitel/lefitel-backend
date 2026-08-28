@@ -281,6 +281,17 @@ beforeEach(() => {
   // exist outside this test file. With the real value restored, those tests
   // supply what the gate actually asks for: a `stepup_password` field on the
   // request, alongside whatever `oldPass` each was already testing.
+  //
+  // `mfa_source: null` for the same reason, and it used to be missing
+  // altogether. `findLiveSession` returns the column on every row, so a
+  // fixture without it is a shape production never produces — and 66 tests in
+  // this file read this one object. It is harmless today only because
+  // `estadoEfectivo` compares it with `!= null`, under which an absent column
+  // and a null one mean the same thing; written strictly, the absent column
+  // would read as "a factor was proved here" and switch the deadline rule off
+  // across this entire file at once. The rule itself is pinned against a row
+  // that really is a field short in `auth/sessionState.test.ts`, which is
+  // where that belongs — a shared fixture's job is to be the real shape.
   sesionFindOne.mockResolvedValue({
     dataValues: {
       id: MI_SESION,
@@ -290,6 +301,7 @@ beforeEach(() => {
       last_used_at: new Date(),
       estado: "completa",
       mfa_satisfied_at: null,
+      mfa_source: null,
     },
   } as never);
   sesionFindAll.mockResolvedValue([] as never);
