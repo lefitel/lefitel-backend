@@ -1497,8 +1497,9 @@ describe("requireStepUp, mounted on the real routes", () => {
   // What this block does *not* assert: which routes mount the gate. Every test
   // here goes through a request, and a request cannot tell an unmounted gate
   // from a satisfied one — both answer whatever the handler answers. The
-  // eleven mounts are held structurally in `routes/routeGuards.test.ts`, in
-  // one table. Do not start a second half-table here.
+  // mounts are held structurally in `routes/routeGuards.test.ts`, in one
+  // table — fourteen of them today, and the count is that table's business
+  // rather than a number restated here. Do not start a second half-table.
 
   beforeEach(async () => {
     await passwordConfirmLimiter.resetKey(CLAVE_YO);
@@ -1822,7 +1823,7 @@ describe("requireStepUp, mounted on the real routes", () => {
    * notice `requireStepUp()` disappearing from that route. Afterwards the gate
    * could be deleted from `usuario.routes.ts` with the whole suite still green.
    * Mount coverage is not this trio's job and never should have been: it now
-   * lives in `routes/routeGuards.test.ts`, which pins all eleven gated routes
+   * lives in `routes/routeGuards.test.ts`, which pins every gated route
    * against the app Express actually assembled.
    *
    * `id: 99` is this file's own established stand-in for "a row that is not
@@ -1869,8 +1870,8 @@ describe("requireStepUp, mounted on the real routes", () => {
       //   `requireStepUp()` deleted from `DELETE /api/rol/:id`: the other two
       //   go red and this one stays green. It cannot see the mount at all, and
       //   that is the honest reason it looks redundant next to them. The mount
-      //   itself is pinned structurally, for all eleven gated routes at once,
-      //   in `routes/routeGuards.test.ts`.
+      //   itself is pinned structurally, for every gated route at once, in
+      //   `routes/routeGuards.test.ts`.
       //
       //   a correct password stops opening the gate (`confirmacion.ok`
       //   defeated): this is the only one of the three that goes red, and it

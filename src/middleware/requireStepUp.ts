@@ -116,16 +116,23 @@ export interface OpcionesStepUp {
    * only. Off by default, and every administrative mount leaves it off.
    *
    * **For the doors `onboarding` opens in order to stop being `onboarding`.**
-   * `ONBOARDING_EXTRA` in `auth/sessionState.ts` opens six prefixes precisely
-   * so somebody past their deadline can finish setting up: the email, TOTP,
-   * WebAuthn registration, the recovery codes. The specification puts several
-   * of those same operations behind step-up — "cambiar el email propio", "dar
-   * de alta o de baja cualquier factor" — and, in the same section, says which
-   * of them `onboarding` is shut out of: "un usuario en `onboarding` no puede
-   * hacer las operaciones **administrativas** de la lista: responden 403, nunca
-   * pasan" (the emphasis is this comment's). Administrative. Setting up your
-   * own account is the other kind, and the two rules only contradict each other
-   * if that word is dropped.
+   * `ONBOARDING_EXTRA` in `auth/sessionState.ts` opens six prefixes, and
+   * **five** of them are that: the email, TOTP, WebAuthn registration, the
+   * stored credentials, the recovery codes. The sixth is `/api/auth/sessions`,
+   * which is not — the write behind it takes this gate with the option **off**,
+   * and refusing `onboarding` there is the whole of what closed a demonstrated
+   * attack (see `auth.routes.ts`). That is the shape of this option, stated
+   * against the one prefix that disproves the lazy version of it: it is decided
+   * per route, never per state, and there is no reading of "`onboarding` may
+   * reach it" that implies "the gate should let it through".
+   *
+   * The specification puts several of those same operations behind step-up —
+   * "cambiar el email propio", "dar de alta o de baja cualquier factor" — and,
+   * in the same section, says which of them `onboarding` is shut out of: "un
+   * usuario en `onboarding` no puede hacer las operaciones **administrativas**
+   * de la lista: responden 403, nunca pasan" (the emphasis is this comment's).
+   * Administrative. Setting up your own account is the other kind, and the two
+   * rules only contradict each other if that word is dropped.
    *
    * **Measured, not argued.** Mounting the gate without this option on `POST
    * /api/auth/email/send` turns `app.auth.test.ts`'s "leaves the doors that

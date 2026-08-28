@@ -72,6 +72,9 @@ const SESION_NO_DISPONIBLE =
   "No se pudo iniciar la sesión en este momento. Inténtelo de nuevo en unos minutos.";
 /** Twin of the message in `authenticate.ts`; both mean the row is gone. */
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
+/** Named because the body below is now built in two shapes and the sentence is
+ *  the same in both; two hand-typed copies of one string is how they drift. */
+const LOGIN_OK = "Login exitoso";
 /** One answer for "not yours", "never existed" and "already closed". */
 const SESION_NO_ENCONTRADA = "Esa sesión no existe o ya se cerró.";
 
@@ -257,7 +260,45 @@ export const login = handler("login", async (req: Request, res: Response) => {
     }
   }
 
-  const permisos = await permissionsFor(check.usuario.id_rol);
+  /**
+   * **The permission matrix, only for a session that opens `completa`.** The
+   * same rule `GET /api/auth/me` applies below, on the door rather than the
+   * window — and the door matters more: reaching `/me` means already holding
+   * the cookie, while this answers whoever typed a correct password.
+   *
+   * From plan 4B, an account with a factor opens `parcial` here: the password
+   * was accepted, the second factor has not been proved, and `authenticate`
+   * will refuse that session everything outside `PARCIAL`, the narrowest
+   * allowlist in `auth/sessionState.ts`. Handing it the account's whole map of
+   * authority in the login body would give away, at the door, exactly what the
+   * endpoint one route away was just taught to withhold — and to the one
+   * caller the rule names.
+   *
+   * **This goes past the letter of the specification and not past its
+   * argument.** The sentence "en estado no `completa`, devuelve estado sin
+   * permisos" sits in the `/auth/me` row of §5's table. What makes publishing
+   * the matrix wrong there is the state of the session, which is the same
+   * state here; the address that publishes it is not what the reasoning turns
+   * on. Left to 4B as a note, the hole would be open from its first day and
+   * would depend on somebody reading the note.
+   *
+   * **Absent, not empty**, for the reason spelled out at `me` below, and the
+   * client already reads it that way: `permisos` is optional in `web/src`'s
+   * own session interface, and nothing in the login screen touches it.
+   *
+   * Nothing changes for anybody today. Every login that is not past its
+   * deadline opens `completa` — nobody has a factor to open `parcial` with —
+   * so this is the same body it has always been, and `login.session.test.ts`
+   * pins that shape unchanged.
+   */
+  const cuerpo =
+    estado === "completa"
+      ? {
+          usuario: check.usuario,
+          permisos: await permissionsFor(check.usuario.id_rol),
+          message: LOGIN_OK,
+        }
+      : { usuario: check.usuario, message: LOGIN_OK };
   // Last, not first. Written before the session existed, this line would claim
   // somebody logged in on a request that answered 500.
   logLogin(check.usuario, req.ip ?? null);
@@ -276,7 +317,7 @@ export const login = handler("login", async (req: Request, res: Response) => {
   purgeExpiredTokens().catch((err) =>
     authLog.error({ err }, "no se pudo purgar token_uso_unico tras el login"),
   );
-  return res.status(200).json({ usuario: check.usuario, permisos, message: "Login exitoso" });
+  return res.status(200).json(cuerpo);
 });
 
 /**

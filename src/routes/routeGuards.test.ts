@@ -350,7 +350,7 @@ describe("who may change data", () => {
  * Live here and not in `app.auth.test.ts`, which pins the gate's *behaviour*
  * through real requests: this file already walks the app as Express assembled
  * it, across all three routers at once, and already owns the question "is the
- * right gate on the right route". Splitting the eleven between two files would
+ * right gate on the right route". Splitting the fourteen between two files would
  * mean two half-tables, which is the shape the gap above came in.
  */
 const STEP_UP_GATED = [

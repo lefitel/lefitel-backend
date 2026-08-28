@@ -327,15 +327,26 @@ async function authenticateBySession(
     expires_at: expiresAt,
     // The recomputed one, not `sesion.estado`, and two things read it.
     //
-    // **`GET /api/auth/me` publishes it today**, and that is the one visible
-    // change this rule makes to a request it does *not* refuse: `/api/auth/me`
-    // is in `PARCIAL`, so every state reaches it, and from here on it answers
+    // **`GET /api/auth/me` reads it for two decisions**, and they are the
+    // whole of what this rule changes on a request it does *not* refuse.
+    // `/api/auth/me` is in `PARCIAL`, so every state reaches it.
+    //
+    // It *publishes* the value: from here on that endpoint answers
     // `onboarding` mid-session instead of the `completa` the row still holds.
     // That is the improvement, not a side effect — the endpoint's own comment
     // says this field exists because "the day the grace period runs out is
     // undebuggable" without it, and until now it went on saying `completa`
     // while the ERP answered 403, which is exactly the confusion it was added
     // to prevent.
+    //
+    // And it *withholds the permission matrix* on anything but `completa`,
+    // which is the larger of the two and arrived later: the answer's very
+    // shape now depends on this line rather than on `sesion.estado`. A
+    // session the row still calls `completa`, and this rule has decided is
+    // not, stops being handed the account's map of authority — pinned by
+    // "stops handing that session the permission matrix" in
+    // `app.auth.test.ts`, which goes through the assembled app precisely so
+    // that it is *this* value being read and not the stored one.
     //
     // **`requireStepUp` reads it too**, and there the stored value would leave
     // the gate believing a session the check above has already decided is past

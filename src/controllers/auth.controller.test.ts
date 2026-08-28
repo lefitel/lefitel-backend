@@ -115,6 +115,8 @@ const OTRA_SESION = "bbbbbbbb-22de-4222-8222-bbbbbbbbbbbb";
 const AJENA = "cccccccc-33ef-4333-8333-cccccccccccc";
 const TOKEN = "un-token-opaco-de-sesion";
 const CADUCA = new Date("2026-09-01T00:00:00.000Z");
+/** A grace deadline already gone by: the login opens `onboarding` against it. */
+const AYER = new Date(Date.now() - 24 * 60 * 60 * 1000);
 // Deliberately not `CADUCA`: a test pinning this value has to fail if `me`
 // starts computing its own date (`Date.now() + algo`) instead of reading the
 // one `authenticate` already put on `req.user`, and a coincidence with
@@ -292,6 +294,72 @@ describe("POST /api/auth/login", () => {
     expect(JSON.stringify(c.payload)).not.toContain("$2a$12$hash");
   });
 
+  it("withholds the permission matrix from a login that does not open a complete session", async () => {
+    /**
+     * The same rule as `/api/auth/me`'s below, on the door instead of the
+     * window, and the door is the more exposed of the two: reaching `/me`
+     * means already holding the cookie, while this answers whoever typed a
+     * correct password — which after plan 4B is exactly the caller the rule
+     * is about, "somebody who has the password and has not proved the second
+     * factor". A `parcial` session cannot use a single line of the matrix,
+     * and was being handed all of it in the login body, one route away from
+     * the endpoint that had just been taught not to.
+     *
+     * The specification's sentence sits in the `/auth/me` row of its table, so
+     * this goes past the letter of it. It does not go past the argument: what
+     * makes publishing the matrix wrong there is the state of the session, not
+     * the address that published it.
+     *
+     * Both states, driven the way `login.session.test.ts` drives them — a
+     * registered passkey for `parcial`, a deadline in the past for
+     * `onboarding` — so this reads the real `estadoInicialDeSesion` and not a
+     * literal.
+     */
+    const casos = [
+      ["parcial", () => passkeyCount.mockResolvedValue(1)],
+      [
+        "onboarding",
+        () => findOne.mockResolvedValue(storedUser({ mfa_grace_until: AYER })),
+      ],
+    ] as const;
+
+    for (const [estado, montar] of casos) {
+      vi.clearAllMocks();
+      findOne.mockResolvedValue(storedUser());
+      createSession.mockResolvedValue({ token: TOKEN, expiresAt: CADUCA });
+      permissionsFor.mockResolvedValue(PERMISOS);
+      passkeyCount.mockResolvedValue(0);
+      totpCount.mockResolvedValue(0);
+      update.mockResolvedValue([1]);
+      montar();
+
+      const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+      await login(c.req, c.res);
+
+      // Still a successful login: the cookie is set and the person is in.
+      // Withholding the matrix must not turn into refusing the login, which
+      // would lock out every account the day its deadline passed.
+      expect(c.status, estado).toBe(200);
+      expect(createSession, estado).toHaveBeenCalledWith(YO, expect.anything(), estado);
+      expect(Object.keys(c.payload ?? {}).sort(), estado).toEqual(["message", "usuario"]);
+      // Absent, and absent because it was never asked for.
+      expect(permissionsFor, estado).not.toHaveBeenCalled();
+    }
+  });
+
+  it("still sends the matrix to the complete session the login usually opens", async () => {
+    // The other shape, kept beside the one above so the pair is legible: this
+    // is every login today — nobody has a factor and nobody is past their
+    // deadline — and it must go on carrying the matrix, or the first screen
+    // after logging in draws no buttons for anybody.
+    const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+    await login(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "completa");
+    expect(Object.keys(c.payload ?? {}).sort()).toEqual(["message", "permisos", "usuario"]);
+    expect(c.payload?.permisos).toEqual(PERMISOS);
+  });
   it("refuses a body with nothing in it, without looking anything up", async () => {
     const c = call(undefined, { body: {} });
     await login(c.req, c.res);
