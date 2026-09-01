@@ -930,7 +930,7 @@ exacto que hay que ejecutar y en qué repositorio.
 | **A0** | La bitácora deja de apuntar lo que el servidor rechazó | ✅ `538f309` + `5add364` — 16 ficheros |
 | **A1** | Las siete rutas muertas, borradas | ✅ `e8cf5f6` — 8 ficheros. De 119 rutas montadas a 112 |
 | **A3** | Un fallo deja de contarle al navegador lo que dijo Postgres | ✅ `2d36db1` + `7898569` — 18 ficheros. 74 manejadores movidos a `makeHandler` |
-| **A4** | `ARCHITECTURE.md` al día | ✅ — y el hallazgo: siete de sus ocho índices no están en ninguna migración |
+| **A4** | `ARCHITECTURE.md` al día | ✅ — y el hallazgo: **ninguno** de sus nueve índices está en una migración |
 
 ### Familia A — sólo servidor, no rompe a nadie
 
