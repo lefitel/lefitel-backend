@@ -44,7 +44,31 @@ const here = dirname(fileURLToPath(import.meta.url));
  * mentions `req.body` in the values of a write is what this test is looking
  * for.
  */
-const FILTERS = ["authoredBy", "withoutAuthor", "assignable", "pick"];
+// `creatableFrom` and `editableFrom` wrap `pick()` with an explicit field
+// list, so they are stricter than the rest. They only became visible from the
+// write once this test started following one level of alias.
+const FILTERS = ["authoredBy", "withoutAuthor", "assignable", "pick", "creatableFrom", "editableFrom"];
+
+/**
+ * A write whose argument is a bare name, resolved to what that name was
+ * assigned. Added after a change moved six filters out of the call and into a
+ * `const` a line above — which left those six writes correct and this test
+ * unable to tell, because the argument no longer said `req.body`. A guarantee
+ * that depends on where you put the parentheses is not a guarantee.
+ *
+ * One level only, and deliberately: the idiom this follows is
+ * `const editable = assignable(req.body); row.set(editable);`. Anything deeper
+ * is not an idiom, it is somewhere to hide, and it will read as unresolved —
+ * which fails closed, because the declaration text is what gets judged.
+ */
+function unalias(source: string, arg: string): string {
+  const name = arg.trim();
+  if (!/^[A-Za-z_$][\w$]*$/.test(name)) return arg;
+  // `String.raw`, or the template turns `\b` into a backspace and `\s` into an
+  // `s`, and the pattern matches nothing while the test still passes.
+  const decl = new RegExp(String.raw`\b(?:const|let|var)\s+${name}\s*=\s*([^;]+);`);
+  return decl.exec(source)?.[1] ?? arg;
+}
 
 /** Every `.set(…)` and `.create(…)` in the controllers, with its argument. */
 function writes(): { file: string; line: number; call: string; arg: string }[] {
@@ -88,9 +112,16 @@ function writes(): { file: string; line: number; call: string; arg: string }[] {
 
 describe("what a client may assign", () => {
   it("never hands req.body to a model without filtering it first", () => {
-    const raw = writes()
-      .filter((w) => w.arg.includes("req.body"))
-      .filter((w) => !FILTERS.some((f) => w.arg.includes(`${f}(`)))
+    const all = writes();
+
+    // So a rename or a moved folder cannot make this test vacuous by finding
+    // nothing to judge. Same guard `responseShape.test.ts` carries.
+    expect(all.length, "el escáner no encontró ninguna escritura que juzgar").toBeGreaterThan(20);
+
+    const raw = all
+      .map((w) => ({ ...w, resolved: unalias(readFileSync(join(here, w.file), "utf8"), w.arg) }))
+      .filter((w) => w.resolved.includes("req.body"))
+      .filter((w) => !FILTERS.some((f) => w.resolved.includes(`${f}(`)))
       .map((w) => `${w.file}:${w.line}  .${w.call}(${w.arg.trim().slice(0, 40)})`);
 
     expect(

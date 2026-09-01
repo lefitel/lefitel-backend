@@ -63,7 +63,10 @@ export async function updateObs(req: Request, res: Response) {
     }
     const bvTipo = dv["id_tipoObs"] as number | null | undefined;
     const avTipo = editable["id_tipoObs"] as number | null | undefined;
-    if (bvTipo !== undefined && bvTipo !== avTipo) {
+    // Only when the request actually carries it: without this, a body that omits
+    // `id_tipoObs` recorded a change from the current type to nothing. And the
+    // logAction below is unconditional, so it really was written every time.
+    if (Object.hasOwn(editable, "id_tipoObs") && bvTipo !== undefined && bvTipo !== avTipo) {
       const fkRef = async (pkVal: number | null | undefined) => {
         if (pkVal == null) return null;
         const row = await TipoObsModel.findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });

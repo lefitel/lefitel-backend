@@ -218,7 +218,11 @@ export async function updatePoste(req: Request, res: Response) {
     ).map(async ([k, Model]) => {
       const bv = dv[k] as number | null | undefined;
       const av = editable[k] as number | null | undefined;
-      if (bv === undefined || bv === av) return;
+      // Only when the request actually carries the key. A partial update that
+      // omits it leaves the column untouched, but this recorded
+      // `after: {id_propietario: null}` — a change nobody asked for, written into
+      // the audit log as if it had happened. Same guard `updateEvento` has.
+      if (!Object.hasOwn(editable, k) || bv === undefined || bv === av) return;
       [beforeMeta[k], afterMeta[k]] = await Promise.all([fkRef(Model, bv), fkRef(Model, av)]);
     }));
 
@@ -258,6 +262,10 @@ export async function updatePoste(req: Request, res: Response) {
       }
     });
 
+    // Still `bodyWithoutAdss` and not `editable`, and they are the same thing
+    // here: `withoutAuthor` drops id/createdAt/updatedAt/deletedAt/id_usuario and
+    // never `image`. Said out loud because the day `image` joins that list, this
+    // line would delete the old file while the write refused the new one.
     if (oldImage && bodyWithoutAdss.image && oldImage !== bodyWithoutAdss.image) {
       deleteImageFile(oldImage);
     }

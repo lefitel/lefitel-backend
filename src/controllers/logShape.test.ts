@@ -35,7 +35,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** The wrappers that already drop what a client may not assign. */
-const FILTERS = ["assignable", "withoutAuthor", "authoredBy", "pick", "creatableFrom"];
+const FILTERS = ["assignable", "withoutAuthor", "authoredBy", "pick", "creatableFrom", "editableFrom"];
 
 /**
  * `req.body` handed over whole — not `req.body.name`, which names one field.
@@ -52,9 +52,9 @@ const CUERPO_ENTERO = /req\.body(?![.[\w])/;
 const NOT_OURS = ["rol.controller.ts"];
 
 /** Every `logAction(...)` argument in the controllers, with its file and line. */
-function logCalls() {
+function logCalls(only?: string[]) {
   const found: { file: string; line: number; arg: string }[] = [];
-  const files = readdirSync(here).filter(
+  const files = only ?? readdirSync(here).filter(
     (f) => f.endsWith(".controller.ts") && !NOT_OURS.includes(f),
   );
 
@@ -105,7 +105,34 @@ function metadataOf(arg: string): string | null {
   return null;
 }
 
+/** The calls whose `metadata` hands the body over whole. */
+const offenders = (files?: string[]) =>
+  logCalls(files)
+    .map((c) => ({ ...c, meta: metadataOf(c.arg) }))
+    .filter((c) => c.meta !== null && CUERPO_ENTERO.test(c.meta))
+    .filter((c) => !FILTERS.some((f) => c.meta!.includes(`${f}(`)));
+
 describe("what the bitácora may claim", () => {
+  // A source-level test that finds nothing to read passes for the wrong reason.
+  // `readdirSync` is not recursive and matches one suffix, so moving the
+  // controllers into a subfolder, or renaming them, would quietly empty this.
+  // Same guard `responseShape.test.ts` carries, and the one this file was
+  // written without.
+  it("finds calls to judge at all, so an empty walk cannot pass by default", () => {
+    expect(logCalls().length, "el escáner no encontró ninguna llamada a logAction").toBeGreaterThan(30);
+  });
+
+  // The exception is a debt, and debts need a due date. `routeGuards.test.ts`
+  // keeps three tests of this shape for the same reason: without one, the entry
+  // outlives the defect and that file stays unscanned for good.
+  it("keeps the exception list honest", () => {
+    const stale = NOT_OURS.filter((f) => offenders([f]).length === 0);
+    expect(
+      stale,
+      `estos ficheros ya no tienen el defecto: quítalos de NOT_OURS en vez de dejarlos sin escanear:\n  ${stale.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
   it("never builds an audit diff from the unfiltered request body", () => {
     const raw = logCalls()
       .map((c) => ({ ...c, meta: metadataOf(c.arg) }))

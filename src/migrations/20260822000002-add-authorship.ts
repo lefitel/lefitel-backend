@@ -21,7 +21,7 @@ import { QueryInterface, DataTypes } from "sequelize";
  * Be clear about what that rule says, because it is not quite the question
  * being asked. It says **who touched this event at that moment**, not who wrote
  * this row. Two of the four actions below are also logged by code paths that
- * write nothing: `updateEvento` logs `RESOLVE_EVENTO` on any pendiente→resuelto
+ * write nothing: `resolverEvento` logs `RESOLVE_EVENTO` on any pendiente→resuelto
  * transition, and `createEvento` logs `CREATE_EVENTO` even when the request
  * carries no inline revision. So an entry can be evidence for a row that does
  * not exist, and if a different person acted on the same event inside the

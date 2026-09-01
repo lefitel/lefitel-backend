@@ -321,6 +321,10 @@ export async function updateEvento(req: Request, res: Response) {
       }
     });
 
+    // Still `bodyWithoutObs` and not `editable`, and they are the same thing
+    // here: `withoutAuthor` drops id/createdAt/updatedAt/deletedAt/id_usuario and
+    // never `image`. Said out loud because the day `image` joins that list, this
+    // line would delete the old file while the write refused the new one.
     if (oldImage && bodyWithoutObs.image && oldImage !== bodyWithoutObs.image) {
       deleteImageFile(oldImage);
     }
