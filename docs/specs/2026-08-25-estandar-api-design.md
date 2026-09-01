@@ -891,7 +891,7 @@ aplicación instalada. Una caja así no se puede desplegar de ninguna manera
 correcta.
 
 **El corte nuevo es por radio de daño al desplegar**, no por materia. Salen
-dieciséis tareas en cuatro familias, y las tres primeras familias se pueden hacer
+catorce tareas en cuatro familias, y las tres primeras familias se pueden hacer
 en cualquier orden dentro de la suya.
 
 ### Las dos reglas que gobiernan la lista
@@ -1081,7 +1081,7 @@ cd api && npx vitest run src/routes/listShape.test.ts
 ```
 
 **C4 · `201`/`204` y la capa cliente (§3.5, §4.1).** La tarea más grande de las
-dieciséis. **La cifra de la primera versión estaba muy corta:** hay 57
+catorce. **La cifra de la primera versión estaba muy corta:** hay 57
 comparaciones literales con `200` repartidas en 25 ficheros de `web/src`, de las
 cuales las que rompen de verdad son al menos quince, cada una con su mensaje
 falso — «No se pudo archivar» sobre una fila que sí se archivó, «No se pudo
