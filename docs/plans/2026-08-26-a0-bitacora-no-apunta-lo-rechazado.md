@@ -75,7 +75,7 @@ apunta.
 - Produces: nada que otro fichero importe. Lo que produce es la lista de
   infractores, que las tareas 2 a 4 van vaciando.
 
-- [ ] **Step 1: Escribir el test**
+- [x] **Step 1: Escribir el test**
 
 Crear `src/controllers/logShape.test.ts`. La cabecera explica el porqué, como
 hacen sus dos hermanos; el cuerpo recorre las llamadas a `logAction(` de cada
@@ -186,7 +186,7 @@ describe("what the bitácora may claim", () => {
 });
 ```
 
-- [ ] **Step 2: Ejecutar y ver la lista completa**
+- [x] **Step 2: Ejecutar y ver la lista completa**
 
 ```
 cd api && npx vitest run src/controllers/logShape.test.ts
@@ -201,7 +201,7 @@ su diff en un bucle que lee `req.body` a través de una variable intermedia
 Los cubre la tarea 4 con tests de comportamiento. Si el test de forma listara
 ocho en vez de seis, algo se leyó mal: comprobar antes de seguir.
 
-- [ ] **Step 3: Commit del test en rojo, no**
+- [x] **Step 3: Commit del test en rojo, no**
 
 No se commitea todavía. El commit es uno solo, al final (§9 del spec y norma de
 la casa).
@@ -226,7 +226,7 @@ mitades del diff hablan del cuerpo recibido y no de lo escrito.
 - Consumes: `assignable` de `src/utils/authorship.js`, ya importado en los cinco
   (lo metió `ce91b1b`). No hace falta tocar ningún import.
 
-- [ ] **Step 1: Aplicar el mismo cambio en los cinco**
+- [x] **Step 1: Aplicar el mismo cambio en los cinco**
 
 Tomando `ciudad` como ejemplo — los otros cuatro son idénticos salvo el nombre
 de la variable y de la entidad. Antes:
@@ -254,7 +254,7 @@ Y en la llamada a `logAction`, `after: req.body` pasa a `after: editable`.
 se borra la imagen vieja: `assignable` no filtra `image`, así que dan igual, y
 cambiarlas es ruido en el diff.
 
-- [ ] **Step 2: Ejecutar el test de forma y ver bajar la lista**
+- [x] **Step 2: Ejecutar el test de forma y ver bajar la lista**
 
 ```
 cd api && npx vitest run src/controllers/logShape.test.ts
@@ -262,7 +262,7 @@ cd api && npx vitest run src/controllers/logShape.test.ts
 
 Esperado: sigue **FAIL**, pero ahora la lista tiene **un solo** fichero, `obs`.
 
-- [ ] **Step 3: Comprobar que no se rompió nada de los cinco**
+- [x] **Step 3: Comprobar que no se rompió nada de los cinco**
 
 ```
 cd api && npx vitest run
@@ -280,7 +280,7 @@ la fila. Mismo defecto, otra forma — `deletedAt` entra en el bucle igual.
 **Files:**
 - Modify: `src/controllers/obs.controller.ts:53-57` y `:69`
 
-- [ ] **Step 1: Filtrar antes del bucle**
+- [x] **Step 1: Filtrar antes del bucle**
 
 Con el mismo comentario que en la tarea 2, añadir antes del bucle:
 
@@ -293,7 +293,7 @@ y sustituir dentro del bucle `Object.keys(req.body)` → `Object.keys(editable)`
 `req.body["id_tipoObs"]` → `editable["id_tipoObs"]`; y en la escritura,
 `TempObs.set(assignable(req.body))` → `TempObs.set(editable)`.
 
-- [ ] **Step 2: El test de forma pasa a verde**
+- [x] **Step 2: El test de forma pasa a verde**
 
 ```
 cd api && npx vitest run src/controllers/logShape.test.ts
@@ -320,7 +320,7 @@ quedan sin guardián cuando A1 borre `updateRevision` y `updateSolucion`.**
   — estos dos modelos sí tienen autor, y `withoutAuthor` quita además
   `id_usuario`.
 
-- [ ] **Step 1: Arreglar primero los mocks, o el fichero de test no carga**
+- [x] **Step 1: Arreglar primero los mocks, o el fichero de test no carga**
 
 Esto lo encontró la auditoría previa y es la razón por la que la primera versión
 de este plan no se podía ejecutar. `authorship.test.ts` no puede importar
@@ -362,7 +362,7 @@ Por último, añadir `updatePoste` al import de la cabecera:
 const { updatePoste } = await import("./poste.controller.js");
 ```
 
-- [ ] **Step 2: Escribir los dos tests que fallan**
+- [x] **Step 2: Escribir los dos tests que fallan**
 
 En el `describe("an edit cannot reassign the author")`, después del caso de
 `PUT /solucion/:id`:
@@ -410,7 +410,7 @@ En el `describe("an edit cannot reassign the author")`, después del caso de
   });
 ```
 
-- [ ] **Step 3: Ejecutar y comprobar que fallan por la razón correcta**
+- [x] **Step 3: Ejecutar y comprobar que fallan por la razón correcta**
 
 ```
 cd api && npx vitest run src/controllers/authorship.test.ts
@@ -421,7 +421,7 @@ have property "id_usuario"`, y **los quince anteriores en verde**. Si el fichero
 no carga, o si falla con `TypeError`, es el Step 1 que quedó a medias: volver,
 no seguir.
 
-- [ ] **Step 4: Arreglar `updateEvento`**
+- [x] **Step 4: Arreglar `updateEvento`**
 
 Tras la desestructuración de `obs_ids` y `state`, añadir:
 
@@ -445,12 +445,12 @@ unas líneas antes, así que `bodyWithoutObs.state` es `undefined` siempre y el
 minuto, `src/migrations/20260822000002-add-authorship.ts:24` sigue afirmando lo
 contrario en un comentario.
 
-- [ ] **Step 5: Arreglar `updatePoste` igual**
+- [x] **Step 5: Arreglar `updatePoste` igual**
 
 Mismo cambio, con `withoutAuthor(bodyWithoutAdss)`, sustituyendo en el bucle de
 metadatos, en el bloque de claves foráneas y en el `set()`.
 
-- [ ] **Step 6: Ejecutar y comprobar que pasan**
+- [x] **Step 6: Ejecutar y comprobar que pasan**
 
 ```
 cd api && npx vitest run src/controllers/authorship.test.ts
@@ -466,13 +466,13 @@ tocar la aserción.
 
 ## Task 5: Cerrar
 
-- [ ] **Step 1: Avisar a la sesión de roles**
+- [x] **Step 1: Avisar a la sesión de roles**
 
 `rol.controller.ts:47,50` tiene el mismo defecto y está en `NOT_OURS`. El cambio
 es idéntico al de la tarea 2 y son tres líneas. Que lo hagan ellos y quiten la
 entrada.
 
-- [ ] **Step 2: Lint y tipos, por separado**
+- [x] **Step 2: Lint y tipos, por separado**
 
 ```
 cd api && npm run lint
@@ -486,13 +486,13 @@ cinco errores en `src/auth/securityNotice.test.ts` (sesión de autenticación).
 Lo que hay que comprobar es que **no aparece ninguno nuevo** en los ficheros
 tocados aquí.
 
-- [ ] **Step 3: Suite entera**
+- [x] **Step 3: Suite entera**
 
 ```
 cd api && npx vitest run
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd api

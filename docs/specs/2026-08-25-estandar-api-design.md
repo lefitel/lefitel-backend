@@ -927,13 +927,15 @@ exacto que hay que ejecutar y en qué repositorio.
 | **0a** | El cuerpo de la petición deja de poder archivar filas (§3.9) | ✅ `ce91b1b` — 10 ficheros |
 | **0b** | Autoría de postes, nombre de cuenta en bitácora, presupuesto de subidas | ✅ `64431bf` — 11 ficheros |
 | **T0** | Este documento al día tras la segunda auditoría | ✅ — cifras, criterios, despliegue y este apartado |
+| **A0** | La bitácora deja de apuntar lo que el servidor rechazó | ✅ `538f309` + `5add364` — 16 ficheros |
+| **A1** | Las siete rutas muertas, borradas | ✅ `e8cf5f6` — 8 ficheros. De 119 rutas montadas a 112 |
 
 ### Familia A — sólo servidor, no rompe a nadie
 
 Ninguna necesita que el cliente se entere. Se despliegan cuando convenga, sin
 coordinar con Vercel.
 
-**A0 · La bitácora deja de apuntar lo que el servidor rechazó.** Va primera, y no
+**A0 · La bitácora deja de apuntar lo que el servidor rechazó.** ✅ Hecha, `538f309` y `5add364`. Fue primera, y no
 estaba en la primera versión de esta lista: la encontró la auditoría previa de
 A1, que es exactamente para lo que sirve auditar antes de empezar.
 
@@ -951,7 +953,7 @@ Ocho se arreglan aquí. El noveno es `rol.controller.ts`, de la sesión de roles
 queda como excepción escrita en el test, con su motivo, y se les avisa.
 
 Y va **antes de A1** por una razón dura: los dos únicos sitios que hoy lo hacen
-bien son `updateRevision` y `updateSolucion`, que A1 borra junto con los dos
+bien eran `updateRevision` y `updateSolucion`, que A1 borró junto con los dos
 tests que lo vigilan. Sin A0 delante, A1 no es una limpieza, es una regresión.
 Plan: [`docs/plans/2026-08-26-a0-bitacora-no-apunta-lo-rechazado.md`](../plans/2026-08-26-a0-bitacora-no-apunta-lo-rechazado.md).
 
@@ -959,7 +961,7 @@ Plan: [`docs/plans/2026-08-26-a0-bitacora-no-apunta-lo-rechazado.md`](../plans/2
 cd api && npx vitest run src/controllers/logShape.test.ts
 ```
 
-**A1 · Borrar las siete rutas muertas.** Las de §7. **Requiere A0 hecho.**
+**A1 · Borrar las siete rutas muertas.** ✅ Hecha, `e8cf5f6`. Las de §7. Requería A0 delante, y no como formalidad: sin él habría sido una regresión de bitácora.
 Arrastra tres cosas que no
 son opcionales: tres entradas de `routeGuards.test.ts` (`READ_GATE_NOT_APPLICABLE`
 y `EVENTOS_GATES`) que dejan la suite roja si no se quitan, cinco casos de
@@ -1140,7 +1142,7 @@ el documento sigue teniendo razón.
 |---|---|
 | 3.1 método | El test de contrato de los seis informes (C1), que hay que escribir antes de mover nada |
 | 3.2 sub-recursos y orden de declaración | Test que recorre **las rutas montadas** y falla si un literal se declara después de un paramétrico del mismo nivel. Se escribe en B1, no en D1: las rutas de opciones son las primeras que pisan esa trampa |
-| 3.3 sobre | Test con la **lista escrita a mano** de los listados. Derivarlo es imposible: `res.json(x)` no revela la forma de `x`, y ése fue el error de la primera versión. La lista se cuenta al empezar C3, no ahora: hoy ya es uno menos que ayer porque A1 borra uno |
+| 3.3 sobre | Test con la **lista escrita a mano** de los listados. Derivarlo es imposible: `res.json(x)` no revela la forma de `x`, y ése fue el error de la primera versión. La lista se cuenta al empezar C3, no ahora: A1 ya borró uno, así que la cuenta de la primera versión sobra |
 | 3.3 techo y centinela | Test del centinela sobre una colección por encima y por debajo del tope, más un caso del valor que el servidor viejo interpretaba como `50` |
 | 3.4 nombres | Test que recorre **la tabla montada** —no los ficheros— y falla si un segmento tiene mayúsculas o un verbo fuera de la lista |
 | 3.5 códigos | Test por método sobre las rutas que crean y archivan |

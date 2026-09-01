@@ -636,6 +636,11 @@ const EVENTOS_GATES: Record<string, string> = {
   "POST /api/evento/:id/resolver": "eventos.editar",
   "POST /api/evento/:id/reabrir": "eventos.editar",
   "DELETE /api/evento/:id": "eventos.archivar",
+  // Missing until A1's audit went looking, while two comments in this file
+  // claimed this table named every gated route it had. Unlisted, changing this
+  // line to `eventos.ver` would let an account that may only look at incidents
+  // unarchive any of them, with the suite green.
+  "PATCH /api/evento/:id/desarchivar": "eventos.archivar",
   "POST /api/revision/": "eventos.editar",
   // The one read on this list, and the reason the read test above has an
   // exception list instead of nothing: it hands over every incident and every

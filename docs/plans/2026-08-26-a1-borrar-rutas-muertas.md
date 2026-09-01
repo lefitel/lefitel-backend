@@ -61,7 +61,7 @@ nueva.
   existen antes de empezar**, no darlo por hecho.
 - Produces: `solucion.controller.ts` exporta **solamente** `getSolucion_evento`.
 
-- [ ] **Step 1: Comprobar que A0 está puesto**
+- [x] **Step 1: Comprobar que A0 está puesto**
 
 ```
 cd api && npx vitest run src/controllers/logShape.test.ts
@@ -71,7 +71,7 @@ cd api && npx vitest run src/controllers/authorship.test.ts -t "refused reassign
 Esperado: los dos en verde. Si el segundo no encuentra ningún caso, A0 no está
 hecho: **parar aquí.**
 
-- [ ] **Step 2: Quitar las cuatro rutas**
+- [x] **Step 2: Quitar las cuatro rutas**
 
 `src/routes/solucion.routes.ts` queda así, entero:
 
@@ -94,7 +94,7 @@ export default router;
 Fíjate en que **desaparece el import de `requirePermission`**: ya no queda
 ninguna ruta con puerta en este router.
 
-- [ ] **Step 3: Quitar las cuatro funciones del controlador**
+- [x] **Step 3: Quitar las cuatro funciones del controlador**
 
 En `src/controllers/solucion.controller.ts`, borrar `getSolucion`,
 `createSolucion`, `updateSolucion` y `deleteSolucion`. Queda
@@ -111,7 +111,7 @@ import { logAction } from "../utils/logAction.js";                  // ← fuera
 El fichero queda con `Request`/`Response`, `SolucionModel` y
 `SOLUCION_PUBLIC_ATTRIBUTES`.
 
-- [ ] **Step 4: Quitar la entrada de `routeGuards.test.ts`, y corregir su cuenta**
+- [x] **Step 4: Quitar la entrada de `routeGuards.test.ts`, y corregir su cuenta**
 
 Borrar de `READ_GATE_NOT_APPLICABLE` la línea `"GET /api/solucion/",`. El caso
 «keeps the read exception list honest» calcula las entradas que ya no
@@ -123,7 +123,7 @@ quedan diecinueve. **Ese mismo fichero argumenta en otro sitio contra dejar
 cuentas escritas que envejecen**, así que o se corrige el número o se quita la
 frase; no se deja mintiendo.
 
-- [ ] **Step 5: Quitar los dos casos de `authorship.test.ts`**
+- [x] **Step 5: Quitar los dos casos de `authorship.test.ts`**
 
 - `it("is the session, on POST /solucion", …)`. **Se borra, no se reescribe:**
   la garantía que vigila la sigue vigilando
@@ -140,7 +140,7 @@ que importar de ahí.
 falta: `evento.controller.ts` importa ese modelo, y el caso de `resolver` usa su
 mock de `create`. Igual con el de `revision.model.js` en la tarea siguiente.
 
-- [ ] **Step 6: Comprobar**
+- [x] **Step 6: Comprobar**
 
 ```
 cd api && grep -cE 'router\.(post|put|delete)\(' src/routes/solucion.routes.ts
@@ -160,7 +160,7 @@ quitar.
 - Modify: `src/routes/routeGuards.test.ts` — dos entradas
 - Modify: `src/controllers/authorship.test.ts` — tres casos
 
-- [ ] **Step 1: Quitar las dos rutas**
+- [x] **Step 1: Quitar las dos rutas**
 
 En `src/routes/revision.routes.ts`, borrar `router.put("/:id", …)` y
 `router.delete("/:id", …)`. Quedan el `POST /` y el `GET /:id_evento`, los dos
@@ -168,7 +168,7 @@ con consumidor vivo. **El comentario de cabecera sobre `editar` frente a `crear`
 se queda**: sigue explicando por qué el `POST` pide `editar`, y `requirePermission`
 sigue haciendo falta para él.
 
-- [ ] **Step 2: Quitar las dos funciones del controlador**
+- [x] **Step 2: Quitar las dos funciones del controlador**
 
 Borrar `updateRevision` y `deleteRevision`. Con `updateRevision` desaparece su
 rama `else`, que era un duplicado de `createRevision` inalcanzable a través del
@@ -177,7 +177,7 @@ router —`put("/:id")` no casa con un segmento vacío—, y con ella el único 
 `EventoModel` y `logAction` **se quedan**: los usan `eventoRef` y
 `createRevision`.
 
-- [ ] **Step 3: Quitar las dos entradas de `routeGuards.test.ts`**
+- [x] **Step 3: Quitar las dos entradas de `routeGuards.test.ts`**
 
 De `EVENTOS_GATES`:
 
@@ -189,7 +189,7 @@ De `EVENTOS_GATES`:
 El bucle que las recorre empuja `"→ no está montada"` cuando no encuentra la
 ruta, y la aserción falla. Sin esto, suite roja.
 
-- [ ] **Step 4: Quitar los tres casos de `authorship.test.ts`**
+- [x] **Step 4: Quitar los tres casos de `authorship.test.ts`**
 
 Los nombres exactos, tal como están escritos hoy:
 
@@ -204,7 +204,7 @@ Los nombres exactos, tal como están escritos hoy:
 
 Del `await import("./revision.controller.js")` desaparece `updateRevision`.
 
-- [ ] **Step 5: Comprobar**
+- [x] **Step 5: Comprobar**
 
 ```
 cd api && grep -c 'router\.' src/routes/revision.routes.ts
@@ -225,7 +225,7 @@ quién lo usa. Subconjunto estricto, y las dos piden `archivos:ver`.
 - Modify: `src/routes/files.routes.ts` — una línea y un nombre del import
 - Modify: `src/controllers/files.controller.ts` — una función
 
-- [ ] **Step 1: Quitar la ruta y la función**
+- [x] **Step 1: Quitar la ruta y la función**
 
 Borrar `router.get("/", requirePermission("archivos", "ver"), getFiles);` y
 `getFiles` del import de arriba. Borrar la función `getFiles` del controlador.
@@ -233,7 +233,7 @@ Borrar `router.get("/", requirePermission("archivos", "ver"), getFiles);` y
 `readDiskFiles` **se queda**: la usan `getOrphanFiles`, `getEntityImageStats` y
 las demás.
 
-- [ ] **Step 2: Comprobar**
+- [x] **Step 2: Comprobar**
 
 ```
 cd api && grep -c 'getFiles' src/routes/files.routes.ts src/controllers/files.controller.ts
@@ -248,7 +248,7 @@ por eso esta tarea no lo toca.
 
 ## Task 4: Cerrar
 
-- [ ] **Step 1: Lint y tipos, por separado**
+- [x] **Step 1: Lint y tipos, por separado**
 
 ```
 cd api && npm run lint
@@ -262,13 +262,13 @@ autenticación). Lo que hay que comprobar es que **no aparece nada nuevo** en lo
 ficheros tocados aquí. Si el lint se queja de un import sin usar en uno de ellos,
 es uno de los seis huérfanos: buscarlo, no silenciarlo.
 
-- [ ] **Step 2: Suite entera**
+- [x] **Step 2: Suite entera**
 
 ```
 cd api && npx vitest run
 ```
 
-- [ ] **Step 3: Comprobar que la ruta que NO se borra sigue viva**
+- [x] **Step 3: Comprobar que la ruta que NO se borra sigue viva**
 
 ```
 cd api && grep -n 'router\.' src/routes/solucion.routes.ts
@@ -282,7 +282,7 @@ sin puerta que no esté en la lista de excepciones hace fallar la suite. Pero es
 el criterio que la primera versión del spec escribió mal —decía que
 `/api/solucion` tenía que desaparecer— así que se comprueba a ojo también.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd api

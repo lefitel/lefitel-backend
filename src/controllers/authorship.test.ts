@@ -206,7 +206,6 @@ describe("an edit cannot reassign the author", () => {
     expect(meta.after).not.toHaveProperty("id_usuario");
     expect(meta.before).not.toHaveProperty("id_usuario");
   });
-
 });
 
 describe("the author of an event and of a pole", () => {
