@@ -428,22 +428,26 @@ const evento: EntityDef = {
         `CASE WHEN ${a}."state" IS NOT TRUE AND ${a}."date" IS NOT NULL` +
         ` THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - ${a}."date")) / 86400))::int END`,
     },
-    // Mirrors reporte.controller.ts:353 — resolution is measured against the
-    // last revision date, never updatedAt, and never goes below zero.
-    // Resolution is measured against the last revision date, never updatedAt.
-    // The inner query is an aggregate, so it always yields a row: with no
-    // revisions MAX is NULL and GREATEST(0, NULL) is 0 in Postgres, which fed
-    // phantom zeros into every average. The legacy report skips such events, so
-    // this returns NULL and they drop out of AVG/MIN the same way.
+    // Mirrors putTiemposResumen: evento.date → the solution's date. The repair
+    // closes the evento; a revision is a site visit and closes nothing, so
+    // measuring to the last revision measured the wrong thing entirely.
+    //
+    // The inner query is an aggregate and always yields a row, so an evento
+    // with no solution must return NULL explicitly or MAX being NULL would feed
+    // a phantom into the averages. Same for the incoherent ones — a repair
+    // dated before the fault: the legacy report discards them, and NULL is how
+    // they drop out of AVG/MIN/MAX here too. A GREATEST(0, …) would instead
+    // publish them as repaired the same day, which is what used to happen to a
+    // third of the closed eventos.
     tiempoResolucion: {
       kind: "number",
-      label: "Días de resolución",
+      label: "Días hasta la reparación",
       sql: (a) =>
         `CASE WHEN ${a}."state" IS TRUE THEN (` +
-        `SELECT CASE WHEN MAX(r."date") IS NULL THEN NULL ELSE` +
-        ` GREATEST(0, ROUND(EXTRACT(EPOCH FROM (MAX(r."date") - ${a}."createdAt")) / 86400))::int END` +
-        ` FROM "${TABLE.revision}" r` +
-        ` WHERE r."id_evento" = ${a}."id" AND r."deletedAt" IS NULL) END`,
+        `SELECT CASE WHEN MAX(s."date") IS NULL OR MAX(s."date") < ${a}."date" THEN NULL ELSE` +
+        ` ROUND(EXTRACT(EPOCH FROM (MAX(s."date") - ${a}."date")) / 86400)::int END` +
+        ` FROM "${TABLE.solucion}" s` +
+        ` WHERE s."id_evento" = ${a}."id" AND s."deletedAt" IS NULL) END`,
     },
     numRevisiones: {
       kind: "number",

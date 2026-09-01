@@ -156,14 +156,20 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
     }
   });
 
-  it("tiempos de resolución: count, average, min and max per tramo", async () => {
+  it("tiempos de reparación: count, average, min and max per tramo", async () => {
 
-    const legacy = await callLegacy(putTiemposResumen, { fechaInicial: FROM, fechaFinal: TO });
+    // Both sides now measure evento.date → solución.date, and both select the
+    // period by the repair date. Selecting by revision date, as this test used
+    // to, answers a different question: what was visited, not what was fixed.
+    const { tramos: legacy } = await callLegacy(putTiemposResumen, { fechaInicial: FROM, fechaFinal: TO });
     const config: ReportConfig = {
       root: "evento",
       columns: [
         { path: "poste.tramo" },
-        { path: "id", agg: "count" },
+        // Counting `id` would count every evento in the tramo, including the
+        // incoherent ones the average excludes. The panel's `count` is the
+        // size of the sample behind its figure, so count the same thing.
+        { path: "tiempoResolucion", agg: "count" },
         { path: "tiempoResolucion", agg: "avg" },
         { path: "tiempoResolucion", agg: "min" },
         { path: "tiempoResolucion", agg: "max" },
@@ -171,7 +177,10 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
       groupBy: ["poste.tramo"],
       filters: {
         op: "and",
-        conditions: [{ path: "state", operator: "eq", value: true }, revisionEnRango],
+        conditions: [
+          { path: "state", operator: "eq", value: true },
+          { path: "solucion.date", operator: "between", value: [FROM, TO] },
+        ],
       },
       limit: 5000,
     };
@@ -185,7 +194,13 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
         count: num(r.count), avg: num(r.avgDias), min: num(r.minDias), max: num(r.maxDias),
       }))
       .map(key);
+    // Two of the 85 tramos have no usable day at all: every evento in them is
+    // one of the incoherent ones, repaired before it happened. The panel hides
+    // a tramo with nothing to average; the generator still renders its grouped
+    // row with a NULL aggregate. Both are right for what they are, so the
+    // comparison is over the tramos that do have a figure.
     const builtRows = built.rows
+      .filter((r) => r.c2 !== null && r.c2 !== undefined)
       .map((r) => ({
         tramo: String(r.c0), count: num(r.c1), avg: Math.round(num(r.c2)),
         min: num(r.c3), max: num(r.c4),

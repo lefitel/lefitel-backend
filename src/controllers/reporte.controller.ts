@@ -36,9 +36,31 @@ interface IEventoConRevisions extends IEvento {
   }) | null;
 }
 
+interface IEventoConSolucion extends IEvento {
+  solucions: { date: Date }[];
+  revisions: { id: number }[];
+  poste: (Pick<IPoste, "id" | "id_ciudadA" | "id_ciudadB"> & {
+    ciudadA: Pick<ICiudad, "id" | "name"> | null;
+    ciudadB: Pick<ICiudad, "id" | "name"> | null;
+  }) | null;
+}
+
 // IDs de eventos que tienen al menos una revisión dentro del rango de fechas
 const getEventIdsInRange = async (fechaInicial: Date, fechaFinal: Date): Promise<number[]> => {
   const rows = await RevisionModel.findAll({
+    where: { date: { [Op.between]: [fechaInicial, fechaFinal] } },
+    attributes: ["id_evento"],
+    group: ["id_evento"],
+  });
+  return rows.map((r) => r.dataValues.id_evento as number);
+};
+
+// IDs de eventos REPARADOS dentro del rango. Hermana de `getEventIdsInRange`,
+// que selecciona por fecha de revisión: para "cuánto tardamos en reparar", la
+// pregunta es qué se reparó en el período, no qué se fue a mirar. Los demás
+// informes siguen usando la de revisiones a propósito.
+const getEventIdsRepairedInRange = async (fechaInicial: Date, fechaFinal: Date): Promise<number[]> => {
+  const rows = await SolucionModel.findAll({
     where: { date: { [Op.between]: [fechaInicial, fechaFinal] } },
     attributes: ["id_evento"],
     group: ["id_evento"],
@@ -313,9 +335,19 @@ export async function putObsFrecuencia(req: Request, res: Response) {
   }
 }
 
-// ─── Tiempos de Resolución (resumen por tramo) ────────────────────────────────
-// Para eventos resueltos en el período, calcula avg/min/max días por tramo.
-// Usa la fecha de la última revisión como fecha de resolución (más preciso que updatedAt).
+// ─── Tiempos de Reparación (resumen por tramo) ────────────────────────────────
+// Para los eventos reparados en el período, calcula avg/min/max días por tramo.
+//
+// El intervalo va de `evento.date` — el día en que ocurrió la avería — hasta la
+// fecha de su solución, que es la reparación. Antes iba del alta en el sistema
+// hasta la ÚLTIMA revisión, que es una visita de inspección y no cierra nada:
+// medía el tiempo hasta que alguien fue a mirar y lo llamaba resolución. Sobre
+// la base real eso daba una mediana de 9 días donde la verdadera es 44.
+//
+// Los eventos incoherentes —reparación fechada antes que la avería, cosa que el
+// histórico contiene— se DESCARTAN y se informa cuántos. Antes se forzaban a 0
+// con un Math.max, que es como un tercio de los eventos acababa publicándose
+// como resuelto el mismo día.
 
 export async function putTiemposResumen(req: Request, res: Response) {
   const { fechaInicial, fechaFinal } = req.body;
@@ -323,14 +355,19 @@ export async function putTiemposResumen(req: Request, res: Response) {
     return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
   }
   try {
-    const eventIds = await getEventIdsInRange(new Date(fechaInicial), new Date(fechaFinal));
+    const eventIds = await getEventIdsRepairedInRange(new Date(fechaInicial), new Date(fechaFinal));
     const eventos = await EventoModel.findAll({
       where: { id: { [Op.in]: eventIds }, state: true },
-      attributes: ["id", "createdAt"],
+      attributes: ["id", "date"],
       include: [
         {
-          model: RevisionModel,
+          model: SolucionModel,
           attributes: ["date"],
+        },
+        // Sólo para contarlas: cuántas visitas costó cerrar el evento.
+        {
+          model: RevisionModel,
+          attributes: ["id"],
         },
         {
           model: PosteModel,
@@ -345,18 +382,36 @@ export async function putTiemposResumen(req: Request, res: Response) {
 
     const tramoMap = new Map<string, {
       ciudadAId: number | null; ciudadBId: number | null;
-      ciudadAName: string; ciudadBName: string; dias: number[];
+      ciudadAName: string; ciudadBName: string; dias: number[]; visitas: number[];
     }>();
 
-    for (const e of eventos) {
-      const ed = e.toJSON() as unknown as IEventoConRevisions;
-      const p = ed.poste;
-      if (!p || !ed.createdAt) continue;
+    let descartados = 0;
 
-      // Fecha de resolución = fecha de la última revisión registrada
-      const revisions = ed.revisions ?? [];
-      if (revisions.length === 0) continue;
-      const fechaResolucion = new Date(Math.max(...revisions.map((r) => new Date(r.date).getTime())));
+    for (const e of eventos) {
+      const ed = e.toJSON() as unknown as IEventoConSolucion;
+      const p = ed.poste;
+      if (!p || !ed.date) continue;
+
+      // Fecha de reparación = fecha de la solución. Sin solución no hay nada que
+      // medir: el evento no llegó a cerrarse.
+      const solucions = ed.solucions ?? [];
+      if (solucions.length === 0) continue;
+      const fechaReparacion = new Date(Math.max(...solucions.map((s) => new Date(s.date).getTime())));
+
+      // Reparado antes de ocurrir: el dato no se sostiene, así que no promedia.
+      // Se cuenta aparte para poder decir en pantalla cuántos quedaron fuera.
+      //
+      // La comparación va sobre los instantes, NO sobre los días redondeados.
+      // Una reparación a las 09:00 de una avería de las 14:00 del mismo día
+      // redondea a -0, y `-0 < 0` es falso en JavaScript, así que colaba como
+      // "reparado en 0 días" — que es justo el cero fantasma que se quitó.
+      const inicio = new Date(ed.date).getTime();
+      const fin = fechaReparacion.getTime();
+      if (!Number.isFinite(inicio) || !Number.isFinite(fin) || fin < inicio) {
+        descartados++;
+        continue;
+      }
+      const dias = Math.round((fin - inicio) / (1000 * 60 * 60 * 24));
 
       // Normalizar tramo: el de menor id siempre como ciudadA. Así (1,2) y (2,1) se cuentan juntos.
       const aIsMin = p.id_ciudadA <= p.id_ciudadB;
@@ -372,12 +427,11 @@ export async function putTiemposResumen(req: Request, res: Response) {
           ciudadAName: minName,
           ciudadBName: maxName,
           dias: [],
+          visitas: [],
         });
       }
-      const dias = Math.round(
-        (fechaResolucion.getTime() - new Date(ed.createdAt).getTime()) / (1000 * 60 * 60 * 24)
-      );
-      tramoMap.get(key)!.dias.push(Math.max(0, dias));
+      tramoMap.get(key)!.dias.push(dias);
+      tramoMap.get(key)!.visitas.push((ed.revisions ?? []).length);
     }
 
     const result = [...tramoMap.values()]
@@ -388,13 +442,14 @@ export async function putTiemposResumen(req: Request, res: Response) {
         ciudadAName: t.ciudadAName,
         ciudadBName: t.ciudadBName,
         count: t.dias.length,
+        avgVisitas: Math.round((t.visitas.reduce((s, v) => s + v, 0) / t.visitas.length) * 10) / 10,
         avgDias: Math.round(t.dias.reduce((s, d) => s + d, 0) / t.dias.length),
         minDias: Math.min(...t.dias),
         maxDias: Math.max(...t.dias),
       }))
       .sort((a, b) => b.avgDias - a.avgDias);
 
-    res.status(200).json(result);
+    res.status(200).json({ tramos: result, descartados });
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Error desconocido";
     res.status(500).json({ message: msg });
