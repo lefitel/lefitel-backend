@@ -509,13 +509,16 @@ describe("mounted on the real routes, not merely built", () => {
    * production.
    */
   interface Layer {
-    regexp: { source: string };
     route?: { path: string; methods: Record<string, boolean>; stack: { handle: RequestHandler & { name: string } }[] };
     handle: { stack?: Layer[] };
   }
 
   function stackFor(method: string, path: string): (RequestHandler & { name: string })[] {
-    const stack = (app as unknown as { _router: { stack: Layer[] } })._router.stack;
+    // `_router` in Express 4, `router` in Express 5. `stackFor` throws when it
+    // finds nothing, so an unreadable tree fails here rather than silently
+    // reporting an empty middleware chain.
+    const held = app as unknown as { router?: { stack: Layer[] }; _router?: { stack: Layer[] } };
+    const stack = (held.router ?? held._router)?.stack ?? [];
     for (const layer of stack) {
       if (!layer.handle.stack) continue;
       for (const inner of layer.handle.stack) {

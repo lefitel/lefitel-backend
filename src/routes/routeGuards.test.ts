@@ -12,12 +12,68 @@
 // /api/files is protected).
 
 import { describe, it, expect } from "vitest";
-import app from "../app.js";
+import express from "express";
+
+/**
+ * Where each router was mounted, taken down as the app declared it.
+ *
+ * This used to be read back out of Express's internals: a mount compiled to
+ * `^\/api\/usuario\/?(?=\/|$)` and `mountPath()` un-escaped the regexp to
+ * recover "/api/usuario". Express 5 stores no regexp — a `Layer` turns its path
+ * straight into `matchers`, closures over a pattern nothing exposes, and
+ * `layer.path` is populated only while a request is being matched. There is
+ * nothing left to read the mount back out of.
+ *
+ * So it is recorded at the moment it is declared instead, by wrapping
+ * `app.use` for the duration of the import. That is less clever than the regexp
+ * and better in two ways: it reads what `app.ts` *said* rather than what
+ * Express compiled, and it does not care which major version compiled it.
+ *
+ * The wrap has to be installed before `app.js` is imported — the mounts all run
+ * at module scope — which is why the import below is dynamic and the restore
+ * comes immediately after.
+ *
+ * **A queue per handler, not one path per handler.** `authenticate` is one
+ * function object mounted on twenty different prefixes, so a plain map keeps
+ * only the last of them and every other router loses its gate — the whole suite
+ * then reports the API as wide open, which is a false alarm indistinguishable
+ * from the real thing this file exists to raise. Express appends one layer per
+ * handler in the order `use` was called, so the paths are read back in that same
+ * order below. Pathless mounts record `null` rather than being skipped, because
+ * skipping one would slide every later entry onto the wrong layer.
+ */
+const declaredMounts = new Map<unknown, (string | null)[]>();
+const realUse = express.application.use;
+(express.application as unknown as { use: unknown }).use = function (this: unknown, ...args: unknown[]) {
+  const path = typeof args[0] === "string" ? (args[0] as string) : null;
+  for (const handler of path === null ? args : args.slice(1)) {
+    const queue = declaredMounts.get(handler) ?? [];
+    queue.push(path);
+    declaredMounts.set(handler, queue);
+  }
+  return (realUse as unknown as (...a: unknown[]) => unknown).apply(this, args);
+};
+const app = (await import("../app.js")).default;
+(express.application as unknown as { use: unknown }).use = realUse;
+
+/** The next path this handler was mounted on, in declaration order. */
+const taken = new Map<unknown, number>();
+function nextMount(handler: unknown): string | undefined {
+  const queue = declaredMounts.get(handler);
+  if (!queue) return undefined;
+  const at = taken.get(handler) ?? 0;
+  taken.set(handler, at + 1);
+  return queue[at] ?? undefined;
+}
 
 /** Express layers carry no public types; this is the shape we read. */
 interface Layer {
   name: string;
-  regexp: RegExp & { fast_slash?: boolean };
+  /**
+   * True for a pathless `router.use(mw)`, which therefore covers every route
+   * declared after it. Express 4 spelled this `regexp.fast_slash`.
+   */
+  slash?: boolean;
   handle: { name: string; stack?: Layer[] };
   route?: {
     path: string;
@@ -42,32 +98,27 @@ interface MountedRoute {
   permissions: string[];
 }
 
-/**
- * Recover "/api/usuario" from the regexp Express compiled for it.
- *
- * Express 4 keeps no copy of the mount path, only `^\/api\/usuario\/?(?=\/|$)`.
- * The transformation back is mechanical, and the sanity check below fails loudly
- * if a version bump ever changes the shape.
- */
-function mountPath(layer: Layer): string {
-  if (layer.regexp.fast_slash) return "";
-  return layer.regexp.source
-    .replace(/^\^/, "")
-    .replace(/\\\/\?\(\?=\\\/\|\$\)$/, "")
-    .replace(/\\\//g, "/");
-}
-
 function mountedRoutes(): MountedRoute[] {
-  const stack = (app as unknown as { _router: { stack: Layer[] } })._router.stack;
+  const held = app as unknown as { router?: { stack: Layer[] }; _router?: { stack: Layer[] } };
+  const stack = (held.router ?? held._router)?.stack;
+  // Asserted, not defaulted. An empty stack would make every check below pass
+  // over nothing at all, which is the one way a test like this can lie — and
+  // reading the router is exactly what the last major version bump broke.
+  if (!stack?.length) throw new Error("no se pudo leer el router de express: cambió la forma interna");
   const routes: MountedRoute[] = [];
 
-  // `app.use(path, a, b, router)` produces one layer per argument, all sharing
-  // the same compiled regexp, in the order they were written. So anything seen
+  // `app.use(path, a, b, router)` produces one layer per argument, all recorded
+  // above under the same path, in the order they were written. So anything seen
   // under a prefix before the router itself is a gate that guards it.
   const beforeRouter = new Map<string, string[]>();
 
   for (const layer of stack) {
-    const key = layer.regexp.source;
+    // `undefined` for a layer that was not mounted on a path: the global
+    // middleware — helmet, cors, the body parser — and the terminal error
+    // handler. Those guard nothing in particular and are deliberately left out
+    // of every chain, which is what keying on the compiled regexp used to
+    // achieve by accident.
+    const key = nextMount(layer.handle);
     // A route declared straight on the app — `app.post("/api/x", handler)` —
     // has no `handle.stack`, so it used to fall through to the else and be
     // filed away as the name of a middleware: invisible to both assertions
@@ -76,7 +127,7 @@ function mountedRoutes(): MountedRoute[] {
     // file exists to catch.
     if (layer.route) {
       const chain = [
-        ...(beforeRouter.get(key) ?? []),
+        ...(key === undefined ? [] : beforeRouter.get(key) ?? []),
         ...layer.route.stack.map((s) => s.handle.name),
       ];
       const permissions = layer.route.stack
@@ -90,14 +141,18 @@ function mountedRoutes(): MountedRoute[] {
       continue;
     }
     if (layer.handle.stack) {
-      const prefix = mountPath(layer);
+      // A router that reached here without a recorded mount is a router this
+      // walk cannot place, and a route it cannot place is a route it cannot
+      // check. Loudly, rather than under an empty prefix.
+      if (key === undefined) throw new Error(`router montado sin ruta declarada: ${layer.name}`);
+      const prefix = key;
       // A router can also gate itself with `router.use(requireRole(...))` — the
       // report builder does. Those are pathless layers inside the router's own
       // stack, and they cover every route declared after them.
       const routerWide: string[] = [];
       for (const inner of layer.handle.stack) {
         if (!inner.route) {
-          if (inner.regexp.fast_slash) routerWide.push(inner.handle.name);
+          if (inner.slash) routerWide.push(inner.handle.name);
           continue;
         }
         const chain = [
@@ -114,7 +169,7 @@ function mountedRoutes(): MountedRoute[] {
           });
         }
       }
-    } else {
+    } else if (key !== undefined) {
       beforeRouter.set(key, [...(beforeRouter.get(key) ?? []), layer.handle.name]);
     }
   }

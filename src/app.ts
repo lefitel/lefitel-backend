@@ -121,6 +121,25 @@ app.use(
   }),
 );
 app.use(express.json());
+/**
+ * `req.body` is an object even when nothing parsed one.
+ *
+ * Express 4 left `{}` on a request no body parser matched — a POST with no
+ * content type, or the form-encoded post `express.json()` ignores, or the empty
+ * body `axios.delete()` sends. Express 5 leaves `undefined` instead, and two
+ * dozen controllers read `req.body.campo` straight, so the same request stopped
+ * being a 400 from a validator and became a TypeError the terminal handler turns
+ * into a 500: a caller's mistake reported as this server breaking, and a real
+ * incident harder to find among them.
+ *
+ * One line here rather than a guard at twenty-four call sites, and it keeps the
+ * answers the frontend already expects. It runs after the parser on purpose —
+ * before it, there would be nothing to leave alone.
+ */
+app.use((req, _res, next) => {
+  if (req.body === undefined) req.body = {};
+  next();
+});
 // `res.cookie` is native to Express; `req.cookies` is not. Without this the
 // session can be handed out and never read back.
 app.use(cookieParser());

@@ -17,7 +17,7 @@
 // report builder meters its query, its count and its export separately, each
 // against what it actually costs.
 
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import type { Request } from "express";
 
 /** One minute. Short on purpose: this meters a burst, not a day's work. */
@@ -44,10 +44,16 @@ export const UPLOAD_LIMIT = 30;
  * returns `undefined` puts every anonymous caller into one shared bucket, and a
  * shared bucket is worse than a wrong one: the first stranger to spend it locks
  * out the rest.
+ *
+ * `ipKeyGenerator` folds an IPv6 address into its /56 block, which is what the
+ * three sibling limiters already do and what this one was missing. Without it a
+ * single holder of one allocation is billions of distinct keys and therefore no
+ * budget at all — express-rate-limit says so out loud, and its ValidationError
+ * was printing on every boot, including into the test output.
  */
 export const uploadBucketKey = (req: Request): string => {
   const id = (req as Request & { user?: { id?: number } }).user?.id;
-  return id === undefined ? `upload:ip:${req.ip}` : `upload:u:${id}`;
+  return id === undefined ? `upload:ip:${ipKeyGenerator(req.ip ?? "")}` : `upload:u:${id}`;
 };
 
 export const uploadLimiter = rateLimit({

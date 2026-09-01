@@ -59,7 +59,11 @@ function paresMontados(): { pair: string; path: string }[] {
     }
   };
 
-  recorrer((app as unknown as { _router: { stack: Layer[] } })._router.stack, "");
+  // Express 5 renamed `_router` to `router` and made it public. Read through
+  // both so the walk does not depend on which major compiled the app, and let
+  // the "cannot pass by default" assertion below catch it if neither answers.
+  const held = app as unknown as { router?: { stack: Layer[] }; _router?: { stack: Layer[] } };
+  recorrer((held.router ?? held._router)?.stack ?? [], "");
   return salida;
 }
 
