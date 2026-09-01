@@ -7,9 +7,15 @@ import {
   putObsFrecuencia,
   putTiemposResumen,
 } from "../controllers/reporte.controller.js";
+import { getOpcionesReporte } from "../controllers/opciones.controller.js";
 import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
+
+// The lists the three report screens fill their filters from. This router has
+// no parametric route at all, so the ordering trap of §3.2 does not apply here
+// — declared first anyway, so all three mounts read the same way.
+router.get("/opciones", requirePermission("reportes", "ver"), getOpcionesReporte);
 
 router.put("/general",         requirePermission("reportes", "ver"), putReporteGeneral);
 router.put("/tramo",           requirePermission("reportes", "ver"), putReporteTramo);

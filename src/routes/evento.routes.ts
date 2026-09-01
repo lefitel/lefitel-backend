@@ -11,6 +11,7 @@ import {
   searchEvento,
   updateEvento,
 } from "../controllers/evento.controller.js";
+import { getOpcionesEvento } from "../controllers/opciones.controller.js";
 import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
@@ -20,6 +21,11 @@ router.post("/", requirePermission("eventos", "crear"), createEvento);
 router.post("/:id/reabrir", requirePermission("eventos", "editar"), reabrirEvento);
 router.post("/:id/resolver", requirePermission("eventos", "editar"), resolverEvento);
 router.put("/:id", requirePermission("eventos", "editar"), updateEvento);
+// Before `/:id`, and that is not style — see `routeOrder.test.ts`. `/opciones`
+// is a literal, and Express matches layers in declaration order, so a literal
+// declared after a parametric sibling never runs: the request would reach
+// `searchEvento` with `id = "opciones"` instead.
+router.get("/opciones", requirePermission("eventos", "ver"), getOpcionesEvento);
 router.get("/", getEvento);
 router.get("/poste/:id_poste", getEvento_poste);
 router.get("/usuario/:id_usuario", getEvento_usuario);

@@ -931,6 +931,7 @@ exacto que hay que ejecutar y en qué repositorio.
 | **A1** | Las siete rutas muertas, borradas | ✅ `e8cf5f6` — 8 ficheros. De 119 rutas montadas a 112 |
 | **A3** | Un fallo deja de contarle al navegador lo que dijo Postgres | ✅ `2d36db1` + `7898569` — 18 ficheros. 74 manejadores movidos a `makeHandler` |
 | **A4** | `ARCHITECTURE.md` al día | ✅ — y el hallazgo: **ninguno** de sus nueve índices está en una migración |
+| **B1** | Los cuatro endpoints de opciones | 🟡 tres de cuatro. Falta montar el de usuario, por fichero ajeno — ver abajo |
 
 ### Familia A — sólo servidor, no rompe a nadie
 
@@ -1025,14 +1026,47 @@ cd api && grep -cE '/api/(postes|eventos)|RevicionModel' docs/ARCHITECTURE.md   
 Añaden rutas que todavía no llama nadie. Si salen mal, no rompen nada, porque no
 hay quien las use hasta la familia C.
 
-**B1 · Los cuatro endpoints de opciones, en el servidor (§5).** Con una trampa
-que el propio documento describe en §3.2 y que sus rutas nuevas pisaban:
-`/opciones` es un literal y hay que **declararlo antes** del `/:id` de cada
-router, o Express se lo come y acaba consultando `id = "opciones"`. Afecta a
-`poste`, `evento` y `usuario`.
+**B1 · Los cuatro endpoints de opciones, en el servidor (§5).** 🟡 **Tres
+montados; el de usuario, no.** `poste`, `evento` y `reporte` los sirve
+`controllers/opciones.controller.ts`. La trampa de §3.2 era real —`/opciones` es
+un literal y hay que declararlo antes del `/:id` de su router, o Express acaba
+consultando `id = "opciones"`— y queda cerrada por un test genérico, no por tres
+comprobaciones a mano.
+
+**Lo que falta y por qué.** `GET /api/usuario/opciones` necesita
+`usuario.routes.ts` y una entrada en `ROLES_GATES` de `routeGuards.test.ts`
+—`MODULOS_TABULADOS` tumba cualquier ruta con puerta bajo `/api/usuario` que
+ninguna tabla nombre—, y los dos ficheros tenían trabajo sin commitear de la
+sesión de autenticación. El manejador está escrito en el controlador, sin montar:
+son tres líneas cuando suelten. **En `ROLES_GATES` y no en `SEGURIDAD_GATES`**,
+aunque el test una las dos listas: esa tabla declara describir el módulo
+Seguridad, y meterle un `roles.editar` la convierte en una tabla que miente.
+
+**Dos cosas que la tarea cambió respecto a lo planeado**, ambas de sus auditorías:
+
+- **El criterio de terminado eran dos tests, no uno.** El de abajo cubre los
+  endpoints; el de §3.2 es genérico y vive en `routeOrder.test.ts`, que recorre el
+  `stack` compilado de **todos** los routers y falla si un patrón declarado antes
+  ya casa con una ruta declarada después. Cuatro comprobaciones sobre cuatro rutas
+  conocidas habrían pasado dejando la trampa armada para el `/autores` de B2. Ese
+  test implementa una regla **más estrecha** que la frase de §3.2, a propósito:
+  `usuario.routes.ts` declara hoy `PUT /:id` antes de `/username/:id` y las tres
+  son alcanzables, porque un segmento no puede casar con dos. Lo que importa no es
+  el orden de las declaraciones, es si un patrón anterior tapa una ruta posterior
+  **entera**.
+- **`order: [["id","DESC"]]` en todos los bloques**, que el plan no tenía.
+  `ReportTramoSec` construye una columna de Excel por cada elemento en el orden de
+  la lista, y un `findAll` sin `order` recibe el orden de montón de Postgres, que
+  se mueve tras un UPDATE o un VACUUM. Sin él, las columnas de un informe guardado
+  cambian entre ejecuciones sin que nada lo explique.
+
+Y el `tramos` nuevo descarta los pares que nombran una ciudad archivada, que
+`getTramos` sí sirve: esa ciudad no viaja en el bloque `ciudad` de la misma
+respuesta, así que el desplegable ofrecía un vecino que no podía dibujar. A
+`getTramos` no se le toca: tiene consumidor vivo y es de la tarea que lo retira.
 
 ```
-cd api && npx vitest run src/routes/opciones.test.ts
+cd api && npx vitest run src/routes/opciones.test.ts src/routes/routeOrder.test.ts
 ```
 
 **B2 · `GET /api/bitacora/autores` (§5.4).** Misma trampa: antes de
@@ -1150,7 +1184,7 @@ el documento sigue teniendo razón.
 | Regla | Cómo se comprueba |
 |---|---|
 | 3.1 método | El test de contrato de los seis informes (C1), que hay que escribir antes de mover nada |
-| 3.2 sub-recursos y orden de declaración | Test que recorre **las rutas montadas** y falla si un literal se declara después de un paramétrico del mismo nivel. Se escribe en B1, no en D1: las rutas de opciones son las primeras que pisan esa trampa |
+| 3.2 sub-recursos y orden de declaración | ✅ `routeOrder.test.ts`, escrito en B1. Recorre el `stack` compilado de cada router —descubiertos por directorio, no listados— y falla si un patrón declarado antes ya casa con una ruta declarada después, contando `router.all` y avisando de un `router.use` con ruta, cuyo prefijo Express 5 no expone. **Desviación consciente:** lee los módulos de router, no la tabla montada, así que cubre un router antes de que nadie lo monte y no vería una ruta declarada directamente sobre la app — eso lo ve `routeGuards.test.ts` |
 | 3.3 sobre | Test con la **lista escrita a mano** de los listados. Derivarlo es imposible: `res.json(x)` no revela la forma de `x`, y ése fue el error de la primera versión. La lista se cuenta al empezar C3, no ahora: A1 ya borró uno, así que la cuenta de la primera versión sobra |
 | 3.3 techo y centinela | Test del centinela sobre una colección por encima y por debajo del tope, más un caso del valor que el servidor viejo interpretaba como `50` |
 | 3.4 nombres | Test que recorre **la tabla montada** —no los ficheros— y falla si un segmento tiene mayúsculas o un verbo fuera de la lista |
@@ -1161,7 +1195,7 @@ el documento sigue teniendo razón.
 | 3.8 propiedad | `routeGuards.test.ts` ya distingue el gate de propiedad del de permiso; se añade que el tercer argumento coincida con el parámetro de la ruta |
 | 3.9 entrada | ✅ `requestShape.test.ts` y `responseShape.test.ts`, ya escritos |
 | 4.1 / 4.2 cliente | Test en `web`: un 403, un 500 y un fallo de red producen `status` 403, 500 y 0; y el auto-logout sigue disparando con 401 |
-| 5 opciones | Test por endpoint: qué bloques devuelve y con qué columnas exactas |
+| 5 opciones | 🟡 `opciones.test.ts`, por endpoint y por bloque: qué bloques devuelve, con qué columnas **exactas pedidas a la base de datos** —leídas del espía y no de la respuesta, porque los modelos están mockeados y las filas serían las del propio test— y que el paramétrico no le robó la ruta, comprobado porque `findOne` no se llamó. Tres de los cuatro endpoints; falta el de usuario |
 
 ---
 
