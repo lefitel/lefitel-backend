@@ -141,9 +141,14 @@ describe("POST /api/upload with a real multipart body", () => {
       .set(DEL_FRONTEND)
       .attach("file", grande, "enorme.png");
 
-    // Not a 2xx, and — the part that matters — nothing on disk. multer's limit
-    // has to stop the body before the controller ever sees a `req.file`.
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    // 413 and not 500: the caller sent something too big, which is a fact only
+    // they can act on. The message names the ceiling for the same reason — the
+    // alternative is retrying the same photograph, since nothing in a generic
+    // failure suggests a smaller one would work.
+    expect(res.status).toBe(413);
+    expect(res.body.message).toMatch(/5 MB/);
+    // And the part that matters most: nothing on disk. multer's limit has to
+    // stop the body before the controller ever sees a `req.file`.
     expect(await stored()).toEqual([]);
   });
 
@@ -154,7 +159,7 @@ describe("POST /api/upload with a real multipart body", () => {
       .set(DEL_FRONTEND)
       .attach("imagen", imagen, "otro-campo.png");
 
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
     expect(await stored()).toEqual([]);
   });
 
@@ -165,7 +170,23 @@ describe("POST /api/upload with a real multipart body", () => {
       .set(DEL_FRONTEND)
       .field("nada", "nada");
 
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    // 400, not the 500 this used to answer. Sending no file is something the
+    // caller did, and a 500 is what somebody gets paged about.
+    expect(res.status).toBe(400);
+    expect(await stored()).toEqual([]);
+  });
+
+  it("refuses a file that is not an image, without blaming the server", async () => {
+    const res = await request(app)
+      .post("/api/upload")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .attach("file", Buffer.from("esto es texto plano, no una imagen"), "mentira.png");
+
+    // The extension says png and the bytes do not. sharp refuses it, and that
+    // refusal is about the file we were handed — 400 — not about this server
+    // failing, which is what it used to answer.
+    expect(res.status).toBe(400);
     expect(await stored()).toEqual([]);
   });
 
