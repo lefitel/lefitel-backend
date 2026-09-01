@@ -350,10 +350,10 @@ describe("who may change data", () => {
  * `requireStepUp` (`middleware/requireStepUp.ts`) asks a second question after
  * the permission has already said yes: was a factor proved in the last ten
  * minutes — or, while the account has no factor to prove at all, is the
- * caller's own password supplied. Fourteen routes ask it: creating, editing and
- * unlocking accounts, everything that touches roles or the permission matrix,
- * closing one of your own other sessions, and registering the address your
- * password can be reset through.
+ * caller's own password supplied. Fifteen routes ask it: creating, editing and
+ * unlocking accounts, resetting somebody else's second factor, everything that
+ * touches roles or the permission matrix, closing one of your own other
+ * sessions, and registering the address your password can be reset through.
  *
  * **Two of them have no permission in front of them, and the order test below
  * says which may not.** `DELETE /api/auth/sessions/:id` and `POST
@@ -378,7 +378,7 @@ describe("who may change data", () => {
  *
  * **Written out rather than derived**, for the same reason `GENERADOR_GATES`
  * below is: a list computed from the routers would only assert that the code
- * agrees with itself. These fourteen are the intent, and the comparison runs both
+ * agrees with itself. These fifteen are the intent, and the comparison runs both
  * ways — a mount that disappears fails, and so does one that appears.
  *
  * **The second direction is load-bearing, not symmetry for its own sake, and
@@ -405,11 +405,11 @@ describe("who may change data", () => {
  * Live here and not in `app.auth.test.ts`, which pins the gate's *behaviour*
  * through real requests: this file already walks the app as Express assembled
  * it, across all three routers at once, and already owns the question "is the
- * right gate on the right route". Splitting the fourteen between two files would
+ * right gate on the right route". Splitting the fifteen between two files would
  * mean two half-tables, which is the shape the gap above came in.
  */
 const STEP_UP_GATED = [
-  // usuario.routes.ts — seven.
+  // usuario.routes.ts — eight.
   "POST /api/usuario/",
   "DELETE /api/usuario/:id",
   "PATCH /api/usuario/:id/desarchivar",
@@ -419,6 +419,13 @@ const STEP_UP_GATED = [
   "PUT /api/usuario/:id",
   "PUT /api/usuario/username/:id",
   "PUT /api/usuario/userpass/:id",
+  // The escape hatch from §8 of the MFA design — an administrator clears
+  // somebody else's second factor. `rescatarMfaDeUsuario`'s own comment
+  // explains the refusal this route adds on top of the gate: resetting your
+  // own factors here would leave your own session past `requireStepUp` on
+  // nothing but the cookie, since an account with no factors is exactly what
+  // this gate lets through unchallenged.
+  "POST /api/usuario/:id/mfa/reset",
   // rol.routes.ts — four. `GET /` is a read and carries no gate of any kind:
   // every screen that shows a person needs the name of their role.
   "POST /api/rol/",
@@ -448,7 +455,7 @@ describe("which writes also demand a recently proved factor", () => {
     .map((r) => `${r.method} ${r.path}`)
     .sort();
 
-  it("mounts requireStepUp on exactly those fourteen routes and on no others", () => {
+  it("mounts requireStepUp on exactly those fifteen routes and on no others", () => {
     // `stepUpGate` is the name `requireStepUp()` gives the function it returns,
     // for exactly this — see the comment above the `return` in
     // `requireStepUp.ts`. An anonymous handler there would make this assertion
@@ -714,6 +721,10 @@ const SEGURIDAD_GATES: Record<string, string> = {
   // the other way out of one. It is the one pair on this table that a reader
   // could plausibly talk themselves into changing.
   "PATCH /api/usuario/:id/desbloquear": "seguridad.editar",
+  // Same pair as `/desbloquear` just above, and the same reasoning: this is
+  // the other way an administrator undoes a state that leaves an account
+  // unable to log in.
+  "POST /api/usuario/:id/mfa/reset": "seguridad.editar",
   "GET /api/usuario/": "seguridad.ver",
   "GET /api/usuario/user/:user": "seguridad.ver",
   // The four that a person may also call for their own row.

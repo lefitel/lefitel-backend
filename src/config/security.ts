@@ -141,6 +141,26 @@ export const STEP_UP_PASSWORD_FIELD = "stepup_password";
 export const MFA_GRACE_DAYS = 14;
 
 /**
+ * How long `--reset-mfa` (and its endpoint twin, `POST
+ * /usuario/:id/mfa/reset`) extends `usuarios.mfa_grace_until` by, once it has
+ * cleared an account's factors.
+ *
+ * **Never a reduction — that is the whole reason this is a duration and not a
+ * date.** `auth/rescueCore.ts`'s `proximaGraciaDeRescate` takes whatever
+ * deadline the account already had and this many hours from now, and keeps
+ * the later of the two. Written as a plain assignment instead, this makes
+ * things worse for almost everyone it touches: 0 of the accounts in
+ * production have `mfa_grace_until` set at all on deploy day, so the login
+ * stamps `MFA_GRACE_DAYS` (fourteen days) on each one's first login: a
+ * technician with twelve of those fourteen days left who loses their phone
+ * and gets rescued would have that twelve cut down to one, and land in
+ * `onboarding` — answering 403 to almost everything — the day after being
+ * "rescued". See §8 of the design and finding H1 of the pre-audit that
+ * caught it before it shipped.
+ */
+export const RESCUE_GRACE_HOURS = 24;
+
+/**
  * How long a browser must refuse to reach this host over plain HTTP, in
  * seconds. Two years, which is what the preload list asks for.
  *

@@ -7,6 +7,7 @@ import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { issueSession } from "../auth/issueSession.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
+import { restablecerSegundoFactor, type ActorRescate } from "../auth/rescueCore.js";
 import bcryptjs from "bcryptjs";
 import { deleteImageFile } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
@@ -905,6 +906,79 @@ export const desbloquearUsuario = handler("desbloquearUsuario", async (req: Requ
   // something was.
   logAction({ id_usuario: req.user?.id, action: "ACCOUNT_UNLOCKED", entity: "Usuario", entity_id: Number(id), detail: `Desbloqueó la cuenta del usuario #${id}`, metadata: { before: antes }, severity: 'critical', ip_address: req.ip ?? null });
   return res.sendStatus(200);
+});
+/**
+ * `POST /usuario/:id/mfa/reset` — the in-app half of §8's "vía de escape":
+ * an administrator clears somebody else's second factor from the browser,
+ * in thirty seconds, instead of that person being locked out until whoever
+ * has console access to the production container gets to a keyboard.
+ *
+ * A thin translation of an HTTP request onto `restablecerSegundoFactor`
+ * (`auth/rescueCore.ts`) and nothing more — every rule that matters (H1's
+ * grace that never shrinks, H2's lockout lifted alongside the factors,
+ * H6-bis's sessions and remembered devices revoked together, the mandatory
+ * notice before anything is touched, the audit line that survives a
+ * rollback) lives there, once, shared with `--reset-mfa` on the console
+ * script. This handler owns exactly two things that are its own: the
+ * permission/step-up gate below (`usuario.routes.ts`), and the refusal
+ * right after it.
+ *
+ * **Refuses `:id === req.user.id` — Isaias's decision, not a default, and
+ * not merely "unwise".** This route's whole job is to leave its target with
+ * *zero* registered factors. `requireStepUp` (`middleware/requireStepUp.ts`)
+ * lets exactly that kind of account — one with nothing to prove — through
+ * its own gate on the session cookie alone (see that middleware's "account
+ * has nothing to prove" branch). So resetting your *own* factors here would
+ * disarm the gate in front of every other sensitive route on your own
+ * session, starting with the very next request: no factor left to demand,
+ * so nothing left to check. The console (`--reset-mfa` run with a shell
+ * inside the production container) is the deliberate way to reset your own
+ * factors instead — it does not go through this gate, or any session, at
+ * all.
+ */
+export const rescatarMfaDeUsuario = handler("rescatarMfaDeUsuario", async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const targetId = Number(id);
+
+  if (req.user && targetId === req.user.id) {
+    return res.status(403).json({
+      message:
+        "No puede restablecer su propio segundo factor desde el panel. Use la consola de rescate del servidor.",
+    });
+  }
+
+  // Named for the notice email and the bitácora `metadata`, not for anything
+  // this handler decides with — `req.user.id` alone would already be enough
+  // to trace, but `@user` is what a human reading the alert can act on
+  // without a second lookup.
+  const admin = req.user ? await UsuarioModel.findByPk(req.user.id, { attributes: ["user"] }) : null;
+  const actor: ActorRescate = {
+    descripcion: `endpoint: @${admin?.dataValues.user ?? "?"} (id ${req.user?.id ?? "?"})`,
+    ip: req.ip ?? null,
+  };
+
+  const resultado = await restablecerSegundoFactor(targetId, actor);
+
+  if (!resultado.ok) {
+    if (resultado.motivo === "no-encontrada") {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+    // "archivada": the row exists but is soft-deleted — `usuario.model.ts`
+    // is `paranoid`, so an ordinary lookup would have answered 404 about an
+    // account that is very much on file. Same wording `resolverCuentaDeRescate`
+    // gives the console for the same case, so the two doors do not describe
+    // one condition two different ways.
+    return res.status(409).json({
+      message: `La cuenta @${resultado.user} está archivada. Desarchívela antes de restablecer su segundo factor.`,
+    });
+  }
+
+  return res.status(200).json({
+    message: `Segundo factor restablecido para @${resultado.cuenta.user}.`,
+    sesiones_revocadas: resultado.datos.sesionesRevocadas,
+    dispositivos_revocados: resultado.datos.dispositivosRevocados,
+    gracia_hasta: resultado.datos.graceUntil,
+  });
 });
 export const desarchivarUsuario = handler("desarchivarUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;

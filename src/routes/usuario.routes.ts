@@ -6,6 +6,7 @@ import {
   desarchivarUsuario,
   desbloquearUsuario,
   getUsuario,
+  rescatarMfaDeUsuario,
   searchUsuario,
   searchUsuario_user,
   requiresOwnPassword,
@@ -144,6 +145,23 @@ router.patch(
   requirePermission("seguridad", "editar"),
   requireStepUp(),
   desbloquearUsuario,
+);
+// The escape hatch from §8 of the MFA design: an administrator clears
+// somebody else's second factor from the browser. `editar`, the same
+// permission `/desbloquear` above asks for and for the same reason — this
+// is the other way an administrator undoes a state that leaves an account
+// unable to log in. `requireStepUp()` with no options: an `onboarding`
+// session is refused outright, same as every other administrative mount on
+// this router, never the exception. See `rescatarMfaDeUsuario` in
+// `usuario.controller.ts` for the refusal this route adds on top of both
+// gates — resetting your own factors through here is rejected even with the
+// permission and a proved factor, because it would leave the caller's own
+// session past `requireStepUp`'s gate on nothing but the cookie.
+router.post(
+  "/:id/mfa/reset",
+  requirePermission("seguridad", "editar"),
+  requireStepUp(),
+  rescatarMfaDeUsuario,
 );
 router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);
 

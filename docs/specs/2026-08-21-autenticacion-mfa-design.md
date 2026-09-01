@@ -807,7 +807,19 @@ portátil y SSH a mano las 24 horas: lunes 8:00, técnico en campo sin factor,
 dueño en el coche con el móvil, y nada que hacer hasta la noche. Hoy ese mismo
 caso se resuelve desde el navegador en treinta segundos.
 
-### El script, como segundo recurso
+### El script, y **no** es el segundo recurso
+
+> ⚠️ **Este encabezado decía «como segundo recurso» y estaba mal.** La
+> pre-auditoría de la vía de escape lo midió: el botón de arriba cuelga de
+> `/api/usuario`, y la lista blanca de `auth/sessionState.ts` no abre esa ruta ni
+> para `parcial` ni para `onboarding`. Así que **un administrador cuyo propio
+> plazo de gracia venció no alcanza el botón**, ni para rescatar a otro ni para
+> rescatarse a sí mismo — y ese es precisamente el modo de fallo para el que se
+> escribió esta sección entera.
+>
+> El script es el **único** recurso que funciona siempre. De ahí que su criterio
+> de aceptación —demostrarlo ejecutándose dentro del contenedor de producción—
+> no sea ceremonia: es lo que sostiene la sección.
 
 ```bash
 npm run auth:rescue:deploy -- --user <usuario> --reset-mfa       # borra factores + gracia de 24 h
@@ -830,12 +842,73 @@ y dispositivos recordados. Sin lo primero, el rescate deja a la persona sin
 factor y con la gracia vencida: exactamente el estado del que se la quería sacar.
 Sin lo segundo, deja viva la sesión del atacante que causó el incidente.
 
-Y **el script escribe en la bitácora antes de tocar nada**, con severidad
-`critical`, el usuario del sistema operativo y la marca de tiempo. Iba a ser la
-operación más privilegiada del sistema y la única sin registro: un insider con
-acceso al contenedor —que en Coolify es una consola del navegador, no una clave
-SSH— resetea el MFA del administrador, entra con la contraseña, y en la bitácora
-solo queda un `LOGIN` normal.
+🔴 **«Concede siempre una gracia nueva» es `max`, nunca una asignación** — y la
+diferencia deja a alguien fuera del ERP. La pre-auditoría lo midió: el día del
+despliegue, 0 de 15 cuentas tienen plazo puesto, y el primer login de cada una
+estampa los 14 días. A quien pierde el móvil el día 2 le quedaban doce; una
+asignación se los deja **en uno**, y si no consigue registrar un factor ese día
+—fin de semana, sin terminal de repuesto— cae en `onboarding` y el ERP le
+responde 403 a todo. Un rescate que deja a la persona peor que antes de correrlo.
+Vive con nombre propio en `proximaGraciaDeRescate` (`auth/rescueCore.ts`), con su
+propio test, para que nadie lo vuelva a leer como generosidad.
+
+Y `--reset-mfa` **levanta también el bloqueo por intentos fallidos**, que no
+estaba escrito aquí y hace falta: quien pierde su factor se pone nervioso, falla
+cinco veces su contraseña y queda bloqueado. El login rechaza una cuenta
+bloqueada **antes de comparar nada** y con el mismo mensaje que una contraseña
+equivocada, así que un rescate que no lo mira deja a la persona leyendo
+«contraseña incorrecta» sobre una contraseña correcta.
+
+### El registro: qué queda escrito, y por qué no es un correo
+
+Todo rescate deja **una línea de bitácora con severidad `critical`**, y lleva:
+la cuenta rescatada, la operación, quién la pidió (desde la consola, el usuario
+del sistema operativo y el proceso; desde el botón, la cuenta del administrador),
+la IP cuando la hay, cómo acabó, y si el aviso por correo llegó a salir.
+
+**Tres cosas la hacen fiable, y ninguna es como escribe el resto del ERP:**
+
+- **Se escribe pase lo que pase**, tanto si la operación funcionó como si lanzó.
+  Un intento fallido también deja constancia de que alguien lo intentó.
+- **Se escribe fuera de la transacción.** Dentro, un rollback borraría justo el
+  registro que tenía que sobrevivir al fallo.
+- **Si la línea no se puede escribir, la operación falla.** No usa `logAction`, y
+  ese es el punto: ese ayudante termina en un `catch` vacío que **nadie espera**
+  —78 llamadas, cero `await`— así que un INSERT fallido le informa de éxito a
+  quien ya cree que la acción quedó registrada. Aquí la escritura se espera y su
+  fallo propaga.
+
+**A quién se atribuye**, porque `bitacoras.id_usuario` es `NOT NULL` con clave
+ajena real y no hay fila centinela ni NULL al que caer: **a la cuenta rescatada**,
+con el actor real dentro de `metadata`. `verifyEmail` ya hace exactamente eso por
+la misma razón estructural —quien llama no siempre es el sujeto— y es donde
+cualquiera buscaría al actor: al lado de la cuenta a la que le pasó algo.
+
+#### El aviso por correo queda construido y **apagado a propósito**
+
+Decidido por Isaias el 2026-09-01. `avisarRescate` (`auth/securityNotice.ts`)
+existe y se intenta antes de tocar nada, pero **`MAIL_SECURITY_TO` no está
+configurada y no bloquea nada**: se intenta, se deja constancia de si salió, y la
+operación sigue.
+
+**El razonamiento, porque el de la primera versión de esta sección era peor.** Se
+defendió el correo como «la única traza que quien tiene consola no puede borrar».
+Eso es falso: **esa misma persona puede impedir el envío**, porque las
+credenciales de correo están en el entorno del proceso que ella controla. Contra
+alguien decidido el correo no protege más que la bitácora — y ese actor, con las
+credenciales de la base en ese mismo entorno, ya podía escribir directamente en
+`usuarios` sin script ninguno.
+
+Lo que el correo sí aporta es que **llega solo**: la bitácora hay que ir a
+mirarla, y nadie la mira hasta que ya sospecha. Pero eso **solo vale si hay
+alguien leyendo el buzón**, y hoy no lo hay. Un aviso que sale hacia un buzón que
+nadie revisa es peor que ninguno: da sensación de vigilancia sin vigilancia.
+
+**Para encenderlo, el día que Osefi decida quién vigila:** poner
+`MAIL_SECURITY_TO` en el entorno. Nada de código. Y conviene saber que esa
+variable **gobierna otros dos avisos que ya existen** —restablecimiento de
+contraseña por enlace y cambio de correo— que **hoy tampoco llegan a ninguna
+parte**. No es deuda que traiga este trabajo; es deuda que este trabajo destapó.
 
 ### Antes de desplegar
 
@@ -1240,6 +1313,12 @@ que ser visible para alguien que no sea quien lo pidió.
 
 ### Qué hay que hacer para desplegar el Plan 4A
 
+> 🔴 **Antes de teclear nada: el 4A no se despliega solo.** Decidido el
+> 2026-09-01 — sale en el mismo despliegue que el 4B, y el porqué está en «El 4A
+> arma una mecha de 14 días» más abajo. Todo lo que sigue describe la mitad de
+> ese despliegue que corresponde al 4A; no es un procedimiento que se ejecute por
+> su cuenta.
+
 Esto es lo que hay que leer a las ocho de la mañana con el ERP parado. El resto
 de esta sección explica por qué; esta subsección dice qué se teclea y en qué
 orden.
@@ -1395,6 +1474,26 @@ registran ningún factor.
 > **Regla de despliegue: el 4A no se despliega más de `MFA_GRACE_DAYS` antes que
 > el 4B.** No «pronto»: catorce días contados desde el primer login de cada
 > persona, y el más temprano de esos es el día mismo del despliegue.
+
+✅ **Decidido por Isaias el 2026-09-01: el 4A y el 4B salen en el mismo
+despliegue.** No es una lectura estricta de la regla de arriba, es la que la hace
+irrelevante — **la mecha nunca llega a estar armada sin salida**, porque las rutas
+que registran un factor están vivas desde el primer minuto en que existe el plazo.
+
+Lo que esa decisión zanja, y conviene tenerlo junto:
+
+- **La ventana de catorce días deja de ser un riesgo de calendario.** Nadie tiene
+  que vigilar una fecha ni preparar el `UPDATE` de más abajo como plan de
+  contingencia. Sigue escrito porque el mecanismo existe y hay que saber leerlo,
+  no porque haya que tenerlo a mano.
+- **Nada del 4A sale a producción antes de que el 4B esté terminado.** Ni las
+  migraciones. El esqueleto solo, por muy verificado que esté, no tiene ningún
+  valor operativo y sí un riesgo.
+- **Y el orden interno del 4B sigue mandando igual** (ver la lista de requisitos
+  de entrada): el endpoint que *verifica* un factor tiene que estar vivo antes
+  que —o en el mismo despliegue que— el que lo *registra*. Salir todo junto no
+  dispensa de eso; registrar un factor deja la siguiente sesión en `parcial`, y de
+  `parcial` solo se sale verificando.
 
 **La salida de emergencia, si esa fecha se va a incumplir:**
 

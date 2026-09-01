@@ -12,6 +12,8 @@
     "lint": "eslint src",
     "migrate": "tsx src/database/migrate.ts",
     "migrate:deploy": "node dist/database/migrate.js",
+    "auth:rescue": "tsx src/scripts/rescue.ts",
+    "auth:rescue:deploy": "node dist/scripts/rescue.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",

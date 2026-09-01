@@ -1,20 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
+import type { CorreoAEnviar } from "./mailer.js";
 
-const enviarCorreo = vi.fn(async () => ({ ok: true }));
-vi.mock("./mailer.js", () => ({ enviarCorreo: (...a: unknown[]) => enviarCorreo(...(a as [])) }));
+// The mock carries the real signature. Declared with no parameters, as it was,
+// vitest types every recorded call as an empty tuple, so `mock.calls[0][0]` —
+// which four assertions below read — does not typecheck at all.
+const enviarCorreo = vi.fn(async (_correo: CorreoAEnviar) => ({ ok: true }));
+vi.mock("./mailer.js", () => ({ enviarCorreo: (correo: CorreoAEnviar) => enviarCorreo(correo) }));
 
 const findByPk = vi.fn(async () => ({ dataValues: { user: "Diego" } }));
 vi.mock("../models/usuario.model.js", () => ({ UsuarioModel: { findByPk: (...a: unknown[]) => findByPk(...(a as [])) } }));
 
 const warn = vi.fn();
-vi.mock("../utils/logger.js", () => ({ log: () => ({ warn, error: vi.fn(), info: vi.fn() }) }));
+const error = vi.fn();
+vi.mock("../utils/logger.js", () => ({ log: () => ({ warn, error, info: vi.fn() }) }));
 
-const { avisarPasswordRestablecida, avisarCorreoCambiado, maskEmail } = await import("./securityNotice.js");
+const { avisarPasswordRestablecida, avisarCorreoCambiado, avisarRescate, maskEmail } =
+  await import("./securityNotice.js");
 
 beforeEach(() => {
   enviarCorreo.mockClear();
   warn.mockClear();
+  error.mockClear();
   findByPk.mockClear();
 });
 afterEach(() => vi.unstubAllEnvs());
@@ -118,6 +125,90 @@ describe("avisarCorreoCambiado", () => {
 });
 
 /**
+ * §8's mandatory notice, shared by every rescue operation in
+ * `auth/rescueCore.ts`. Decided by Isaias: this goes out whether the
+ * request is legitimate or not, because it is the one trace a console
+ * operator's own database credentials cannot edit — see this function's own
+ * docblock for the full reasoning.
+ */
+describe("avisarRescate", () => {
+  const ENTRADA = {
+    id_usuario: 14,
+    operacion: "RESCUE_MFA_RESET",
+    detalle: "Se borraron todos sus factores de segundo paso.",
+    actor: "consola: isaias@VPS-osefi (pid 4821)",
+    ip: null,
+  };
+
+  it("sends exactly one message — to the company, never to the account holder", async () => {
+    // Unlike `avisarPasswordRestablecida`, there is no "to the user" half:
+    // a rescue runs precisely when that mailbox is not a reliable channel
+    // any more (the phone is lost, or the address is what is being
+    // replaced).
+    vi.stubEnv("MAIL_SECURITY_TO", "seguridad@osefi.net");
+    await avisarRescate(ENTRADA);
+    expect(enviarCorreo).toHaveBeenCalledTimes(1);
+    expect(enviarCorreo.mock.calls[0][0]).toMatchObject({ para: "seguridad@osefi.net" });
+  });
+
+  it("names the operation, the account, who asked, and from where", async () => {
+    vi.stubEnv("MAIL_SECURITY_TO", "seguridad@osefi.net");
+    await avisarRescate({ ...ENTRADA, ip: "203.0.113.5" });
+    const correo = enviarCorreo.mock.calls[0][0] as { asunto: string; texto: string };
+    expect(correo.asunto).toContain("RESCUE_MFA_RESET");
+    expect(correo.asunto).toContain("@Diego");
+    expect(correo.texto).toContain("isaias@VPS-osefi");
+    expect(correo.texto).toContain("203.0.113.5");
+    expect(correo.texto).toContain("Se borraron todos sus factores de segundo paso.");
+  });
+
+  it("says 'consola del contenedor' rather than a blank when there is no IP", async () => {
+    vi.stubEnv("MAIL_SECURITY_TO", "seguridad@osefi.net");
+    await avisarRescate(ENTRADA);
+    const correo = enviarCorreo.mock.calls[0][0] as { texto: string };
+    expect(correo.texto).toMatch(/consola/i);
+  });
+
+  it("reports enviado: false, and logs at error (not warn), when MAIL_SECURITY_TO is missing", async () => {
+    // Louder than the other two notices above: for this family the mail *is*
+    // the one surviving trace, not a courtesy copy.
+    vi.stubEnv("MAIL_SECURITY_TO", "");
+    const resultado = await avisarRescate(ENTRADA);
+    expect(resultado).toEqual({ enviado: false });
+    expect(enviarCorreo).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledOnce();
+    expect(error.mock.calls[0][1]).toMatch(/MAIL_SECURITY_TO/);
+  });
+
+  it("reports enviado: false and logs at error when Resend itself refuses the send", async () => {
+    vi.stubEnv("MAIL_SECURITY_TO", "seguridad@osefi.net");
+    enviarCorreo.mockResolvedValueOnce({ ok: false });
+    const resultado = await avisarRescate(ENTRADA);
+    expect(resultado).toEqual({ enviado: false });
+    expect(error).toHaveBeenCalledOnce();
+  });
+
+  it("reports enviado: true on an ordinary successful send", async () => {
+    vi.stubEnv("MAIL_SECURITY_TO", "seguridad@osefi.net");
+    const resultado = await avisarRescate(ENTRADA);
+    expect(resultado).toEqual({ enviado: true });
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("does not stop to check the daily mail budget — deliberately not gated by mailBudget.ts", async () => {
+    // A console invocation is its own OS process with its own copy of that
+    // module's in-memory counter, so it cannot see what the server has spent
+    // today and the server cannot see what the console just spent — see this
+    // function's own docblock. Reconciling the two needs a database-backed
+    // counter this plan does not build; the cheap, correct answer is to never
+    // ask it, matching `avisarPasswordRestablecida` and `avisarCorreoCambiado`
+    // above, neither of which calls it either.
+    const src = readFileSync("src/auth/securityNotice.ts", "utf8");
+    expect(src).not.toMatch(/consumirPresupuestoDeCorreo/);
+  });
+});
+
+/**
  * The audit half of Task 7, pinned as a test rather than written down in a
  * report — a report is read once, a test is read every time it fails.
  *
@@ -129,7 +220,14 @@ describe("avisarCorreoCambiado", () => {
  * happens to exercise.
  */
 describe("no token ever reaches the bitácora", () => {
-  const CONTROLLERS = ["src/controllers/email.controller.ts", "src/controllers/password.controller.ts"];
+  const CONTROLLERS = [
+    "src/controllers/email.controller.ts",
+    "src/controllers/password.controller.ts",
+    // `registrarRescateEnBitacora` writes the same kind of `metadata` object,
+    // against the same table, for the operation most likely to be run by
+    // somebody with a database handle already in hand.
+    "src/auth/rescueCore.ts",
+  ];
 
   it("has no metadata object mentioning a token in either recovery controller", () => {
     const offenders: string[] = [];

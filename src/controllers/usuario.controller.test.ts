@@ -21,6 +21,9 @@ const create = vi.fn();
 const findAll = vi.fn();
 const restore = vi.fn();
 const destroy = vi.fn();
+// `rescatarMfaDeUsuario` looks up the caller's own username for the notice
+// and the bitácora, the same way `nombreDe` does in `securityNotice.ts`.
+const findByPk = vi.fn();
 
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: {
@@ -29,7 +32,19 @@ vi.mock("../models/usuario.model.js", () => ({
     findAll: (...args: unknown[]) => findAll(...args),
     restore: (...args: unknown[]) => restore(...args),
     destroy: (...args: unknown[]) => destroy(...args),
+    findByPk: (...args: unknown[]) => findByPk(...args),
   },
+}));
+// The escape hatch's shared core (`auth/rescueCore.ts`) is mocked whole, the
+// same two reasons as the session store just below: what is under test here
+// is which id and which actor description this controller hands it, not what
+// the core does with them — that is `rescueCore.test.ts`'s job — and the real
+// module imports `credencialWebauthn.model.ts`, `factorTotp.model.ts` and
+// friends, each of which calls `UsuarioModel.hasMany` on the plain object
+// standing in for the model above, which has no such method.
+const restablecerSegundoFactor = vi.fn();
+vi.mock("../auth/rescueCore.js", () => ({
+  restablecerSegundoFactor: (...args: unknown[]) => restablecerSegundoFactor(...args),
 }));
 // Two things this controller reaches for now that it ends sessions: the store,
 // and a transaction to end them in. Mocked rather than real — what is under
@@ -108,6 +123,7 @@ const {
   deleteUsuario,
   desarchivarUsuario,
   desbloquearUsuario,
+  rescatarMfaDeUsuario,
 } = await import("./usuario.controller.js");
 
 const ADMIN = 1;
@@ -252,6 +268,21 @@ beforeEach(() => {
   // needs it to be accepted, so the interesting case stays the one the test
   // names.
   verifyOwnPassword.mockResolvedValue({ ok: true });
+  // A default success, so that the one test below which makes the core answer
+  // something else cannot leak a `mockResolvedValueOnce`'s absence into a later
+  // test — `vi.clearAllMocks()` clears calls, not implementations, and a leaked
+  // rejection here would surface tests later as an unexplained 500.
+  restablecerSegundoFactor.mockResolvedValue({
+    ok: true,
+    cuenta: { id: OTHER, user: "otro" },
+    avisoEnviado: true,
+    datos: {
+      factoresBorrados: { passkeys: 1, totp: 1, codigos: 5 },
+      sesionesRevocadas: 2,
+      dispositivosRevocados: 1,
+      graceUntil: new Date("2027-01-01T00:00:00.000Z"),
+    },
+  });
 });
 
 describe("creating and archiving users", () => {
@@ -905,6 +936,115 @@ describe("lifting a lockout", () => {
     await desbloquearUsuario(c.req, c.res);
 
     expect(c.status).toBe(404);
+  });
+});
+
+/**
+ * `POST /usuario/:id/mfa/reset` — §8's in-app escape hatch. The handler is a
+ * thin translation onto `auth/rescueCore.ts`'s `restablecerSegundoFactor`,
+ * mocked whole above, so what belongs here is only what this controller does
+ * on its own: the self-reset refusal, the actor description it builds for the
+ * core, and the response it gives for each of the core's outcomes. Every rule
+ * the core actually enforces — H1's grace that never shrinks, H2's lockout,
+ * H6-bis's remembered devices — is `rescueCore.test.ts`'s business, not this
+ * file's, and duplicating it here would be the second copy this whole plan
+ * exists to avoid.
+ *
+ * Unlike `desbloquearUsuario` and its siblings above, this handler carries no
+ * inline `can()` check of its own: `usuario.routes.ts` mounts
+ * `requirePermission("seguridad", "editar")` and `requireStepUp()` in front of
+ * it, and `routeGuards.test.ts` pins both the pair and the order. A direct
+ * call to the handler below, with no middleware in front of it, therefore
+ * reaches the core — that is expected, not a hole, the same way calling
+ * `sendVerificationEmail` directly bypasses `authenticate`.
+ */
+describe("resetting somebody else's second factor", () => {
+  it("refuses to reset the caller's own factors, and never asks the core", async () => {
+    // Isaias's decision, not a default — see the handler's own comment for
+    // why: this route's whole job is to leave its target with zero factors,
+    // and `requireStepUp` lets exactly that kind of account through its own
+    // gate on the session cookie alone. Resetting your own factors here would
+    // disarm your own next step-up check.
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(ADMIN) } });
+    await rescatarMfaDeUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(restablecerSegundoFactor).not.toHaveBeenCalled();
+  });
+
+  it("calls the shared core with the target id and a description naming the caller", async () => {
+    findByPk.mockResolvedValue({ dataValues: { user: "admin_isaias" } });
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await rescatarMfaDeUsuario(c.req, c.res);
+
+    expect(restablecerSegundoFactor).toHaveBeenCalledWith(
+      OTHER,
+      expect.objectContaining({
+        // A human reading the notice email or the bitácora `metadata` has to
+        // be able to tell who asked for this without a second lookup.
+        descripcion: expect.stringContaining("admin_isaias"),
+        ip: "::1",
+      }),
+    );
+  });
+
+  it("still names the caller by id when their own username lookup comes back empty", async () => {
+    // Archived, or the read raced something — either way this must not throw
+    // and must not silently claim nobody asked for it.
+    findByPk.mockResolvedValue(null);
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await rescatarMfaDeUsuario(c.req, c.res);
+
+    expect(restablecerSegundoFactor).toHaveBeenCalledWith(
+      OTHER,
+      expect.objectContaining({ descripcion: expect.stringContaining(String(ADMIN)) }),
+    );
+  });
+
+  it("answers 404 when the target account does not exist", async () => {
+    restablecerSegundoFactor.mockResolvedValue({ ok: false, motivo: "no-encontrada" });
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await rescatarMfaDeUsuario(c.req, c.res);
+
+    expect(c.status).toBe(404);
+  });
+
+  it("answers 409, naming the account, when the target is archived", async () => {
+    restablecerSegundoFactor.mockResolvedValue({ ok: false, motivo: "archivada", user: "pepe" });
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await rescatarMfaDeUsuario(c.req, c.res);
+
+    expect(c.status).toBe(409);
+    expect(c.message).toContain("@pepe");
+  });
+
+  it("answers 200 with what actually changed, on success", async () => {
+    const graceUntil = new Date("2027-06-01T00:00:00.000Z");
+    restablecerSegundoFactor.mockResolvedValue({
+      ok: true,
+      cuenta: { id: OTHER, user: "otro" },
+      avisoEnviado: true,
+      datos: {
+        factoresBorrados: { passkeys: 1, totp: 0, codigos: 8 },
+        sesionesRevocadas: 3,
+        dispositivosRevocados: 2,
+        graceUntil,
+      },
+    });
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await rescatarMfaDeUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.payload).toMatchObject({
+      sesiones_revocadas: 3,
+      dispositivos_revocados: 2,
+      gracia_hasta: graceUntil,
+    });
   });
 });
 
