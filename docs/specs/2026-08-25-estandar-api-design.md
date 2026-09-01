@@ -929,6 +929,7 @@ exacto que hay que ejecutar y en qué repositorio.
 | **T0** | Este documento al día tras la segunda auditoría | ✅ — cifras, criterios, despliegue y este apartado |
 | **A0** | La bitácora deja de apuntar lo que el servidor rechazó | ✅ `538f309` + `5add364` — 16 ficheros |
 | **A1** | Las siete rutas muertas, borradas | ✅ `e8cf5f6` — 8 ficheros. De 119 rutas montadas a 112 |
+| **A3** | Un fallo deja de contarle al navegador lo que dijo Postgres | ✅ `2d36db1` + `7898569` — 18 ficheros. 74 manejadores movidos a `makeHandler` |
 
 ### Familia A — sólo servidor, no rompe a nadie
 
@@ -986,7 +987,14 @@ error terminal.
 cd api && npx vitest run src/app.notfound.test.ts
 ```
 
-**A3 · Sacar `error.message` de las respuestas de 500 (§3.5).** Mecánico, unos
+**A3 · Sacar `error.message` de las respuestas de 500 (§3.5).** ✅ Hecha,
+`2d36db1` y `7898569`. **Y no era mecánica**, que es lo que decía esta línea:
+sustituir el mensaje por uno neutro cambia una fuga por ceguera, porque estos
+fallos no se registraban en ningún sitio y el navegador era el único lugar donde
+asomaban. La herramienta correcta ya estaba en el árbol —`utils/handler.ts`, que
+registra bajo el logger de su controlador y responde neutro—, así que 74
+manejadores perdieron su `try/catch` entero. Quedan 16 fugas en tres ficheros de
+otras sesiones, nombrados en la lista de excepciones del test. Eran unos
 veinte controladores. Uno de ellos es `rol.controller.ts`, de la sesión de roles:
 o se coordina, o se deja fuera y se dice. El criterio no es contar ficheros, es
 que el test lo prohíba.
