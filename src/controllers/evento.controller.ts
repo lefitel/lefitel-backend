@@ -35,6 +35,60 @@ export async function getEvento(req: Request, res: Response) {
   const posteVal = getFilterVal("poste");
   const posteWhere = posteVal ? { name: { [Op.iLike]: `%${posteVal}%` } } : undefined;
 
+  // `state` is nullable, so "pendiente" cannot be `state = false`: that misses
+  // the rows where nobody ever set it. The screen calls anything that is not
+  // resolved pending, and so does this.
+  const stateVal = getFilterVal("state");
+  if (stateVal === "pending") where["state"] = { [Op.not]: true };
+  if (stateVal === "solved") where["state"] = true;
+
+  const priorityVal = getFilterVal("priority");
+  if (priorityVal === "true") where["priority"] = true;
+  if (priorityVal === "false") where["priority"] = { [Op.not]: true };
+
+  // Criticality is a property of the observation catalogue, not of the event,
+  // so both the filter and the sort below reach it the same way: the worst
+  // level — lowest number, 1 is catastrophic — among the event's observations.
+  // Same rule as `getEventCriticality` on the frontend, which is what paints
+  // the column, so the two cannot disagree about a row.
+  //
+  // It deliberately does not exclude archived observations, because the include
+  // further down sends them (`paranoid: false`) and the column shows them. A
+  // filter that hid what its own column displays would make the screen
+  // contradict itself. Whether archiving an observation should quietly drop an
+  // event out of "críticas" is an open decision — see
+  // docs/AUDITORIA-INCIDENCIAS.md — and the report builder answers it the other
+  // way today. When that is settled, both places move together.
+  const WORST_CRITICALITY =
+    '(SELECT MIN(o."criticality") FROM "eventoObs" eo' +
+    ' JOIN "obs" o ON o."id" = eo."id_obs"' +
+    ' WHERE eo."id_evento" = "evento"."id" AND eo."deletedAt" IS NULL)';
+
+  // A Map, not an object literal: `"constructor" in {}` is true through the
+  // prototype, so an object would have accepted `criticality=constructor` and
+  // built `BETWEEN undefined AND undefined`. The bands are also the only values
+  // that ever reach the SQL string — the request's own text never does.
+  const CRITICALITY_BANDS = new Map<string, [number, number] | null>([
+    ["criticas", [1, 3]],
+    ["altas", [4, 5]],
+    ["medias", [6, 7]],
+    ["bajas", [8, 9]],
+    ["sin", null],
+  ]);
+  const critVal = getFilterVal("criticality");
+  const critBand = critVal !== undefined && CRITICALITY_BANDS.has(critVal)
+    // `get` returns null for "sin", which is a band, so the presence check
+    // above is what decides — not the value.
+    ? { range: CRITICALITY_BANDS.get(critVal) ?? null }
+    : undefined;
+  const critCondition = critBand
+    ? literal(
+      critBand.range
+        ? `${WORST_CRITICALITY} BETWEEN ${critBand.range[0]} AND ${critBand.range[1]}`
+        : `${WORST_CRITICALITY} IS NULL`,
+    )
+    : undefined;
+
   const SORTABLE = new Set(["id", "description", "date", "state", "priority", "createdAt"]);
   const sortByCols = Array.isArray(sortBy) ? sortBy as string[] : sortBy ? [sortBy as string] : [];
   const sortOrderVals = Array.isArray(sortOrder) ? sortOrder as string[] : sortOrder ? [sortOrder as string] : [];
@@ -42,6 +96,7 @@ export async function getEvento(req: Request, res: Response) {
     const dir = sortOrderVals[i] === "asc" ? "ASC" : "DESC";
     if (col === "ultimaRev")        return [literal('(SELECT MAX("date") FROM "revicions" WHERE "revicions"."id_evento" = "evento"."id" AND "revicions"."deletedAt" IS NULL)'), `${dir} NULLS LAST`];
     if (col === "fechaResolucion")  return [literal('(SELECT "date" FROM "solucions" WHERE "solucions"."id_evento" = "evento"."id" AND "solucions"."deletedAt" IS NULL LIMIT 1)'), `${dir} NULLS LAST`];
+    if (col === "criticality")      return [literal(WORST_CRITICALITY), `${dir} NULLS LAST`];
     if (col === "poste")            return [PosteModel, "name", dir];
     if (col === "usuario")      return [UsuarioModel, "name", dir];
     if (col === "propietario")  return [PosteModel, PropietarioModel, "name", dir];
@@ -51,7 +106,7 @@ export async function getEvento(req: Request, res: Response) {
   const queryOptions = {
     order: (orderEntries.length ? orderEntries : [["id", "DESC"]]) as Order,
     paranoid: !isArchived,
-    where,
+    where: critCondition ? { ...where, [Op.and]: [critCondition] } : where,
     attributes: { exclude: ["image"] },
     include: [
       {
@@ -79,7 +134,11 @@ export async function getEvento(req: Request, res: Response) {
         model: EventoObsModel,
         separate: true,
         attributes: ["id", "id_obs", "id_evento"],
-        include: [{ model: ObsModel, paranoid: false, attributes: ["id", "name"] }],
+        // `criticality` is what the Gravedad column paints and what the filter
+        // above selects on. Without it the list could name the observation but
+        // not say how bad it is, which is how an urgent event became
+        // unfindable on the very screen an alert sends you to.
+        include: [{ model: ObsModel, paranoid: false, attributes: ["id", "name", "criticality"] }],
       },
       {
         model: UsuarioModel,

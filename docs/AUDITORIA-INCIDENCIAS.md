@@ -20,6 +20,12 @@ sistema que ya no existe. Citar con `git show <sha>:ruta`, nunca con `sed` sobre
 | Una sola escala de colores para la gravedad, con test que impide escribir otra | `ca2fa4b` (web) |
 | El contador de «Obs. crítica», los días negativos y el «hace Hoy», y las dos frases falsas del aviso rojo | `2c1f9e1` (web) |
 | El gráfico de Actividad, descrito y traspasado al rediseño de `/app/home` | `f3df742` (api) |
+| El gráfico de Actividad, ya arreglado por esa sesión: Isaias eligió flujos, y `pending`/`solved` pasaron a `entraron`/`salieron` | `adaa4ff` (web) |
+| El CSV del recorrido exporta lo que hay en pantalla, y el botón dice cuántas filas se lleva | ver abajo (web) |
+| La gravedad llega al navegador y se ve: columna en la tabla, insignia en la ficha, etiquetas teñidas por nivel, y también en Excel/CSV/PDF | ver abajo (api + web) |
+| Filtros rápidos de estado, gravedad y prioridad sobre la tabla de incidencias, resueltos en el servidor | ver abajo (api + web) |
+| Las bandas de gravedad (1-3 críticas, 4-5 altas…) se escribían en tres sitios; ahora en uno, con test a los dos lados del cable | ver abajo (web) |
+| Recargar la tabla dejó de tirar los filtros: `load()` recargaba con los valores del primer render | ver abajo (web) |
 
 ## Descartado al verificar
 
@@ -31,16 +37,9 @@ sistema que ya no existe. Citar con `git show <sha>:ruta`, nunca con `sed` sobre
 
 ## Abierto — frontend, sin bloqueo
 
-Verificado abierto el 2026-08-31 en `2c1f9e1`.
+Verificado abierto el 2026-09-01 en `adaa4ff`. Los tres primeros de esta lista están **cerrados**;
+lo que sigue es lo que queda.
 
-1. **El CSV del recorrido ignora los filtros.** `exportCsv(list, …)` en vez de `filteredList`:
-   filtras a tres filas y descargas cuatrocientas. El mapa y los contadores de esa pantalla tampoco
-   respetan el filtro.
-2. **La ficha de la incidencia no muestra la gravedad.** Cero menciones de `criticality` en
-   `EventoDetallePage.tsx`. Se llega ahí desde «Obs. crítica» por ser nivel 1 y no se ve el nivel.
-3. **La tabla de incidencias no tiene columna de gravedad ni filtro de prioridad.** Junto con lo
-   anterior, es lo que deja sin salida cualquier aviso: te dice que hay cuatro urgentes, pulsas, y
-   aterrizas donde no se pueden encontrar.
 4. **«N prioritarios» incluye los resueltos** (`ReportGeneralSec.tsx:334`, `list.filter(e =>
    e.priority)` sin `!e.state`).
 5. **El «último evento» de una persona no es el último**: ordena por prioridad antes que por fecha
@@ -52,6 +51,11 @@ Verificado abierto el 2026-08-31 en `2c1f9e1`.
    días en su ficha y 7 en el informe de tiempos.
 8. **El mapa del recorrido usa un rojo que no está en su leyenda** e indistinguible del que sí
    significa «crítica».
+9. **En el recorrido, el mapa y los contadores de arriba siguen sin filtrar.** No se arregló con el
+   CSV a propósito: los filtros viven dentro de la tarjeta «Eventos del Tramo», y el mapa es otra
+   tarjeta, encima. Hacer que el mapa obedezca a unos controles que están debajo de él es peor que
+   dejarlo; el arreglo de verdad es subir los filtros al nivel de la pantalla, y eso cambia la
+   distribución. **Decisión de Isaias, no bug.**
 
 ## Abierto — zona de otras sesiones
 
@@ -84,6 +88,13 @@ Y el **gráfico de Actividad**, en `HALLAZGO-GRAFICO-ACTIVIDAD.md`.
    ocurrió el evento, solo un enlace al catálogo. Bajar un nivel —desplegable de un clic, sin
    confirmación— deja de considerar críticos cientos de eventos históricos y hace irreproducible un
    informe ya entregado. Archivar una observación tiene el mismo efecto.
+
+   **Y ya hay dos respuestas distintas conviviendo.** El filtro nuevo de la tabla de incidencias
+   **sí** cuenta las observaciones archivadas, porque el listado las muestra y un filtro que
+   escondiera lo que su propia columna pinta haría que la pantalla se contradijera sola. El
+   generador de informes **no** las cuenta. No es un descuido: es la misma decisión sin tomar,
+   asomando en dos sitios. Cuando se decida, se cambian los dos a la vez —
+   `evento.controller.ts` y `reportBuilder/catalog.ts`, ambos con el comentario puesto.
 5. **Las reglas que la base nunca tuvo**: estado no nulo con valor por defecto, fecha no futura,
    gravedad entre 1 y 9, y una sola solución viva por evento. Cambio de esquema en producción.
 6. **Las fotografías se sirven sin autenticación.** En parte deliberado; debe ser decisión escrita.

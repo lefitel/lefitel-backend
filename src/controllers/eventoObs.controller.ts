@@ -8,7 +8,11 @@ export async function getEventoObs(req: Request, res: Response) {
     const TempEventoObs = await EventoObsModel.findAll({
       where: { id_evento },
       order: [["id", "DESC"]],
-      include: [{ model: ObsModel, paranoid: false, attributes: ["id", "name"] }],
+      // This feeds the event detail screen's observation chips. Sending the name
+      // without `criticality` is why that screen showed no severity at all: you
+      // could arrive there from a "crítica" alert and read nothing about how
+      // bad it is.
+      include: [{ model: ObsModel, paranoid: false, attributes: ["id", "name", "criticality"] }],
     });
     res.status(200).json(TempEventoObs);
   } catch (error) {
