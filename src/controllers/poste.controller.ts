@@ -12,7 +12,13 @@ import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 
-export async function getPoste(req: Request, res: Response) {
+import { log } from "../utils/logger.js";
+import { makeHandler } from "../utils/handler.js";
+
+const posteLog = log("poste");
+const handler = makeHandler(posteLog);
+
+export const getPoste = handler("getPoste", async (req: Request, res: Response) => {
   const { ciudadA, ciudadB, ciudadId, archived, page, limit, filterColumn, filterValue, export: isExport, sortBy, sortOrder } = req.query;
   const isArchived = archived === "true";
 
@@ -65,247 +71,223 @@ export async function getPoste(req: Request, res: Response) {
     ],
   };
 
-  try {
-    if (isExport === "true") {
-      const data = await PosteModel.findAll(queryOptions);
-      return res.status(200).json(data);
-    }
-
-    const pageNum = Math.max(1, Number(page) || 1);
-    const limitNum = Math.min(100, Math.max(15, Number(limit) || 50));
-    const offset = (pageNum - 1) * limitNum;
-
-    const { count, rows } = await PosteModel.findAndCountAll({
-      ...queryOptions,
-      limit: limitNum,
-      offset,
-    });
-
-    return res.status(200).json({
-      data: rows,
-      total: count,
-      page: pageNum,
-      totalPages: Math.ceil(count / limitNum),
-      limit: limitNum,
-    });
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
+  if (isExport === "true") {
+    const data = await PosteModel.findAll(queryOptions);
+    return res.status(200).json(data);
   }
-}
 
-export async function getTramos(_req: Request, res: Response) {
-  try {
-    const rows = await PosteModel.findAll({
-      attributes: ["id_ciudadA", "id_ciudadB"],
-      group: ["id_ciudadA", "id_ciudadB"],
-      raw: true,
-    }) as unknown as { id_ciudadA: number; id_ciudadB: number }[];
-    // Tramos bidireccionales: dedup (a,b) y (b,a) usando min/max como clave.
-    const seen = new Set<string>();
-    const result: { id_ciudadA: number; id_ciudadB: number }[] = [];
-    for (const { id_ciudadA, id_ciudadB } of rows) {
-      const minId = Math.min(id_ciudadA, id_ciudadB);
-      const maxId = Math.max(id_ciudadA, id_ciudadB);
-      const key = `${minId}-${maxId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      result.push({ id_ciudadA: minId, id_ciudadB: maxId });
-    }
-    return res.status(200).json(result);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
+  const pageNum = Math.max(1, Number(page) || 1);
+  const limitNum = Math.min(100, Math.max(15, Number(limit) || 50));
+  const offset = (pageNum - 1) * limitNum;
+
+  const { count, rows } = await PosteModel.findAndCountAll({
+    ...queryOptions,
+    limit: limitNum,
+    offset,
+  });
+
+  return res.status(200).json({
+    data: rows,
+    total: count,
+    page: pageNum,
+    totalPages: Math.ceil(count / limitNum),
+    limit: limitNum,
+  });
+});
+
+export const getTramos = handler("getTramos", async (_req: Request, res: Response) => {
+  const rows = await PosteModel.findAll({
+    attributes: ["id_ciudadA", "id_ciudadB"],
+    group: ["id_ciudadA", "id_ciudadB"],
+    raw: true,
+  }) as unknown as { id_ciudadA: number; id_ciudadB: number }[];
+  // Tramos bidireccionales: dedup (a,b) y (b,a) usando min/max como clave.
+  const seen = new Set<string>();
+  const result: { id_ciudadA: number; id_ciudadB: number }[] = [];
+  for (const { id_ciudadA, id_ciudadB } of rows) {
+    const minId = Math.min(id_ciudadA, id_ciudadB);
+    const maxId = Math.max(id_ciudadA, id_ciudadB);
+    const key = `${minId}-${maxId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ id_ciudadA: minId, id_ciudadB: maxId });
   }
-}
+  return res.status(200).json(result);
+});
 
-export async function createPoste(req: Request, res: Response) {
-  try {
-    const { adss_ids, ...posteBody } = req.body;
-    const TempPoste = await sequelize.transaction(async (t) => {
-      // Same as evento: the author is the session, not a field of the body.
-      const poste = await PosteModel.create(authoredBy(posteBody, req), { transaction: t });
-      const posteId = poste.dataValues.id as number;
-      if (Array.isArray(adss_ids) && adss_ids.length > 0) {
-        await Promise.all(
-          (adss_ids as number[]).map((id_adss) =>
-             
-            AdssPosteModel.create({ id_adss, id_poste: posteId }, { transaction: t })
-          )
-        );
-      }
-      return poste;
-    });
-    const posteId = TempPoste.dataValues.id as number;
-
-    let adssLabel: string | null = null;
+export const createPoste = handler("createPoste", async (req: Request, res: Response) => {
+  const { adss_ids, ...posteBody } = req.body;
+  const TempPoste = await sequelize.transaction(async (t) => {
+    // Same as evento: the author is the session, not a field of the body.
+    const poste = await PosteModel.create(authoredBy(posteBody, req), { transaction: t });
+    const posteId = poste.dataValues.id as number;
     if (Array.isArray(adss_ids) && adss_ids.length > 0) {
-       
-      const adssRows = await AdssModel.findAll({
-        where: { id: adss_ids },
-        attributes: ["name"],
-        paranoid: false,
-      });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      adssLabel = adssRows.map((r: any) => r.dataValues.name).join(", ") || null;
+      await Promise.all(
+        (adss_ids as number[]).map((id_adss) =>
+           
+          AdssPosteModel.create({ id_adss, id_poste: posteId }, { transaction: t })
+        )
+      );
     }
+    return poste;
+  });
+  const posteId = TempPoste.dataValues.id as number;
 
+  let adssLabel: string | null = null;
+  if (Array.isArray(adss_ids) && adss_ids.length > 0) {
+     
+    const adssRows = await AdssModel.findAll({
+      where: { id: adss_ids },
+      attributes: ["name"],
+      paranoid: false,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    adssLabel = adssRows.map((r: any) => r.dataValues.name).join(", ") || null;
+  }
+
+  logAction({
+    id_usuario: req.user?.id,
+    action: "CREATE_POSTE",
+    entity: "Poste",
+    entity_id: posteId,
+    detail: `Registró Poste ${posteBody.name}`,
+    metadata: { after: { name: posteBody.name, ...(adssLabel ? { adss: adssLabel } : {}) } },
+    severity: 'info',
+  });
+  res.status(200).json(TempPoste);
+});
+export const searchPoste = handler("searchPoste", async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  const TempPoste = await PosteModel.findOne({
+    where: { id },
+    include: [
+      { model: MaterialModel, paranoid: false },
+      { model: PropietarioModel, paranoid: false },
+      { model: CiudadModel, as: "ciudadA", paranoid: false },
+      { model: CiudadModel, as: "ciudadB", paranoid: false },
+      // Never the bare model: it would send `pass`. See USUARIO_AS_AUTHOR.
+      { model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] },
+    ],
+  });
+  res.status(200).json(TempPoste);
+});
+export const updatePoste = handler("updatePoste", async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  const TempPoste = await PosteModel.findOne({ where: { id } });
+  if (!TempPoste) return res.status(404).json({ message: "Poste no encontrado" });
+  const oldImage = TempPoste.dataValues.image;
+  const dv = TempPoste.dataValues as unknown as Record<string, unknown>;
+
+  const { adss_ids, ...bodyWithoutAdss } = req.body;
+
+  const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
+  // The diff below is computed from what will actually be written, not from
+  // what arrived. `withoutAuthor` refuses `id_usuario` at the write, and a log
+  // that records the refused change is worse than no log at all: the bitácora is
+  // the one place a reader goes to find out who reassigned a row.
+  const editable = withoutAuthor(bodyWithoutAdss);
+  const fkKeys = new Set(["id_propietario", "id_material", "id_ciudadA", "id_ciudadB"]);
+  const beforeMeta: Record<string, unknown> = {};
+  const afterMeta:  Record<string, unknown> = {};
+
+  for (const k of Object.keys(editable)) {
+    const bv = dv[k];
+    if (bv === undefined || fkKeys.has(k)) continue;
+    if (isPrimVal(bv) && isPrimVal(editable[k])) { beforeMeta[k] = bv; afterMeta[k] = editable[k]; }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fkRef = async (Model: any, pkVal: number | null | undefined) => {
+    if (pkVal == null) return null;
+    const row = await Model.findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
+    return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
+  };
+  await Promise.all((
+    [["id_propietario", PropietarioModel], ["id_material", MaterialModel], ["id_ciudadA", CiudadModel], ["id_ciudadB", CiudadModel]] as [string, unknown][]
+  ).map(async ([k, Model]) => {
+    const bv = dv[k] as number | null | undefined;
+    const av = editable[k] as number | null | undefined;
+    // Only when the request actually carries the key. A partial update that
+    // omits it leaves the column untouched, but this recorded
+    // `after: {id_propietario: null}` — a change nobody asked for, written into
+    // the audit log as if it had happened. Same guard `updateEvento` has.
+    if (!Object.hasOwn(editable, k) || bv === undefined || bv === av) return;
+    [beforeMeta[k], afterMeta[k]] = await Promise.all([fkRef(Model, bv), fkRef(Model, av)]);
+  }));
+
+  let adssLogData: { before: string | null; after: string | null } | null = null;
+
+  await sequelize.transaction(async (t) => {
+    TempPoste.set(editable);
+    await TempPoste.save({ transaction: t });
+
+    if (Array.isArray(adss_ids)) {
+       
+      const currentAdssPoste = await AdssPosteModel.findAll({ where: { id_poste: id }, transaction: t });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const currentIds = currentAdssPoste.map((a: any) => a.dataValues.id_adss as number);
+      const toAdd = (adss_ids as number[]).filter((aid) => !currentIds.includes(aid));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const toRemove = currentAdssPoste.filter((a: any) => !(adss_ids as number[]).includes(a.dataValues.id_adss as number));
+
+      if (toAdd.length > 0 || toRemove.length > 0) {
+        const allIds = [...new Set([...currentIds, ...(adss_ids as number[])])];
+         
+        const allRows = await AdssModel.findAll({ where: { id: allIds }, attributes: ["id", "name"], paranoid: false, transaction: t });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const nameMap = new Map(allRows.map((r: any) => [r.dataValues.id as number, r.dataValues.name as string]));
+        const beforeAdss = currentIds.map((aid: number) => nameMap.get(aid)).filter(Boolean).join(", ");
+        const afterAdss = (adss_ids as number[]).map((aid) => nameMap.get(aid)).filter(Boolean).join(", ");
+
+        await Promise.all([
+           
+          ...toAdd.map((id_adss: number) => AdssPosteModel.create({ id_adss, id_poste: Number(id) }, { transaction: t })),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ...toRemove.map((a: any) => a.destroy({ transaction: t })),
+        ]);
+
+        adssLogData = { before: beforeAdss || null, after: afterAdss || null };
+      }
+    }
+  });
+
+  // Still `bodyWithoutAdss` and not `editable`, and they are the same thing
+  // here: `withoutAuthor` drops id/createdAt/updatedAt/deletedAt/id_usuario and
+  // never `image`. Said out loud because the day `image` joins that list, this
+  // line would delete the old file while the write refused the new one.
+  if (oldImage && bodyWithoutAdss.image && oldImage !== bodyWithoutAdss.image) {
+    deleteImageFile(oldImage);
+  }
+  if (Object.keys(beforeMeta).some(k => beforeMeta[k] !== afterMeta[k])) {
+    logAction({ id_usuario: req.user?.id, action: "UPDATE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Editó Poste #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
+  }
+  if (adssLogData) {
     logAction({
       id_usuario: req.user?.id,
-      action: "CREATE_POSTE",
+      action: "UPDATE_ADSS_POSTE",
       entity: "Poste",
-      entity_id: posteId,
-      detail: `Registró Poste ${posteBody.name}`,
-      metadata: { after: { name: posteBody.name, ...(adssLabel ? { adss: adssLabel } : {}) } },
-      severity: 'info',
+      entity_id: Number(id),
+      detail: `Actualizó ADSS del Poste #${id}`,
+      metadata: { before: { adss: adssLogData.before }, after: { adss: adssLogData.after } },
+      severity: 'warning',
     });
-    res.status(200).json(TempPoste);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
   }
-}
-export async function searchPoste(req: Request, res: Response) {
+
+  res.status(200).json(TempPoste);
+});
+export const deletePoste = handler("deletePoste", async (req: Request, res: Response) => {
   const { id } = req.params;
-  try {
-    const TempPoste = await PosteModel.findOne({
-      where: { id },
-      include: [
-        { model: MaterialModel, paranoid: false },
-        { model: PropietarioModel, paranoid: false },
-        { model: CiudadModel, as: "ciudadA", paranoid: false },
-        { model: CiudadModel, as: "ciudadB", paranoid: false },
-        // Never the bare model: it would send `pass`. See USUARIO_AS_AUTHOR.
-        { model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] },
-      ],
-    });
-    res.status(200).json(TempPoste);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
-export async function updatePoste(req: Request, res: Response) {
+
+  await PosteModel.destroy({ where: { id } });
+  logAction({ id_usuario: req.user?.id, action: "DELETE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Archivó Poste #${id}`, severity: 'critical' });
+  return res.sendStatus(200);
+});
+export const desarchivarPoste = handler("desarchivarPoste", async (req: Request, res: Response) => {
   const { id } = req.params;
-  try {
-    const TempPoste = await PosteModel.findOne({ where: { id } });
-    if (!TempPoste) return res.status(404).json({ message: "Poste no encontrado" });
-    const oldImage = TempPoste.dataValues.image;
-    const dv = TempPoste.dataValues as unknown as Record<string, unknown>;
 
-    const { adss_ids, ...bodyWithoutAdss } = req.body;
-
-    const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
-    // The diff below is computed from what will actually be written, not from
-    // what arrived. `withoutAuthor` refuses `id_usuario` at the write, and a log
-    // that records the refused change is worse than no log at all: the bitácora is
-    // the one place a reader goes to find out who reassigned a row.
-    const editable = withoutAuthor(bodyWithoutAdss);
-    const fkKeys = new Set(["id_propietario", "id_material", "id_ciudadA", "id_ciudadB"]);
-    const beforeMeta: Record<string, unknown> = {};
-    const afterMeta:  Record<string, unknown> = {};
-
-    for (const k of Object.keys(editable)) {
-      const bv = dv[k];
-      if (bv === undefined || fkKeys.has(k)) continue;
-      if (isPrimVal(bv) && isPrimVal(editable[k])) { beforeMeta[k] = bv; afterMeta[k] = editable[k]; }
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const fkRef = async (Model: any, pkVal: number | null | undefined) => {
-      if (pkVal == null) return null;
-      const row = await Model.findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
-      return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
-    };
-    await Promise.all((
-      [["id_propietario", PropietarioModel], ["id_material", MaterialModel], ["id_ciudadA", CiudadModel], ["id_ciudadB", CiudadModel]] as [string, unknown][]
-    ).map(async ([k, Model]) => {
-      const bv = dv[k] as number | null | undefined;
-      const av = editable[k] as number | null | undefined;
-      // Only when the request actually carries the key. A partial update that
-      // omits it leaves the column untouched, but this recorded
-      // `after: {id_propietario: null}` — a change nobody asked for, written into
-      // the audit log as if it had happened. Same guard `updateEvento` has.
-      if (!Object.hasOwn(editable, k) || bv === undefined || bv === av) return;
-      [beforeMeta[k], afterMeta[k]] = await Promise.all([fkRef(Model, bv), fkRef(Model, av)]);
-    }));
-
-    let adssLogData: { before: string | null; after: string | null } | null = null;
-
-    await sequelize.transaction(async (t) => {
-      TempPoste.set(editable);
-      await TempPoste.save({ transaction: t });
-
-      if (Array.isArray(adss_ids)) {
-         
-        const currentAdssPoste = await AdssPosteModel.findAll({ where: { id_poste: id }, transaction: t });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const currentIds = currentAdssPoste.map((a: any) => a.dataValues.id_adss as number);
-        const toAdd = (adss_ids as number[]).filter((aid) => !currentIds.includes(aid));
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toRemove = currentAdssPoste.filter((a: any) => !(adss_ids as number[]).includes(a.dataValues.id_adss as number));
-
-        if (toAdd.length > 0 || toRemove.length > 0) {
-          const allIds = [...new Set([...currentIds, ...(adss_ids as number[])])];
-           
-          const allRows = await AdssModel.findAll({ where: { id: allIds }, attributes: ["id", "name"], paranoid: false, transaction: t });
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const nameMap = new Map(allRows.map((r: any) => [r.dataValues.id as number, r.dataValues.name as string]));
-          const beforeAdss = currentIds.map((aid: number) => nameMap.get(aid)).filter(Boolean).join(", ");
-          const afterAdss = (adss_ids as number[]).map((aid) => nameMap.get(aid)).filter(Boolean).join(", ");
-
-          await Promise.all([
-             
-            ...toAdd.map((id_adss: number) => AdssPosteModel.create({ id_adss, id_poste: Number(id) }, { transaction: t })),
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ...toRemove.map((a: any) => a.destroy({ transaction: t })),
-          ]);
-
-          adssLogData = { before: beforeAdss || null, after: afterAdss || null };
-        }
-      }
-    });
-
-    // Still `bodyWithoutAdss` and not `editable`, and they are the same thing
-    // here: `withoutAuthor` drops id/createdAt/updatedAt/deletedAt/id_usuario and
-    // never `image`. Said out loud because the day `image` joins that list, this
-    // line would delete the old file while the write refused the new one.
-    if (oldImage && bodyWithoutAdss.image && oldImage !== bodyWithoutAdss.image) {
-      deleteImageFile(oldImage);
-    }
-    if (Object.keys(beforeMeta).some(k => beforeMeta[k] !== afterMeta[k])) {
-      logAction({ id_usuario: req.user?.id, action: "UPDATE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Editó Poste #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
-    }
-    if (adssLogData) {
-      logAction({
-        id_usuario: req.user?.id,
-        action: "UPDATE_ADSS_POSTE",
-        entity: "Poste",
-        entity_id: Number(id),
-        detail: `Actualizó ADSS del Poste #${id}`,
-        metadata: { before: { adss: adssLogData.before }, after: { adss: adssLogData.after } },
-        severity: 'warning',
-      });
-    }
-
-    res.status(200).json(TempPoste);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
-export async function deletePoste(req: Request, res: Response) {
-  const { id } = req.params;
-  try {
-    await PosteModel.destroy({ where: { id } });
-    logAction({ id_usuario: req.user?.id, action: "DELETE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Archivó Poste #${id}`, severity: 'critical' });
-    return res.sendStatus(200);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
-export async function desarchivarPoste(req: Request, res: Response) {
-  const { id } = req.params;
-  try {
-    await PosteModel.restore({ where: { id } });
-    logAction({ id_usuario: req.user?.id, action: "RESTORE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Desarchivó Poste #${id}`, severity: 'info' });
-    return res.sendStatus(200);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+  await PosteModel.restore({ where: { id } });
+  logAction({ id_usuario: req.user?.id, action: "RESTORE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Desarchivó Poste #${id}`, severity: 'info' });
+  return res.sendStatus(200);
+});

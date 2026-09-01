@@ -15,6 +15,12 @@ import { BCRYPT_COST } from "../config/security.js";
 import { validarPassword } from "../utils/password.js";
 import { whereUsernameIs } from "../utils/username.js";
 
+import { log } from "../utils/logger.js";
+import { makeHandler } from "../utils/handler.js";
+
+const usuarioLog = log("usuario");
+const handler = makeHandler(usuarioLog);
+
 /** Shared text: whichever endpoint hit this, the fix is the same username. */
 const USERNAME_TAKEN_MESSAGE = "El nombre de usuario ya está tomado por otra persona.";
 
@@ -141,53 +147,41 @@ function isUsernameUniqueViolation(error: unknown): boolean {
   return err.parent?.constraint === "usuarios_user_uniq" || /usuarios_user_uniq/i.test(err.message ?? "");
 }
 
-export async function getUsuario(req: Request, res: Response) {
+export const getUsuario = handler("getUsuario", async (req: Request, res: Response) => {
   const archived = req.query.archived === "true";
-  try {
-    const TempUsuario = await UsuarioModel.findAll({
-      order: [["id", "DESC"]],
-      attributes: { exclude: ["pass"] },
-      include: [{ model: RolModel }],
-      paranoid: !archived,
-      where: archived ? { deletedAt: { [Op.ne]: null } } : {},
-    });
-    res.status(200).json(TempUsuario);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : "Error desconocido";
-    return res.status(500).json({ message: msg });
-  }
-}
-export async function searchUsuario(req: Request, res: Response) {
+
+  const TempUsuario = await UsuarioModel.findAll({
+    order: [["id", "DESC"]],
+    attributes: { exclude: ["pass"] },
+    include: [{ model: RolModel }],
+    paranoid: !archived,
+    where: archived ? { deletedAt: { [Op.ne]: null } } : {},
+  });
+  res.status(200).json(TempUsuario);
+});
+export const searchUsuario = handler("searchUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;
-  try {
-    const TempUsuario = await UsuarioModel.findOne({
-      where: { id },
-      attributes: { exclude: ["pass"] },
-      include: [{ model: RolModel }],
-    });
-    res.status(200).json(TempUsuario);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : "Error desconocido";
-    return res.status(500).json({ message: msg });
-  }
-}
 
-export async function searchUsuario_user(req: Request, res: Response) {
+  const TempUsuario = await UsuarioModel.findOne({
+    where: { id },
+    attributes: { exclude: ["pass"] },
+    include: [{ model: RolModel }],
+  });
+  res.status(200).json(TempUsuario);
+});
+
+export const searchUsuario_user = handler("searchUsuario_user", async (req: Request, res: Response) => {
   const { user } = req.params;
-  try {
-    const TempUsuario = await UsuarioModel.findOne({
-      where: { user },
-      attributes: { exclude: ["pass"] },
-    });
-    if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
-    res.status(200).json(TempUsuario);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : "Error desconocido";
-    return res.status(500).json({ message: msg });
-  }
-}
 
-export async function createUsuario(req: Request, res: Response) {
+  const TempUsuario = await UsuarioModel.findOne({
+    where: { user },
+    attributes: { exclude: ["pass"] },
+  });
+  if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
+  res.status(200).json(TempUsuario);
+});
+
+export const createUsuario = handler("createUsuario", async (req: Request, res: Response) => {
   // The route already asks the same question. Asked again here so the rule
   // travels with the handler rather than with wherever it happens to be mounted.
   if (!(await can(req.user?.id_rol, "seguridad", "crear"))) {
@@ -264,9 +258,12 @@ export async function createUsuario(req: Request, res: Response) {
     if (isUsernameUniqueViolation(error)) {
       return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
     }
-    return res.status(500).json({ message: error.message });
+    // Anything that is not the name clash goes up to `handler`, which files it
+    // under this controller's log with the route attached and answers a neutral
+    // 500. It used to be sent to the browser verbatim.
+    throw error;
   }
-}
+});
 /**
  * The fields a request may change about a user through `PUT /usuario/:id`.
  *
@@ -346,7 +343,7 @@ function withoutPass(instance: { toJSON(): unknown }): Record<string, unknown> {
   return plain;
 }
 
-export async function updateUsuario(req: Request, res: Response) {
+export const updateUsuario = handler("updateUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;
   const loggedUser = req.user;
 
@@ -361,56 +358,52 @@ export async function updateUsuario(req: Request, res: Response) {
   // telephone number would also let them promote themselves.
   const mayAssignRoles = await can(loggedUser.id_rol, "roles", "editar");
 
-  try {
-    const TempUsuario = await UsuarioModel.findOne({ where: { id } });
-    if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
+  const TempUsuario = await UsuarioModel.findOne({ where: { id } });
+  if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
 
-    // The profile page sends the whole user object back, its own role included,
-    // so an unchanged id_rol from a non-administrator is ordinary traffic and is
-    // simply dropped by the allowlist. Asking for a *different* one is an
-    // escalation attempt, and that earns a refusal and a line in the bitácora.
-    const requestedRol = (req.body as Record<string, unknown> | undefined)?.id_rol;
-    if (!mayAssignRoles && requestedRol !== undefined && Number(requestedRol) !== TempUsuario.dataValues.id_rol) {
-      logAction({ id_usuario: loggedUser.id, action: "ROLE_CHANGE_DENIED", entity: "Usuario", entity_id: Number(id), detail: `Intentó cambiar el rol del usuario #${id} sin permiso sobre Roles`, metadata: { from: TempUsuario.dataValues.id_rol, requested: requestedRol }, severity: 'critical', ip_address: req.ip ?? null });
-      return res.status(403).json({ message: "Solo un administrador puede cambiar el rol de un usuario." });
-    }
-
-    const patch = editableFrom(req.body, mayAssignRoles);
-    const oldImage = TempUsuario.dataValues.image;
-    const udv = TempUsuario.dataValues as unknown as Record<string, unknown>;
-    const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
-    const beforeMeta: Record<string, unknown> = {};
-    const afterMeta:  Record<string, unknown> = {};
-    for (const k of Object.keys(patch)) {
-      const bv = udv[k];
-      if (bv === undefined || k === "id_rol") continue;
-      if (isPrimVal(bv) && isPrimVal(patch[k])) { beforeMeta[k] = bv; afterMeta[k] = patch[k]; }
-    }
-    const bvRol = udv["id_rol"] as number | null | undefined;
-    const avRol = patch["id_rol"] as number | null | undefined;
-    // Only when the role is actually part of the write. Reading it off the raw
-    // body meant a request that never mentioned id_rol still logged a change
-    // "to null".
-    if ("id_rol" in patch && bvRol !== avRol) {
-      const fkRef = async (pkVal: number | null | undefined) => {
-        if (pkVal == null) return null;
-        const row = await RolModel.findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
-        return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
-      };
-      [beforeMeta["id_rol"], afterMeta["id_rol"]] = await Promise.all([fkRef(bvRol), fkRef(avRol)]);
-    }
-    TempUsuario.set(patch);
-    await TempUsuario.save();
-    if (oldImage && patch.image && oldImage !== patch.image) {
-      deleteImageFile(oldImage);
-    }
-    logAction({ id_usuario: req.user?.id, action: "UPDATE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Editó perfil del usuario #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
-    res.status(200).json(withoutPass(TempUsuario));
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
+  // The profile page sends the whole user object back, its own role included,
+  // so an unchanged id_rol from a non-administrator is ordinary traffic and is
+  // simply dropped by the allowlist. Asking for a *different* one is an
+  // escalation attempt, and that earns a refusal and a line in the bitácora.
+  const requestedRol = (req.body as Record<string, unknown> | undefined)?.id_rol;
+  if (!mayAssignRoles && requestedRol !== undefined && Number(requestedRol) !== TempUsuario.dataValues.id_rol) {
+    logAction({ id_usuario: loggedUser.id, action: "ROLE_CHANGE_DENIED", entity: "Usuario", entity_id: Number(id), detail: `Intentó cambiar el rol del usuario #${id} sin permiso sobre Roles`, metadata: { from: TempUsuario.dataValues.id_rol, requested: requestedRol }, severity: 'critical', ip_address: req.ip ?? null });
+    return res.status(403).json({ message: "Solo un administrador puede cambiar el rol de un usuario." });
   }
-}
-export async function updateUserName(req: Request, res: Response) {
+
+  const patch = editableFrom(req.body, mayAssignRoles);
+  const oldImage = TempUsuario.dataValues.image;
+  const udv = TempUsuario.dataValues as unknown as Record<string, unknown>;
+  const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
+  const beforeMeta: Record<string, unknown> = {};
+  const afterMeta:  Record<string, unknown> = {};
+  for (const k of Object.keys(patch)) {
+    const bv = udv[k];
+    if (bv === undefined || k === "id_rol") continue;
+    if (isPrimVal(bv) && isPrimVal(patch[k])) { beforeMeta[k] = bv; afterMeta[k] = patch[k]; }
+  }
+  const bvRol = udv["id_rol"] as number | null | undefined;
+  const avRol = patch["id_rol"] as number | null | undefined;
+  // Only when the role is actually part of the write. Reading it off the raw
+  // body meant a request that never mentioned id_rol still logged a change
+  // "to null".
+  if ("id_rol" in patch && bvRol !== avRol) {
+    const fkRef = async (pkVal: number | null | undefined) => {
+      if (pkVal == null) return null;
+      const row = await RolModel.findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
+      return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
+    };
+    [beforeMeta["id_rol"], afterMeta["id_rol"]] = await Promise.all([fkRef(bvRol), fkRef(avRol)]);
+  }
+  TempUsuario.set(patch);
+  await TempUsuario.save();
+  if (oldImage && patch.image && oldImage !== patch.image) {
+    deleteImageFile(oldImage);
+  }
+  logAction({ id_usuario: req.user?.id, action: "UPDATE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Editó perfil del usuario #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
+  res.status(200).json(withoutPass(TempUsuario));
+});
+export const updateUserName = handler("updateUserName", async (req: Request, res: Response) => {
   const { id } = req.params;
   const user = typeof req.body?.user === "string" ? req.body.user.trim() : req.body?.user;
   const loggedUser = req.user;
@@ -539,11 +532,14 @@ export async function updateUserName(req: Request, res: Response) {
     if (isUsernameUniqueViolation(error)) {
       return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
     }
-    return res.status(500).json({ message: error.message });
+    // Anything that is not the name clash goes up to `handler`, which files it
+    // under this controller's log with the route attached and answers a neutral
+    // 500. It used to be sent to the browser verbatim.
+    throw error;
   }
-}
+});
 
-export async function updateUserPass(req: Request, res: Response) {
+export const updateUserPass = handler("updateUserPass", async (req: Request, res: Response) => {
   const { id } = req.params;
   const { pass, oldPass } = req.body;
   const loggedUser = req.user;
@@ -554,322 +550,315 @@ export async function updateUserPass(req: Request, res: Response) {
     return res.status(403).json({ message: "No tienes permiso para editar la contraseña de este usuario." });
   }
 
-  try {
-    const TempUsuario = await UsuarioModel.findOne({
-      where: { id },
-    });
-    if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
+  const TempUsuario = await UsuarioModel.findOne({
+    where: { id },
+  });
+  if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
 
-    /**
-     * Changing your own password proves it is you. The exemption is for
-     * changing somebody else's.
-     *
-     * **What this replaced, and it was the worst hole of this plan.** The
-     * condition read `if (oldPass) { compare } else if (!mayResetPasswords)
-     * { refuse }` — it looked at the *permission* and never at *whose account
-     * it is*. So anybody holding `seguridad.editar` could change **their own**
-     * password without knowing the current one. The unattended machine with an
-     * administrator's session open: whoever sits down sets a new password,
-     * their own session survives (`isSelf` spares it below) and every other
-     * session of that account ends in the same write — so the owner is locked
-     * out of their own account behind a password only the attacker knows. The
-     * revocation is right and stays; it is what makes this the whole account
-     * rather than an inconvenience.
-     *
-     * **Who has to pass it** is `requiresOwnPassword`, the same function the
-     * rename above branches on and the rate limit in `usuario.routes.ts` reads.
-     * The reasoning lives with it. Short version: an administrator resetting
-     * *somebody else's* password still sends nothing, because that is what the
-     * permission authorises and there is no password they could know.
-     *
-     * **`bcryptjs.compare` here, and not the shared `verifyOwnPassword` the
-     * rename uses.** Two ways of comparing a password in one file needs a
-     * reason, and the reason has changed — which is worth saying, because the
-     * one written here first was the load-bearing one and it is gone.
-     *
-     * It was the lockout. The shared door refused a resting account before it
-     * compared anything, and that is exactly wrong for this handler, where
-     * lifting the lockout is the *point* — see the write below. So this compared
-     * its own hash to stay out of the way of it. That refusal turned out to be
-     * wrong for the **rename** too, for the same reason and with worse
-     * consequences, and it is now a named policy rather than a fact about the
-     * shared door: see `LockoutPolicy` in `auth/credentials.ts`. Both doors leave
-     * the lockout to the login, so this handler could go through the shared one
-     * today without breaking the rescue.
-     *
-     * What keeps them separate now is only the wasted work, and it is enough to
-     * leave alone rather than enough to have chosen. The shared door reads the
-     * row again by id — this handler is holding it already, forty lines above.
-     * Its filler hash levels the timing of a lookup *by username*, to stop
-     * enumeration; there is no name in this request to probe with, and "no such
-     * account" was answered as a 404 above. And its success path re-hashes at
-     * the current cost and clears the two lockout columns — both of which the
-     * write below is about to do anyway, inside a transaction, so borrowing them
-     * would buy a second bcrypt (~250 ms on every password change) and two
-     * UPDATEs whose results are immediately overwritten.
-     *
-     * What is worth borrowing is the bitácora line, and it is taken: the same
-     * action name `verifyOwnPassword` writes, so a run of failed confirmations
-     * on one account reads as one event whichever door it arrived at. Without
-     * it the 429 from the budget below would have nothing behind it explaining
-     * why.
-     *
-     * A wrong password here does **not** move `failed_attempts`, matching the
-     * rename and for the same reason: mistyping your current password while
-     * changing it must not be able to shut you out of the ERP. What stops that
-     * from being an unlimited oracle is `passwordConfirmLimiter` on the route —
-     * which this endpoint had never had, while it was already comparing
-     * passwords with nothing counting them at all.
-     *
-     * An `oldPass` that arrives on a change to **somebody else's** account is
-     * ignored rather than compared, which is new. Compared, it was checked
-     * against the *target's* hash — an unlimited 401-or-not oracle against
-     * another person's password, for a caller who can reset it outright anyway
-     * and would learn the plaintext by guessing. Nothing is given up: the
-     * permission is what authorises that request, with or without a password on
-     * it.
-     */
-    if (requiresOwnPassword(req)) {
-      // Not a string is not a password and an empty one is not a confirmation,
-      // refused the same way the rename refuses them so the two cannot disagree
-      // about what counts as "sent nothing". The old `if (oldPass)` treated
-      // every falsy value as "did not send one" and fell through to the
-      // permission, which is the shape the hole above had.
-      if (typeof oldPass !== "string" || oldPass === "") {
-        return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
-      }
-      const isMatch = await bcryptjs.compare(oldPass, TempUsuario.dataValues.pass);
-      if (!isMatch) {
-        logAction({ id_usuario: loggedUser.id, action: "PASSWORD_CONFIRM_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: `Contraseña incorrecta al cambiar la contraseña de @${TempUsuario.dataValues.user}`, metadata: { user: TempUsuario.dataValues.user }, severity: 'warning', ip_address: req.ip ?? null });
-        return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
-      }
+  /**
+   * Changing your own password proves it is you. The exemption is for
+   * changing somebody else's.
+   *
+   * **What this replaced, and it was the worst hole of this plan.** The
+   * condition read `if (oldPass) { compare } else if (!mayResetPasswords)
+   * { refuse }` — it looked at the *permission* and never at *whose account
+   * it is*. So anybody holding `seguridad.editar` could change **their own**
+   * password without knowing the current one. The unattended machine with an
+   * administrator's session open: whoever sits down sets a new password,
+   * their own session survives (`isSelf` spares it below) and every other
+   * session of that account ends in the same write — so the owner is locked
+   * out of their own account behind a password only the attacker knows. The
+   * revocation is right and stays; it is what makes this the whole account
+   * rather than an inconvenience.
+   *
+   * **Who has to pass it** is `requiresOwnPassword`, the same function the
+   * rename above branches on and the rate limit in `usuario.routes.ts` reads.
+   * The reasoning lives with it. Short version: an administrator resetting
+   * *somebody else's* password still sends nothing, because that is what the
+   * permission authorises and there is no password they could know.
+   *
+   * **`bcryptjs.compare` here, and not the shared `verifyOwnPassword` the
+   * rename uses.** Two ways of comparing a password in one file needs a
+   * reason, and the reason has changed — which is worth saying, because the
+   * one written here first was the load-bearing one and it is gone.
+   *
+   * It was the lockout. The shared door refused a resting account before it
+   * compared anything, and that is exactly wrong for this handler, where
+   * lifting the lockout is the *point* — see the write below. So this compared
+   * its own hash to stay out of the way of it. That refusal turned out to be
+   * wrong for the **rename** too, for the same reason and with worse
+   * consequences, and it is now a named policy rather than a fact about the
+   * shared door: see `LockoutPolicy` in `auth/credentials.ts`. Both doors leave
+   * the lockout to the login, so this handler could go through the shared one
+   * today without breaking the rescue.
+   *
+   * What keeps them separate now is only the wasted work, and it is enough to
+   * leave alone rather than enough to have chosen. The shared door reads the
+   * row again by id — this handler is holding it already, forty lines above.
+   * Its filler hash levels the timing of a lookup *by username*, to stop
+   * enumeration; there is no name in this request to probe with, and "no such
+   * account" was answered as a 404 above. And its success path re-hashes at
+   * the current cost and clears the two lockout columns — both of which the
+   * write below is about to do anyway, inside a transaction, so borrowing them
+   * would buy a second bcrypt (~250 ms on every password change) and two
+   * UPDATEs whose results are immediately overwritten.
+   *
+   * What is worth borrowing is the bitácora line, and it is taken: the same
+   * action name `verifyOwnPassword` writes, so a run of failed confirmations
+   * on one account reads as one event whichever door it arrived at. Without
+   * it the 429 from the budget below would have nothing behind it explaining
+   * why.
+   *
+   * A wrong password here does **not** move `failed_attempts`, matching the
+   * rename and for the same reason: mistyping your current password while
+   * changing it must not be able to shut you out of the ERP. What stops that
+   * from being an unlimited oracle is `passwordConfirmLimiter` on the route —
+   * which this endpoint had never had, while it was already comparing
+   * passwords with nothing counting them at all.
+   *
+   * An `oldPass` that arrives on a change to **somebody else's** account is
+   * ignored rather than compared, which is new. Compared, it was checked
+   * against the *target's* hash — an unlimited 401-or-not oracle against
+   * another person's password, for a caller who can reset it outright anyway
+   * and would learn the plaintext by guessing. Nothing is given up: the
+   * permission is what authorises that request, with or without a password on
+   * it.
+   */
+  if (requiresOwnPassword(req)) {
+    // Not a string is not a password and an empty one is not a confirmation,
+    // refused the same way the rename refuses them so the two cannot disagree
+    // about what counts as "sent nothing". The old `if (oldPass)` treated
+    // every falsy value as "did not send one" and fell through to the
+    // permission, which is the shape the hole above had.
+    if (typeof oldPass !== "string" || oldPass === "") {
+      return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
     }
-
-    const motivo = validarPassword(pass ?? "");
-    if (motivo) return res.status(400).json({ message: motivo });
-
-    const hashedPass = await bcryptjs.hash(pass, BCRYPT_COST);
-    /**
-     * A new password lifts the lockout, in the same write.
-     *
-     * The lockout had no way out at all. `failed_attempts` is only ever cleared
-     * by a successful login, and a successful login is impossible while the
-     * account is locked, because the login answers before it compares anything.
-     * So the count only ever grew: five wrong guesses, wait out the minute, send
-     * one more, and from the fourth round on the wait pins itself at
-     * LOCKOUT_MAX_MINUTES. From there one request every quarter of an hour keeps
-     * the account shut indefinitely, from a single address, without coming near
-     * any rate-limit bucket. The only remedy was an UPDATE by hand in Postgres.
-     *
-     * And the everyday half of the same problem: an administrator resets a
-     * password precisely because somebody cannot get in. Leaving the lock on
-     * meant dictating the new password and having the login still answer
-     * "Usuario o contraseña incorrectos" for up to fifteen minutes, with neither
-     * of them able to tell that apart from having heard it wrong.
-     */
-    TempUsuario.set({
-      pass: hashedPass,
-      failed_attempts: 0,
-      locked_until: null,
-      // The stamp `authenticate` measures every session against, in the same
-      // `set` as the hash so there is no ordering in which the password is the
-      // new one and the stamp still names the old.
-      pass_changed_at: new Date(),
-    });
-
-    const isSelf = loggedUser.id === Number(id);
-    /**
-     * A new password ends the old sessions, which until now it did not.
-     *
-     * Changing a password — the thing you do *because* somebody else may know
-     * the old one — left every browser that knew it logged in, for up to thirty
-     * days. An administrator resetting the password of a leaver was doing
-     * nothing whatsoever to the laptop in their bag. The belt over these
-     * braces is `usuarios.pass_changed_at`, stamped in the `set` above:
-     * `authenticate` refuses any session opened before it, so an endpoint that
-     * changes a password and forgets to revoke still cannot leave a live
-     * session behind it.
-     *
-     * **Nothing is spared here, and that is a change.** This used to pass
-     * `except: isSelf ? loggedUser.id_sesion : undefined`, keeping the caller's
-     * own session alive — because otherwise changing your own password answers
-     * 200 and then refuses your very next request, which reads as the change
-     * having failed and invites doing it again. That reasoning was right and
-     * the problem it names is real; what replaced it is the rotation below.
-     *
-     * Sparing a row and stamping the column cannot both be true. The spared
-     * session was opened on Tuesday, the stamp says Thursday, and
-     * `authenticate` reads Tuesday < Thursday and answers 401 — so the
-     * exception would have gone on being written here while being dead in
-     * fact, and no test of it would have noticed, because the thing killing it
-     * lives in another file.
-     *
-     * Of the ways to reconcile the two, rotating is the only one that does not
-     * buy the exception back in some other currency. Moving the spared
-     * session's `created_at` forward would corrupt the anchor of the thirty-day
-     * ceiling — change your password every twenty-nine days and the session
-     * never dies, which is a worse hole than the one being closed. A column
-     * recording that one session had acknowledged the change would be a column
-     * whose only job is to punch a hole in the rule this whole mechanism is.
-     * Simply logging the caller out is the UX failure the paragraph above
-     * describes. **The rule in `authenticate` is worth having precisely because
-     * it has no exceptions**, and rotation is what keeps that true.
-     *
-     * Both writes in one transaction, for the same reason `deleteUsuario` uses
-     * one, and the failure it prevents is nastier than it looks. Saved outside a
-     * transaction, a revocation that fails leaves the password **already
-     * changed** and answers 500 — and the retry does not repair it, it makes it
-     * worse: the form sends the same `oldPass`, which no longer matches the
-     * stored hash, so the second attempt answers 401 "La contraseña actual
-     * suministrada no es correcta". Ana changes her password because she thinks
-     * somebody knows it, the UPDATE on `sesiones` loses a lock race against the
-     * `touchSession` writes of a running export, and she is told her current
-     * password is wrong — while it has in fact changed and her old sessions are
-     * still alive for a week. It does not take the database being down; it
-     * takes one lock conflict on a table every request writes to.
-     */
-    const { sesiones: revocadas, dispositivos } = await sequelize.transaction(async (transaction) => {
-      await TempUsuario.save({ transaction });
-      const sesiones = await revokeAllSessionsOf(Number(id), { transaction });
-      /**
-       * A remembered device is a cookie that skips the *next* login's second
-       * factor entirely — read before there is any session for `authenticate`
-       * to refuse. Revoking every session while leaving that cookie standing
-       * would still let whoever this password change was meant to shut out
-       * straight back in, unchallenged, on the very next login. Same finding
-       * as `deleteUsuario`'s own archive below, one call site later than it.
-       *
-       * **Inside this transaction, and that is a different answer than the
-       * one a few lines down.** The rotation that follows this whole block —
-       * `issueSession`, for `isSelf` — deliberately runs *after* this
-       * transaction commits and swallows its own failure, because by then the
-       * password is already saved and a 500 there would send the caller into
-       * a retry with an `oldPass` that no longer matches. None of that
-       * applies here: this transaction has not committed anything yet, so a
-       * failure rolls the hash and the session revocation back with it. The
-       * caller's current password is still the one they just typed, a 500 is
-       * an honest description of "nothing changed", and a retry costs them
-       * nothing extra. Answering 200 with a password changed and a device
-       * still able to skip the factor would be the worse of the two ways to
-       * get this wrong — the one that looks like success.
-       */
-      const dispositivos = await revokeAllRememberedDevicesOf(Number(id), { transaction });
-      return { sesiones, dispositivos };
-    });
-
-    /**
-     * The replacement credential, for the caller only, and never at the cost of
-     * the answer.
-     *
-     * **Outside the transaction on purpose.** `createSession` takes no
-     * transaction, and the atomicity that matters is the pair above — a
-     * password changed with its old sessions still alive is the hole; a
-     * password changed with no new cookie is somebody logging in again.
-     *
-     * **The catch is load-bearing and must not become a rethrow.** By this line
-     * the password is committed. Answering 500 says "it did not work", and the
-     * retry sends the same `oldPass` against a hash that has already changed —
-     * so the second attempt answers "La contraseña actual suministrada no es
-     * correcta" about a change that succeeded. Swallowing this costs the caller
-     * their cookie and nothing else: they log in again, with the new password,
-     * and it works.
-     *
-     * **`mfa_satisfied_at` does not come across, and that is the point rather
-     * than an oversight to tidy up later.** The new row starts with no step-up
-     * proof, so a factor proved a minute ago has to be proved again for the
-     * next protected write. Changing a password is not evidence of possessing a
-     * second factor — it is evidence of knowing the password, which is what the
-     * new session has proved and all it has proved. Carrying the old proof
-     * across would mean a stolen session that also knows the password could
-     * refresh itself into a step-up-authorised session indefinitely, without
-     * ever touching a factor.
-     *
-     * **A request already in flight across this rotation gets 401, by design.**
-     * Anything the page fired before this response landed authenticates against
-     * a row that is now revoked, and the window is real rather than theoretical:
-     * it runs from the commit to the response arriving, with two bcrypt
-     * operations sitting in front of it. The old `except` spared exactly that
-     * case, and giving it up is the price of the rule having no exceptions —
-     * paid deliberately, not overlooked. The client's part is to retry such a
-     * request once rather than treat the 401 as the end of the session; the new
-     * cookie is already on the response that raced it.
-     *
-     * `estado` **is** carried across, from the session making the request.
-     * Today only `completa` can reach this route at all — `sessionState.ts`
-     * opens nothing outside `/api/auth/*` to the other two — so a literal
-     * `"completa"` would behave identically and would be a silent promotion the
-     * day that allowlist widens.
-     */
-    if (isSelf) {
-      try {
-        await issueSession(req, res, loggedUser.id, loggedUser.estado);
-      } catch (err) {
-        logAction({ id_usuario: loggedUser.id, action: "SESSION_ROTATION_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: "Cambió su contraseña, pero no se pudo abrir la sesión nueva", metadata: { error: err instanceof Error ? err.message : String(err) }, severity: 'warning', ip_address: req.ip ?? null });
-      }
+    const isMatch = await bcryptjs.compare(oldPass, TempUsuario.dataValues.pass);
+    if (!isMatch) {
+      logAction({ id_usuario: loggedUser.id, action: "PASSWORD_CONFIRM_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: `Contraseña incorrecta al cambiar la contraseña de @${TempUsuario.dataValues.user}`, metadata: { user: TempUsuario.dataValues.user }, severity: 'warning', ip_address: req.ip ?? null });
+      return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
     }
-
-    logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf, sesiones_revocadas: revocadas, dispositivos_revocados: dispositivos }, severity: 'critical', ip_address: req.ip ?? null });
-    res.status(200).json(withoutPass(TempUsuario));
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
   }
-}
-export async function deleteUsuario(req: Request, res: Response) {
+
+  const motivo = validarPassword(pass ?? "");
+  if (motivo) return res.status(400).json({ message: motivo });
+
+  const hashedPass = await bcryptjs.hash(pass, BCRYPT_COST);
+  /**
+   * A new password lifts the lockout, in the same write.
+   *
+   * The lockout had no way out at all. `failed_attempts` is only ever cleared
+   * by a successful login, and a successful login is impossible while the
+   * account is locked, because the login answers before it compares anything.
+   * So the count only ever grew: five wrong guesses, wait out the minute, send
+   * one more, and from the fourth round on the wait pins itself at
+   * LOCKOUT_MAX_MINUTES. From there one request every quarter of an hour keeps
+   * the account shut indefinitely, from a single address, without coming near
+   * any rate-limit bucket. The only remedy was an UPDATE by hand in Postgres.
+   *
+   * And the everyday half of the same problem: an administrator resets a
+   * password precisely because somebody cannot get in. Leaving the lock on
+   * meant dictating the new password and having the login still answer
+   * "Usuario o contraseña incorrectos" for up to fifteen minutes, with neither
+   * of them able to tell that apart from having heard it wrong.
+   */
+  TempUsuario.set({
+    pass: hashedPass,
+    failed_attempts: 0,
+    locked_until: null,
+    // The stamp `authenticate` measures every session against, in the same
+    // `set` as the hash so there is no ordering in which the password is the
+    // new one and the stamp still names the old.
+    pass_changed_at: new Date(),
+  });
+
+  const isSelf = loggedUser.id === Number(id);
+  /**
+   * A new password ends the old sessions, which until now it did not.
+   *
+   * Changing a password — the thing you do *because* somebody else may know
+   * the old one — left every browser that knew it logged in, for up to thirty
+   * days. An administrator resetting the password of a leaver was doing
+   * nothing whatsoever to the laptop in their bag. The belt over these
+   * braces is `usuarios.pass_changed_at`, stamped in the `set` above:
+   * `authenticate` refuses any session opened before it, so an endpoint that
+   * changes a password and forgets to revoke still cannot leave a live
+   * session behind it.
+   *
+   * **Nothing is spared here, and that is a change.** This used to pass
+   * `except: isSelf ? loggedUser.id_sesion : undefined`, keeping the caller's
+   * own session alive — because otherwise changing your own password answers
+   * 200 and then refuses your very next request, which reads as the change
+   * having failed and invites doing it again. That reasoning was right and
+   * the problem it names is real; what replaced it is the rotation below.
+   *
+   * Sparing a row and stamping the column cannot both be true. The spared
+   * session was opened on Tuesday, the stamp says Thursday, and
+   * `authenticate` reads Tuesday < Thursday and answers 401 — so the
+   * exception would have gone on being written here while being dead in
+   * fact, and no test of it would have noticed, because the thing killing it
+   * lives in another file.
+   *
+   * Of the ways to reconcile the two, rotating is the only one that does not
+   * buy the exception back in some other currency. Moving the spared
+   * session's `created_at` forward would corrupt the anchor of the thirty-day
+   * ceiling — change your password every twenty-nine days and the session
+   * never dies, which is a worse hole than the one being closed. A column
+   * recording that one session had acknowledged the change would be a column
+   * whose only job is to punch a hole in the rule this whole mechanism is.
+   * Simply logging the caller out is the UX failure the paragraph above
+   * describes. **The rule in `authenticate` is worth having precisely because
+   * it has no exceptions**, and rotation is what keeps that true.
+   *
+   * Both writes in one transaction, for the same reason `deleteUsuario` uses
+   * one, and the failure it prevents is nastier than it looks. Saved outside a
+   * transaction, a revocation that fails leaves the password **already
+   * changed** and answers 500 — and the retry does not repair it, it makes it
+   * worse: the form sends the same `oldPass`, which no longer matches the
+   * stored hash, so the second attempt answers 401 "La contraseña actual
+   * suministrada no es correcta". Ana changes her password because she thinks
+   * somebody knows it, the UPDATE on `sesiones` loses a lock race against the
+   * `touchSession` writes of a running export, and she is told her current
+   * password is wrong — while it has in fact changed and her old sessions are
+   * still alive for a week. It does not take the database being down; it
+   * takes one lock conflict on a table every request writes to.
+   */
+  const { sesiones: revocadas, dispositivos } = await sequelize.transaction(async (transaction) => {
+    await TempUsuario.save({ transaction });
+    const sesiones = await revokeAllSessionsOf(Number(id), { transaction });
+    /**
+     * A remembered device is a cookie that skips the *next* login's second
+     * factor entirely — read before there is any session for `authenticate`
+     * to refuse. Revoking every session while leaving that cookie standing
+     * would still let whoever this password change was meant to shut out
+     * straight back in, unchallenged, on the very next login. Same finding
+     * as `deleteUsuario`'s own archive below, one call site later than it.
+     *
+     * **Inside this transaction, and that is a different answer than the
+     * one a few lines down.** The rotation that follows this whole block —
+     * `issueSession`, for `isSelf` — deliberately runs *after* this
+     * transaction commits and swallows its own failure, because by then the
+     * password is already saved and a 500 there would send the caller into
+     * a retry with an `oldPass` that no longer matches. None of that
+     * applies here: this transaction has not committed anything yet, so a
+     * failure rolls the hash and the session revocation back with it. The
+     * caller's current password is still the one they just typed, a 500 is
+     * an honest description of "nothing changed", and a retry costs them
+     * nothing extra. Answering 200 with a password changed and a device
+     * still able to skip the factor would be the worse of the two ways to
+     * get this wrong — the one that looks like success.
+     */
+    const dispositivos = await revokeAllRememberedDevicesOf(Number(id), { transaction });
+    return { sesiones, dispositivos };
+  });
+
+  /**
+   * The replacement credential, for the caller only, and never at the cost of
+   * the answer.
+   *
+   * **Outside the transaction on purpose.** `createSession` takes no
+   * transaction, and the atomicity that matters is the pair above — a
+   * password changed with its old sessions still alive is the hole; a
+   * password changed with no new cookie is somebody logging in again.
+   *
+   * **The catch is load-bearing and must not become a rethrow.** By this line
+   * the password is committed. Answering 500 says "it did not work", and the
+   * retry sends the same `oldPass` against a hash that has already changed —
+   * so the second attempt answers "La contraseña actual suministrada no es
+   * correcta" about a change that succeeded. Swallowing this costs the caller
+   * their cookie and nothing else: they log in again, with the new password,
+   * and it works.
+   *
+   * **`mfa_satisfied_at` does not come across, and that is the point rather
+   * than an oversight to tidy up later.** The new row starts with no step-up
+   * proof, so a factor proved a minute ago has to be proved again for the
+   * next protected write. Changing a password is not evidence of possessing a
+   * second factor — it is evidence of knowing the password, which is what the
+   * new session has proved and all it has proved. Carrying the old proof
+   * across would mean a stolen session that also knows the password could
+   * refresh itself into a step-up-authorised session indefinitely, without
+   * ever touching a factor.
+   *
+   * **A request already in flight across this rotation gets 401, by design.**
+   * Anything the page fired before this response landed authenticates against
+   * a row that is now revoked, and the window is real rather than theoretical:
+   * it runs from the commit to the response arriving, with two bcrypt
+   * operations sitting in front of it. The old `except` spared exactly that
+   * case, and giving it up is the price of the rule having no exceptions —
+   * paid deliberately, not overlooked. The client's part is to retry such a
+   * request once rather than treat the 401 as the end of the session; the new
+   * cookie is already on the response that raced it.
+   *
+   * `estado` **is** carried across, from the session making the request.
+   * Today only `completa` can reach this route at all — `sessionState.ts`
+   * opens nothing outside `/api/auth/*` to the other two — so a literal
+   * `"completa"` would behave identically and would be a silent promotion the
+   * day that allowlist widens.
+   */
+  if (isSelf) {
+    try {
+      await issueSession(req, res, loggedUser.id, loggedUser.estado);
+    } catch (err) {
+      logAction({ id_usuario: loggedUser.id, action: "SESSION_ROTATION_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: "Cambió su contraseña, pero no se pudo abrir la sesión nueva", metadata: { error: err instanceof Error ? err.message : String(err) }, severity: 'warning', ip_address: req.ip ?? null });
+    }
+  }
+
+  logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf, sesiones_revocadas: revocadas, dispositivos_revocados: dispositivos }, severity: 'critical', ip_address: req.ip ?? null });
+  res.status(200).json(withoutPass(TempUsuario));
+});
+export const deleteUsuario = handler("deleteUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;
   if (!(await can(req.user?.id_rol, "seguridad", "archivar"))) {
     return res.status(403).json({ message: "No tienes permiso para eliminar usuarios." });
   }
-  try {
-    /**
-     * Archiving an account, ending its sessions and cutting off its remembered
-     * devices — all three, or none.
-     *
-     * The `ON DELETE RESTRICT` on `sesiones.id_usuario` and on
-     * `dispositivo_recordado.id_usuario` does nothing here and never will: this
-     * is a soft delete, the row stays where it is with a `deletedAt` on it, and
-     * no foreign key fires on an UPDATE. So archiving somebody used to leave
-     * every browser they were logged in on working until the session hit its
-     * own expiry — up to thirty days for the person whose access you just took
-     * away. `authenticate` refuses an archived account on the next request,
-     * which covers the sessions from the moment this commits; revoking the rows
-     * is what makes the sessions screen honest and what closes the gap if that
-     * check is ever moved or cached.
-     *
-     * **The remembered devices are not covered by that check, and they outlive
-     * the archive.** A remembered device is what lets a login *skip* the second
-     * factor, so it is read before there is any session for `authenticate` to
-     * refuse. While the account is archived that does not matter — `UsuarioModel`
-     * is `paranoid`, so the login's own `findOne` never finds the row and nobody
-     * gets that far. What matters is the undo: `desarchivarUsuario` restores the
-     * row and touches nothing else, so every unexpired device cookie comes back
-     * with the account, still good for skipping the factor. Revoking them here
-     * is what makes an archive survive being reversed.
-     *
-     * And it is the deliberate asymmetry with `factor_totp`,
-     * `credencial_webauthn` and `codigo_recuperacion`, which are left alone for
-     * exactly that reason — so un-archiving gives somebody their account back
-     * with their factors intact. A factor is something only that person has; a
-     * remembered device is a machine that may since have changed hands.
-     *
-     * One transaction, because half of this is worse than none. Archived with
-     * live sessions is the hole itself; sessions killed without the archive is
-     * an account that looks fine to an administrator and cannot be used; and an
-     * account archived whose devices still work looks closed on the screen and
-     * is open in the field. If any of the three fails the whole thing rolls
-     * back, the caller gets a 500, and retrying does all of it.
-     */
-    const revocadas = await sequelize.transaction(async (transaction) => {
-      await UsuarioModel.destroy({ where: { id }, transaction });
-      const sesiones = await revokeAllSessionsOf(Number(id), { transaction });
-      const dispositivos = await revokeAllRememberedDevicesOf(Number(id), { transaction });
-      return { sesiones, dispositivos };
-    });
-    logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, metadata: { sesiones_revocadas: revocadas.sesiones, dispositivos_revocados: revocadas.dispositivos }, severity: 'critical' });
-    return res.sendStatus(200);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+
+  /**
+   * Archiving an account, ending its sessions and cutting off its remembered
+   * devices — all three, or none.
+   *
+   * The `ON DELETE RESTRICT` on `sesiones.id_usuario` and on
+   * `dispositivo_recordado.id_usuario` does nothing here and never will: this
+   * is a soft delete, the row stays where it is with a `deletedAt` on it, and
+   * no foreign key fires on an UPDATE. So archiving somebody used to leave
+   * every browser they were logged in on working until the session hit its
+   * own expiry — up to thirty days for the person whose access you just took
+   * away. `authenticate` refuses an archived account on the next request,
+   * which covers the sessions from the moment this commits; revoking the rows
+   * is what makes the sessions screen honest and what closes the gap if that
+   * check is ever moved or cached.
+   *
+   * **The remembered devices are not covered by that check, and they outlive
+   * the archive.** A remembered device is what lets a login *skip* the second
+   * factor, so it is read before there is any session for `authenticate` to
+   * refuse. While the account is archived that does not matter — `UsuarioModel`
+   * is `paranoid`, so the login's own `findOne` never finds the row and nobody
+   * gets that far. What matters is the undo: `desarchivarUsuario` restores the
+   * row and touches nothing else, so every unexpired device cookie comes back
+   * with the account, still good for skipping the factor. Revoking them here
+   * is what makes an archive survive being reversed.
+   *
+   * And it is the deliberate asymmetry with `factor_totp`,
+   * `credencial_webauthn` and `codigo_recuperacion`, which are left alone for
+   * exactly that reason — so un-archiving gives somebody their account back
+   * with their factors intact. A factor is something only that person has; a
+   * remembered device is a machine that may since have changed hands.
+   *
+   * One transaction, because half of this is worse than none. Archived with
+   * live sessions is the hole itself; sessions killed without the archive is
+   * an account that looks fine to an administrator and cannot be used; and an
+   * account archived whose devices still work looks closed on the screen and
+   * is open in the field. If any of the three fails the whole thing rolls
+   * back, the caller gets a 500, and retrying does all of it.
+   */
+  const revocadas = await sequelize.transaction(async (transaction) => {
+    await UsuarioModel.destroy({ where: { id }, transaction });
+    const sesiones = await revokeAllSessionsOf(Number(id), { transaction });
+    const dispositivos = await revokeAllRememberedDevicesOf(Number(id), { transaction });
+    return { sesiones, dispositivos };
+  });
+  logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, metadata: { sesiones_revocadas: revocadas.sesiones, dispositivos_revocados: revocadas.dispositivos }, severity: 'critical' });
+  return res.sendStatus(200);
+});
 /**
  * Lets a locked account back in.
  *
@@ -894,33 +883,30 @@ export async function deleteUsuario(req: Request, res: Response) {
  * so this endpoint is the provisional way out, and §8 of the same document
  * already plans a rescue script beside it.
  */
-export async function desbloquearUsuario(req: Request, res: Response) {
+export const desbloquearUsuario = handler("desbloquearUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;
   if (!(await can(req.user?.id_rol, "seguridad", "editar"))) {
     return res.status(403).json({ message: "No tienes permiso para desbloquear usuarios." });
   }
-  try {
-    const TempUsuario = await UsuarioModel.findOne({ where: { id } });
-    if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
 
-    const antes = {
-      failed_attempts: TempUsuario.dataValues.failed_attempts ?? 0,
-      locked_until: TempUsuario.dataValues.locked_until ?? null,
-    };
-    TempUsuario.set({ failed_attempts: 0, locked_until: null });
-    await TempUsuario.save();
-    // `critical`, like changing somebody else's password: this removes a
-    // protection from an account, and it is exactly the line to read when
-    // asking how an attacker got past a lockout. Recorded with what the
-    // lockout was, so the entry says what was undone and not merely that
-    // something was.
-    logAction({ id_usuario: req.user?.id, action: "ACCOUNT_UNLOCKED", entity: "Usuario", entity_id: Number(id), detail: `Desbloqueó la cuenta del usuario #${id}`, metadata: { before: antes }, severity: 'critical', ip_address: req.ip ?? null });
-    return res.sendStatus(200);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
-export async function desarchivarUsuario(req: Request, res: Response) {
+  const TempUsuario = await UsuarioModel.findOne({ where: { id } });
+  if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
+
+  const antes = {
+    failed_attempts: TempUsuario.dataValues.failed_attempts ?? 0,
+    locked_until: TempUsuario.dataValues.locked_until ?? null,
+  };
+  TempUsuario.set({ failed_attempts: 0, locked_until: null });
+  await TempUsuario.save();
+  // `critical`, like changing somebody else's password: this removes a
+  // protection from an account, and it is exactly the line to read when
+  // asking how an attacker got past a lockout. Recorded with what the
+  // lockout was, so the entry says what was undone and not merely that
+  // something was.
+  logAction({ id_usuario: req.user?.id, action: "ACCOUNT_UNLOCKED", entity: "Usuario", entity_id: Number(id), detail: `Desbloqueó la cuenta del usuario #${id}`, metadata: { before: antes }, severity: 'critical', ip_address: req.ip ?? null });
+  return res.sendStatus(200);
+});
+export const desarchivarUsuario = handler("desarchivarUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;
   if (!(await can(req.user?.id_rol, "seguridad", "archivar"))) {
     return res.status(403).json({ message: "No tienes permiso para restaurar usuarios." });
@@ -951,6 +937,9 @@ export async function desarchivarUsuario(req: Request, res: Response) {
     if (isUsernameUniqueViolation(error)) {
       return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
     }
-    return res.status(500).json({ message: error.message });
+    // Anything that is not the name clash goes up to `handler`, which files it
+    // under this controller's log with the route attached and answers a neutral
+    // 500. It used to be sent to the browser verbatim.
+    throw error;
   }
-}
+});

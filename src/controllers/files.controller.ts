@@ -9,6 +9,12 @@ import { UsuarioModel } from "../models/usuario.model.js";
 import { IMAGES_DIR, resolveImagePath } from "../utils/fileUtils.js";
 import { logAction } from "../utils/logAction.js";
 
+import { log } from "../utils/logger.js";
+import { makeHandler } from "../utils/handler.js";
+
+const filesLog = log("files");
+const handler = makeHandler(filesLog);
+
 interface FileInfo {
   name: string;
   path: string;
@@ -59,23 +65,19 @@ async function readDiskFiles(): Promise<FileInfo[]> {
   }
 }
 
-export async function getOrphanFiles(req: Request, res: Response) {
-  try {
-    const [files, dbMap] = await Promise.all([
-      readDiskFiles(),
-      getAllDbImageMap(),
-    ]);
-    const result = files.map((f) => {
-      const usage = dbMap.get(f.path) ?? null;
-      return { ...f, isOrphan: !usage, usedBy: usage };
-    });
-    res.status(200).json(result);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+export const getOrphanFiles = handler("getOrphanFiles", async (req: Request, res: Response) => {
+  const [files, dbMap] = await Promise.all([
+    readDiskFiles(),
+    getAllDbImageMap(),
+  ]);
+  const result = files.map((f) => {
+    const usage = dbMap.get(f.path) ?? null;
+    return { ...f, isOrphan: !usage, usedBy: usage };
+  });
+  res.status(200).json(result);
+});
 
-export async function deleteFile(req: Request, res: Response) {
+export const deleteFile = handler("deleteFile", async (req: Request, res: Response) => {
   const name = req.params.name as string;
   // Express decodes %2F inside a route parameter, so the name arrived here able
   // to climb out of the images directory and unlinkSync obeyed.
@@ -83,127 +85,108 @@ export async function deleteFile(req: Request, res: Response) {
   if (fullPath === null) {
     return res.status(400).json({ message: "Nombre de archivo inválido." });
   }
-  try {
-    fs.unlinkSync(fullPath);
-    logAction({ id_usuario: req.user?.id, action: "DELETE_FILE", entity: "File", entity_id: null, detail: `Eliminó archivo ${name}`, metadata: { filename: name }, severity: 'critical' });
-    res.sendStatus(200);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
 
-export async function getEntityImageStats(req: Request, res: Response) {
-  try {
-    const diskFiles = await readDiskFiles();
-    const diskSet = new Set(diskFiles.map((f) => f.path));
+  fs.unlinkSync(fullPath);
+  logAction({ id_usuario: req.user?.id, action: "DELETE_FILE", entity: "File", entity_id: null, detail: `Eliminó archivo ${name}`, metadata: { filename: name }, severity: 'critical' });
+  res.sendStatus(200);
+});
 
-    const [postes, eventos, ciudades, usuarios, soluciones] = await Promise.all([
-      PosteModel.findAll({ attributes: ["image"], paranoid: false }),
-      EventoModel.findAll({ attributes: ["image"], paranoid: false }),
-      CiudadModel.findAll({ attributes: ["image"], paranoid: false }),
-      UsuarioModel.findAll({ attributes: ["image"], paranoid: false }),
-      SolucionModel.findAll({ attributes: ["image"], paranoid: false }),
-    ]);
+export const getEntityImageStats = handler("getEntityImageStats", async (req: Request, res: Response) => {
+  const diskFiles = await readDiskFiles();
+  const diskSet = new Set(diskFiles.map((f) => f.path));
 
-    const summarize = (rows: { dataValues: { image?: string | null } }[]) => {
-      let sinImagen = 0, referenciaRota = 0;
-      for (const r of rows) {
-        const img = r.dataValues.image;
-        if (!img) sinImagen++;
-        else if (!diskSet.has(img)) referenciaRota++;
-      }
-      return { total: rows.length, sinImagen, referenciaRota };
-    };
+  const [postes, eventos, ciudades, usuarios, soluciones] = await Promise.all([
+    PosteModel.findAll({ attributes: ["image"], paranoid: false }),
+    EventoModel.findAll({ attributes: ["image"], paranoid: false }),
+    CiudadModel.findAll({ attributes: ["image"], paranoid: false }),
+    UsuarioModel.findAll({ attributes: ["image"], paranoid: false }),
+    SolucionModel.findAll({ attributes: ["image"], paranoid: false }),
+  ]);
 
-    res.status(200).json({
-      postes:    summarize(postes),
-      eventos:   summarize(eventos),
-      ciudades:  summarize(ciudades),
-      usuarios:  summarize(usuarios),
-      soluciones: summarize(soluciones),
-    });
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+  const summarize = (rows: { dataValues: { image?: string | null } }[]) => {
+    let sinImagen = 0, referenciaRota = 0;
+    for (const r of rows) {
+      const img = r.dataValues.image;
+      if (!img) sinImagen++;
+      else if (!diskSet.has(img)) referenciaRota++;
+    }
+    return { total: rows.length, sinImagen, referenciaRota };
+  };
 
-export async function getBrokenImageRefs(req: Request, res: Response) {
-  try {
-    const diskSet = new Set((await readDiskFiles()).map((f) => f.path));
+  res.status(200).json({
+    postes:    summarize(postes),
+    eventos:   summarize(eventos),
+    ciudades:  summarize(ciudades),
+    usuarios:  summarize(usuarios),
+    soluciones: summarize(soluciones),
+  });
+});
 
-    const [postes, eventos, ciudades, usuarios, soluciones] = await Promise.all([
-      PosteModel.findAll({ attributes: ["id", "image", "name"], paranoid: false }),
-      EventoModel.findAll({ attributes: ["id", "image"], paranoid: false }),
-      CiudadModel.findAll({ attributes: ["id", "image", "name"], paranoid: false }),
-      UsuarioModel.findAll({ attributes: ["id", "image", "name", "lastname"], paranoid: false }),
-      SolucionModel.findAll({ attributes: ["id", "image", "id_evento"], paranoid: false }),
-    ]);
+export const getBrokenImageRefs = handler("getBrokenImageRefs", async (req: Request, res: Response) => {
+  const diskSet = new Set((await readDiskFiles()).map((f) => f.path));
 
-    const broken: { tipo: string; id: number; name: string; image: string }[] = [];
+  const [postes, eventos, ciudades, usuarios, soluciones] = await Promise.all([
+    PosteModel.findAll({ attributes: ["id", "image", "name"], paranoid: false }),
+    EventoModel.findAll({ attributes: ["id", "image"], paranoid: false }),
+    CiudadModel.findAll({ attributes: ["id", "image", "name"], paranoid: false }),
+    UsuarioModel.findAll({ attributes: ["id", "image", "name", "lastname"], paranoid: false }),
+    SolucionModel.findAll({ attributes: ["id", "image", "id_evento"], paranoid: false }),
+  ]);
 
-    for (const p of postes)
-      if (p.dataValues.image && !diskSet.has(p.dataValues.image))
-        broken.push({ tipo: "Poste", id: p.dataValues.id, name: p.dataValues.name, image: p.dataValues.image });
-    for (const e of eventos)
-      if (e.dataValues.image && !diskSet.has(e.dataValues.image))
-        broken.push({ tipo: "Evento", id: e.dataValues.id, name: `Evento #${e.dataValues.id}`, image: e.dataValues.image });
-    for (const c of ciudades)
-      if (c.dataValues.image && !diskSet.has(c.dataValues.image))
-        broken.push({ tipo: "Ciudad", id: c.dataValues.id, name: c.dataValues.name, image: c.dataValues.image });
-    for (const u of usuarios)
-      if (u.dataValues.image && !diskSet.has(u.dataValues.image))
-        broken.push({ tipo: "Usuario", id: u.dataValues.id, name: `${u.dataValues.name} ${u.dataValues.lastname}`, image: u.dataValues.image });
-    for (const s of soluciones)
-      if (s.dataValues.image && !diskSet.has(s.dataValues.image))
-        broken.push({ tipo: "Solución", id: s.dataValues.id_evento, name: `Evento #${s.dataValues.id_evento}`, image: s.dataValues.image });
+  const broken: { tipo: string; id: number; name: string; image: string }[] = [];
 
-    res.status(200).json(broken);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+  for (const p of postes)
+    if (p.dataValues.image && !diskSet.has(p.dataValues.image))
+      broken.push({ tipo: "Poste", id: p.dataValues.id, name: p.dataValues.name, image: p.dataValues.image });
+  for (const e of eventos)
+    if (e.dataValues.image && !diskSet.has(e.dataValues.image))
+      broken.push({ tipo: "Evento", id: e.dataValues.id, name: `Evento #${e.dataValues.id}`, image: e.dataValues.image });
+  for (const c of ciudades)
+    if (c.dataValues.image && !diskSet.has(c.dataValues.image))
+      broken.push({ tipo: "Ciudad", id: c.dataValues.id, name: c.dataValues.name, image: c.dataValues.image });
+  for (const u of usuarios)
+    if (u.dataValues.image && !diskSet.has(u.dataValues.image))
+      broken.push({ tipo: "Usuario", id: u.dataValues.id, name: `${u.dataValues.name} ${u.dataValues.lastname}`, image: u.dataValues.image });
+  for (const s of soluciones)
+    if (s.dataValues.image && !diskSet.has(s.dataValues.image))
+      broken.push({ tipo: "Solución", id: s.dataValues.id_evento, name: `Evento #${s.dataValues.id_evento}`, image: s.dataValues.image });
 
-export async function clearBrokenImageRefs(req: Request, res: Response) {
-  try {
-    const diskSet = new Set((await readDiskFiles()).map((f) => f.path));
+  res.status(200).json(broken);
+});
 
-    const [postes, eventos, ciudades, usuarios, soluciones] = await Promise.all([
-      PosteModel.findAll({ attributes: ["id", "image"], paranoid: false }),
-      EventoModel.findAll({ attributes: ["id", "image"], paranoid: false }),
-      CiudadModel.findAll({ attributes: ["id", "image"], paranoid: false }),
-      UsuarioModel.findAll({ attributes: ["id", "image"], paranoid: false }),
-      SolucionModel.findAll({ attributes: ["id", "image"], paranoid: false }),
-    ]);
+export const clearBrokenImageRefs = handler("clearBrokenImageRefs", async (req: Request, res: Response) => {
+  const diskSet = new Set((await readDiskFiles()).map((f) => f.path));
 
-    const isBroken = (img: string | null | undefined) => img && !diskSet.has(img);
-    let cleared = 0;
+  const [postes, eventos, ciudades, usuarios, soluciones] = await Promise.all([
+    PosteModel.findAll({ attributes: ["id", "image"], paranoid: false }),
+    EventoModel.findAll({ attributes: ["id", "image"], paranoid: false }),
+    CiudadModel.findAll({ attributes: ["id", "image"], paranoid: false }),
+    UsuarioModel.findAll({ attributes: ["id", "image"], paranoid: false }),
+    SolucionModel.findAll({ attributes: ["id", "image"], paranoid: false }),
+  ]);
 
-    await Promise.all([
-      ...postes.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
-      ...eventos.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
-      ...ciudades.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
-      ...usuarios.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
-      ...soluciones.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
-    ]);
+  const isBroken = (img: string | null | undefined) => img && !diskSet.has(img);
+  let cleared = 0;
 
-    logAction({ id_usuario: req.user?.id, action: "CLEAR_BROKEN_REFS", entity: "File", entity_id: null, detail: `Limpió ${cleared} referencias rotas de imágenes`, metadata: { cleared }, severity: 'warning' });
-    res.status(200).json({ cleared });
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+  await Promise.all([
+    ...postes.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
+    ...eventos.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
+    ...ciudades.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
+    ...usuarios.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
+    ...soluciones.filter((r) => isBroken(r.dataValues.image)).map((r) => { cleared++; return r.update({ image: null }); }),
+  ]);
 
-export async function deleteOrphanFiles(req: Request, res: Response) {
-  try {
-    const [files, dbMap] = await Promise.all([
-      readDiskFiles(),
-      getAllDbImageMap(),
-    ]);
-    const orphans = files.filter((f) => !dbMap.has(f.path));
-    await Promise.all(orphans.map((f) => fs.promises.unlink(path.join(IMAGES_DIR, f.name))));
-    logAction({ id_usuario: req.user?.id, action: "DELETE_ORPHANS", entity: "File", entity_id: null, detail: `Eliminó ${orphans.length} archivos huérfanos`, metadata: { deleted: orphans.length, files: orphans.map((f) => f.name) }, severity: 'warning' });
-    res.status(200).json({ deleted: orphans.length, files: orphans.map((f) => f.name) });
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+  logAction({ id_usuario: req.user?.id, action: "CLEAR_BROKEN_REFS", entity: "File", entity_id: null, detail: `Limpió ${cleared} referencias rotas de imágenes`, metadata: { cleared }, severity: 'warning' });
+  res.status(200).json({ cleared });
+});
+
+export const deleteOrphanFiles = handler("deleteOrphanFiles", async (req: Request, res: Response) => {
+  const [files, dbMap] = await Promise.all([
+    readDiskFiles(),
+    getAllDbImageMap(),
+  ]);
+  const orphans = files.filter((f) => !dbMap.has(f.path));
+  await Promise.all(orphans.map((f) => fs.promises.unlink(path.join(IMAGES_DIR, f.name))));
+  logAction({ id_usuario: req.user?.id, action: "DELETE_ORPHANS", entity: "File", entity_id: null, detail: `Eliminó ${orphans.length} archivos huérfanos`, metadata: { deleted: orphans.length, files: orphans.map((f) => f.name) }, severity: 'warning' });
+  res.status(200).json({ deleted: orphans.length, files: orphans.map((f) => f.name) });
+});

@@ -1,5 +1,10 @@
 import { Request, Response } from "express";
 import { SolucionModel, SOLUCION_PUBLIC_ATTRIBUTES } from "../models/solucion.model.js";
+import { log } from "../utils/logger.js";
+import { makeHandler } from "../utils/handler.js";
+
+const solucionLog = log("solucion");
+const handler = makeHandler(solucionLog);
 
 // One function left. `getSolucion`, `createSolucion`, `updateSolucion` and
 // `deleteSolucion` are gone — see `solucion.routes.ts` and §7 of the API
@@ -7,19 +12,15 @@ import { SolucionModel, SOLUCION_PUBLIC_ATTRIBUTES } from "../models/solucion.mo
 // is `reabrir`, and both move the event's state in the same transaction, which
 // is the whole reason the loose CRUD could not stay.
 
-export async function getSolucion_evento(req: Request, res: Response) {
+export const getSolucion_evento = handler("getSolucion_evento", async (req: Request, res: Response) => {
   const { id_evento } = req.params;
 
-  try {
-    const TempSolucion = await SolucionModel.findOne({
-      where: { id_evento },
-      // See SOLUCION_PUBLIC_ATTRIBUTES: this route has no permission gate at
-      // all, so it must not carry the author.
-      attributes: [...SOLUCION_PUBLIC_ATTRIBUTES],
-      order: [["id", "DESC"]],
-    });
-    res.status(200).json(TempSolucion);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+  const TempSolucion = await SolucionModel.findOne({
+    where: { id_evento },
+    // See SOLUCION_PUBLIC_ATTRIBUTES: this route has no permission gate at
+    // all, so it must not carry the author.
+    attributes: [...SOLUCION_PUBLIC_ATTRIBUTES],
+    order: [["id", "DESC"]],
+  });
+  res.status(200).json(TempSolucion);
+});

@@ -4,22 +4,24 @@ import { RevisionModel, REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.mo
 import { authoredBy } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
 
-export async function getRevision(req: Request, res: Response) {
+import { log } from "../utils/logger.js";
+import { makeHandler } from "../utils/handler.js";
+
+const revisionLog = log("revision");
+const handler = makeHandler(revisionLog);
+
+export const getRevision = handler("getRevision", async (req: Request, res: Response) => {
   const { id_evento } = req.params;
 
-  try {
-    const revisions = await RevisionModel.findAll({
-      where: { id_evento },
-      // Not the whole row: this route is authenticated and nothing more, and
-      // the author belongs to the generator's gate. See the attribute list.
-      attributes: [...REVISION_PUBLIC_ATTRIBUTES],
-      order: [["id", "DESC"]],
-    });
-    res.status(200).json(revisions);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+  const revisions = await RevisionModel.findAll({
+    where: { id_evento },
+    // Not the whole row: this route is authenticated and nothing more, and
+    // the author belongs to the generator's gate. See the attribute list.
+    attributes: [...REVISION_PUBLIC_ATTRIBUTES],
+    order: [["id", "DESC"]],
+  });
+  res.status(200).json(revisions);
+});
 /**
  * Resolves the event a revision belongs to, for the audit log.
  *
@@ -34,16 +36,12 @@ const eventoRef = async (id_evento: unknown) => {
   return row ? { id: row.dataValues.id, name: row.dataValues.description } : id_evento;
 };
 
-export async function createRevision(req: Request, res: Response) {
-  try {
-    const revision = await RevisionModel.create(authoredBy(req.body, req));
-    const evRef = await eventoRef(req.body.id_evento);
-    logAction({ id_usuario: req.user?.id, action: "ADD_REVISION", entity: "Revisión", entity_id: Number(req.body.id_evento), detail: `Agregó revisión al Evento #${req.body.id_evento}`, metadata: { after: { id_evento: evRef, description: req.body.description } }, severity: 'info' });
-    res.status(200).json(revision);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+export const createRevision = handler("createRevision", async (req: Request, res: Response) => {
+  const revision = await RevisionModel.create(authoredBy(req.body, req));
+  const evRef = await eventoRef(req.body.id_evento);
+  logAction({ id_usuario: req.user?.id, action: "ADD_REVISION", entity: "Revisión", entity_id: Number(req.body.id_evento), detail: `Agregó revisión al Evento #${req.body.id_evento}`, metadata: { after: { id_evento: evRef, description: req.body.description } }, severity: 'info' });
+  res.status(200).json(revision);
+});
 
 // No `updateRevision` and no `deleteRevision`. Their routes had no caller ever,
 // and `updateRevision` carried a second, unreachable life: with no `:id` it fell
