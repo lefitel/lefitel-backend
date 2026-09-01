@@ -5,7 +5,6 @@ import {
   getBrokenImageRefs,
   clearBrokenImageRefs,
   getEntityImageStats,
-  getFiles,
   getOrphanFiles,
 } from "../controllers/files.controller.js";
 import { requirePermission } from "../middleware/requirePermission.js";
@@ -15,7 +14,9 @@ const router = Router();
 // The gate used to sit on the mount in app.ts as `requireRole(1)`, which drew no
 // line between listing files and deleting them. Reading the module and erasing
 // its contents are different permissions, so they are asked for separately.
-router.get("/", requirePermission("archivos", "ver"), getFiles);
+// No bare `GET /`. `/orphans` below returns the same `readDiskFiles()` plus
+// whether each file is used and by what — a strict superset, behind the same
+// permission. See §7 of the API standard spec.
 router.get("/orphans", requirePermission("archivos", "ver"), getOrphanFiles);
 router.delete("/orphans", requirePermission("archivos", "archivar"), deleteOrphanFiles);
 router.get("/entity-stats", requirePermission("archivos", "ver"), getEntityImageStats);

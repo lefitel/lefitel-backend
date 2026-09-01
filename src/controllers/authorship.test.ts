@@ -14,7 +14,16 @@
 // And the body could still set `createdAt`, which is the key the authorship
 // backfill matches on.
 //
-// So this file spans four controllers, because the rule does. Nine doors.
+// So this file spans several controllers, because the rule does.
+//
+// It used to cover nine doors across four. A1 deleted four of them — the loose
+// CRUD on `solucion` and the two writes on `revision`, none of which had a
+// caller — and this file lost five cases with them. Four were pure subtraction:
+// their subject is gone and nothing else does what they described. The fifth
+// was not, and it is why A0 had to run first: `updateRevision` and
+// `updateSolucion` were the only two handlers that refused an authorship change
+// *and* kept it out of the audit log, and that guarantee now lives on
+// `updateEvento` and `updatePoste`, below, with a test each.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
@@ -73,8 +82,11 @@ vi.mock("../database/sequelize.js", () => ({
   sequelize: { transaction: (cb: (t: unknown) => Promise<unknown>) => cb({ id: "t" }) },
 }));
 
-const { createRevision, updateRevision } = await import("./revision.controller.js");
-const { createSolucion, updateSolucion } = await import("./solucion.controller.js");
+// No import from `solucion.controller` any more, and only the create from
+// `revision.controller`: A1 deleted the four writes this file used to exercise
+// there. The model mocks above stay — `evento.controller` imports both models,
+// and the resolver case below still counts on `solucionCreate`.
+const { createRevision } = await import("./revision.controller.js");
 const { createEvento, updateEvento, resolverEvento } = await import("./evento.controller.js");
 const { updatePoste } = await import("./poste.controller.js");
 
@@ -114,16 +126,6 @@ describe("the author of an inspection", () => {
     expect(revisionCreate.mock.calls[0][0]).toMatchObject({ id_usuario: 7 });
   });
 
-  it("is the session on the id-less branch of PUT /revision, which also creates", async () => {
-    // `updateRevision` with no `:id` falls through to a create. That branch is
-    // unreachable through the router as mounted — `put("/:id")` cannot match an
-    // empty segment — so this is a guard on dead code, kept because the code is
-    // there and the next person to add a route may reach it.
-    await updateRevision(reqOf({ description: "ok", id_evento: 3, id_usuario: 2 }), resOf());
-    expect(revisionCreate).toHaveBeenCalledOnce();
-    expect(revisionCreate.mock.calls[0][0]).toMatchObject({ id_usuario: 7 });
-  });
-
   it("is the session on POST /evento, which writes the first inspection inline", async () => {
     await createEvento(
       reqOf({ description: "e", id_poste: 1, revision: { description: "primera" } }),
@@ -144,12 +146,6 @@ describe("the author of an inspection", () => {
 });
 
 describe("the author of a repair", () => {
-  it("is the session, on POST /solucion", async () => {
-    await createSolucion(reqOf({ description: "arreglado", id_evento: 3, id_usuario: 2 }), resOf());
-    expect(solucionCreate).toHaveBeenCalledOnce();
-    expect(solucionCreate.mock.calls[0][0]).toMatchObject({ id_usuario: 7 });
-  });
-
   it("is the session on PUT /evento/:id/resolver, which writes the repair inline", async () => {
     // 342 of the 513 attributable repairs came in through this door, not
     // through POST /solucion — which is exactly why the backfill had to read
@@ -166,46 +162,13 @@ describe("the author of a repair", () => {
 });
 
 describe("an edit cannot reassign the author", () => {
-  it("drops id_usuario from PUT /revision/:id", async () => {
-    // Not overwritten with the editor's id: fixing a typo in a description is
-    // not a claim to have carried out the inspection.
-    const set = vi.fn();
-    const { RevisionModel } = await import("../models/revision.model.js");
-    vi.mocked(RevisionModel.findOne).mockResolvedValue({
-      dataValues: { id: 4, id_evento: 3, description: "vieja", id_usuario: 2 },
-      set,
-      save: vi.fn(),
-    } as never);
-
-    await updateRevision(reqOf({ description: "nueva", id_usuario: 9 }, { id: "4" }), resOf());
-
-    expect(set).toHaveBeenCalledOnce();
-    expect(set.mock.calls[0][0]).toEqual({ description: "nueva" });
-    expect(set.mock.calls[0][0]).not.toHaveProperty("id_usuario");
-  });
-
-  it("drops id_usuario from PUT /solucion/:id", async () => {
-    const set = vi.fn();
-    const { SolucionModel } = await import("../models/solucion.model.js");
-    vi.mocked(SolucionModel.findOne).mockResolvedValue({
-      dataValues: { id: 4, id_evento: 3, description: "vieja", image: null, id_usuario: 2 },
-      set,
-      save: vi.fn(),
-    } as never);
-
-    await updateSolucion(reqOf({ description: "nueva", id_usuario: 9 }, { id: "4" }), resOf());
-
-    expect(set).toHaveBeenCalledOnce();
-    expect(set.mock.calls[0][0]).toEqual({ description: "nueva" });
-  });
-
   // These two build their audit diff through an intermediate variable, so
   // `logShape.test.ts` cannot see them: they need a behavioural test each.
   //
-  // They are also the two that survive A1. Until now they refused the
-  // reassignment at the write and recorded it anyway; `updateRevision` and
-  // `updateSolucion` above did it right and are about to be deleted, so the
-  // guard moves here before its old home goes.
+  // And they are now the only two left. `updateRevision` and `updateSolucion`
+  // were the pair that did this right, and A1 deleted them — after A0 moved the
+  // guard here, which is the only reason deleting them was a cleanup and not a
+  // regression.
   it("does not tell the bitácora about a refused reassignment, on PUT /evento/:id", async () => {
     const { logAction } = await import("../utils/logAction.js");
     eventoFindOne.mockResolvedValue({
@@ -244,25 +207,6 @@ describe("an edit cannot reassign the author", () => {
     expect(meta.before).not.toHaveProperty("id_usuario");
   });
 
-  it("does not tell the bitácora about a change it refused", async () => {
-    // The audit entry's `after` used to be `req.body` verbatim, which would
-    // have recorded an authorship change that never happened — the one place a
-    // reader would go to find out who reassigned it.
-    const { logAction } = await import("../utils/logAction.js");
-    const { RevisionModel } = await import("../models/revision.model.js");
-    vi.mocked(RevisionModel.findOne).mockResolvedValue({
-      dataValues: { id: 4, id_evento: 3, description: "vieja", id_usuario: 2 },
-      set: vi.fn(),
-      save: vi.fn(),
-    } as never);
-
-    await updateRevision(reqOf({ description: "nueva", id_usuario: 9 }, { id: "4" }), resOf());
-
-    const entry = vi.mocked(logAction).mock.calls[0][0];
-    const after = (entry.metadata as { after?: Record<string, unknown> }).after;
-    expect(after).toBeDefined();
-    expect(after).not.toHaveProperty("id_usuario");
-  });
 });
 
 describe("the author of an event and of a pole", () => {

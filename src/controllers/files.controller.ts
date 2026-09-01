@@ -59,15 +59,6 @@ async function readDiskFiles(): Promise<FileInfo[]> {
   }
 }
 
-export async function getFiles(req: Request, res: Response) {
-  try {
-    const files = await readDiskFiles();
-    res.status(200).json(files);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
-
 export async function getOrphanFiles(req: Request, res: Response) {
   try {
     const [files, dbMap] = await Promise.all([

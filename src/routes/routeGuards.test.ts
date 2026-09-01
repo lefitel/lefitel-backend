@@ -532,10 +532,13 @@ const READ_GATE_NOT_APPLICABLE = [
   "GET /api/auth/sessions",
 
   // ── Everything below is the debt ────────────────────────────────────────
-  // Reads that any logged-in account may call, whatever its role. Counted:
-  // twenty. `GET /api/dashboard/` used to be one of them and the
-  // worst of them — no `where`, no `limit`, the whole asset register in one
-  // response — which is why it was gated first.
+  // Reads that any logged-in account may call, whatever its role. The count is
+  // deliberately not written here any more: it was «twenty», and A1 deleted
+  // `GET /api/solucion/` out from under it. A number in a comment ages in
+  // silence; the test below is what keeps this list honest.
+  // `GET /api/dashboard/` used to be one of these and the worst of them — no
+  // `where`, no `limit`, the whole asset register in one response — which is why
+  // it was gated first.
   "GET /api/adss/",
   "GET /api/adssposte/:id_poste",
   "GET /api/ciudad/",
@@ -553,7 +556,6 @@ const READ_GATE_NOT_APPLICABLE = [
   "GET /api/propietario/",
   "GET /api/revision/:id_evento",
   "GET /api/rol/",
-  "GET /api/solucion/",
   "GET /api/solucion/evento/:id_evento",
   "GET /api/tipoObs/",
 ];
@@ -635,8 +637,6 @@ const EVENTOS_GATES: Record<string, string> = {
   "POST /api/evento/:id/reabrir": "eventos.editar",
   "DELETE /api/evento/:id": "eventos.archivar",
   "POST /api/revision/": "eventos.editar",
-  "PUT /api/revision/:id": "eventos.editar",
-  "DELETE /api/revision/:id": "eventos.archivar",
   // The one read on this list, and the reason the read test above has an
   // exception list instead of nothing: it hands over every incident and every
   // pole in one response, so `ver` has to mean something here.

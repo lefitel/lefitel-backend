@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { EventoModel } from "../models/evento.model.js";
 import { RevisionModel, REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.model.js";
-import { authoredBy, withoutAuthor } from "../utils/authorship.js";
+import { authoredBy } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
 
 export async function getRevision(req: Request, res: Response) {
@@ -44,46 +44,12 @@ export async function createRevision(req: Request, res: Response) {
     return res.status(500).json({ message: error.message });
   }
 }
-export async function updateRevision(req: Request, res: Response) {
-  const { id } = req.params;
-  if (id) {
-    try {
-      const revision = await RevisionModel.findOne({ where: { id } });
-      if (!revision) return res.status(404).json({ message: "Revisión no encontrada" });
-      const rdv = revision.dataValues as unknown as Record<string, unknown>;
-      const id_evento = revision.dataValues.id_evento;
-      // The author is not editable: see withoutAuthor. Stripping it before the
-      // `before` snapshot too, so the bitácora does not record a change that
-      // was refused.
-      const body = withoutAuthor(req.body);
-      const beforeRevision = Object.fromEntries(Object.keys(body).map(k => [k, rdv[k]]));
-      revision.set(body);
-      await revision.save();
-      logAction({ id_usuario: req.user?.id, action: "UPDATE_REVISION", entity: "Revisión", entity_id: Number(id_evento), detail: `Editó revisión del Evento #${id_evento}`, metadata: { before: beforeRevision, after: body }, severity: 'warning' });
-      res.status(200).json(revision);
-    } catch (error) {
-      return res.status(500).json({ message: error.message });
-    }
-  } else {
-    try {
-      const revision = await RevisionModel.create(authoredBy(req.body, req));
-      const evRef2 = await eventoRef(req.body.id_evento);
-      logAction({ id_usuario: req.user?.id, action: "ADD_REVISION", entity: "Revisión", entity_id: Number(req.body.id_evento) || null, detail: `Agregó revisión al Evento #${req.body.id_evento}`, metadata: { after: { id_evento: evRef2, description: req.body.description } }, severity: 'info' });
-      res.status(200).json(revision);
-    } catch (error) {
-      return res.status(500).json({ message: error.message });
-    }
-  }
-}
-export async function deleteRevision(req: Request, res: Response) {
-  const { id } = req.params;
-  try {
-    const revision = await RevisionModel.findOne({ where: { id } });
-    const id_evento = revision?.dataValues.id_evento;
-    await RevisionModel.destroy({ where: { id } });
-    logAction({ id_usuario: req.user?.id, action: "DELETE_REVISION", entity: "Revisión", entity_id: id_evento ? Number(id_evento) : null, detail: `Eliminó revisión del Evento #${id_evento ?? id}`, severity: 'warning' });
-    return res.sendStatus(200);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-}
+
+// No `updateRevision` and no `deleteRevision`. Their routes had no caller ever,
+// and `updateRevision` carried a second, unreachable life: with no `:id` it fell
+// through to a create, duplicating `createRevision` for a request the router
+// could never produce — `put("/:id")` does not match an empty segment.
+//
+// What it did have that nothing else did was refusing an authorship change
+// *and* keeping it out of the audit log. That guarantee did not go with it: A0
+// moved it to `updateEvento` and `updatePoste` first, with a test on each.
