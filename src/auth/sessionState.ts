@@ -88,6 +88,51 @@ export function puedeAlcanzar(estado: EstadoSesion, ruta: string): boolean {
 }
 
 /**
+ * Which session states may reach a stored photograph — the header avatar and
+ * the field images `express.static` serves from the filesystem root, not from
+ * `/api/...`.
+ *
+ * **Deliberately not an entry in `PERMITIDAS`, and not derived from it.**
+ * That table is written in the vocabulary of API paths: every string in it is
+ * `/api/auth/...`, so asking it about `/1712428860328_210.jpg` can only ever
+ * come back `false` for `parcial` and `onboarding` alike — not because either
+ * state was refused this route on purpose, but because the table was never
+ * asked the question. A silent `false` reached that way is an accident, not a
+ * decision, and it is exactly what put every image behind a 403 for
+ * `onboarding` the day this constant did not exist: `authenticate` had
+ * nothing else to consult, so it consulted the one table it had and got the
+ * API's answer for a route the API's answer was never about.
+ *
+ * This is the explicit decision instead, made about the images mount by name
+ * rather than inherited from what the images mount is not:
+ *
+ * - **`onboarding` opens it.** This person finished the password step; the
+ *   second factor is what is missing, not the session. The design treats the
+ *   shell of the application — including the header avatar — as part of the
+ *   setup screens `onboarding` may already reach, not as ERP data behind them.
+ * - **`parcial` stays shut.** A password with no factor proved yet is half a
+ *   login, and half a login has no business rendering anything belonging to
+ *   an application it has not entered. Nothing about this constant changes
+ *   that; it narrows a different route, not this one.
+ * - **`completa` opens it too**, spelled out here rather than left to fall
+ *   out of `puedeAlcanzar`'s `"todo"`: `authenticateArchivos` uses this
+ *   function as its *only* gate for the images mount, never `puedeAlcanzar`,
+ *   so a `completa` session that was not named in this list would find every
+ *   photograph 403 the moment nobody remembered the API's separate "yes"
+ *   does not reach here. Written down beside the other two rather than
+ *   assumed from a different table's default.
+ *
+ * Still an allowlist, not a blocklist: a fourth session state would have to
+ * be added here explicitly to be let in; left out, it is refused by default,
+ * the same direction every other refusal in this file fails toward.
+ */
+const ARCHIVOS_ESTATICOS: readonly EstadoSesion[] = ["onboarding", "completa"];
+
+export function puedeVerArchivosEstaticos(estado: EstadoSesion): boolean {
+  return ARCHIVOS_ESTATICOS.includes(estado);
+}
+
+/**
  * The state actually in force right now, as opposed to the one the login wrote
  * into the session row however many days ago.
  *

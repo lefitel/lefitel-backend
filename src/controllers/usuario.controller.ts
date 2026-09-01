@@ -728,9 +728,33 @@ export async function updateUserPass(req: Request, res: Response) {
      * still alive for a week. It does not take the database being down; it
      * takes one lock conflict on a table every request writes to.
      */
-    const revocadas = await sequelize.transaction(async (transaction) => {
+    const { sesiones: revocadas, dispositivos } = await sequelize.transaction(async (transaction) => {
       await TempUsuario.save({ transaction });
-      return revokeAllSessionsOf(Number(id), { transaction });
+      const sesiones = await revokeAllSessionsOf(Number(id), { transaction });
+      /**
+       * A remembered device is a cookie that skips the *next* login's second
+       * factor entirely — read before there is any session for `authenticate`
+       * to refuse. Revoking every session while leaving that cookie standing
+       * would still let whoever this password change was meant to shut out
+       * straight back in, unchallenged, on the very next login. Same finding
+       * as `deleteUsuario`'s own archive below, one call site later than it.
+       *
+       * **Inside this transaction, and that is a different answer than the
+       * one a few lines down.** The rotation that follows this whole block —
+       * `issueSession`, for `isSelf` — deliberately runs *after* this
+       * transaction commits and swallows its own failure, because by then the
+       * password is already saved and a 500 there would send the caller into
+       * a retry with an `oldPass` that no longer matches. None of that
+       * applies here: this transaction has not committed anything yet, so a
+       * failure rolls the hash and the session revocation back with it. The
+       * caller's current password is still the one they just typed, a 500 is
+       * an honest description of "nothing changed", and a retry costs them
+       * nothing extra. Answering 200 with a password changed and a device
+       * still able to skip the factor would be the worse of the two ways to
+       * get this wrong — the one that looks like success.
+       */
+      const dispositivos = await revokeAllRememberedDevicesOf(Number(id), { transaction });
+      return { sesiones, dispositivos };
     });
 
     /**
@@ -784,7 +808,7 @@ export async function updateUserPass(req: Request, res: Response) {
       }
     }
 
-    logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf, sesiones_revocadas: revocadas }, severity: 'critical', ip_address: req.ip ?? null });
+    logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf, sesiones_revocadas: revocadas, dispositivos_revocados: dispositivos }, severity: 'critical', ip_address: req.ip ?? null });
     res.status(200).json(withoutPass(TempUsuario));
   } catch (error) {
     return res.status(500).json({ message: error.message });

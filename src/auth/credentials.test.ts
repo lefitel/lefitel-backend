@@ -105,6 +105,12 @@ vi.mock("./tokenStore.js", () => ({ purgeExpiredTokens: vi.fn().mockResolvedValu
 vi.mock("./factorInventory.js", () => ({
   estadoInicialDeSesion: vi.fn().mockResolvedValue({ estado: "completa", graceUntil: null }),
 }));
+// And the sixth. `logoutAll` now also revokes remembered devices (see its own
+// comment), so `auth.controller.ts` imports `rememberedDeviceStore.js`, which
+// reaches `dispositivoRecordado.model.ts` — one more caller of
+// `UsuarioModel.hasMany` on the same insufficient stub above. `login`, the one
+// endpoint this file exercises, never touches a remembered device at all.
+vi.mock("./rememberedDeviceStore.js", () => ({ revokeAllRememberedDevicesOf: vi.fn() }));
 
 // The handler both `POST /api/login` and `POST /api/auth/login` are mounted on.
 const { login } = await import("../controllers/auth.controller.js");

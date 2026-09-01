@@ -31,6 +31,7 @@ import { UsuarioModel } from "../models/usuario.model.js";
 import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
+import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
 import { consumirPresupuestoDeCorreo } from "../auth/mailBudget.js";
 import { avisarPasswordRestablecida } from "../auth/securityNotice.js";
@@ -313,6 +314,20 @@ export const resetPassword = handler("resetPassword", async (req: Request, res: 
     // sessions to begin with — see `sessionStore.ts`'s own comment on why
     // `except: undefined` is what "spare nothing" means, not a gap to fill.
     await revokeAllSessionsOf(result.id_usuario, { transaction });
+    // A remembered device outlives a session revocation — it is a separate
+    // cookie that skips the *next* login's second factor entirely, read
+    // before there is any session for `authenticate` to refuse. This route
+    // exists for the account that believes somebody else now has its
+    // password; leaving that somebody's browser able to skip the factor on
+    // their way back in would undo the point of resetting it.
+    //
+    // Inside this same transaction, not after it: this whole handler already
+    // commits to "all four writes or none" — `consumirToken`'s own comment
+    // argues the token redemption belongs in here for exactly that reason —
+    // and a reset that changed the password while failing to revoke a device
+    // would be the worst of the three possible outcomes, because it is the
+    // one that answers 200.
+    await revokeAllRememberedDevicesOf(result.id_usuario, { transaction });
 
     return result;
   });

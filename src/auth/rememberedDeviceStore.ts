@@ -3,8 +3,25 @@
 //
 // Only two of its operations exist in the 4A skeleton, because there is not yet
 // any factor to prove: the sweep that stops the table growing for ever, and the
-// revocation that has to run when an account is archived. Issuing and accepting
-// a device cookie belong to the plans that build the factors.
+// revocation of every device an account has. Issuing and accepting a device
+// cookie belong to the plans that build the factors.
+//
+// **The revocation has four call sites, not one.** An earlier version of this
+// comment named only the archive (`deleteUsuario`), which was true when it was
+// written and stopped being true without anybody updating it — the exact way a
+// header comment becomes a trap: the next plan reads "the archive is what 4A
+// owes" and never looks for the other three. A remembered device is a cookie
+// that skips a login's second factor entirely, so anywhere an account's
+// credential is being forcibly ended — archived, or its owner declaring "get
+// me out of everywhere" — that skip has to be closed alongside it, or the
+// device cookie outlives the very event meant to end its owner's access:
+//
+// - `deleteUsuario` (`controllers/usuario.controller.ts`) — archiving.
+// - `logoutAll` (`controllers/auth.controller.ts`) — "close every session".
+// - `resetPassword` (`controllers/password.controller.ts`) — "somebody else
+//   has my password".
+// - `updateUserPass` (`controllers/usuario.controller.ts`) — changing your own
+//   password, or having it changed for you.
 //
 // Its own module rather than a corner of `purgeJob.ts`, for the same reason
 // `purgeExpiredSessions` lives in `sessionStore.ts` and `purgeExpiredTokens` in
@@ -63,12 +80,22 @@ export async function purgeExpiredRememberedDevices(): Promise<number> {
 /**
  * Cut off every browser this account had told to stop asking.
  *
- * Called when an account is archived, and it has to be called explicitly: that
- * delete is *logical*, so the `ON DELETE RESTRICT` on `id_usuario` never fires
- * and no cascade ever will. The rows survive the archive — and so, without this,
- * does every device cookie on them, ready to skip the second factor the moment
- * `desarchivarUsuario` brings the account back. See `deleteUsuario` for why that
- * undo, and not the archived stretch itself, is where the hole would be.
+ * Four call sites today, listed on this module's own header comment, and each
+ * reaches for it explicitly rather than by any cascade: `dispositivo_recordado`
+ * carries `ON DELETE RESTRICT` on `id_usuario`, `UsuarioModel` deletes are
+ * logical (`paranoid`) so that FK never fires on any of them anyway, and there
+ * is no trigger that would call this on a session revocation or a password
+ * write on its own. Whoever ends a credential has to ask for this one too.
+ *
+ * The archive (`deleteUsuario`) is the oldest reason and the one with an undo:
+ * the rows survive the archive, and so, without this, does every device cookie
+ * on them — ready to skip the second factor the moment `desarchivarUsuario`
+ * brings the account back. See `deleteUsuario` for why that undo, and not the
+ * archived stretch itself, is where the hole would be. The other three —
+ * `logoutAll`, `resetPassword`, `updateUserPass` — have no undo to wait for:
+ * a device cookie is a second, independent way past the login this endpoint
+ * is trying to close, and it works whether or not a session survives, so it is
+ * cut off at the same moment rather than on any later event.
  *
  * Revoked, not deleted: the row stays until the sweep takes it, so the sessions
  * screen can still show that the device existed and when it was cut off. How

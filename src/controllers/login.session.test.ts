@@ -98,6 +98,12 @@ vi.mock("../models/factorTotp.model.js", () => ({
 vi.mock("../models/codigoRecuperacion.model.js", () => ({
   CodigoRecuperacionModel: { count: vi.fn() },
 }));
+// Same failure, same fix, for `logoutAll` — one of the other five endpoints
+// this file never calls, now that it also revokes remembered devices (see its
+// own comment in `auth.controller.ts`). `rememberedDeviceStore.js` reaches
+// `dispositivoRecordado.model.ts`, one more caller of `UsuarioModel.hasMany`
+// on the plain stub above.
+vi.mock("../auth/rememberedDeviceStore.js", () => ({ revokeAllRememberedDevicesOf: vi.fn() }));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 // `login` sweeps `token_uso_unico` opportunistically after a successful
 // login (see `tokenStore.ts`). Mocked wholesale for the same reason

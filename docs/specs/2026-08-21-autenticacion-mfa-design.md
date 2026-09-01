@@ -434,6 +434,38 @@ dispositivos recordados del usuario que archiva. El `ON DELETE CASCADE` no sirve
 aquí: el borrado es lógico, la fila no se borra, y ninguna cascada se dispara
 jamás.
 
+#### Los cuatro sitios que cortan un dispositivo recordado
+
+Este documento pide la revocación en cuatro sitios, repartidos entre esta
+sección, la tabla de endpoints de §5 y el párrafo del reset en §6. **El 4A
+construyó al principio uno solo** —el archivado— y, peor, la cabecera del propio
+módulo presentaba ese único llamante como el conjunto completo, que es lo que
+habría hecho que nadie los echara de menos. Los cuatro están ahora, y se listan
+juntos aquí porque separados es como se pierden:
+
+| Dónde | Fichero | Transacción |
+|---|---|---|
+| Archivar una cuenta | `usuario.controller.ts` · `deleteUsuario` | Dentro de la del archivado |
+| Cerrar todas las sesiones | `auth.controller.ts` · `logoutAll` | Sin transacción, a propósito |
+| Reset de contraseña | `password.controller.ts` · `resetPassword` | Dentro de la existente |
+| Cambio de contraseña | `usuario.controller.ts` · `updateUserPass` | Dentro de la de la contraseña |
+
+**Por qué importa que estén los cuatro, y no solo el primero.** Un dispositivo
+recordado es precisamente la cookie que permite **saltarse el segundo factor** en
+el siguiente login. Sin estos tres, y una vez el 4B esté en pie, «cerrar todas
+mis sesiones» —el botón que este documento llama *la* respuesta a una cuenta
+robada— revocaría todas las sesiones y **dejaría vivas todas las cookies de
+dispositivo**: el portátil robado vuelve a entrar sabiendo la contraseña y se
+salta el factor. Lo mismo para el reset, que es literalmente lo que hace quien
+cree que le han robado la cuenta.
+
+**Por qué `logoutAll` no abre transacción y los otros sí.** Sus dos llamadas son
+idempotentes y no hay ningún «deshacer» posterior que un fallo a medias pueda
+morder — al contrario que el archivado, que sí es reversible y donde un archivo
+con dispositivos vivos vuelve mal. En los dos caminos de contraseña la
+revocación entra en la transacción que ya existe, porque en ese punto todavía no
+se ha comprometido nada y un fallo revierte limpio.
+
 ## 4. El flujo de entrada
 
 ```
@@ -1219,7 +1251,7 @@ orden.
 |---|---|
 | `20260826000002-add-mfa-columns` | Añade `usuarios.mfa_grace_until`, `usuarios.pass_changed_at` y `sesiones.estado`, `sesiones.mfa_satisfied_at`, `sesiones.mfa_source`. |
 | `20260826000003-create-factor-tables` | Crea `credencial_webauthn`, `factor_totp`, `codigo_recuperacion` y `dispositivo_recordado`, vacías. |
-| `20260827000001-harden-mfa-schema` | Correcciones a las dos anteriores, que ya habían corrido: quita el `DEFAULT` de `sesiones.estado`, acota `credential_id` a 1364 caracteres, pone `DEFAULT now()` en los `created_at`, añade un índice de purga y renombra los índices a la convención del arco. |
+| `20260827000001-harden-mfa-schema` | Correcciones a las dos anteriores, que ya habían corrido: acota `credential_id` a 1364 caracteres, pone `DEFAULT now()` en los `created_at`, añade un índice de purga y renombra los índices a la convención del arco. |
 
 Son tres y no dos: la tercera se escribió después, en un fichero aparte, porque
 las dos primeras ya habían corrido contra la copia de producción, y editar un
@@ -1229,6 +1261,46 @@ construyó. Y ojo con una cuarta: por nombre, entre la segunda y la tercera qued
 aplica **todo lo que esté pendiente** en una sola pasada, así que si esa todavía
 no ha corrido, correrá aquí. El comando enumera por su nombre las que aplicó;
 conviene leer esa línea y no darla por supuesta.
+
+##### Y hay una quinta, escrita a propósito donde el desplegador no la ve
+
+`20260827000002-drop-sesiones-estado-default` **no está en la lista de arriba, y
+no debe estarlo todavía.** Vive en `src/migrations/pending/`, un directorio que
+el buscador de migraciones no mira.
+
+Lo que hace es quitar el `DEFAULT 'completa'` de `sesiones.estado`. Ese default
+lo puso `20260826000002` para rellenar las filas que ya existían cuando se creó
+la columna, y debería haber caducado en ese mismo instante. Mientras siga puesto,
+la columna que decide **todo lo que una sesión puede hacer** tiene un valor que
+la base regala cuando nadie lo pide: un script de rescate, una semilla o un
+`create()` que se deje el campo acuñan una sesión con el ERP entero, sin error y
+sin rastro de que nadie tomara esa decisión.
+
+🔴 **Su requisito de entrada es duro: no se aplica mientras la imagen anterior
+pueda alcanzar esa base.** El `createSession` de la imagen anterior es previo a
+la columna `estado` y no la nombra en su INSERT — **ese `DEFAULT` es lo único que
+hace legal ese INSERT.** Medido con el propio umzug del proyecto: el mismo INSERT
+funciona antes de esta migración y muere después con violación de `not-null`.
+Y el fallo es de los peores de leer: las sesiones ya abiertas siguen
+funcionando, porque el código viejo no selecciona una columna que no conoce, así
+que **solo fallan los logins nuevos**, con un 503 que habla de «una dependencia»
+y no apunta a nada.
+
+**Por qué está aparcada en un directorio y no simplemente anotada.**
+`migrate:deploy` aplica todo lo pendiente de una pasada y no admite ningún
+argumento que diga qué migración correr. Un fichero que sus hermanas ven es un
+fichero que corre en el próximo despliegue, y «acuérdate de no desplegar esa
+todavía» no es un mecanismo. `database/migrate.ts` busca con
+`../migrations/*.{ts,js}`, y un solo `*` no cruza un separador de directorio, así
+que nada bajo `migrations/pending/` se descubre — ni en desarrollo ni en `dist/`,
+porque `tsc` replica el árbol. Comprobado contra la propia librería de globs de
+umzug (`tinyglobby`) con ese patrón exacto. Su test sí corre donde está, porque
+vitest busca por todo el árbol: aparcar el fichero no aparca su prueba.
+
+**Para armarla:** se sube el fichero y su test un nivel, a `src/migrations/`. Nada
+más — ni renombrar, ni registrar, ni editar. El día correcto es aquel en que la
+imagen anterior ya no exista en ninguna parte, que es también el día en que la
+vuelta atrás descrita más abajo deja de estar disponible.
 
 **No hay variables de entorno nuevas.** Ninguna. `MFA_ENCRYPTION_KEY` y las de
 WebAuthn son del 4B y del 4C, y hasta entonces no las lee nadie. Los tres números
@@ -1282,6 +1354,19 @@ anterior en Coolify y **dejar el esquema nuevo puesto** es seguro —el código
 viejo ignora las columnas que no conoce— y es lo que hay que hacer si algo va
 mal. Solo si el problema **es** el esquema se toca el esquema, y entonces se
 deshacen las tres en orden inverso con el código viejo ya desplegado.
+
+⚠️ **Y esa seguridad tiene una condición y una fecha de caducidad.** Se sostiene
+sobre que `sesiones.estado` conserve su `DEFAULT 'completa'`: es lo único que
+hace legal el INSERT del código viejo, que no nombra esa columna. La quinta
+migración —`20260827000002`, aparcada en `src/migrations/pending/` y descrita
+arriba— se lo quita, y es justamente la que se aplica el día en que esta imagen
+deje de estar en juego. **Desde ese día esta vuelta atrás deja de existir**, y
+hay que escribir la siguiente antes de necesitarla.
+
+Dicho de otro modo, y es la razón entera de que esa migración esté aparcada: si
+corriera en el mismo `migrate:deploy` que las otras tres, la vuelta atrás
+quedaría rota **en el mismo instante en que se despliega el arco**, que es
+exactamente cuando más falta hace.
 
 El `down` de `20260826000003` se niega si alguna de las cuatro tablas tiene
 filas, y dice cuáles y cuántas. Eso es una segunda guardia, pensada para después
@@ -1445,10 +1530,18 @@ Reunido aquí y no en el plan del 4A, porque **el 4B se diseña leyendo este
 documento** y un plan terminado es lo primero que nadie vuelve a abrir. Todo lo
 de esta lista está medido contra el código del 4A, no supuesto.
 
-Las cuatro primeras son **requisitos de entrada**: no se dan por diseñadas hasta
-que el 4B las conteste. Hoy ninguna es explotable, porque el código que las
-consumiría todavía no existe — que es exactamente lo que las hace fáciles de
-pasar por alto.
+Son seis, y no todas piden lo mismo:
+
+- **Del 1 al 3, requisitos de entrada del 4B**: no se dan por diseñadas hasta que
+  el 4B las conteste. Hoy ninguna es explotable, porque el código que las
+  consumiría todavía no existe — que es exactamente lo que las hace fáciles de
+  pasar por alto.
+- **El 4 está cerrado**, y resultó no ser un deber del 4B sino un fallo vivo del
+  4A. Se deja escrito con la corrección al lado, porque cómo se subestimó importa
+  más que el hallazgo.
+- **El 5 y el 6 son deuda del 4A aplazada a propósito**, con la decisión ya
+  tomada y la ejecución pendiente. El 5 arma una trampa que solo se dispara
+  cuando exista el 4B; el 6 está vivo hoy y se cierra con el 5.
 
 **1. `counter` y `ultimo_paso` son `BIGINT` y llegan a Node como cadenas,
 mientras `src/interfaces/index.ts` los declara `number`.** Comprobado en un
@@ -1491,11 +1584,103 @@ Solo esperar a que caduque.
 carga, **todas las pantallas salen vacías, todo guardado falla, y no hay un solo
 aviso en ninguna parte**.
 
-Y un detalle que hay que ver antes de construir la pantalla: **la lista blanca de
-`onboarding` solo entiende rutas que empiezan por `/api/`**, y las imágenes se
-sirven desde la raíz (`src/app.ts`, detrás de `authenticate`). Así que la
-pantalla de configuración que monte el 4B tendrá **el avatar y las imágenes
-rotos**, y nadie va a pensar en añadir la raíz de imágenes a esa lista.
+✅ **Y un detalle que estaba escrito aquí como deber del 4B y resultó ser un
+fallo vivo del 4A. Ya está cerrado; se deja escrito porque la corrección importa
+más que el hallazgo.**
+
+Decía así: «la lista blanca de `onboarding` solo entiende rutas que empiezan por
+`/api/`, y las imágenes se sirven desde la raíz, así que la pantalla de
+configuración que monte el 4B tendrá el avatar y las imágenes rotos».
+
+**Eso subestimaba el daño por completo.** No era «una pantalla que el 4B aún no
+ha construido»: era que, pasado el plazo de gracia, **toda cuenta sin factor
+recibía 403 en todas las imágenes guardadas**, sin que nadie desplegara nada. El
+reloj lo disparaba solo, para toda la plantilla a la vez, y no rompía «el
+avatar»: rompía el avatar de la cabecera **y todas las fotografías de postes**,
+que son el contenido principal del ERP. Medido con una sonda: estado
+`onboarding` → 403; estado `completa` → 404. La diferencia entre esos dos
+números es la prueba de que no faltaba el fichero, sino que la puerta lo
+rechazaba.
+
+**Cerrado por `puedeVerArchivosEstaticos` (`src/auth/sessionState.ts`)**, una
+lista blanca propia para el montaje de ficheros, decidida por lo que esa ruta es
+y no heredada de lo que no es: abre `onboarding` y `completa`, y mantiene
+cerrado `parcial` —media autenticación no tiene por qué renderizar nada de una
+aplicación en la que aún no ha entrado—. La usa `authenticateArchivos`
+(`src/middleware/authenticate.ts`), que es lo que `src/app.ts` monta delante de
+`express.static`. Sigue siendo lista blanca y no negra: un cuarto estado tendría
+que nombrarse ahí para entrar, y omitirlo lo deja fuera. Los tres estados están
+cubiertos en `src/app.images.test.ts`, que existía **porque ese montaje es
+posicional** y hasta ahora no tenía ni un caso de estado de sesión — que es
+exactamente por qué esto no lo vio nadie.
+
+**Lo que el 4B puede dar por hecho:** su pantalla de configuración sirve el
+avatar y las fotos en `onboarding` igual que en `completa`, sin tocar nada.
+
+**5. Cambiar la contraseña acuña una sesión sin la prueba del factor, y eso
+encierra a quien ha cumplido.** Aplazado a propósito, no pasado por alto: la
+decisión de fondo está tomada y la ejecución queda para después de este arco.
+
+`updateUserPass` (`usuario.controller.ts`), cuando alguien cambia su **propia**
+contraseña, revoca todas sus sesiones y abre una nueva. Esa nueva nace con
+`mfa_satisfied_at` y `mfa_source` a NULL, **a propósito**: cambiar la contraseña
+demuestra que sabes la contraseña, no que posees un segundo factor, y arrastrar
+el sello dejaría a una sesión robada que además sepa la contraseña refrescarse
+indefinidamente en estado autorizado para step-up sin tocar un factor nunca. Ese
+razonamiento es correcto y se queda.
+
+**La consecuencia no deseada es la tercera cláusula de `estadoEfectivo`**, que
+pregunta «¿lleva esta fila evidencia de que hubo un factor?». Alguien que
+registra su factor el día 5 de su gracia y cambia su contraseña el día 10 se
+queda con una sesión sin evidencia y creada **antes** de su propio plazo — o
+sea, sin cumplir ninguna de las tres exenciones. El día 15 esa sesión cae en
+`onboarding`, en una cuenta que hizo exactamente lo que se le pidió y que **no
+tiene forma de limpiar `mfa_grace_until`**, porque nada en `src/` vuelve a tocar
+esa columna. Es degradado y no sellado —`onboarding` deja abierto `/auth/mfa`, así
+que un segundo intento sale— pero **incumple la condición escrita al construir
+`estadoEfectivo`**: que el mecanismo funcione aunque el 4B olvide su mitad. Aquí
+no la olvida el 4B; la destruye el 4A él solo.
+
+**La decisión tomada, y es la que simplifica: cambiar la contraseña debe
+mandarte al login.** Los dos caminos de contraseña de este ERP ya se comportan
+distinto —`resetPassword` no abre sesión y te devuelve al login; `updateUserPass`
+te rota la sesión— y esa asimetría no tiene defensa. Unificando por el lado del
+login, **este problema desaparece de raíz**: no hay sesión acuñada por un
+controlador, y la siguiente sale de un login de verdad, que calcula el estado con
+`estadoInicialDeSesion` y no pierde ninguna evidencia.
+
+Lo que hace falta para ejecutarlo, medido y no supuesto:
+
+- Quitar el bloque `if (isSelf) { issueSession(...) }` de `updateUserPass`.
+- **Y dejar de mandar `SESSION_EXPIRES_HEADER` en esa respuesta**, que si no
+  seguiría anunciando la caducidad de la sesión que la propia transacción acaba
+  de revocar, y el cliente armaría un temporizador sobre una sesión muerta. Peor
+  que el fallo que se arregla, así que no es una deleción limpia.
+- Tres tests: dos con nombre en `usuario.controller.test.ts` y el de integración
+  real `app.auth.test.ts` · *«rotates the session and tells the client the NEW
+  deadline»*.
+- En `web`, que `guardarPassword` (`PerfilPage.tsx`) y su gemelo de
+  `UsuarioDetallePage.tsx` lleven a la persona al login con un mensaje claro, en
+  vez de dejarla en la pantalla con una sesión ya muerta.
+
+Para `isSelf === false` —un administrador cambiando la contraseña de otra
+persona— no cambia nada: ahí no se rota hoy tampoco.
+
+**6. Una petición en vuelo durante ese cambio de contraseña mata la sesión
+nueva.** Vivo hoy, y se cierra con el punto 5.
+
+Cualquier petición que la página disparara antes de que llegara la respuesta se
+autentica contra una fila ya revocada y recibe 401. El comentario del código lo
+da por aceptado —«el cliente reintentará»— y **el cliente no reintenta**: el
+interceptor de `SesionProvider.tsx` trata todo 401 como fin de sesión y llama a
+`logout()`, que revoca **la cookie que el navegador tenga en ese momento**, que
+ya es la nueva. Resultado: cambias la contraseña, ves un 200, y te echan.
+
+**No se puede arreglar solo en el servidor.** Da igual el orden en que se creen y
+revoquen las sesiones: quien mata la nueva es el `logout()` que dispara el
+cliente después, y el servidor no puede negarse a honrarlo sin romper el logout
+de verdad. Con el punto 5 hecho deja de ser un fallo, porque ir al login pasa a
+ser el resultado buscado y anunciado.
 
 ---
 

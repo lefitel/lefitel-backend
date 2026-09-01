@@ -7,7 +7,7 @@
 // wrong region. A pure function is tested by calling it.
 
 import { describe, it, expect } from "vitest";
-import { puedeAlcanzar, estadoEfectivo, ESTADOS_SESION } from "./sessionState.js";
+import { puedeAlcanzar, puedeVerArchivosEstaticos, estadoEfectivo, ESTADOS_SESION } from "./sessionState.js";
 import type { EstadoSesion } from "./sessionState.js";
 
 describe("what each session state opens", () => {
@@ -49,6 +49,39 @@ describe("what each session state opens", () => {
 
   it("ignores the query string", () => {
     expect(puedeAlcanzar("parcial", "/api/auth/me?x=1")).toBe(true);
+  });
+});
+
+describe("which states may reach a stored photograph", () => {
+  // `puedeVerArchivosEstaticos` is a second, independent allowlist —
+  // deliberately not read out of `PERMITIDAS`, whose every entry is
+  // `/api/auth/...` and has no opinion about `/1712428860328_210.jpg`. This
+  // is the finding itself, pinned directly: before this function existed,
+  // `authenticate` had nothing else to ask about a path outside `/api/...`,
+  // consulted `puedeAlcanzar` anyway, and got a silent `false` for
+  // `onboarding` — 403 on every photograph in the ERP, the day an account's
+  // grace period ran out. See `app.images.test.ts` for the same three cases
+  // through the real mount.
+  it("shuts a partial session out, same as the ERP", () => {
+    expect(puedeVerArchivosEstaticos("parcial")).toBe(false);
+  });
+
+  it("opens it to an onboarding session — the regression this task closes", () => {
+    expect(puedeVerArchivosEstaticos("onboarding")).toBe(true);
+  });
+
+  it("leaves it open to a complete session, unchanged", () => {
+    expect(puedeVerArchivosEstaticos("completa")).toBe(true);
+  });
+
+  it("says nothing about the API allowlist, and the API allowlist says nothing about this", () => {
+    // The two tables answer independently. `parcial` cannot reach
+    // `/api/usuario` and cannot reach a photograph either, but for different,
+    // unrelated reasons — proving one is silent about the other is the whole
+    // point of keeping them apart, so a future edit to one cannot quietly
+    // narrow or widen the other by accident.
+    expect(puedeAlcanzar("onboarding", "/1712428860328_210.jpg")).toBe(false);
+    expect(puedeVerArchivosEstaticos("onboarding")).toBe(true);
   });
 });
 

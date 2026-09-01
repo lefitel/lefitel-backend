@@ -48,6 +48,15 @@ const revokeAllSessionsOf = vi.fn();
 vi.mock("../auth/sessionStore.js", () => ({
   revokeAllSessionsOf: (...a: unknown[]) => revokeAllSessionsOf(...a),
 }));
+// `/password/reset` is the "somebody else knows my password" door, so it has
+// to cut off remembered devices the same way it cuts off sessions — see the
+// call site's own comment. Mocked for the same reason the store above is: the
+// real module imports `dispositivoRecordado.model.ts`, which calls
+// `UsuarioModel.hasMany` on the plain object standing in for the model here.
+const revokeAllRememberedDevicesOf = vi.fn();
+vi.mock("../auth/rememberedDeviceStore.js", () => ({
+  revokeAllRememberedDevicesOf: (...a: unknown[]) => revokeAllRememberedDevicesOf(...a),
+}));
 
 const enviarCorreo = vi.fn();
 vi.mock("../auth/mailer.js", () => ({
@@ -146,6 +155,7 @@ beforeEach(() => {
   crearToken.mockResolvedValue(TOKEN_CRUDO);
   consumirToken.mockResolvedValue({ id_usuario: A, email_destino: "a@osefi.net" });
   revokeAllSessionsOf.mockResolvedValue(1);
+  revokeAllRememberedDevicesOf.mockResolvedValue(0);
   enviarCorreo.mockResolvedValue({ ok: true });
   bcryptHash.mockResolvedValue("$2a$12$hasheada");
 });
@@ -509,5 +519,54 @@ describe("POST /auth/password/reset", () => {
     const [values] = update.mock.calls[0] as [Record<string, unknown>];
     expect(values.pass).toBe("$2a$12$hasheada");
     expect(values.pass_changed_at).toBeInstanceOf(Date);
+  });
+
+  /**
+   * `/password/reset` is the literal "somebody else has my password" door —
+   * closing every session but leaving a remembered-device cookie standing
+   * would let that same somebody's browser skip the second factor on the
+   * very next login, on the password that was just supposedly taken away
+   * from them. Specification finding, not covered until now.
+   */
+  describe("also cuts off every remembered device", () => {
+    it("revokes the account the token names, inside the same transaction", async () => {
+      consumirToken.mockResolvedValue({ id_usuario: A, email_destino: "a@osefi.net" });
+      const c = call({ token: "un-token", pass: CLAVE_VALIDA });
+      await resetPassword(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      // The account the *token* names, not an id `vi.fn().mockResolvedValue`
+      // would accept blindly — the same property the "ignores an id and
+      // email" test above pins for the sessions call.
+      expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(A, { transaction: TRANSACCION });
+    });
+
+    it("ignores an id and email in the body that point at another account", async () => {
+      consumirToken.mockResolvedValue({ id_usuario: A, email_destino: "a@osefi.net" });
+      const c = call({
+        token: "un-token-valido",
+        pass: CLAVE_VALIDA,
+        id: 999,
+        id_usuario: 999,
+        email: "attacker@evil.com",
+      });
+      await resetPassword(c.req, c.res);
+
+      expect(revokeAllRememberedDevicesOf.mock.calls[0][0]).toBe(A);
+    });
+
+    it("rolls the whole reset back — new password included — rather than leave a device cookie live", async () => {
+      // All four writes commit together or none do: `consumirToken`'s own
+      // comment already argues for the token redemption sharing this
+      // transaction with the rest, for the same reason. A reset that
+      // "succeeded" but left a device able to skip the factor is worse than
+      // one that visibly failed and can be retried with the same link.
+      revokeAllRememberedDevicesOf.mockRejectedValue(new Error("no se pudo revocar el dispositivo"));
+      const c = call({ token: "un-token", pass: CLAVE_VALIDA });
+      await resetPassword(c.req, c.res);
+
+      expect(c.status).toBe(500);
+      expect(logAction).not.toHaveBeenCalled();
+    });
   });
 });

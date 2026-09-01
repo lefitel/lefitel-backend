@@ -44,7 +44,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import { httpLogger } from "./middleware/httpLogger.js";
-import { authenticate } from "./middleware/authenticate.js";
+import { authenticate, authenticateArchivos } from "./middleware/authenticate.js";
 import { loginRateLimit } from "./middleware/loginLimiters.js";
 import { requireSameOrigin } from "./middleware/csrf.js";
 import { allowedOrigins, HSTS_MAX_AGE_SECONDS, ROLE_HEADER, SESSION_EXPIRES_HEADER } from "./config/security.js";
@@ -313,11 +313,26 @@ app.use("/api/files", authenticate, filesRoutes);
  * What this does not fix: a photograph is still reachable by anyone with *a*
  * session, whatever pole it belongs to. Scoping it to the owner is the separate
  * piece of work this unblocks rather than replaces.
+ *
+ * **`authenticateArchivos`, not `authenticate`.** This mount is not a router
+ * under `/api/...`, so `authenticate`'s own gate — `puedeAlcanzar`, which
+ * only knows `/api/auth/...` — had no opinion about an image path and, asked
+ * anyway, answered no by default: every `onboarding` session got **403 on
+ * every photograph** the moment its account's MFA grace period ran out,
+ * because nothing had ever decided what images owe a session mid-setup, not
+ * because the deadline was supposed to close them. `completa` never showed
+ * this — `puedeAlcanzar("completa", ...)` is unconditionally `"todo"` — which
+ * is why the hole was invisible until a grace period actually expired.
+ * `authenticateArchivos` carries `puedeVerArchivosEstaticos`
+ * (`auth/sessionState.ts`) instead: an explicit, separate allowlist that
+ * opens this mount to `onboarding` and `completa` and keeps it shut for
+ * `parcial`, decided by what this route is rather than derived from what it
+ * is not. See `src/app.images.test.ts` for the three states covered.
  */
 const imagenesEstaticas = express.static(process.env.IMAGES_DIR ?? "/images");
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (req.path.startsWith("/api/")) return next();
-  void authenticate(req, res, () => imagenesEstaticas(req, res, next));
+  void authenticateArchivos(req, res, () => imagenesEstaticas(req, res, next));
 });
 
 /**

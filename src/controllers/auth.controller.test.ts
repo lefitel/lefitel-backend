@@ -47,6 +47,15 @@ vi.mock("../auth/sessionStore.js", () => ({
   revokeSessionOf: (...a: unknown[]) => revokeSessionOf(...a),
   revokeAllSessionsOf: (...a: unknown[]) => revokeAllSessionsOf(...a),
 }));
+// `logoutAll` also has to cut off the browsers this account told to stop
+// asking for a second factor — see the call site's own comment for why.
+// Mocked for the same reason `sessionStore.js` is: the real module imports
+// `dispositivoRecordado.model.ts`, which calls `UsuarioModel.hasMany` on the
+// plain object standing in for the model in this file.
+const revokeAllRememberedDevicesOf = vi.fn();
+vi.mock("../auth/rememberedDeviceStore.js", () => ({
+  revokeAllRememberedDevicesOf: (...a: unknown[]) => revokeAllRememberedDevicesOf(...a),
+}));
 
 // The three factor tables, mocked at the model rather than mocking
 // `factorInventory.js` wholesale: what the login does with the state is the
@@ -260,6 +269,7 @@ beforeEach(() => {
   listSessionsOf.mockResolvedValue([]);
   revokeSessionOf.mockResolvedValue(true);
   revokeAllSessionsOf.mockResolvedValue(0);
+  revokeAllRememberedDevicesOf.mockResolvedValue(0);
   permissionsFor.mockResolvedValue(PERMISOS);
   purgeExpiredTokens.mockResolvedValue(0);
   // Nothing registered, which is every account on the day this deploys.
@@ -766,6 +776,42 @@ describe("POST /api/auth/logout-all", () => {
     const c = call(YO_CON_SESION, { body: { id_usuario: 1 }, params: { id: "1" } });
     await logoutAll(c.req, c.res);
 
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(YO);
+  });
+
+  /**
+   * "I lost my laptop" has to close the door a remembered device leaves open,
+   * or the thief's browser — which still knows the password — walks straight
+   * back in on the next login without ever touching the second factor this
+   * endpoint was supposed to force. Specification finding, not covered until
+   * now: this was the one of four call sites the archived-account path
+   * (`deleteUsuario`) never claimed to be.
+   */
+  it("also cuts off every remembered device, not only the sessions", async () => {
+    revokeAllRememberedDevicesOf.mockResolvedValue(2);
+    const c = call(YO_CON_SESION);
+    await logoutAll(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    // The caller's own id — the same argument `revokeAllSessionsOf` gets.
+    // `vi.fn().mockResolvedValue(2)` would answer "yes" for any argument at
+    // all, so the assertion has to be on what was actually sent, not merely
+    // that the call happened.
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(YO);
+  });
+
+  it("answers 500 rather than closing every session while a device cookie still skips the factor", async () => {
+    // Sessions revoked, then the device sweep throws. No transaction ties the
+    // two together — see the call site's own comment for why none is needed —
+    // so the sessions really are gone by the time this answers 500; the point
+    // pinned here is that the failure is reported rather than swallowed, so a
+    // caller who sees 500 knows to retry rather than believing the button
+    // worked.
+    revokeAllRememberedDevicesOf.mockRejectedValue(new Error("no se pudo revocar el dispositivo"));
+    const c = call(YO_CON_SESION);
+    await logoutAll(c.req, c.res);
+
+    expect(c.status).toBe(500);
     expect(revokeAllSessionsOf).toHaveBeenCalledWith(YO);
   });
 });

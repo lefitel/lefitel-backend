@@ -104,6 +104,7 @@ const { TokenUsoUnicoModel } = await import("./models/tokenUsoUnico.model.js");
 const { CredencialWebauthnModel } = await import("./models/credencialWebauthn.model.js");
 const { FactorTotpModel } = await import("./models/factorTotp.model.js");
 const { CodigoRecuperacionModel } = await import("./models/codigoRecuperacion.model.js");
+const { DispositivoRecordadoModel } = await import("./models/dispositivoRecordado.model.js");
 
 /**
  * The models are real, and only their query methods are replaced.
@@ -202,6 +203,14 @@ const transaction = vi.spyOn(sequelize, "transaction");
 const passkeyCount = vi.spyOn(CredencialWebauthnModel, "count");
 const totpCount = vi.spyOn(FactorTotpModel, "count");
 const codigoCount = vi.spyOn(CodigoRecuperacionModel, "count");
+/**
+ * One more, for the remembered-device revocation `updateUserPass` gained
+ * alongside its rotation (see that handler's own comment). Left real, this
+ * hits the actual `DispositivoRecordadoModel.update`, which reaches for the
+ * configured connection the same way every other unspied model call here
+ * would — this file's whole premise is that none of them get the chance.
+ */
+const dispositivoUpdate = vi.spyOn(DispositivoRecordadoModel, "update");
 
 const YO = 7;
 const MI_ROL = 2;
@@ -333,6 +342,9 @@ beforeEach(() => {
   passkeyCount.mockResolvedValue(0);
   totpCount.mockResolvedValue(0);
   codigoCount.mockResolvedValue(0);
+  // No remembered devices to revoke, by default — matching every other
+  // fixture in this file, which models an ordinary account under plan 4A.
+  dispositivoUpdate.mockResolvedValue([0] as never);
 });
 
 /** The `where` of the nth UPDATE the store sent to the sessions table. */

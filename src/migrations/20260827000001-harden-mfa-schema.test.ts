@@ -1,8 +1,9 @@
 // The corrections to the two MFA migrations of 2026-08-26.
 //
 // Each test below is one rule, and its name is the rule. What is asserted is
-// what a later edit could quietly undo: the default that must not come back on
-// `sesiones.estado`, the length that keeps `credential_id` under the btree
+// what a later edit could quietly undo: that `sesiones.estado` stays entirely
+// alone here (its default's removal moved to `20260827000002`, gated on its
+// own precondition), the length that keeps `credential_id` under the btree
 // ceiling, and the pair of indexes the purge needs to be more than a sequential
 // scan.
 
@@ -66,14 +67,15 @@ describe("harden-mfa-schema", () => {
     }
   });
 
-  it("drops the default that let a session be minted 'completa' without asking", async () => {
-    // The one change here with a security consequence. While that default
-    // stands, a raw INSERT — the rescue script the specification plans, a seed,
-    // a `.create(...)` missing a field — opens a session with the run of the
-    // whole ERP and leaves no trace of the decision.
-    expect(sqlOf(await ran(up))).toMatch(
-      /ALTER TABLE sesiones ALTER COLUMN estado DROP DEFAULT/i,
-    );
+  it("does not touch sesiones.estado — that default's removal is 20260827000002's job", async () => {
+    // This migration ran that ALTER through an earlier draft. Removing it here
+    // and putting it back would silently reopen the exact window
+    // `20260827000002`'s header exists to document: `DEFAULT 'completa'` is the
+    // only thing that keeps the previous image's `createSession` — which does
+    // not name `estado` — legal against this schema, and a routine
+    // `migrate:deploy` applies whatever is pending in one pass with no gap
+    // between migrating and redeploying the image.
+    expect(sqlOf(await ran(up))).not.toMatch(/sesiones/i);
   });
 
   it("caps credential_id at the length WebAuthn allows, well under the btree ceiling", async () => {
@@ -134,13 +136,14 @@ describe("harden-mfa-schema", () => {
     }
   });
 
-  it("puts every one of the five changes back, so the schema dumps match again", async () => {
+  it("puts every one of the four changes back, so the schema dumps match again", async () => {
     // A migration that only goes forward is one nobody can safely deploy on a
-    // Friday. Each `up` statement has its opposite here — including restoring
-    // the `estado` default, which is a worse schema and the correct reversal.
+    // Friday. Each `up` statement has its opposite here, and `estado` is not
+    // among them — `down` must not touch it any more than `up` does, for the
+    // same reason.
     const sql = sqlOf(await ran(down));
 
-    expect(sql).toMatch(/ALTER TABLE sesiones ALTER COLUMN estado SET DEFAULT 'completa'/i);
+    expect(sql).not.toMatch(/sesiones/i);
     expect(sql).toMatch(
       /ALTER TABLE credencial_webauthn ALTER COLUMN credential_id TYPE TEXT/i,
     );

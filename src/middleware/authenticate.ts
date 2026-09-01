@@ -1,7 +1,13 @@
 import type { Request, Response, NextFunction } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { findLiveSession, touchSession, slidingExpiry, cappedByCeiling } from "../auth/sessionStore.js";
-import { puedeAlcanzar, estadoEfectivo, MENSAJE_FACTOR_PENDIENTE } from "../auth/sessionState.js";
+import {
+  puedeAlcanzar,
+  puedeVerArchivosEstaticos,
+  estadoEfectivo,
+  MENSAJE_FACTOR_PENDIENTE,
+} from "../auth/sessionState.js";
+import type { EstadoSesion } from "../auth/sessionState.js";
 import { readSessionCookie, setSessionCookie } from "../auth/sessionCookie.js";
 import { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER, SESSION_EXPIRES_HEADER } from "../config/security.js";
 import { log } from "../utils/logger.js";
@@ -44,6 +50,39 @@ const ERROR_INESPERADO = "Ocurrió un error al procesar la petición.";
  * the whole API going silent.
  */
 export async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await autenticarContraSuperficie(req, res, next, puedeAlcanzar);
+}
+
+/**
+ * The same door, guarding the field photographs instead of `/api/...`.
+ *
+ * Everything above this line about revocation, password rotation and the
+ * fourteen-day deadline applies exactly the same way — a session is a session
+ * whichever door it is walking through. The one thing that has to differ is
+ * which allowlist decides whether it may pass, and that is the entire reason
+ * this is a second export rather than a branch inside `authenticate` keyed on
+ * the path: `puedeAlcanzar` is written in the vocabulary of `/api/...` routes
+ * and has no opinion, correct or otherwise, about `/1712428860328_210.jpg`.
+ * Asking it anyway is what answered 403 to `onboarding` on every photograph
+ * in the ERP the moment the grace period ran out — not because `onboarding`
+ * was refused images on purpose, but because nothing had ever decided the
+ * question, and the API's list, asked regardless, said no by default.
+ *
+ * `puedeVerArchivosEstaticos` (`auth/sessionState.ts`) is that explicit
+ * decision, made about this mount by what it is rather than by what it is
+ * not. `app.ts` is the only caller: the images mount there is the sole
+ * surface outside `/api/...` that runs behind a session today.
+ */
+export async function authenticateArchivos(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await autenticarContraSuperficie(req, res, next, (estado) => puedeVerArchivosEstaticos(estado));
+}
+
+async function autenticarContraSuperficie(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  puedeAlcanzarEstaSuperficie: (estado: EstadoSesion, ruta: string) => boolean,
+): Promise<void> {
   try {
     const cookieToken = readSessionCookie(req);
     if (!cookieToken) {
@@ -54,7 +93,7 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
       return;
     }
 
-    await authenticateBySession(cookieToken, req, res, next);
+    await authenticateBySession(cookieToken, req, res, next, puedeAlcanzarEstaSuperficie);
   } catch (err) {
     authLog.warn({ err }, "fallo inesperado al autenticar la petición");
     if (!res.headersSent) {
@@ -68,6 +107,7 @@ async function authenticateBySession(
   req: Request,
   res: Response,
   next: NextFunction,
+  puedeAlcanzarEstaSuperficie: (estado: EstadoSesion, ruta: string) => boolean,
 ): Promise<void> {
   const sesion = await findLiveSession(token);
 
@@ -205,6 +245,16 @@ async function authenticateBySession(
    *   login they have already passed, and they would pass it again, and land
    *   in the same place: a loop with no way out.
    *
+   * That branching is about how to phrase a refusal and does not change with
+   * the caller — `parcial` means "unfinished login" on every surface this
+   * middleware guards. **Which allowlist decides whether there is a refusal
+   * at all is what `puedeAlcanzarEstaSuperficie` carries in**: `authenticate`
+   * passes `puedeAlcanzar`, written for `/api/...`; `authenticateArchivos`
+   * passes `puedeVerArchivosEstaticos`, written for the images mount. Neither
+   * table has an opinion about the other's routes, which is the point — see
+   * `authenticateArchivos`'s own comment for why asking the wrong one was the
+   * defect.
+   *
    * `originalUrl` and not `req.path`: this middleware runs inside routers, so
    * `req.path` is relative to the mount point — "/1", not "/api/usuario/1".
    *
@@ -214,7 +264,7 @@ async function authenticateBySession(
    * this one has not become.
    */
   const ruta = req.originalUrl;
-  if (!puedeAlcanzar(estado, ruta)) {
+  if (!puedeAlcanzarEstaSuperficie(estado, ruta)) {
     if (estado === "parcial") {
       res.status(401).json({ message: SESION_INCOMPLETA });
       return;

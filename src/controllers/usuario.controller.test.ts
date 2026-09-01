@@ -1368,6 +1368,70 @@ describe("a new password ends the old sessions", () => {
     expect(opciones.transaction).toBe(TRANSACCION);
   });
 
+  /**
+   * A remembered device is a cookie that skips the *next* login's second
+   * factor — read before there is any session for `authenticate` to refuse.
+   * A password change that revoked every session but left that cookie
+   * standing would still let whoever the password change was meant to shut
+   * out straight back in, factor-free, on the very next login. Specification
+   * finding, not covered until this task: `deleteUsuario` below was the only
+   * one of four call sites the plan had wired up.
+   */
+  it("revokes the account's remembered devices in the same transaction as the password", async () => {
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO, id_sesion: MI_SESION },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    // The same transaction the hash and the session revocation ran inside —
+    // not a second, unrelated call outside it. `vi.fn().mockResolvedValue(0)`
+    // would answer "yes" to any argument, so the assertion has to be on what
+    // was actually sent.
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(SELF, { transaction: TRANSACCION });
+  });
+
+  it("revokes the target's remembered devices, not the administrator's, when resetting somebody else's", async () => {
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN, id_sesion: MI_SESION },
+      { params: { id: String(OTHER) }, body: { pass: "una-clave-de-prueba" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(OTHER, { transaction: TRANSACCION });
+  });
+
+  it("answers 500 rather than changing the password while a device cookie still skips the factor", async () => {
+    // Inside the password transaction, not after it — see the call site's own
+    // comment for why the calculus differs from the session rotation a few
+    // lines below, which runs *after* this transaction commits and must not
+    // fail this loudly. Here nothing has committed yet: a failure rolls the
+    // hash and the session revocation back with it, so the caller's current
+    // password is still the old one and a retry is safe rather than the
+    // "current password is wrong" trap `issueSession`'s own catch exists to
+    // avoid one step further down.
+    revokeAllRememberedDevicesOf.mockRejectedValue(new Error("no se pudo revocar el dispositivo"));
+    const stored = storedUser();
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: SELF, id_rol: TECNICO, id_sesion: MI_SESION },
+      { params: { id: String(SELF) }, body: { pass: "una-clave-de-prueba", oldPass: "vieja" } },
+    );
+    await updateUserPass(c.req, c.res);
+
+    expect(c.status).toBe(500);
+    expect(issueSession).not.toHaveBeenCalled();
+  });
+
   it("ends nothing when the password was refused", async () => {
     // Every refusal, one loop: a bad current password, a policy failure, and a
     // request with no permission at all. None of them may close a session,

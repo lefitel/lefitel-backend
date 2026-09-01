@@ -40,6 +40,7 @@ import {
   revokeAllSessionsOf,
   revokeSessionOf,
 } from "../auth/sessionStore.js";
+import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -488,13 +489,35 @@ export const logoutAll = handler("logoutAll", async (req: Request, res: Response
   if (!caller) return res.sendStatus(401);
 
   const cerradas = await revokeAllSessionsOf(caller.id);
+  /**
+   * A remembered device is what lets the *next* login skip the second
+   * factor — so a "close every session" that left those cookies standing
+   * would still let the laptop that was stolen back in, on the same
+   * password, without the factor this whole plan exists to force. The
+   * specification calls this endpoint **the** answer to a stolen device;
+   * until this line it was only closing the half of the door that sessions
+   * cover.
+   *
+   * **No transaction shared with the revocation above, and none is missing
+   * for it.** Both calls are the same shape — a bulk UPDATE guarded by
+   * `revoked_at: null` — so either one repeated after the other already ran
+   * is a no-op, not a double revocation. That is what makes them safe to
+   * leave as two independent statements: unlike `deleteUsuario`'s archive,
+   * there is no later *undo* step here for a half-finished pair to come back
+   * and bite — closing sessions and cutting off devices are two separate
+   * facts about "get me out of everywhere", not two halves of one state
+   * whose disagreement is itself the hole. If this call throws, `handler`
+   * answers 500 with the sessions already closed; retrying finishes the
+   * devices and repeats nothing.
+   */
+  const dispositivos = await revokeAllRememberedDevicesOf(caller.id);
   clearSessionCookie(res);
   // `tenia_fila` used to ride along in this metadata, recording whether the
   // caller had a session row at all. Every caller has one, so it recorded a
   // constant — and a constant in an audit trail is worse than nothing, because
   // the next person reading the bitácora takes it for a distinction that was
   // once measured.
-  logAction({ id_usuario: caller.id, action: "LOGOUT_ALL", entity: "Usuario", entity_id: caller.id, detail: `Cerró todas sus sesiones (${cerradas})`, metadata: { sesiones_revocadas: cerradas }, severity: 'warning', ip_address: req.ip ?? null });
+  logAction({ id_usuario: caller.id, action: "LOGOUT_ALL", entity: "Usuario", entity_id: caller.id, detail: `Cerró todas sus sesiones (${cerradas})`, metadata: { sesiones_revocadas: cerradas, dispositivos_revocados: dispositivos }, severity: 'warning', ip_address: req.ip ?? null });
   // One sentence, and it is true without qualification for the first time.
   return res.status(200).json({ message: "Se cerraron todas sus sesiones.", cerradas });
 });

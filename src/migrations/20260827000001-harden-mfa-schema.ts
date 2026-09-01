@@ -10,28 +10,27 @@ import { QueryInterface } from "sequelize";
 // them. So `20260826000002` and `20260826000003` keep their `up` exactly as it
 // executed; only their `down` gained a guard, because a `down` has not run.
 //
-// Five changes, and the first one is the one with teeth.
+// Four changes here. A fifth — dropping `sesiones.estado`'s
+// `DEFAULT 'completa'` — was in this file through an earlier draft and is not
+// any more. The reasoning for it was sound (see
+// `20260827000002-drop-sesiones-estado-default.ts`, which is where it lives
+// now): that default is a policy value handed out for free, and it should go.
+// What was wrong was doing it *here*. `DEFAULT 'completa'` is also the only
+// thing that keeps the previous image's `createSession` — the one that does
+// not name `estado` in its INSERT because it predates the column — legal
+// against this schema. Dropping it in the same migration that a routine
+// `migrate:deploy` applies turns the deploy order the spec mandates
+// (migrations before the image) into a guaranteed window where the old image
+// 500s every new login, and turns the documented rollback (leave the schema,
+// revert the image) into one too. An auditor with the project's own umzug
+// measured both: `INSERT INTO sesiones (...)` with no `estado` column, run
+// against this migration's own `up`, dies on
+// `el valor nulo en la columna «estado» ... viola la restricción "not-null"`.
+// Against the schema this file now actually produces, the same statement
+// still succeeds — see that migration's test and its header for the INSERT it
+// has to keep refusing instead, once the old image is gone.
 //
-// **1. `sesiones.estado` loses its `DEFAULT 'completa'`.** That default was
-// right for exactly one statement: the `ALTER TABLE` that added the column had
-// to put something in the rows already there, and the sessions that existed
-// were, in the only sense that existed then, complete. It expired when that
-// statement committed, and nobody removed it.
-//
-// What it means now is that `estado` — which is the whole of what a session is
-// allowed to do — has a value the database supplies when nobody says. That
-// contradicts, at one file's distance, the decision `createSession` is built
-// on: it refuses to take a default for `estado` on purpose, "so the compiler
-// asks at each call site which state this login deserves". The compiler cannot
-// ask a raw `INSERT`. The rescue script the specification plans, a seed, a
-// `bulkInsert`, a `.create(...)` that forgets the field — each mints a session
-// with the run of the whole ERP, with no error and no trace of the decision
-// ever being taken.
-//
-// After this, an INSERT that names no `estado` fails on NOT NULL. Loud, at the
-// moment of the mistake, instead of quiet and privileged.
-//
-// **2. `credential_id` gets a length.** It was `TEXT` under a unique btree, and
+// **1. `credential_id` gets a length.** It was `TEXT` under a unique btree, and
 // a btree index tuple cannot exceed 2704 bytes. Measured on a scratch database
 // at Postgres 18.2: 2700 characters of incompressible text are rejected with
 // `el tamaño de fila de índice 2712 excede el máximo 2704`, which arrives at
@@ -46,7 +45,7 @@ import { QueryInterface } from "sequelize";
 // with `value too long for type character varying(1364)`, and the btree ceiling
 // is no longer reachable at all.
 //
-// **3. The four `created_at` columns get a real `DEFAULT now()` — and so does
+// **2. The four `created_at` columns get a real `DEFAULT now()` — and so does
 // `token_uso_unico`, whose own migration only thinks it has one.**
 //
 // This is where the audit's premise turned out to be wrong in an interesting
@@ -66,15 +65,17 @@ import { QueryInterface } from "sequelize";
 // `token_uso_unico` too, because a comment that describes a safety net that is
 // not there is worse than no comment.
 //
-// **The rule these five follow, since two of them point opposite ways:**
-// default the facts, never the policy. `created_at` is a fact — the instant the
-// row came into being — and the value a default supplies is always the right
-// one, so a rescue script that forgets the column gets a correct timestamp
-// instead of a NOT NULL violation. `estado` is a policy: the value a default
-// supplies is a decision about privilege, and it is wrong whenever the caller
-// had a different answer to give.
+// **The rule this one follows, and the one `20260827000002` breaks on
+// purpose:** default the facts, never the policy. `created_at` is a fact —
+// the instant the row came into being — and the value a default supplies is
+// always the right one, so a rescue script that forgets the column gets a
+// correct timestamp instead of a NOT NULL violation. `estado` is a policy:
+// the value a default supplies is a decision about privilege, and it is
+// wrong whenever the caller had a different answer to give — which is why
+// removing its default is real work and gets its own migration, gated on its
+// own precondition, instead of riding along with facts here.
 //
-// **4. A partial index on `dispositivo_recordado.revoked_at`, which is what
+// **3. A partial index on `dispositivo_recordado.revoked_at`, which is what
 // makes the `expires_at` index true.** `20260826000003` added
 // `dispositivo_recordado (expires_at)` with the comment "the purge filters by
 // this one". Task 9 then wrote the purge, and it filters by
@@ -99,7 +100,7 @@ import { QueryInterface } from "sequelize";
 // grows by one row per browser per "remember me" and shrinks only through this
 // sweep, and an index whose comment says it is used should be used.
 //
-// **5. The four index names.** `addIndex` without a `name` lets Sequelize
+// **4. The four index names.** `addIndex` without a `name` lets Sequelize
 // generate one, and it produced `dispositivo_recordado_expires_at` where the
 // rest of this arc writes `sesiones_expires_at_idx` and
 // `token_uso_unico_expires_at_idx`. Renamed to match. The `_key` indexes behind
@@ -131,11 +132,6 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
     // should make the migration fail fast and get retried, not queue whatever
     // else is touching these tables behind it.
     await queryInterface.sequelize.query("SET LOCAL lock_timeout = '5s'", { transaction });
-
-    await queryInterface.sequelize.query(
-      "ALTER TABLE sesiones ALTER COLUMN estado DROP DEFAULT",
-      { transaction },
-    );
 
     // A rewrite in principle, instant in practice: nothing in `src/` inserts
     // into this table yet, so it is empty everywhere this runs. The day it is
@@ -171,10 +167,10 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
 /**
  * Puts the schema back exactly as `20260826000003` left it.
  *
- * Faithful rather than opinionated, including restoring `DEFAULT 'completa'` on
- * `sesiones.estado`: a `down` that improves on the state it reverts to is a
- * `down` whose dump no longer matches, and comparing dumps across a down/up/down
- * cycle is the only cheap proof a migration is reversible at all.
+ * Faithful rather than opinionated: a `down` that improves on the state it
+ * reverts to is a `down` whose dump no longer matches, and comparing dumps
+ * across a down/up/down cycle is the only cheap proof a migration is
+ * reversible at all.
  *
  * ⚠️ **One direction cannot be reversed by SQL.** After this `down`,
  * `credential_id` is TEXT again and will accept a value longer than 1364
@@ -207,11 +203,6 @@ export async function down({ context: queryInterface }: { context: QueryInterfac
 
     await queryInterface.sequelize.query(
       "ALTER TABLE credencial_webauthn ALTER COLUMN credential_id TYPE TEXT",
-      { transaction },
-    );
-
-    await queryInterface.sequelize.query(
-      "ALTER TABLE sesiones ALTER COLUMN estado SET DEFAULT 'completa'",
       { transaction },
     );
   });
