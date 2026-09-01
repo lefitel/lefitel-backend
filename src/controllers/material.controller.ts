@@ -58,10 +58,15 @@ export async function updateMaterial(req: Request, res: Response) {
     const TempMaterial = await MaterialModel.findOne({ where: { id } });
     if (!TempMaterial) return res.status(404).json({ message: "Material no encontrado" });
     const dv = TempMaterial.dataValues as unknown as Record<string, unknown>;
-    const beforeMaterial = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempMaterial.set(assignable(req.body));
+    // The diff is built from what will actually be written. `assignable` refuses
+    // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
+    // refused change is worse than no entry at all: the bitácora is where a reader
+    // goes to find out whether the row was archived.
+    const editable = assignable(req.body);
+    const beforeMaterial = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
+    TempMaterial.set(editable);
     await TempMaterial.save();
-    logAction({ id_usuario: req.user?.id, action: "UPDATE_MATERIAL", entity: "Material", entity_id: Number(id), detail: `Editó material #${id}`, metadata: { before: beforeMaterial, after: req.body }, severity: 'warning' });
+    logAction({ id_usuario: req.user?.id, action: "UPDATE_MATERIAL", entity: "Material", entity_id: Number(id), detail: `Editó material #${id}`, metadata: { before: beforeMaterial, after: editable }, severity: 'warning' });
     res.status(200).json(TempMaterial);
   } catch (error) {
     return res.status(500).json({ message: error.message });

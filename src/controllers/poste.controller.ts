@@ -192,14 +192,19 @@ export async function updatePoste(req: Request, res: Response) {
     const { adss_ids, ...bodyWithoutAdss } = req.body;
 
     const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
+    // The diff below is computed from what will actually be written, not from
+    // what arrived. `withoutAuthor` refuses `id_usuario` at the write, and a log
+    // that records the refused change is worse than no log at all: the bitácora is
+    // the one place a reader goes to find out who reassigned a row.
+    const editable = withoutAuthor(bodyWithoutAdss);
     const fkKeys = new Set(["id_propietario", "id_material", "id_ciudadA", "id_ciudadB"]);
     const beforeMeta: Record<string, unknown> = {};
     const afterMeta:  Record<string, unknown> = {};
 
-    for (const k of Object.keys(bodyWithoutAdss)) {
+    for (const k of Object.keys(editable)) {
       const bv = dv[k];
       if (bv === undefined || fkKeys.has(k)) continue;
-      if (isPrimVal(bv) && isPrimVal(bodyWithoutAdss[k])) { beforeMeta[k] = bv; afterMeta[k] = bodyWithoutAdss[k]; }
+      if (isPrimVal(bv) && isPrimVal(editable[k])) { beforeMeta[k] = bv; afterMeta[k] = editable[k]; }
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -212,7 +217,7 @@ export async function updatePoste(req: Request, res: Response) {
       [["id_propietario", PropietarioModel], ["id_material", MaterialModel], ["id_ciudadA", CiudadModel], ["id_ciudadB", CiudadModel]] as [string, unknown][]
     ).map(async ([k, Model]) => {
       const bv = dv[k] as number | null | undefined;
-      const av = bodyWithoutAdss[k] as number | null | undefined;
+      const av = editable[k] as number | null | undefined;
       if (bv === undefined || bv === av) return;
       [beforeMeta[k], afterMeta[k]] = await Promise.all([fkRef(Model, bv), fkRef(Model, av)]);
     }));
@@ -220,7 +225,7 @@ export async function updatePoste(req: Request, res: Response) {
     let adssLogData: { before: string | null; after: string | null } | null = null;
 
     await sequelize.transaction(async (t) => {
-      TempPoste.set(withoutAuthor(bodyWithoutAdss));
+      TempPoste.set(editable);
       await TempPoste.save({ transaction: t });
 
       if (Array.isArray(adss_ids)) {

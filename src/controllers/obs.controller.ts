@@ -47,16 +47,22 @@ export async function updateObs(req: Request, res: Response) {
     const TempObs = await ObsModel.findOne({ where: { id } });
     if (!TempObs) return res.status(404).json({ message: "Observación no encontrada" });
     const dv = TempObs.dataValues as unknown as Record<string, unknown>;
+    // The diff is built from what will actually be written. `assignable` refuses
+    // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
+    // refused change is worse than no entry at all: the bitácora is where a reader
+    // goes to find out whether the row was archived. Built through a variable, so
+    // `logShape.test.ts` cannot see this one — see its header.
+    const editable = assignable(req.body);
     const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
     const beforeMeta: Record<string, unknown> = {};
     const afterMeta:  Record<string, unknown> = {};
-    for (const k of Object.keys(req.body)) {
+    for (const k of Object.keys(editable)) {
       const bv = dv[k];
       if (bv === undefined || k === "id_tipoObs") continue;
-      if (isPrimVal(bv) && isPrimVal(req.body[k])) { beforeMeta[k] = bv; afterMeta[k] = req.body[k]; }
+      if (isPrimVal(bv) && isPrimVal(editable[k])) { beforeMeta[k] = bv; afterMeta[k] = editable[k]; }
     }
     const bvTipo = dv["id_tipoObs"] as number | null | undefined;
-    const avTipo = req.body["id_tipoObs"] as number | null | undefined;
+    const avTipo = editable["id_tipoObs"] as number | null | undefined;
     if (bvTipo !== undefined && bvTipo !== avTipo) {
       const fkRef = async (pkVal: number | null | undefined) => {
         if (pkVal == null) return null;
@@ -65,7 +71,7 @@ export async function updateObs(req: Request, res: Response) {
       };
       [beforeMeta["id_tipoObs"], afterMeta["id_tipoObs"]] = await Promise.all([fkRef(bvTipo), fkRef(avTipo)]);
     }
-    TempObs.set(assignable(req.body));
+    TempObs.set(editable);
     await TempObs.save();
     logAction({ id_usuario: req.user?.id, action: "UPDATE_OBS", entity: "Obs", entity_id: Number(id), detail: `Editó observación #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
     res.status(200).json(TempObs);

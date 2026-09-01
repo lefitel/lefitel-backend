@@ -58,10 +58,15 @@ export async function updateAdss(req: Request, res: Response) {
     const TempAdss = await AdssModel.findOne({ where: { id } });
     if (!TempAdss) return res.status(404).json({ message: "Adss no encontrado" });
     const dv = TempAdss.dataValues as unknown as Record<string, unknown>;
-    const beforeAdss = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempAdss.set(assignable(req.body));
+    // The diff is built from what will actually be written. `assignable` refuses
+    // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
+    // refused change is worse than no entry at all: the bitácora is where a reader
+    // goes to find out whether the row was archived.
+    const editable = assignable(req.body);
+    const beforeAdss = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
+    TempAdss.set(editable);
     await TempAdss.save();
-    logAction({ id_usuario: req.user?.id, action: "UPDATE_ADSS", entity: "Adss", entity_id: Number(id), detail: `Editó ferretería #${id}`, metadata: { before: beforeAdss, after: req.body }, severity: 'warning' });
+    logAction({ id_usuario: req.user?.id, action: "UPDATE_ADSS", entity: "Adss", entity_id: Number(id), detail: `Editó ferretería #${id}`, metadata: { before: beforeAdss, after: editable }, severity: 'warning' });
     res.status(200).json(TempAdss);
   } catch (error) {
     return res.status(500).json({ message: error.message });

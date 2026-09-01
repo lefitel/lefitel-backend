@@ -34,13 +34,18 @@ export async function updateCiudad(req: Request, res: Response) {
     if (!TempCiudad) return res.status(404).json({ message: "Ciudad no encontrada" });
     const oldImage = TempCiudad.dataValues.image;
     const dv = TempCiudad.dataValues as unknown as Record<string, unknown>;
-    const beforeCiudad = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempCiudad.set(assignable(req.body));
+    // The diff is built from what will actually be written. `assignable` refuses
+    // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
+    // refused change is worse than no entry at all: the bitácora is where a reader
+    // goes to find out whether the row was archived.
+    const editable = assignable(req.body);
+    const beforeCiudad = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
+    TempCiudad.set(editable);
     await TempCiudad.save();
     if (oldImage && req.body.image && oldImage !== req.body.image) {
       deleteImageFile(oldImage);
     }
-    logAction({ id_usuario: req.user?.id, action: "UPDATE_CIUDAD", entity: "Ciudad", entity_id: Number(id), detail: `Editó ciudad #${id}`, metadata: { before: beforeCiudad, after: req.body }, severity: 'warning' });
+    logAction({ id_usuario: req.user?.id, action: "UPDATE_CIUDAD", entity: "Ciudad", entity_id: Number(id), detail: `Editó ciudad #${id}`, metadata: { before: beforeCiudad, after: editable }, severity: 'warning' });
     res.status(200).json(TempCiudad);
   } catch (error) {
     return res.status(500).json({ message: error.message });

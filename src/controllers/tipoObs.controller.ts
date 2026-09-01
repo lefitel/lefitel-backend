@@ -58,10 +58,15 @@ export async function updateTipoObs(req: Request, res: Response) {
     const TempTipoObs = await TipoObsModel.findOne({ where: { id } });
     if (!TempTipoObs) return res.status(404).json({ message: "Tipo de observación no encontrado" });
     const dv = TempTipoObs.dataValues as unknown as Record<string, unknown>;
-    const beforeTipoObs = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempTipoObs.set(assignable(req.body));
+    // The diff is built from what will actually be written. `assignable` refuses
+    // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
+    // refused change is worse than no entry at all: the bitácora is where a reader
+    // goes to find out whether the row was archived.
+    const editable = assignable(req.body);
+    const beforeTipoObs = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
+    TempTipoObs.set(editable);
     await TempTipoObs.save();
-    logAction({ id_usuario: req.user?.id, action: "UPDATE_TIPO_OBS", entity: "TipoObs", entity_id: Number(id), detail: `Editó tipo de observación #${id}`, metadata: { before: beforeTipoObs, after: req.body }, severity: 'warning' });
+    logAction({ id_usuario: req.user?.id, action: "UPDATE_TIPO_OBS", entity: "TipoObs", entity_id: Number(id), detail: `Editó tipo de observación #${id}`, metadata: { before: beforeTipoObs, after: editable }, severity: 'warning' });
     res.status(200).json(TempTipoObs);
   } catch (error) {
     return res.status(500).json({ message: error.message });

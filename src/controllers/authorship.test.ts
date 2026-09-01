@@ -53,10 +53,18 @@ vi.mock("../models/evento.model.js", () => ({
 }));
 vi.mock("../models/eventoObs.model.js", () => ({ EventoObsModel: { create: vi.fn(), destroy: vi.fn(), findAll: vi.fn() } }));
 vi.mock("../models/obs.model.js", () => ({ ObsModel: { findAll: vi.fn().mockResolvedValue([]) } }));
-vi.mock("../models/poste.model.js", () => ({ PosteModel: { findByPk: vi.fn().mockResolvedValue(null) } }));
+vi.mock("../models/poste.model.js", () => ({ PosteModel: { findByPk: vi.fn().mockResolvedValue(null), findOne: vi.fn() } }));
 vi.mock("../models/propietario.model.js", () => ({ PropietarioModel: {} }));
 vi.mock("../models/ciudad.model.js", () => ({ CiudadModel: {} }));
-vi.mock("../models/usuario.model.js", () => ({ UsuarioModel: {} }));
+// `USUARIO_AS_AUTHOR` is spread with `[...]` inside poste.controller, so the
+// mock has to carry it or the module throws on load rather than failing a test.
+vi.mock("../models/usuario.model.js", () => ({ UsuarioModel: {}, USUARIO_AS_AUTHOR: ["id", "name", "lastname"] }));
+// Pulled in by poste.controller. Unmocked they run `sequelize.define` at import
+// time, and the sequelize mock below has no `define` — which takes down the
+// whole file before a single assertion runs.
+vi.mock("../models/adss.model.js", () => ({ AdssModel: {} }));
+vi.mock("../models/adssPoste.model.js", () => ({ AdssPosteModel: { findAll: vi.fn().mockResolvedValue([]), create: vi.fn(), destroy: vi.fn() } }));
+vi.mock("../models/material.model.js", () => ({ MaterialModel: {} }));
 vi.mock("../utils/fileUtils.js", () => ({ deleteImageFile: vi.fn() }));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 // The inline writes live inside a transaction; running the callback with a
@@ -68,6 +76,7 @@ vi.mock("../database/sequelize.js", () => ({
 const { createRevision, updateRevision } = await import("./revision.controller.js");
 const { createSolucion, updateSolucion } = await import("./solucion.controller.js");
 const { createEvento, updateEvento, resolverEvento } = await import("./evento.controller.js");
+const { updatePoste } = await import("./poste.controller.js");
 
 /** A request from user 7, carrying whatever body the test wants to try. */
 const reqOf = (body: unknown, params: Record<string, string> = {}) =>
@@ -188,6 +197,51 @@ describe("an edit cannot reassign the author", () => {
 
     expect(set).toHaveBeenCalledOnce();
     expect(set.mock.calls[0][0]).toEqual({ description: "nueva" });
+  });
+
+  // These two build their audit diff through an intermediate variable, so
+  // `logShape.test.ts` cannot see them: they need a behavioural test each.
+  //
+  // They are also the two that survive A1. Until now they refused the
+  // reassignment at the write and recorded it anyway; `updateRevision` and
+  // `updateSolucion` above did it right and are about to be deleted, so the
+  // guard moves here before its old home goes.
+  it("does not tell the bitácora about a refused reassignment, on PUT /evento/:id", async () => {
+    const { logAction } = await import("../utils/logAction.js");
+    eventoFindOne.mockResolvedValue({
+      dataValues: { id: 5, state: false, image: null, id_poste: 1, id_usuario: 3, description: "vieja" },
+      set: vi.fn(),
+      save: vi.fn(),
+    });
+
+    await updateEvento(reqOf({ description: "otra", id_usuario: 9 }, { id: "5" }), resOf());
+
+    const entry = vi.mocked(logAction).mock.calls[0][0];
+    const meta = entry.metadata as { before?: Record<string, unknown>; after?: Record<string, unknown> };
+    expect(meta.after).not.toHaveProperty("id_usuario");
+    expect(meta.before).not.toHaveProperty("id_usuario");
+  });
+
+  it("refuses and does not record a reassignment, on PUT /poste/:id", async () => {
+    // Two assertions on purpose. `updatePoste` has no test at all today, so this
+    // is also the only thing checking that its write drops the author — which is
+    // what the deleted `PUT /revision/:id` case checked for its own.
+    const set = vi.fn();
+    const { logAction } = await import("../utils/logAction.js");
+    const { PosteModel } = await import("../models/poste.model.js");
+    vi.mocked(PosteModel.findOne).mockResolvedValue({
+      dataValues: { id: 8, name: "P-8", image: null, id_usuario: 3 },
+      set,
+      save: vi.fn(),
+    } as never);
+
+    await updatePoste(reqOf({ name: "P-9", id_usuario: 9 }, { id: "8" }), resOf());
+
+    expect(set.mock.calls[0][0]).not.toHaveProperty("id_usuario");
+    const entry = vi.mocked(logAction).mock.calls[0][0];
+    const meta = entry.metadata as { before?: Record<string, unknown>; after?: Record<string, unknown> };
+    expect(meta.after).not.toHaveProperty("id_usuario");
+    expect(meta.before).not.toHaveProperty("id_usuario");
   });
 
   it("does not tell the bitácora about a change it refused", async () => {

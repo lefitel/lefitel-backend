@@ -88,10 +88,15 @@ export async function updatePropietario(req: Request, res: Response) {
     const TempPropietario = await PropietarioModel.findOne({ where: { id } });
     if (!TempPropietario) return res.status(404).json({ message: "Propietario no encontrado" });
     const dv = TempPropietario.dataValues as unknown as Record<string, unknown>;
-    const beforePropietario = Object.fromEntries(Object.keys(req.body).map(k => [k, dv[k]]));
-    TempPropietario.set(assignable(req.body));
+    // The diff is built from what will actually be written. `assignable` refuses
+    // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
+    // refused change is worse than no entry at all: the bitácora is where a reader
+    // goes to find out whether the row was archived.
+    const editable = assignable(req.body);
+    const beforePropietario = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
+    TempPropietario.set(editable);
     await TempPropietario.save();
-    logAction({ id_usuario: req.user?.id, action: "UPDATE_PROPIETARIO", entity: "Propietario", entity_id: Number(id), detail: `Editó propietario #${id}`, metadata: { before: beforePropietario, after: req.body }, severity: 'warning' });
+    logAction({ id_usuario: req.user?.id, action: "UPDATE_PROPIETARIO", entity: "Propietario", entity_id: Number(id), detail: `Editó propietario #${id}`, metadata: { before: beforePropietario, after: editable }, severity: 'warning' });
     res.status(200).json(TempPropietario);
   } catch (error) {
     return res.status(500).json({ message: error.message });

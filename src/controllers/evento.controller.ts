@@ -243,7 +243,6 @@ export async function updateEvento(req: Request, res: Response) {
   try {
     const TempEvento = await EventoModel.findOne({ where: { id } });
     if (!TempEvento) return res.status(404).json({ message: "Evento no encontrado" });
-    const wasResolved = TempEvento.dataValues.state;
     const oldImage = TempEvento.dataValues.image;
     const edv = TempEvento.dataValues as unknown as Record<string, unknown>;
 
@@ -262,21 +261,26 @@ export async function updateEvento(req: Request, res: Response) {
     // request never applied.
     const { obs_ids, state: _stateIsNotEditable, ...bodyWithoutObs } = req.body;
 
+    // The diff below is computed from what will actually be written, not from
+    // what arrived. `withoutAuthor` refuses `id_usuario` at the write, and a log
+    // that records the refused change is worse than no log at all: the bitácora is
+    // the one place a reader goes to find out who reassigned a row.
+    const editable = withoutAuthor(bodyWithoutObs);
     const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
     const beforeMeta: Record<string, unknown> = {};
     const afterMeta:  Record<string, unknown> = {};
-    for (const k of Object.keys(bodyWithoutObs)) {
+    for (const k of Object.keys(editable)) {
       const bv = edv[k];
       if (bv === undefined || k === "id_poste") continue;
-      if (isPrimVal(bv) && isPrimVal(bodyWithoutObs[k])) { beforeMeta[k] = bv; afterMeta[k] = bodyWithoutObs[k]; }
+      if (isPrimVal(bv) && isPrimVal(editable[k])) { beforeMeta[k] = bv; afterMeta[k] = editable[k]; }
     }
     const bvPoste = edv["id_poste"] as number | null | undefined;
-    const avPoste = bodyWithoutObs["id_poste"] as number | null | undefined;
+    const avPoste = editable["id_poste"] as number | null | undefined;
     // Only when the request actually carries id_poste. A partial update that
     // omits it leaves the column untouched, but this used to record
     // `after: {id_poste: null}` — a change that never happened, written into
     // the audit log as if it had.
-    const postePresent = Object.hasOwn(bodyWithoutObs, "id_poste");
+    const postePresent = Object.hasOwn(editable, "id_poste");
     if (postePresent && bvPoste !== undefined && bvPoste !== avPoste) {
       const fkRef = async (pkVal: number | null | undefined) => {
         if (pkVal == null) return null;
@@ -291,7 +295,7 @@ export async function updateEvento(req: Request, res: Response) {
       // Not reassignable through the edit form either: this used to let a PUT
       // change the author of an event that already existed, and CREATE_EVENTO's
       // bitácora metadata does not carry `id_usuario`, so nothing recorded it.
-      TempEvento.set(withoutAuthor(bodyWithoutObs));
+      TempEvento.set(editable);
       await TempEvento.save({ transaction: t });
 
       if (Array.isArray(obs_ids)) {
@@ -320,9 +324,11 @@ export async function updateEvento(req: Request, res: Response) {
     if (oldImage && bodyWithoutObs.image && oldImage !== bodyWithoutObs.image) {
       deleteImageFile(oldImage);
     }
-    if (!wasResolved && bodyWithoutObs.state === true) {
-      logAction({ id_usuario: req.user?.id, action: "RESOLVE_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Resolvió Evento #${id}`, metadata: { before: { state: false }, after: { state: true } }, severity: 'info' });
-    } else if (Object.keys(beforeMeta).some(k => beforeMeta[k] !== afterMeta[k])) {
+    // No RESOLVE_EVENTO branch here any more, and there has not been a reachable
+    // one since `state` started being destructured out of the body above: the
+    // condition read `bodyWithoutObs.state`, which is `undefined` by construction.
+    // Resolving is `POST /:id/resolver`, which logs it itself.
+    if (Object.keys(beforeMeta).some(k => beforeMeta[k] !== afterMeta[k])) {
       logAction({ id_usuario: req.user?.id, action: "UPDATE_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Editó Evento #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
     }
     if (obsLogData) {
