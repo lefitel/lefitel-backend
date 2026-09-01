@@ -930,6 +930,7 @@ exacto que hay que ejecutar y en qué repositorio.
 | **A0** | La bitácora deja de apuntar lo que el servidor rechazó | ✅ `538f309` + `5add364` — 16 ficheros |
 | **A1** | Las siete rutas muertas, borradas | ✅ `e8cf5f6` — 8 ficheros. De 119 rutas montadas a 112 |
 | **A3** | Un fallo deja de contarle al navegador lo que dijo Postgres | ✅ `2d36db1` + `7898569` — 18 ficheros. 74 manejadores movidos a `makeHandler` |
+| **A4** | `ARCHITECTURE.md` al día | ✅ — y el hallazgo: siete de sus ocho índices no están en ninguna migración |
 
 ### Familia A — sólo servidor, no rompe a nadie
 
@@ -1003,7 +1004,7 @@ que el test lo prohíba.
 cd api && npx vitest run src/controllers/errorShape.test.ts
 ```
 
-**A4 · `ARCHITECTURE.md` al día.** Se quedó sin dueño al cortar esta lista —
+**A4 · `ARCHITECTURE.md` al día.** ✅ Hecha. Se quedó sin dueño al cortar esta lista —
 estaba en el antiguo tramo 1 y no entró en ninguna de las catorce—, y lleva
 desactualizado desde antes de este trabajo: documenta `/api/postes` y
 `/api/eventos` en plural, montajes que no existen (son singulares), dice que
