@@ -281,7 +281,7 @@ describe("requireStepUp", () => {
     const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null });
     await requireStepUp()(req, res, next);
     expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
+      expect.objectContaining({ action: "STEP_UP_DENIED", severity: "warning" }),
     );
   });
 
@@ -556,7 +556,7 @@ describe("requireStepUp", () => {
         expect(next).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(403);
         expect(logAction).toHaveBeenCalledWith(
-          expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
+          expect.objectContaining({ action: "STEP_UP_DENIED", severity: "warning" }),
         );
       });
     });
@@ -678,7 +678,7 @@ describe("requireStepUp", () => {
       await requireStepUp({ exigeContrasena: true })(req, res, next);
 
       expect(logAction).toHaveBeenCalledWith(
-        expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
+        expect.objectContaining({ action: "STEP_UP_DENIED", severity: "warning" }),
       );
       expect(logAction).not.toHaveBeenCalledWith(
         expect.objectContaining({ action: "STEP_UP_SKIPPED" }),
@@ -784,5 +784,190 @@ describe("requireStepUp", () => {
         expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
       );
     });
+  });
+});
+
+// 🔴 Bloque de primer nivel, y la indentación lo dice ahora. Estaba escrito con
+// dos espacios, como si viviera dentro de `describe("requireStepUp")`, que
+// cierra más arriba. Hoy da igual porque el `beforeEach` que resetea los mocks
+// es de fichero — pero es exactamente la forma en que un bloque de tests deja
+// de recibir sus hooks el día que alguien mueva ese `beforeEach` dentro del
+// describe padre, y entonces pasan por un motivo que nadie eligió.
+describe("what the refusal tells the client (plan 4D, tarea 2)", () => {
+  const cuentaSinFactor = { id: 1, estado: "completa" as const, mfa_satisfied_at: null };
+  const cuentaConFactor = { id: 1, estado: "completa" as const, mfa_satisfied_at: null };
+
+  // ── exigeContrasena, so one window can ask for both ────────────────────
+
+  it("announces that the password will also be needed, on a route that demands it", async () => {
+    // 🔴 Without this field the ceremony cannot be done in one window. The
+    // server names one missing thing per refusal, and on these routes there
+    // are two, in a fixed order: prove the factor, then type the password.
+    // A client that cannot see the second one coming has to ask twice — on
+    // the two most delicate operations in the ERP.
+    tieneAlgunFactor.mockResolvedValue(true);
+    const { req, res, next } = contexto(cuentaConFactor, {});
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        motivo: MOTIVO_SIN_FACTOR_RECIENTE,
+        exigeContrasena: true,
+      }),
+    );
+  });
+
+  it("says false on a route that does not demand it", async () => {
+    // The ordinary administrative route: proving the factor is the whole of
+    // what it wants, and a window that asked for a password here would be
+    // asking for something the server will not even read.
+    tieneAlgunFactor.mockResolvedValue(true);
+    const { req, res, next } = contexto(cuentaConFactor, {});
+    await requireStepUp()(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        motivo: MOTIVO_SIN_FACTOR_RECIENTE,
+        exigeContrasena: false,
+      }),
+    );
+  });
+
+  it("never lets the extra fields overwrite the three the contract is built on", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    const { req, res, next } = contexto(cuentaConFactor, {});
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(cuerpo.code).toBe(CODIGO_STEP_UP);
+    expect(cuerpo.motivo).toBe(MOTIVO_SIN_FACTOR_RECIENTE);
+    expect(typeof cuerpo.message).toBe("string");
+  });
+
+  // ── intentosRestantes, so nobody walks into a lockout blind ────────────
+
+  it("counts down the guesses left after a wrong password", async () => {
+    // Imported rather than retyped: a test that hard-codes 5 keeps passing
+    // after somebody changes the constant, while the countdown on screen has
+    // silently started lying.
+    const { PASSWORD_CONFIRM_LIMIT } = await import("../config/security.js");
+    // The budget is shared with "change my password" and "register my
+    // email" — the two screens somebody would go to next. Spending it
+    // without ever being told is how a person ends up locked out of the
+    // very screen that would fix their problem.
+    passwordConfirmLimiter.getKey.mockResolvedValue({ totalHits: 0, resetTime: new Date() });
+    verifyOwnPassword.mockResolvedValue({ ok: false });
+    const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        motivo: MOTIVO_CONTRASENA_INCORRECTA,
+        intentosRestantes: PASSWORD_CONFIRM_LIMIT - 1,
+      }),
+    );
+  });
+
+  it("reaches zero on the last guess rather than going negative", async () => {
+    const { PASSWORD_CONFIRM_LIMIT } = await import("../config/security.js");
+    // 🔴 Lo que este test prueba y lo que NO. Prueba la aritmética en el
+    // borde: la última tirada dice cero, no uno. **No prueba el `Math.max`**
+    // — para eso haría falta `totalHits >= PASSWORD_CONFIRM_LIMIT`, y con
+    // ese valor la rama de arriba responde 429 antes de llegar aquí. Ese
+    // `Math.max` cubre una carrera entre las dos lecturas que este fixture
+    // no puede montar, y se queda escrito por eso, no por esta prueba.
+    passwordConfirmLimiter.getKey.mockResolvedValue({
+      totalHits: PASSWORD_CONFIRM_LIMIT - 1,
+      resetTime: new Date(),
+    });
+    verifyOwnPassword.mockResolvedValue({ ok: false });
+    const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ intentosRestantes: 0 }),
+    );
+  });
+
+  it("files the routine refusals as warnings and the alarming ones as critical", async () => {
+    // 🔴 If everything is critical, nothing is. `sin-factor-reciente` and
+    // `contraseña-requerida` are the *opening move* of an ordinary
+    // ceremony — with the 4D interceptor they happen on every protected
+    // operation, twice on the routes that want both proofs. A wrong
+    // password from inside a live session is a different animal: that is
+    // the shape of a stolen cookie being tested.
+    tieneAlgunFactor.mockResolvedValue(true);
+    const rutinario = contexto(cuentaConFactor, {});
+    await requireStepUp()(rutinario.req, rutinario.res, rutinario.next);
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "STEP_UP_DENIED", severity: "warning" }),
+    );
+
+    logAction.mockReset();
+    tieneAlgunFactor.mockResolvedValue(false);
+    verifyOwnPassword.mockResolvedValue({ ok: false });
+    const alarmante = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
+    await requireStepUp({ exigeContrasena: true })(alarmante.req, alarmante.res, alarmante.next);
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
+    );
+  });
+
+  it("keeps estado-incompleto critical: it is the refusal that closed a real attack", async () => {
+    const { req, res, next } = contexto({ id: 1, estado: "onboarding", mfa_satisfied_at: null });
+    await requireStepUp()(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
+    );
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
+    );
+  });
+
+  it("no deja la contraseña en el cuerpo que llega al controlador", async () => {
+    // 🔴 `rol.controller.ts` escribe `after: req.body` **entero** en la
+    // bitácora al editar un rol. Sin borrarla aquí, una petición que llegue
+    // allí con la contraseña dentro la deja guardada en claro en la tabla de
+    // auditoría, que además se pinta en una pantalla.
+    verifyOwnPassword.mockResolvedValue({ ok: true });
+    const { req, res, next } = contexto(cuentaSinFactor, {
+      nombre: "algo",
+      stepup_password: "la-mia",
+    });
+
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    const cuerpo = (req as unknown as { body: Record<string, unknown> }).body;
+    expect(cuerpo).not.toHaveProperty("stepup_password");
+    // Y lo demás sigue ahí: la puerta consume su campo, no vacía la petición.
+    expect(cuerpo.nombre).toBe("algo");
+  });
+
+  it("se niega a montarse en la combinación que sería un pase libre", () => {
+    // 🔴 `toleraFactorIlegible` sin `exigeContrasena` deja pasar una
+    // escritura sensible sólo con la cookie, y encima escribe una línea que
+    // afirma que la cuenta no tiene factor — cuando sí lo tiene, ilegible.
+    // Un error al montar la ruta es imposible de pasar por alto; una
+    // comprobación en tiempo de petición llegaría tarde.
+    expect(() => requireStepUp({ toleraFactorIlegible: true })).toThrow(
+      /exigeContrasena/,
+    );
+    expect(() =>
+      requireStepUp({ toleraFactorIlegible: true, exigeContrasena: true }),
+    ).not.toThrow();
+  });
+
+  it("says nothing about guesses when the password was never compared", async () => {
+    // A missing password costs nothing and is charged nothing — see the
+    // branch's own comment. Reporting a countdown here would tell somebody
+    // they had spent a guess they never spent.
+    const { req, res, next } = contexto(cuentaSinFactor, {});
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(cuerpo.motivo).toBe(MOTIVO_CONTRASENA_REQUERIDA);
+    expect(cuerpo).not.toHaveProperty("intentosRestantes");
   });
 });

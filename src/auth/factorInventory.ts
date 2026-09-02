@@ -28,6 +28,7 @@ import { CredencialWebauthnModel } from "../models/credencialWebauthn.model.js";
 import { FactorTotpModel } from "../models/factorTotp.model.js";
 import { CodigoRecuperacionModel } from "../models/codigoRecuperacion.model.js";
 import { MFA_GRACE_DAYS } from "../config/security.js";
+import { totpEstaDisponible } from "./mfaKeyCheck.js";
 import type { EstadoSesion } from "./sessionState.js";
 
 const DIA_MS = 24 * 60 * 60 * 1000;
@@ -82,6 +83,43 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
     FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } } }),
   ]);
   return passkeys > 0 || totp > 0;
+}
+
+/**
+ * The other question, and it is **not** the same one: does this account have a
+ * factor it could actually prove *right now*?
+ *
+ * A confirmed `factor_totp` row whose key is unavailable answers `true` to
+ * `tieneAlgunFactor` and `false` here, and the gap between those two answers
+ * is a person locked out. `totp.routes.ts:14-26` left
+ * `requireTotpKeyAvailable` off `DELETE /auth/totp` on purpose — its own words,
+ * "para que una llave equivocada no encierre a nadie en un factor muerto" — and
+ * then mounted `requireStepUp` on it, which demands proof of that same dead
+ * factor. Two pieces each correct on their own; the seam between them is the
+ * lockout. This function is what lets the seam be closed without touching
+ * `tieneAlgunFactor`.
+ *
+ * 🔴 **And `tieneAlgunFactor` is deliberately left alone.** Teaching *it* to
+ * skip an unreadable TOTP looks like the same fix and is a far worse hole: it
+ * has five live callers, and one of them is `estadoInicialDeSesion` below,
+ * which decides what state a session opens in. A mistyped
+ * `MFA_ENCRYPTION_KEY_ACTIVE` would then open **every** session as if nobody
+ * had a second factor at all — a configuration typo turned into a silent,
+ * fleet-wide downgrade. The narrow question belongs in its own function, asked
+ * only by the one route that needs it.
+ *
+ * **Passkeys are unconditionally verifiable**: nothing about them is encrypted
+ * with the TOTP keyring, so a broken key does not touch them. Which is also
+ * why the answer is not simply `!totpEstaDisponible()` — an account holding a
+ * passkey *and* an unreadable TOTP can still prove itself, and must still be
+ * asked to.
+ */
+export async function hayFactorVerificable(id_usuario: number): Promise<boolean> {
+  const [passkeys, totp] = await Promise.all([
+    CredencialWebauthnModel.count({ where: { id_usuario } }),
+    FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } } }),
+  ]);
+  return passkeys > 0 || (totp > 0 && totpEstaDisponible());
 }
 
 /**

@@ -6,6 +6,7 @@ import {
   puedeVerArchivosEstaticos,
   estadoEfectivo,
   MENSAJE_FACTOR_PENDIENTE,
+  CODIGO_FACTOR_PENDIENTE,
 } from "../auth/sessionState.js";
 import type { EstadoSesion } from "../auth/sessionState.js";
 import { readSessionCookie, setSessionCookie } from "../auth/sessionCookie.js";
@@ -269,7 +270,10 @@ async function authenticateBySession(
       res.status(401).json({ message: SESION_INCOMPLETA });
       return;
     }
-    res.status(403).json({ message: MENSAJE_FACTOR_PENDIENTE });
+    // `code` además de la frase: es lo que permite al cliente reconocer esta
+    // negativa concreta y decir qué falta y dónde arreglarlo, en vez del «no
+    // se pudo» genérico que enseñaba antes. Ver la constante.
+    res.status(403).json({ message: MENSAJE_FACTOR_PENDIENTE, code: CODIGO_FACTOR_PENDIENTE });
     return;
   }
 

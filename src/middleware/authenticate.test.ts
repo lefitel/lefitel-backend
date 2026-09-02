@@ -116,7 +116,7 @@ const { SESSION_TOUCH_THROTTLE_MINUTES, ROLE_HEADER, SESSION_EXPIRES_HEADER } =
 // hands the real `puedeAlcanzar` the caller's estado and its own route, and
 // reacts to what it says. Mocking `sessionState.js` would only prove
 // `authenticate` calls *something*, never that the something is this allowlist.
-const { MENSAJE_FACTOR_PENDIENTE } = await import("../auth/sessionState.js");
+const { MENSAJE_FACTOR_PENDIENTE, CODIGO_FACTOR_PENDIENTE } = await import("../auth/sessionState.js");
 
 /**
  * `authorization` sets the header verbatim, and it is still called that rather
@@ -609,8 +609,13 @@ describe("what a session's state may reach", () => {
     await authenticate(c.req, c.res, c.next);
 
     expect(c.status).toBe(403);
-    expect((c.res as unknown as { body: { message: string } }).body).toEqual({
+    // `code` además de la frase: es lo único que deja al cliente reconocer
+    // esta negativa sin comparar el texto en español, y por tanto lo único que
+    // le permite decir «configura tu segundo factor» con un enlace en vez del
+    // «no se pudo» genérico que enseñaba antes (plan 4D, tarea 9).
+    expect((c.res as unknown as { body: { message: string; code: string } }).body).toEqual({
       message: MENSAJE_FACTOR_PENDIENTE,
+      code: CODIGO_FACTOR_PENDIENTE,
     });
     expect(c.next).not.toHaveBeenCalled();
   });
@@ -858,8 +863,13 @@ describe("the deadline a live session cannot outrun", () => {
     await authenticate(c.req, c.res, c.next);
 
     expect(c.status).toBe(403);
-    expect((c.res as unknown as { body: { message: string } }).body).toEqual({
+    // `code` además de la frase: es lo único que deja al cliente reconocer
+    // esta negativa sin comparar el texto en español, y por tanto lo único que
+    // le permite decir «configura tu segundo factor» con un enlace en vez del
+    // «no se pudo» genérico que enseñaba antes (plan 4D, tarea 9).
+    expect((c.res as unknown as { body: { message: string; code: string } }).body).toEqual({
       message: MENSAJE_FACTOR_PENDIENTE,
+      code: CODIGO_FACTOR_PENDIENTE,
     });
     expect(c.next).not.toHaveBeenCalled();
   });

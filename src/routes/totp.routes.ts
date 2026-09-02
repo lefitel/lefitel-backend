@@ -101,10 +101,17 @@ router.post(
   confirmTotp,
 );
 // No `requireTotpKeyAvailable` here — see the module header, hallazgo F6.
+// 🔴 `toleraFactorIlegible` — and it belongs on this route and no other.
+// Without it the exemption above is undone by the gate right below it: this
+// DELETE stays reachable when the keyring cannot read the secret, and then
+// `requireStepUp` asks for a code produced from that same unreadable secret.
+// The escape hatch and the door in front of it disagreed. `exigeContrasena`
+// stays on, so what replaces the impossible code is the password, which a
+// stolen cookie does not carry. See the option's own comment.
 router.delete(
   "/",
   authenticate,
-  requireStepUp({ permiteOnboarding: true, exigeContrasena: true }),
+  requireStepUp({ permiteOnboarding: true, exigeContrasena: true, toleraFactorIlegible: true }),
   deleteTotp,
 );
 

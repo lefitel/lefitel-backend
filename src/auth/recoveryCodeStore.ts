@@ -154,8 +154,85 @@ function tieneFormaDeCodigo(bruto: unknown): bruto is string {
  * regeneration just invalidated ten live credentials. Both need a request —
  * an IP, a session, who to notify — that this module never has; they belong
  * to whichever controller calls this.
+ *
+ * **`opciones.transaction`, added for `confirmTotp` (2026-09-02).** The
+ * standalone regenerate-codes endpoint still calls this with nothing and
+ * gets its own, self-contained transaction, exactly as before. `confirmTotp`
+ * calls it *with* the transaction it is already holding open for
+ * `confirmarFactor`/`promoverSesion`/`apagarLaMecha`, so that issuing the
+ * first ten recovery codes and confirming the factor they back up commit or
+ * roll back together — a factor confirmed with no working recovery net is
+ * worse than refusing the confirmation outright, and this codebase has no
+ * `useCLS` wired up, so a write that does not explicitly carry the caller's
+ * transaction runs on a second pooled connection and would not roll back
+ * with it (the same reasoning `gastarCodigo`'s own docstring below gives for
+ * threading `opciones.transaction` through its `findAll`).
  */
-export async function regenerarCodigos(id_usuario: number): Promise<string[]> {
+/**
+ * Los diez códigos y sus filas ya hasheadas, listos para escribirse.
+ *
+ * 🔴 **Separado de la escritura a propósito, y el motivo está medido.** Los
+ * diez `bcrypt` a coste 12 cuestan **2646 ms** con el bucle de eventos al 88 %
+ * de inanición — la medida está en la cabecera de este módulo. Cuando
+ * `confirmTotp` llamaba a `regenerarCodigos` con su transacción ya abierta,
+ * esos 2,6 segundos transcurrían **dentro** de ella: reteniendo bloqueos de
+ * fila sobre `factor_totp`, `sesiones` y `usuarios`, y una de las quince
+ * conexiones del pool, para hacer aritmética que no necesita la base de datos
+ * para nada.
+ *
+ * Preparar fuera y escribir dentro deja la transacción en dos sentencias.
+ */
+export interface CodigosPreparados {
+  codigos: string[];
+  filas: {
+    id_usuario: number;
+    codigo_hash: string;
+    prefijo: string;
+    used_at: null;
+    created_at: Date;
+  }[];
+  ahora: Date;
+}
+
+export async function prepararCodigos(id_usuario: number): Promise<CodigosPreparados> {
+  const codigos = Array.from({ length: CANTIDAD_CODIGOS }, generarUnCodigo);
+  const ahora = new Date();
+  const filas: CodigosPreparados["filas"] = [];
+  for (const codigo of codigos) {
+    filas.push({
+      id_usuario,
+      codigo_hash: await bcryptjs.hash(codigo, BCRYPT_COST),
+      prefijo: codigo.slice(0, LONGITUD_PREFIJO),
+      used_at: null,
+      created_at: ahora,
+    });
+  }
+  return { codigos, filas, ahora };
+}
+
+/**
+ * Las dos escrituras, y nada más. Rápidas: aquí no se hashea nada.
+ *
+ * Sólo las vigentes: un código ya gastado conserva el `used_at` real que tuvo,
+ * como historia. Tocarlo aquí sobrescribiría *cuándo* se usó de verdad con la
+ * hora de la regeneración.
+ */
+export async function escribirCodigos(
+  id_usuario: number,
+  preparados: CodigosPreparados,
+  transaction: Transaction,
+): Promise<void> {
+  await CodigoRecuperacionModel.update(
+    { used_at: preparados.ahora },
+    { where: { id_usuario, used_at: null }, transaction },
+  );
+  await CodigoRecuperacionModel.bulkCreate(preparados.filas, { transaction });
+}
+
+export async function regenerarCodigos(
+  id_usuario: number,
+  opciones: { transaction?: Transaction } = {},
+): Promise<string[]> {
   const codigos = Array.from({ length: CANTIDAD_CODIGOS }, generarUnCodigo);
   const ahora = new Date();
 
@@ -186,7 +263,10 @@ export async function regenerarCodigos(id_usuario: number): Promise<string[]> {
     });
   }
 
-  await sequelize.transaction(async (transaction) => {
+  // Factored out so the same two writes run either inside a transaction this
+  // function opens for itself (nobody passed one in) or inside one the
+  // caller already holds open (`confirmTotp` — see the docstring above).
+  const escribir = async (transaction: Transaction) => {
     // Only the still-outstanding ones: an already-spent code keeps the
     // `used_at` it was genuinely spent at, as history. Touching it here
     // would overwrite *when* it was really used with the regeneration time.
@@ -195,7 +275,13 @@ export async function regenerarCodigos(id_usuario: number): Promise<string[]> {
       { where: { id_usuario, used_at: null }, transaction },
     );
     await CodigoRecuperacionModel.bulkCreate(filas, { transaction });
-  });
+  };
+
+  if (opciones.transaction) {
+    await escribir(opciones.transaction);
+  } else {
+    await sequelize.transaction(escribir);
+  }
 
   return codigos;
 }
@@ -206,9 +292,24 @@ export async function regenerarCodigos(id_usuario: number): Promise<string[]> {
  * Never the codes themselves, and never even which ones — every caller of
  * this module reaches the plaintext exactly once, from `regenerarCodigos`,
  * and this function has no path back to it.
+ *
+ * **`opciones.transaction`, added for `confirmTotp` (2026-09-02).** That
+ * handler reads this count to decide whether confirming a factor should
+ * also mint the first ten recovery codes — "is there already an outstanding
+ * sheet this would silently invalidate" — and needs the read to happen
+ * inside the same transaction as the rest of its writes so nothing else can
+ * spend or regenerate a code in the gap between this count and the decision
+ * made from it. `countRecoveryCodes` (the plain `GET`) still calls this with
+ * nothing, exactly as before.
  */
-export async function contarCodigosRestantes(id_usuario: number): Promise<number> {
-  return CodigoRecuperacionModel.count({ where: { id_usuario, used_at: null } });
+export async function contarCodigosRestantes(
+  id_usuario: number,
+  opciones: { transaction?: Transaction } = {},
+): Promise<number> {
+  return CodigoRecuperacionModel.count({
+    where: { id_usuario, used_at: null },
+    transaction: opciones.transaction,
+  });
 }
 
 /**

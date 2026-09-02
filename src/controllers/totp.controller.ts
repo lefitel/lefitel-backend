@@ -44,6 +44,11 @@ import {
 import { promoverSesion, sellarPruebaDeFactor, apagarLaMecha } from "../auth/sessionPromotion.js";
 import { sequelize } from "../database/sequelize.js";
 import { tieneAlgunFactor } from "../auth/factorInventory.js";
+import {
+  contarCodigosRestantes,
+  prepararCodigos,
+  escribirCodigos,
+} from "../auth/recoveryCodeStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { logAction } from "../utils/logAction.js";
@@ -262,6 +267,52 @@ export const setupTotp = handler("setupTotp", async (req: Request, res: Response
  * `MAIL_SECURITY_TO` is not configured today and no mail goes out for it; the
  * bitácora line is the constancy that actually exists, matching
  * `rescueCore.ts`'s own precedent for an expected, unsent notice.
+ *
+ * **Sixth write, conditional: the first ten recovery codes (Isaias,
+ * 2026-09-02).** Before this decision, confirming a factor never produced a
+ * backup net — recovering it required remembering, unprompted, to visit a
+ * different screen and type the password again. Whoever scanned the QR and
+ * closed the tab had exactly one working factor and no way back in if it
+ * ever broke, and had no way to know that. From this decision on, confirming
+ * mints the ten codes in the same request and hands them back in this same
+ * response — GitHub and Google both already do it this way.
+ *
+ * **Only when nothing is already outstanding — `contarCodigosRestantes`,
+ * never `tieneAlgunFactor`.** An account can reach this endpoint a *second*
+ * time with `tieneAlgunFactor` having read `false` a moment earlier: delete a
+ * confirmed TOTP factor (`deleteTotp` never touches `codigo_recuperacion`,
+ * see its own comment) and register a new one, and the ten codes printed the
+ * first time are still perfectly good. Gating on factor count would
+ * regenerate there and silently turn a sheet already sitting in a drawer
+ * into ten dead strings — reproducing, from the other direction, the exact
+ * failure this whole feature exists to close. Reading the codes table's own
+ * outstanding count is the one check that answers the question that
+ * actually matters — "would generating now destroy something that still
+ * works" — regardless of how many factors the account happens to hold at
+ * this instant. `regenerateRecoveryCodes` in `recoveryCodes.controller.ts`
+ * remains the only way to get a *fresh* ten once any exist; this handler
+ * only ever fills an empty hand.
+ *
+ * **Inside this function's own transaction, not after it commits — the
+ * atomicity decision.** Two outcomes are each worse than refusing the
+ * confirmation outright: `regenerarCodigos` succeeding while the writes
+ * above roll back would mint a live backup net for a factor the account does
+ * not actually have; the factor confirming while code generation then fails
+ * would leave the account's first factor live with **no** net and no signal
+ * that it needs one, since the whole point of this feature is that nobody
+ * reliably goes and checks. Reading the count and, if it calls for it,
+ * generating the ten both receive this function's own `{ transaction }` —
+ * the same one `confirmarFactor`/`promoverSesion`/`apagarLaMecha` already
+ * carry — so a real failure in either one rolls back every write in this
+ * block together: this codebase has no `useCLS` wired up (verified in the
+ * 4A closure audit), so a call that does not explicitly receive the
+ * transaction runs on a second pooled connection and commits or fails on its
+ * own, independent of the rest.
+ *
+ * `codigos` in the response is the ten fresh plaintext codes, or `null` when
+ * an outstanding sheet already existed and nothing was generated — never
+ * omitted, so the client can tell "nothing to show" apart from "the field
+ * does not exist yet" without guessing.
  */
 export const confirmTotp = handler("confirmTotp", async (req: Request, res: Response) => {
   const caller = req.user;
@@ -321,14 +372,68 @@ export const confirmTotp = handler("confirmTotp", async (req: Request, res: Resp
    * Called only when `promoverSesion` found nothing to promote, so a session
    * that *did* just get promoted is not written to twice.
    */
-  await sequelize.transaction(async (transaction) => {
+  /**
+   * 🔴 **El hashing va fuera de la transacción, y esto está medido.**
+   *
+   * Los diez `bcrypt` a coste 12 cuestan **2646 ms**. Hacerlos dentro de la
+   * transacción —que es lo que pasaba antes de este cambio— retenía durante
+   * esos 2,6 segundos los bloqueos de fila sobre `factor_totp`, `sesiones` y
+   * `usuarios`, y una de las quince conexiones del pool, para hacer aritmética
+   * que no toca la base de datos. Se prepara antes y dentro sólo se escribe.
+   *
+   * La lectura de aquí es un descarte barato: si ya hay códigos vigentes no se
+   * gastan los 2,6 segundos para nada. **La decisión de verdad se vuelve a
+   * tomar dentro de la transacción**, porque entre esta lectura y la escritura
+   * cabe otra petición — y regenerar sobre una hoja que ya existe la mataría.
+   */
+  const yaTieneCodigos = (await contarCodigosRestantes(caller.id)) > 0;
+  const preparados = yaTieneCodigos ? null : await prepararCodigos(caller.id);
+
+  const codigosRecuperacion = await sequelize.transaction(async (transaction) => {
     await confirmarFactor(pendiente.id, pasoAceptado, { transaction });
     const promovida = await promoverSesion(caller.id_sesion, "totp", { transaction });
     if (!promovida) {
       await sellarPruebaDeFactor(caller.id_sesion, "totp", { transaction });
     }
     await apagarLaMecha(caller.id, { transaction });
+
+    // Sixth write, conditional — see this function's own docstring for why
+    // the check is against outstanding codes rather than against the factor
+    // count, and why the write carries this same transaction.
+    //
+    // Se vuelve a contar **dentro**: la lectura de arriba corrió fuera y otra
+    // petición pudo emitir códigos entre medias. Ésta es la que decide.
+    if (!preparados) return null;
+    const restantes = await contarCodigosRestantes(caller.id, { transaction });
+    if (restantes > 0) return null;
+    await escribirCodigos(caller.id, preparados, transaction);
+    return preparados.codigos;
   });
+
+  if (codigosRecuperacion) {
+    /**
+     * Diez credenciales nuevas merecen su propia línea, y no la tenían.
+     *
+     * El camino hermano —`regenerateRecoveryCodes`, cuando alguien los pide a
+     * mano— sí escribe `RECOVERY_CODES_REGENERATED`. Desde que confirmar el
+     * factor los emite solo, **la mayoría** de los juegos del sistema iban a
+     * existir sin rastro de cuándo ni desde qué dirección se emitieron: dos
+     * caminos al mismo hecho, uno registrando y el otro no.
+     *
+     * Aparte de `TOTP_CONFIRMED` y no dentro: son dos hechos distintos, y sólo
+     * uno de los dos ocurre siempre.
+     */
+    logAction({
+      id_usuario: caller.id,
+      action: "RECOVERY_CODES_ISSUED",
+      entity: "Usuario",
+      entity_id: caller.id,
+      detail: "Se emitieron diez códigos de recuperación al confirmar el primer segundo factor",
+      metadata: { id_sesion: caller.id_sesion, cantidad: codigosRecuperacion.length },
+      severity: "critical",
+      ip_address: req.ip ?? null,
+    });
+  }
 
   logAction({
     id_usuario: caller.id,
@@ -341,7 +446,7 @@ export const confirmTotp = handler("confirmTotp", async (req: Request, res: Resp
     ip_address: req.ip ?? null,
   });
 
-  res.status(200).json({ message: MENSAJE_FACTOR_CONFIRMADO });
+  res.status(200).json({ message: MENSAJE_FACTOR_CONFIRMADO, codigos: codigosRecuperacion });
 });
 
 /**

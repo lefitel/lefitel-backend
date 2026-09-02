@@ -110,9 +110,12 @@ export const MENSAJE_SIN_FACTOR_PARA_CODIGOS =
  * endpoint. A first issue simply finds nothing outstanding to invalidate.
  *
  * The ten codes are the whole point of the response and appear **exactly
- * once**: this handler is the only caller of `regenerarCodigos` in the 4B
- * codebase, and nothing here writes them to a log, a bitácora `detail` or
- * `metadata` field, or anywhere they could be read back later.
+ * once**: this handler and `totp.controller.ts`'s `confirmTotp` (which, as
+ * of 2026-09-02, also calls `regenerarCodigos` — but only when confirming
+ * leaves the account with nothing else outstanding; see that function's own
+ * comment) are the only two callers of `regenerarCodigos` in the codebase,
+ * and neither writes the codes to a log, a bitácora `detail` or `metadata`
+ * field, or anywhere they could be read back later.
  *
  * **Refuses an account with no confirmed factor, before anything is
  * written** — hallazgo F1. See the module header for the shape of the hole

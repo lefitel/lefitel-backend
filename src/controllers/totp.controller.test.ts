@@ -60,6 +60,15 @@ vi.mock("../auth/factorInventory.js", () => ({
   tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
 }));
 
+const contarCodigosRestantes = vi.fn();
+const prepararCodigos = vi.fn();
+const escribirCodigos = vi.fn();
+vi.mock("../auth/recoveryCodeStore.js", () => ({
+  contarCodigosRestantes: (...a: unknown[]) => contarCodigosRestantes(...a),
+  prepararCodigos: (...a: unknown[]) => prepararCodigos(...a),
+  escribirCodigos: (...a: unknown[]) => escribirCodigos(...a),
+}));
+
 const revokeAllRememberedDevicesOf = vi.fn();
 vi.mock("../auth/rememberedDeviceStore.js", () => ({
   revokeAllRememberedDevicesOf: (...a: unknown[]) => revokeAllRememberedDevicesOf(...a),
@@ -146,7 +155,7 @@ function call(user: NonNullable<Request["user"]> | undefined, body: unknown = {}
       return res.statusCode;
     },
     get payload() {
-      return res.body as { message?: string; secreto?: string; otpauth?: string };
+      return res.body as { message?: string; secreto?: string; otpauth?: string; codigos?: string[] | null };
     },
   };
 }
@@ -165,6 +174,20 @@ beforeEach(() => {
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
   revokeAllRememberedDevicesOf.mockReset().mockResolvedValue(0);
   revokeAllSessionsOf.mockReset().mockResolvedValue(0);
+  // Default: nothing outstanding yet, so `confirmTotp` takes the "issue the
+  // first ten" branch unless a test says otherwise — the common case for
+  // every pre-existing test in this file, none of which registered a factor
+  // before confirming this one.
+  contarCodigosRestantes.mockReset().mockResolvedValue(0);
+  // `prepararCodigos` hashea (caro) y devuelve las filas ya listas;
+  // `escribirCodigos` sólo escribe. Partidas para que los 2,6 segundos de
+  // bcrypt no transcurran dentro de la transacción.
+  prepararCodigos.mockReset().mockImplementation(async () => ({
+    codigos: Array.from({ length: 10 }, (_, i) => `CODIGO-${i}`),
+    filas: [],
+    ahora: new Date(),
+  }));
+  escribirCodigos.mockReset().mockResolvedValue(undefined);
   logAction.mockReset();
 });
 
@@ -431,6 +454,80 @@ describe("confirmTotp", () => {
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ id_usuario: CALLER.id, severity: "critical", action: "TOTP_CONFIRMED" }),
     );
+  });
+
+  describe("issuing the first ten recovery codes on confirm (Isaias, 2026-09-02)", () => {
+    // Before this decision, confirming a factor never generated a recovery
+    // net — somebody had to remember to go find a *different* screen and
+    // type their password again. Whoever scanned the QR and closed the tab
+    // had exactly one working factor and zero ways back in if it broke.
+    function fijarCodigoValido() {
+      const { secret, base32 } = secretoDeFila();
+      leerSecretoSinConfirmar.mockResolvedValue({ id: 55, secreto: base32 });
+      return TOTP.generate({ secret, algorithm: "SHA1", digits: 6, period: 30, timestamp: FIXED_NOW });
+    }
+
+    it("generates and returns ten codes when the account has none outstanding", async () => {
+      contarCodigosRestantes.mockResolvedValue(0);
+      const codigosGenerados = Array.from({ length: 10 }, (_, i) => `CODIGO-${i}`);
+      prepararCodigos.mockResolvedValue({ codigos: codigosGenerados, filas: [], ahora: new Date() });
+      const c = call(CALLER, { codigo: fijarCodigoValido() });
+
+      await confirmTotp(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      // Both reads/writes carry the transaction this handler already opened
+      // for `confirmarFactor`/`promoverSesion`/`apagarLaMecha` — see the
+      // atomicity test below for why that is not optional.
+      expect(contarCodigosRestantes).toHaveBeenCalledWith(CALLER.id, { transaction: TRANSACCION });
+      // 🔴 El hashing, FUERA de la transacción; la escritura, dentro. Los diez
+      // bcrypt cuestan 2646 ms medidos, y hacerlos dentro retenía los bloqueos
+      // de fila y una conexión del pool todo ese rato.
+      expect(prepararCodigos).toHaveBeenCalledWith(CALLER.id);
+      expect(escribirCodigos).toHaveBeenCalledWith(
+        CALLER.id,
+        expect.anything(),
+        TRANSACCION,
+      );
+      expect(c.payload.codigos).toEqual(codigosGenerados);
+    });
+
+    it("does not regenerate, and answers with no codes, when an outstanding sheet already exists", async () => {
+      // The scenario the "only the first factor" rule protects: this TOTP
+      // factor was deleted and a new one is being registered (`deleteTotp`
+      // never touches `codigo_recuperacion`), or a second factor is being
+      // added, while the ten codes printed earlier are still good.
+      // Regenerating here would silently turn that sheet into ten dead
+      // strings — worse than the bug this whole feature exists to fix.
+      contarCodigosRestantes.mockResolvedValue(4);
+      const c = call(CALLER, { codigo: fijarCodigoValido() });
+
+      await confirmTotp(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(escribirCodigos).not.toHaveBeenCalled();
+      expect(c.payload.codigos).toBeNull();
+    });
+
+    it("never confirms the factor when generating the recovery codes fails — atomicity", async () => {
+      contarCodigosRestantes.mockResolvedValue(0);
+      escribirCodigos.mockRejectedValue(new Error("boom"));
+      const c = call(CALLER, { codigo: fijarCodigoValido() });
+
+      await confirmTotp(c.req, c.res);
+
+      // `makeHandler` (`utils/handler.ts`) turns the rejection into a 500
+      // instead of letting the request hang — that much is generic. The
+      // load-bearing part is what never ran *after* the failure: no success
+      // response and no `TOTP_CONFIRMED` bitácora line, because the read that
+      // decided to generate, the generation itself, and every write that
+      // finishes confirming the factor all share this handler's one
+      // transaction — a real rejection here rolls every one of them back
+      // together, so the factor never actually confirms.
+      expect(c.status).toBe(500);
+      expect(c.payload.message).not.toBe(MENSAJE_FACTOR_CONFIRMADO);
+      expect(logAction).not.toHaveBeenCalled();
+    });
   });
 });
 

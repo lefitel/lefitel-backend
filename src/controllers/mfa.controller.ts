@@ -88,7 +88,7 @@ import { promoverSesion } from "../auth/sessionPromotion.js";
 import type { FuenteMfa } from "../auth/sessionState.js";
 import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js";
 import { acunarDispositivo, setRememberedDeviceCookie } from "../auth/rememberedDeviceIssue.js";
-import { REMEMBER_DEVICE_FIELD } from "../config/security.js";
+import { REMEMBER_DEVICE_FIELD, LOCKOUT_AFTER_FAILURES } from "../config/security.js";
 import { permissionsFor } from "../permissions/store.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
@@ -293,23 +293,42 @@ async function verificarTotp(id_usuario: number, codigo: string, ip: string | nu
  * `credentials.ts` exports no standalone version of it to call instead; the
  * throttling math itself is imported, not rewritten.
  */
+/**
+ * @returns how many wrong answers are left before the account locks, or `null`
+ * when that cannot be established (the row vanished mid-request). `0` means
+ * this failure was the one that locked it.
+ *
+ * **Why it is returned at all.** Five wrong codes lock the whole ERP account —
+ * 1, 2, 4, 8, up to 15 minutes — and until this returned something, nothing on
+ * screen said so. Worse, every way to fail answers the same sentence ("Código
+ * incorrecto o ya utilizado"), and once locked, the *login* answers "Usuario o
+ * contraseña incorrectos", which is indistinguishable from mistyping a
+ * password. So somebody with a phone whose clock has drifted — enough on its
+ * own, `verificarTotp` refuses outside ±1 step — walks from "my code is not
+ * working" to "I cannot log in at all" without ever reading a warning, and the
+ * button that lifts the lock is one an administrator has to press.
+ */
 async function cargarIntentoFallido(
   id_usuario: number,
   ip: string | null,
   accion: string,
   detalle: string,
-): Promise<void> {
+): Promise<number | null> {
   await UsuarioModel.increment("failed_attempts", { where: { id: id_usuario } });
   const actualizado = await UsuarioModel.findOne({
     where: { id: id_usuario },
     attributes: ["failed_attempts"],
   });
+  let intentosRestantes: number | null = null;
   if (actualizado) {
     const fallos = actualizado.dataValues.failed_attempts ?? 0;
     // Same reasoning as `verifyCredentials`: the database already added one,
     // so `siguienteBloqueo` is given the count *before* this failure and
     // adds it itself, rather than the arithmetic running twice.
     const { locked_until } = siguienteBloqueo(fallos - 1);
+    // Counted off the same `fallos` the lockout decision uses, so the number
+    // on screen and the moment the door shuts can never disagree.
+    intentosRestantes = locked_until ? 0 : Math.max(0, LOCKOUT_AFTER_FAILURES - fallos);
     if (locked_until) {
       await UsuarioModel.update({ locked_until }, { where: { id: id_usuario } });
       logAction({
@@ -334,6 +353,7 @@ async function cargarIntentoFallido(
     severity: "warning",
     ip_address: ip,
   });
+  return intentosRestantes;
 }
 
 /** Clears a stale lockout on success, the same way a correct password does
@@ -367,7 +387,11 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
   // compared and nothing charged further — the account is already paying
   // for this.
   if (estaBloqueada(datosUsuario)) {
-    return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
+    // Cero, igual que en `/auth/stepup`. La frase sigue siendo la misma que la
+    // de un código erróneo —una cuenta bloqueada no se le confirma a nadie que
+    // esté sondeando—, pero el cero le dice a quien lleva un minuto tecleando
+    // códigos correctos que insistir ya no es el remedio.
+    return res.status(400).json({ message: CODIGO_MFA_INVALIDO, intentosRestantes: 0 });
   }
 
   const crudo = (req.body as Record<string, unknown> | undefined)?.[CAMPO_CODIGO];
@@ -432,6 +456,24 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
   }
 
   if (fuente === null) {
+    /**
+     * 🔴 Se responde **siempre**, también cuando no se ha cargado nada.
+     *
+     * La primera versión lo omitía en el fallo criptográfico, razonando que no
+     * había nada que contar. Un test que lleva aquí desde el 4B lo cazó: su
+     * trabajo es garantizar que un código erróneo, una fila corrupta y una
+     * clave mala se contesten **idénticamente**, para que nadie los distinga
+     * sondeando. Un campo presente en dos casos y ausente en el tercero es
+     * exactamente esa distinción.
+     *
+     * Así que aquí se informa del contador **tal y como está**, leído de la
+     * fila que ya se consultó arriba y sin incrementarlo: el número es cierto,
+     * no cuesta una consulta más, y la respuesta sigue siendo indistinguible.
+     */
+    let intentosRestantes: number | null = Math.max(
+      0,
+      LOCKOUT_AFTER_FAILURES - (datosUsuario.failed_attempts ?? 0),
+    );
     if (fallaCriptografica) {
       // Hallazgo F5/A5/C-4: a row this process cannot decrypt is the
       // server's fault, never the caller's — `secretoDe` already logged it at
@@ -441,7 +483,7 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
       // thing this branch does differently; the response below is identical
       // either way, on purpose (same status, same message, same shape).
     } else {
-      await cargarIntentoFallido(
+      const cargado = await cargarIntentoFallido(
         caller.id,
         ip,
         "MFA_VERIFY_FAILED",
@@ -449,8 +491,26 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
           ? "Se intentó un código de recuperación sin ningún factor confirmado en la cuenta: nada que rescatar"
           : "Código de segundo factor incorrecto, repetido o ya utilizado",
       );
+      // Ver la nota gemela en `stepup`: `null` es «no se pudo establecer».
+      if (cargado !== null) intentosRestantes = cargado;
     }
-    return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
+    /**
+     * 🔴 La cuenta atrás **sobre todo aquí**, y durante un rato estuvo sólo en
+     * la ruta hermana.
+     *
+     * El ejemplo con el que se justificó este contador —un móvil cuyo reloj se
+     * ha desviado, que basta para que todos los códigos fallen— ocurre al
+     * entrar, o sea en esta ruta, no en `/auth/stepup`. Sin él, cinco intentos
+     * idénticos y sin aviso llevan de «mi código no funciona» a «no puedo
+     * entrar», porque a partir del bloqueo el login contesta «Usuario o
+     * contraseña incorrectos» y nadie relaciona las dos cosas.
+     *
+     * Omitido cuando vale `null` —fallo criptográfico, que no carga nada—
+     * para no decirle a alguien que ha gastado un intento que no gastó.
+     */
+    return res
+      .status(400)
+      .json({ message: CODIGO_MFA_INVALIDO, intentosRestantes });
   }
 
   await limpiarFallosPrevios(caller.id, datosUsuario);
@@ -542,7 +602,12 @@ export const stepup = handler("stepup", async (req: Request, res: Response) => {
   // Same bucket as `verify` (Task 17's own text: "mismo cubo por cuenta que
   // la Task 7") — the same account-wide counter, not a second one.
   if (estaBloqueada(datosUsuario)) {
-    return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
+    // `intentosRestantes: 0` and not silence. The sentence is the same one a
+    // wrong code gets — deliberately, so a locked account is not confirmed to
+    // anybody probing — but the person who has been typing correct codes into
+    // a window for the last minute needs to know that trying again is not the
+    // remedy. Zero is what says "this is no longer about the code".
+    return res.status(400).json({ message: CODIGO_MFA_INVALIDO, intentosRestantes: 0 });
   }
 
   const crudo = (req.body as Record<string, unknown> | undefined)?.[CAMPO_CODIGO];
@@ -590,15 +655,34 @@ export const stepup = handler("stepup", async (req: Request, res: Response) => {
     // reason: a row this process cannot decrypt is the server's fault, not
     // the caller's, and must not spend the account's lockout budget.
     // `secretoDe` already logged it at `error` severity.
+    // Mismo criterio que en `verify`, y por el mismo motivo: se responde
+    // siempre, también cuando no se cargó nada, para que un fallo del servidor
+    // no se distinga de un código erróneo por la forma de la respuesta.
+    let intentosRestantes: number | null = Math.max(
+      0,
+      LOCKOUT_AFTER_FAILURES - (datosUsuario.failed_attempts ?? 0),
+    );
     if (!fallaCriptografica) {
-      await cargarIntentoFallido(
+      const cargado = await cargarIntentoFallido(
         caller.id,
         ip,
         "MFA_VERIFY_FAILED",
         "Reautenticación de step-up incorrecta, repetida o ya utilizada",
       );
+      // `null` significa «no se pudo establecer», no «cero»: sobrescribir con
+      // él descartaría el valor honrado que ya se leyó de la fila y, además,
+      // haría que este caso se distinguiera de los demás por la forma de la
+      // respuesta.
+      if (cargado !== null) intentosRestantes = cargado;
     }
-    return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
+    // 🔴 The countdown rides on the *same* answer every failure gives, and the
+    // sentence itself stays deliberately uniform — see `CODIGO_MFA_INVALIDO`'s
+    // own reasoning. What changes is that the person can now see the door
+    // closing. Omitted entirely on a cryptographic failure, where nothing was
+    // charged and there is nothing to count down.
+    return res
+      .status(400)
+      .json({ message: CODIGO_MFA_INVALIDO, intentosRestantes });
   }
 
   await limpiarFallosPrevios(caller.id, datosUsuario);

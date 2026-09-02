@@ -192,11 +192,23 @@ export function confirmCostsNothing(_req: Request, res: Response): boolean {
   return res.statusCode !== 401;
 }
 
-/** The one sentence a spent budget answers with, named so `requireStepUp.ts`
- *  can reuse it instead of retyping it — two copies of one sentence is how
- *  they read differently the day one of them gets improved. */
+/**
+ * The one sentence a spent budget answers with, named so `requireStepUp.ts`
+ * can reuse it instead of retyping it — two copies of one sentence is how they
+ * read differently the day one of them gets improved.
+ *
+ * **The second half names what else this takes away, and that is the point.**
+ * This bucket is shared: `requireStepUp` on nineteen routes,
+ * `chargeConfirmBudgetOnSelfChange` on rename and change-password, and
+ * `/auth/email/send`. So five wrong passwords typed into a step-up window also
+ * shut, for fifteen minutes, the two screens somebody would go to next —
+ * "change my password" and "register my email". Saying only "wait a few
+ * minutes" sends that person to a screen that will refuse them for a reason
+ * they have no way to connect to what they just did.
+ */
 export const PASSWORD_CONFIRM_MESSAGE =
-  "Demasiados intentos. Espere unos minutos antes de volver a confirmar.";
+  "Demasiados intentos. Espere unos minutos antes de volver a confirmar. " +
+  "Mientras tanto tampoco podrás cambiar tu contraseña ni registrar tu correo.";
 
 /**
  * The budget for re-typing your own password, and the only limit those routes

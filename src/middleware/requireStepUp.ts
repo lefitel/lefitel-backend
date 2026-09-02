@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction, RequestHandler } from "express";
 import { verifyOwnPassword } from "../auth/credentials.js";
-import { tieneAlgunFactor } from "../auth/factorInventory.js";
+import { tieneAlgunFactor, hayFactorVerificable } from "../auth/factorInventory.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { passwordConfirmLimiter, passwordConfirmKey, PASSWORD_CONFIRM_MESSAGE } from "./loginLimiters.js";
@@ -188,12 +188,72 @@ export interface OpcionesStepUp {
    * that wants both asks for both.
    */
   exigeContrasena?: boolean;
+
+  /**
+   * Stop demanding proof of a factor **this server has just declared it cannot
+   * read**. Off by default, and exactly one route turns it on:
+   * `DELETE /auth/totp`, the one whose entire purpose is undoing that factor.
+   *
+   * **The seam it closes.** `totp.routes.ts:14-26` deliberately leaves
+   * `requireTotpKeyAvailable` off that DELETE — in its own words, "para que una
+   * llave equivocada no encierre a nadie en un factor muerto" — and then mounts
+   * this gate on it, which asks for a code produced from the very secret the
+   * keyring can no longer decrypt. The route stays open and the gate in front
+   * of it is shut. Both pieces are right; the seam is the lockout.
+   *
+   * **Why this is not a weakening.** The one route that reads it also carries
+   * `exigeContrasena`, so what replaces the impossible code is the password —
+   * something a stolen cookie does not have. And demanding proof of a factor
+   * the server itself reports as unreadable is not a stricter gate, it is an
+   * unsatisfiable one: the same shape as the outage the factor-less branch
+   * below already exists to avoid.
+   *
+   * **Deliberately narrow, and it has to be.** Read by one route rather than
+   * applied to all nineteen, because everywhere else the honest answer to a
+   * broken key is still "prove your factor or spend a recovery code" — those
+   * codes are bcrypt, never encrypted, so they survive exactly this failure.
+   * Widening it would mean that during a configuration fault the password
+   * alone reaches every sensitive write in the ERP. The narrow door is the
+   * escape hatch; the wide one would be the hole.
+   *
+   * 🔴 **This is a remedy, not a fix.** With an unreadable TOTP the lockout
+   * that bites first is not this gate at all: `estadoInicialDeSesion` opens the
+   * session `parcial`, and `parcial` is left only by proving the factor — so
+   * that person never gets a session for this gate to guard. Their real way
+   * back in is a recovery code, which is why those are now issued when the
+   * factor is confirmed instead of waiting to be asked for.
+   */
+  toleraFactorIlegible?: boolean;
 }
 
 export function requireStepUp({
   permiteOnboarding = false,
   exigeContrasena = false,
+  toleraFactorIlegible = false,
 }: OpcionesStepUp = {}): RequestHandler {
+  /**
+   * 🔴 La combinación que convertiría esta puerta en un pase libre, rechazada
+   * al montar la ruta y no en producción.
+   *
+   * `toleraFactorIlegible` hace que un factor que el servidor no puede leer
+   * deje de exigirse, y cae a la rama de la contraseña. Si esa rama no pide
+   * contraseña —`exigeContrasena` apagado— lo que queda es `next()` con una
+   * línea de bitácora, o sea una escritura sensible servida sólo con la cookie.
+   * Y peor: esa línea afirmaría «la cuenta no tiene ningún factor registrado»,
+   * que sería mentira, porque sí lo tiene y sólo está ilegible.
+   *
+   * Hoy la única ruta que activa la opción lleva las dos, así que no hay
+   * agujero. Esto es lo que impide que deje de ser verdad en un descuido: un
+   * error al arrancar es imposible de pasar por alto, y una comprobación en
+   * tiempo de petición llegaría tarde.
+   */
+  if (toleraFactorIlegible && !exigeContrasena) {
+    throw new Error(
+      "requireStepUp: `toleraFactorIlegible` exige `exigeContrasena`. Sin la contraseña, " +
+        "una cookie robada bastaría para una escritura sensible cuando la clave del TOTP falla.",
+    );
+  }
+
   // Named, not anonymous: a later task walks the mounted Express stack the
   // way `routeGuards.test.ts` already does for `requirePermissionGate`, and it
   // can only tell this gate apart from an ordinary handler by this name
@@ -292,8 +352,43 @@ export function requireStepUp({
       // with `exigeContrasena` on, and there the factor has just been proved,
       // so asking whether one exists is both answered and beside the point.
       if (!satisfecho && (await tieneAlgunFactor(user.id))) {
-        denegar(req, res, MENSAJE, MOTIVO_SIN_FACTOR_RECIENTE);
-        return;
+        // The factor exists. Whether it can be *proved* is a second question,
+        // and only the route that undoes a dead factor ever asks it — see
+        // `toleraFactorIlegible`. Asked second, and only when that option is
+        // on, so the ordinary path still pays for one pair of COUNTs rather
+        // than two: this is the hot path of every gated write.
+        if (!toleraFactorIlegible || (await hayFactorVerificable(user.id))) {
+          // 🔴 `exigeContrasena` travels with this refusal, and the whole
+          // ceremony depends on it. On these routes the server demands two
+          // things in a fixed order — prove the factor, *then* type the
+          // password — and it only ever names one of them per refusal. A
+          // client that cannot see the second one coming has no choice but to
+          // ask twice: one window for the code, and, after a round trip, a
+          // second window for the password, on the two most delicate
+          // operations there are. Saying it now is what lets one window ask
+          // for both. Absent means false, so nothing that ignores it changes.
+          denegar(req, res, MENSAJE, MOTIVO_SIN_FACTOR_RECIENTE, { exigeContrasena });
+          return;
+        }
+        // Falls through to the password branch below, which that one route
+        // mounts with `exigeContrasena` — enforced at mount time above, so
+        // this can never reach the free skip.
+        //
+        // 🔴 Y queda constancia, porque es un evento que un operador querría
+        // poder contar durante una avería de claves: el servidor acaba de
+        // aceptar una contraseña **en lugar de** un factor que él mismo declara
+        // ilegible. Sin esta línea la operación no aparecía en ninguna parte.
+        logAction({
+          id_usuario: user.id,
+          action: "STEP_UP_FACTOR_ILEGIBLE",
+          entity: "Sesion",
+          entity_id: null,
+          detail:
+            "La cuenta tiene un factor que este servidor no puede verificar: se acepta la contraseña en su lugar",
+          metadata: { ruta: req.originalUrl, id_sesion: user.id_sesion },
+          severity: "critical",
+          ip_address: req.ip ?? null,
+        });
       }
 
       /**
@@ -380,9 +475,17 @@ export function requireStepUp({
        * ask and commits to nothing.
        */
       let agotado: boolean;
+      /**
+       * Kept from that same read so a wrong answer can tell the caller how
+       * many guesses are left — see the `denegar` call at the end of this
+       * branch. Reading it again after the charge would cost a second round
+       * trip to say something this value already knows.
+       */
+      let gastados: number;
       try {
         const info = await passwordConfirmLimiter.getKey(passwordConfirmKey(req));
-        agotado = (info?.totalHits ?? 0) >= PASSWORD_CONFIRM_LIMIT;
+        gastados = info?.totalHits ?? 0;
+        agotado = gastados >= PASSWORD_CONFIRM_LIMIT;
       } catch (err) {
         next(err);
         return;
@@ -398,6 +501,20 @@ export function requireStepUp({
 
       const confirmacion = await verifyOwnPassword({ id: user.id, pass: password, ip: req.ip ?? null });
       if (confirmacion.ok) {
+        /**
+         * 🔴 Se borra del cuerpo antes de dejar pasar, y hay un sitio concreto
+         * donde importa: `rol.controller.ts` escribe `after: req.body` **entero**
+         * en la bitácora al editar un rol. Sin esta línea, una petición que
+         * llegara ahí con la contraseña dentro la dejaría guardada **en claro**
+         * en la tabla de auditoría, que además se pinta en una pantalla.
+         *
+         * Hoy esa ruta no pide contraseña por sí misma, así que sólo puede
+         * llevarla si comparte ceremonia con otra que sí la pidió. Es un camino
+         * estrecho y un descuido de una línea; ninguna de las dos cosas es
+         * motivo para dejar la contraseña dando vueltas por los controladores,
+         * que no tienen ningún uso para ella.
+         */
+        delete (req.body as Record<string, unknown>)[STEP_UP_PASSWORD_FIELD];
         // Nothing was ever charged for this attempt — see the docstring above
         // for why that is the point, not an oversight.
         next();
@@ -425,7 +542,24 @@ export function requireStepUp({
         return;
       }
 
-      denegar(req, res, MENSAJE, MOTIVO_CONTRASENA_INCORRECTA);
+      /**
+       * How many guesses are left, counted from the read above plus the charge
+       * this branch just made.
+       *
+       * **It reveals nothing.** The limit is a constant in a source file, the
+       * answer only ever goes to an already-authenticated caller, and it is
+       * about that caller's own account. What it buys is the difference
+       * between somebody who stops after the third try and somebody who walks
+       * into a fifteen-minute lockout on the shared budget — a budget that
+       * also holds "change my password" and "register my email", which are the
+       * two screens they would go to next.
+       *
+       * `Math.max` because the two reads are not one atomic operation: a
+       * concurrent request can charge between them, and a negative number on
+       * screen is worse than a zero.
+       */
+      const intentosRestantes = Math.max(0, PASSWORD_CONFIRM_LIMIT - gastados - 1);
+      denegar(req, res, MENSAJE, MOTIVO_CONTRASENA_INCORRECTA, { intentosRestantes });
     } catch (err) {
       // The whole body is one try/catch, matching `authenticate.ts`'s own
       // reasoning exactly: this runs in front of every write this gate
@@ -484,12 +618,46 @@ function registrar(req: Request, motivo: string): void {
     entity_id: null,
     detail: `Operación sensible rechazada por falta de step-up: ${motivo}`,
     metadata: { ruta: req.originalUrl, motivo, id_sesion: req.user?.id_sesion },
-    severity: "critical",
+    /**
+     * 🔴 Not every refusal is an incident, and until the client could answer
+     * this gate, they all looked like one.
+     *
+     * `sin-factor-reciente` and `contraseña-requerida` are the two the server
+     * says *first*, as the opening move of an ordinary ceremony: they mean
+     * "the window is about to ask you for something", and the plan 4D
+     * interceptor produces one of them on **every** protected operation — two
+     * of them on the routes that want both the factor and the password. One
+     * person saving the permission matrix would file two critical lines.
+     * Marking those critical is how a log stops being read: if everything is
+     * critical, nothing is.
+     *
+     * The other two stay. `contraseña-incorrecta` is a failed guess against
+     * somebody's own password from inside a live session — the shape of a
+     * stolen cookie being tested. `estado-incompleto` is an account reaching
+     * an administrative route it is barred from, which is the refusal that
+     * closed a demonstrated attack (see `auth.routes.ts`). Both are worth
+     * waking up for; the first two are worth counting.
+     */
+    severity:
+      motivo === MOTIVO_SIN_FACTOR_RECIENTE || motivo === MOTIVO_CONTRASENA_REQUERIDA
+        ? "warning"
+        : "critical",
     ip_address: req.ip ?? null,
   });
 }
 
-function denegar(req: Request, res: Response, message: string, motivo: string): void {
+function denegar(
+  req: Request,
+  res: Response,
+  message: string,
+  motivo: string,
+  /**
+   * Extra fields for the client, merged into the same body. Additive by
+   * construction: anything that ignores them behaves exactly as before, which
+   * is why they are safe to add to a contract already in use.
+   */
+  extra: Record<string, unknown> = {},
+): void {
   registrar(req, motivo);
   // `code` is the stable class a client checks to know it must
   // re-authenticate at all — matching on the Spanish `message` instead would
@@ -498,5 +666,9 @@ function denegar(req: Request, res: Response, message: string, motivo: string): 
   // `MOTIVO_CONTRASENA_INCORRECTA`) is what tells it *how*: finish
   // onboarding, supply a factor, or retype the password — three different
   // remedies a single `code` cannot distinguish.
-  res.status(403).json({ message, code: CODIGO_STEP_UP, motivo });
+  // 🔴 `extra` last, but it can never overwrite the three above: nothing passes
+  // `code`, `motivo` or `message` in it, and a future caller that tried would
+  // be silently redefining the contract this whole file is about. The two
+  // fields it does carry today are `exigeContrasena` and `intentosRestantes`.
+  res.status(403).json({ message, code: CODIGO_STEP_UP, motivo, ...extra });
 }

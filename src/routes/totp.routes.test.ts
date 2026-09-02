@@ -40,12 +40,24 @@ vi.mock("../auth/mfaKeyCheck.js", () => ({ totpEstaDisponible: () => totpEstaDis
 // would otherwise touch a database or a real limiter through.
 const verifyOwnPassword = vi.fn();
 const tieneAlgunFactor = vi.fn();
+/**
+ * Mocked as a separate function rather than derived from `tieneAlgunFactor`
+ * and `totpEstaDisponible`, deliberately: what *this* file is about is which
+ * route reads it, and a mock that computed the answer would pass even if the
+ * mount stopped asking. The real relationship between the two — that a
+ * confirmed TOTP stops being verifiable when the keyring cannot read it — is
+ * pinned in `factorInventory.test.ts`, where the function lives.
+ */
+const hayFactorVerificable = vi.fn();
 const logAction = vi.fn();
 const passwordConfirmLimiter = vi.fn() as ReturnType<typeof vi.fn> & { getKey: ReturnType<typeof vi.fn> };
 passwordConfirmLimiter.getKey = vi.fn();
 const passwordConfirmKey = vi.fn();
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword: (...a: unknown[]) => verifyOwnPassword(...a) }));
-vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a) }));
+vi.mock("../auth/factorInventory.js", () => ({
+  tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
+  hayFactorVerificable: (...a: unknown[]) => hayFactorVerificable(...a),
+}));
 vi.mock("../utils/logAction.js", () => ({ logAction: (...a: unknown[]) => logAction(...a) }));
 vi.mock("../middleware/loginLimiters.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../middleware/loginLimiters.js")>();
@@ -98,6 +110,9 @@ beforeEach(() => {
   totpEstaDisponible.mockReset().mockReturnValue(true);
   verifyOwnPassword.mockReset();
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
+  // The ordinary world: whatever factor exists can be proved. The one test
+  // that cares flips it.
+  hayFactorVerificable.mockReset().mockResolvedValue(true);
   logAction.mockReset();
   passwordConfirmKey.mockReset().mockReturnValue("pc:totp");
   passwordConfirmLimiter.getKey.mockReset().mockResolvedValue(undefined);
@@ -198,6 +213,85 @@ describe("🔴 exigeContrasena on all three routes (hallazgo C1)", () => {
 
       expect(next).not.toHaveBeenCalled();
       expect(verifyOwnPassword).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }),
+      );
+    },
+  );
+
+  // 🔴 The lockout this route existed to prevent, and did not.
+  //
+  // `totp.routes.ts` leaves `requireTotpKeyAvailable` off this DELETE on
+  // purpose — "para que una llave equivocada no encierre a nadie en un factor
+  // muerto" — and then mounted a gate that asks for a code produced from that
+  // same unreadable secret. The escape hatch stayed open and the door in front
+  // of it was shut, which is worse than being closed: it looks fixed.
+  //
+  // Measured before `toleraFactorIlegible` existed: this assertion read
+  // `MOTIVO_SIN_FACTOR_RECIENTE` for all three routes, and there was no way
+  // for that person to reach `deleteTotp` at all except by spending a recovery
+  // code they may never have generated.
+  it("DELETE / stops demanding a factor the server has just said it cannot read", async () => {
+    const stepUpGate = stepUpGateOf("DELETE", "/");
+    tieneAlgunFactor.mockResolvedValue(true);
+    hayFactorVerificable.mockResolvedValue(false);
+    const { req, res, next } = contexto(
+      { id: 1, estado: "completa", mfa_satisfied_at: null },
+      {},
+    );
+
+    await stepUpGate(req, res, next);
+
+    // Not `sin-factor-reciente`: that answer names a remedy this person cannot
+    // perform. It falls through to the password branch instead.
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
+    );
+    // And the fall-through is *not* the free skip: `exigeContrasena` stays on,
+    // so a stolen cookie with no password still gets nothing.
+    expect(next).not.toHaveBeenCalled();
+    expect(logAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "STEP_UP_SKIPPED" }),
+    );
+  });
+
+  it("DELETE / with the same unreadable factor lets the password through", async () => {
+    const stepUpGate = stepUpGateOf("DELETE", "/");
+    tieneAlgunFactor.mockResolvedValue(true);
+    hayFactorVerificable.mockResolvedValue(false);
+    verifyOwnPassword.mockResolvedValue({ ok: true });
+    const { req, res, next } = contexto(
+      { id: 1, estado: "completa", mfa_satisfied_at: null },
+      { stepup_password: "la-de-verdad" },
+    );
+
+    await stepUpGate(req, res, next);
+
+    // The whole point: there *is* a way out, and it costs the password.
+    expect(next).toHaveBeenCalled();
+    expect(verifyOwnPassword).toHaveBeenCalled();
+  });
+
+  it.each([
+    ["POST", "/setup"],
+    ["POST", "/confirm"],
+  ] as const)(
+    "%s %s keeps demanding the factor even then — the option is one route wide",
+    async (method, path) => {
+      const stepUpGate = stepUpGateOf(method, path);
+      tieneAlgunFactor.mockResolvedValue(true);
+      hayFactorVerificable.mockResolvedValue(false);
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: null },
+        { stepup_password: "does-not-matter" },
+      );
+
+      await stepUpGate(req, res, next);
+
+      // These two register a credential rather than undo one, so an unreadable
+      // key is a reason to refuse, not a reason to accept a password instead.
+      // If `toleraFactorIlegible` ever leaked onto them, this goes red.
+      expect(next).not.toHaveBeenCalled();
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }),
       );

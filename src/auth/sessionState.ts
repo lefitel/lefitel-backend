@@ -398,5 +398,23 @@ export function estadoEfectivo(
 }
 
 /** Shown to somebody in `onboarding` who reached for the ERP. In Spanish: they read it. */
+/**
+ * El `code` que acompaña a `MENSAJE_FACTOR_PENDIENTE` — plan 4D, tarea 9.
+ *
+ * Esa negativa la reciben quince de las diecinueve rutas protegidas cuando el
+ * plazo de gracia venció sin ningún factor registrado. Llegaba al cliente como
+ * un 403 pelado, y `createRol`, `editRol` y `createUsuario` lo convertían en un
+ * «no se pudo» genérico: quien lo leía no tenía forma de saber que lo que le
+ * falta es configurar su segundo factor, ni dónde hacerlo.
+ *
+ * Un `code` deja reconocerlo sin comparar la frase en español, que se mejora y
+ * deja de coincidir. Es aditivo: lo que lo ignore se comporta igual que antes.
+ *
+ * 🔴 Deliberadamente distinto de `CODIGO_STEP_UP`. Aquél abre una ventana
+ * donde teclear algo; aquí no hay nada que teclear, y una ventana que pidiera
+ * una contraseña que el servidor no va a mirar giraría para siempre.
+ */
+export const CODIGO_FACTOR_PENDIENTE = "FACTOR_PENDIENTE";
+
 export const MENSAJE_FACTOR_PENDIENTE =
   "Configura tu segundo factor de autenticación para continuar.";

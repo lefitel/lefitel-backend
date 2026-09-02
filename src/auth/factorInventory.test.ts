@@ -96,11 +96,17 @@ vi.mock("../models/credencialWebauthn.model.js", () => ({
 vi.mock("../models/factorTotp.model.js", () => ({
   FactorTotpModel: { count: (...args: unknown[]) => totpCount(...args) },
 }));
+// The keyring switch, mocked so a test can put the server in the state where
+// it has just declared the TOTP secrets unreadable. `hayFactorVerificable` is
+// the only thing here that reads it.
+const totpEstaDisponible = vi.fn(() => true);
+vi.mock("./mfaKeyCheck.js", () => ({ totpEstaDisponible: () => totpEstaDisponible() }));
+
 vi.mock("../models/codigoRecuperacion.model.js", () => ({
   CodigoRecuperacionModel: { count: (...args: unknown[]) => codigoCount(...args) },
 }));
 
-const { factoresDe, tieneAlgunFactor, estadoInicialDeSesion } = await import(
+const { factoresDe, tieneAlgunFactor, hayFactorVerificable, estadoInicialDeSesion } = await import(
   "./factorInventory.js"
 );
 const { MFA_GRACE_DAYS } = await import("../config/security.js");
@@ -295,6 +301,90 @@ describe("tieneAlgunFactor", () => {
 // otherwise, because that is production on the day this deploys: the branch
 // that matters today is the grace one, and the `parcial` pair below are
 // written now precisely because nothing exercises them yet.
+describe("hayFactorVerificable", () => {
+  // The question `tieneAlgunFactor` cannot answer: not "is there a factor" but
+  // "could this person prove one right now". The gap between the two answers
+  // is a lockout — see the function's own comment and `totp.routes.ts`.
+
+  it("says no when the only factor is a TOTP the keyring cannot read", async () => {
+    secretosTotp = [TOTP_CONFIRMADO];
+    totpEstaDisponible.mockReturnValue(false);
+
+    expect(await hayFactorVerificable(YO)).toBe(false);
+  });
+
+  it("says yes for that same row once the key is back", async () => {
+    secretosTotp = [TOTP_CONFIRMADO];
+    totpEstaDisponible.mockReturnValue(true);
+
+    expect(await hayFactorVerificable(YO)).toBe(true);
+  });
+
+  it("says yes for a passkey even with the key broken — nothing about them is encrypted with it", async () => {
+    passkeys = [PASSKEY];
+    secretosTotp = [];
+    totpEstaDisponible.mockReturnValue(false);
+
+    expect(await hayFactorVerificable(YO)).toBe(true);
+  });
+
+  it("says yes when a passkey sits beside the unreadable TOTP", async () => {
+    // The reason the answer is not simply `!totpEstaDisponible()`: this
+    // account can still prove itself, and must still be asked to.
+    passkeys = [PASSKEY];
+    secretosTotp = [TOTP_CONFIRMADO];
+    totpEstaDisponible.mockReturnValue(false);
+
+    expect(await hayFactorVerificable(YO)).toBe(true);
+  });
+
+  it("ignores an unconfirmed secret, exactly as tieneAlgunFactor does", async () => {
+    secretosTotp = [TOTP_SIN_CONFIRMAR];
+    totpEstaDisponible.mockReturnValue(true);
+
+    expect(await hayFactorVerificable(YO)).toBe(false);
+  });
+
+  it("does not count another account's factors", async () => {
+    passkeys = [PASSKEY_AJENA];
+    secretosTotp = [];
+    totpEstaDisponible.mockReturnValue(true);
+
+    expect(await hayFactorVerificable(YO)).toBe(false);
+  });
+
+  // 🔴 The property that keeps the narrow fix from becoming a wide hole.
+  //
+  // Teaching `tieneAlgunFactor` to skip an unreadable TOTP looks like the same
+  // change and is far worse: `estadoInicialDeSesion` reads it, so a mistyped
+  // `MFA_ENCRYPTION_KEY_ACTIVE` would open every session as if nobody had a
+  // second factor at all. This is the test that goes red the day somebody
+  // "simplifies" the two functions into one.
+  it("leaves tieneAlgunFactor alone: a broken key never makes a factor disappear", async () => {
+    secretosTotp = [TOTP_CONFIRMADO];
+    totpEstaDisponible.mockReturnValue(false);
+
+    expect(await tieneAlgunFactor(YO)).toBe(true);
+    expect(await hayFactorVerificable(YO)).toBe(false);
+  });
+
+  it("and neither does estadoInicialDeSesion: an unreadable factor still opens `parcial`", async () => {
+    // Which is also why fixing the gate is not enough on its own: with the key
+    // broken this person never reaches a gate at all, they are stuck one step
+    // earlier, at a session that only proving the factor can lift. Their real
+    // way back is a recovery code.
+    secretosTotp = [TOTP_CONFIRMADO];
+    totpEstaDisponible.mockReturnValue(false);
+
+    const { estado } = await estadoInicialDeSesion(
+      { id: YO, mfa_grace_until: null },
+      new Date(),
+    );
+
+    expect(estado).toBe("parcial");
+  });
+});
+
 describe("estadoInicialDeSesion", () => {
   const ahora = new Date("2026-09-01T10:00:00.000Z");
 

@@ -78,7 +78,7 @@ const { CODIGO_STEP_UP } = await import("./middleware/requireStepUp.js");
  * against a refusal that had nothing to do with the grace period. The
  * sentence is what makes it fail for the right reason.
  */
-const { MENSAJE_FACTOR_PENDIENTE } = await import("./auth/sessionState.js");
+const { MENSAJE_FACTOR_PENDIENTE, CODIGO_FACTOR_PENDIENTE } = await import("./auth/sessionState.js");
 
 /**
  * The two response header names the frontend hard-codes, written out here.
@@ -2780,7 +2780,18 @@ describe("the fourteen-day deadline, against a session that was already open", (
     expect(res.status).toBe(403);
     // The sentence, not just the number: see `MENSAJE_FACTOR_PENDIENTE`'s
     // import above. A 403 from the permission gate would carry a different one.
-    expect(res.body).toEqual({ message: MENSAJE_FACTOR_PENDIENTE });
+    // El `code` viaja con la frase desde el plan 4D, tarea 9: es lo único que
+    // permite al cliente reconocer esta negativa sin comparar el texto en
+    // español, y por tanto decir «configura tu segundo factor» con un enlace
+    // en vez del «no se pudo» genérico que enseñaba antes.
+    //
+    // 🔴 Esta afirmación vive en dos ficheros —aquí y en
+    // `authenticate.test.ts`— y actualizar sólo uno es exactamente el fallo
+    // que dejó este test en rojo al añadir el campo. Si tocas uno, busca el otro.
+    expect(res.body).toEqual({
+      message: MENSAJE_FACTOR_PENDIENTE,
+      code: CODIGO_FACTOR_PENDIENTE,
+    });
     // And it stopped inside `authenticate`, before the controller read
     // anything: `searchUsuario`'s own `UsuarioModel.findOne` never ran.
     expect(usuarioFindOne).not.toHaveBeenCalled();

@@ -251,6 +251,22 @@ describe("regenerarCodigos", () => {
     expect(updateMock.mock.calls[0]?.[1]?.transaction).toBe(TRANSACCION);
     expect(bulkCreateMock.mock.calls[0]?.[1]?.transaction).toBe(TRANSACCION);
   });
+
+  it("reuses a transaction handed in by the caller instead of opening its own — confirmTotp's atomicity", async () => {
+    // `confirmTotp` folds this call into its own `sequelize.transaction(...)`
+    // block so a factor confirmed and its first ten recovery codes commit or
+    // roll back together. If this function opened a second transaction here
+    // regardless, the two writes below would sit outside the caller's unit
+    // of work and a later failure in that block would not undo them.
+    sembrar({ id_usuario: 1, codigo: CODE_A });
+    const transaccionDelLlamante = { id: "la-transaccion-de-confirmTotp" };
+
+    await regenerarCodigos(1, { transaction: transaccionDelLlamante as unknown as never });
+
+    expect(transactionMock).not.toHaveBeenCalled();
+    expect(updateMock.mock.calls[0]?.[1]?.transaction).toBe(transaccionDelLlamante);
+    expect(bulkCreateMock.mock.calls[0]?.[1]?.transaction).toBe(transaccionDelLlamante);
+  });
 });
 
 describe("contarCodigosRestantes", () => {
@@ -273,6 +289,17 @@ describe("contarCodigosRestantes", () => {
     sembrar({ id_usuario: 1, codigo: CODE_A });
     const resultado = await contarCodigosRestantes(1);
     expect(typeof resultado).toBe("number");
+  });
+
+  it("passes a given transaction through to the count — confirmTotp reads this before deciding to regenerate", async () => {
+    sembrar({ id_usuario: 1, codigo: CODE_A });
+    const transaccionDelLlamante = { id: "la-transaccion-de-confirmTotp" };
+
+    await contarCodigosRestantes(1, { transaction: transaccionDelLlamante as unknown as never });
+
+    expect(countMock).toHaveBeenCalledWith(
+      expect.objectContaining({ transaction: transaccionDelLlamante }),
+    );
   });
 });
 

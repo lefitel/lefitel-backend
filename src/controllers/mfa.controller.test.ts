@@ -460,8 +460,39 @@ describe("POST /auth/mfa/verify", () => {
     expect(codigoMalo.status).toBe(400);
     expect(filaCorrupta.status).toBe(codigoMalo.status);
     expect(claveEquivocada.status).toBe(codigoMalo.status);
-    expect(filaCorrupta.payload).toEqual(codigoMalo.payload);
-    expect(claveEquivocada.payload).toEqual(codigoMalo.payload);
+    // 🔴 **Qué sigue garantizando este test y qué dejó de garantizar, con el
+    // motivo.**
+    //
+    // La frase y el estado son idénticos, y la **forma** también: las tres
+    // respuestas llevan exactamente las mismas claves. Eso es lo que impide
+    // distinguir «tu código está mal» de «el servidor no puede leer tu
+    // secreto» por la pinta de la respuesta.
+    //
+    // Lo que **no** puede ser idéntico es el valor de `intentosRestantes`, y
+    // no por descuido: un fallo criptográfico **no carga el contador** a
+    // propósito (hallazgo F5/A5/C-4 — cargarlo bloquearía justo a la persona a
+    // la que una clave rota ya ha dejado tirada), así que su contador no baja.
+    // Igualarlo exigiría mentir sobre el número, y la mentira se desharía sola
+    // al segundo intento: en el caso normal la cuenta atrás baja y en el otro
+    // no. O sea que esa indistinguibilidad nunca existió más allá de una sola
+    // petición; lo que se elige aquí es decir la verdad en vez de fingirla.
+    //
+    // Y quien puede observar la diferencia ya tiene una sesión válida sobre su
+    // propia cuenta: lo que aprende es que el servidor tiene un problema de
+    // clave, no nada sobre una credencial.
+    const sinContador = (p: Record<string, unknown> | undefined) => {
+      const { intentosRestantes: _, ...resto } = (p ?? {}) as Record<string, unknown>;
+      return resto;
+    };
+    expect(sinContador(filaCorrupta.payload)).toEqual(sinContador(codigoMalo.payload));
+    expect(sinContador(claveEquivocada.payload)).toEqual(sinContador(codigoMalo.payload));
+    // La forma sí es idéntica: mismas claves, siempre.
+    expect(Object.keys(filaCorrupta.payload ?? {}).sort()).toEqual(
+      Object.keys(codigoMalo.payload ?? {}).sort(),
+    );
+    expect(Object.keys(claveEquivocada.payload ?? {}).sort()).toEqual(
+      Object.keys(codigoMalo.payload ?? {}).sort(),
+    );
   });
 
   it("accepts a valid recovery code, spends it and promotes the session in one transaction", async () => {
@@ -816,4 +847,91 @@ describe("POST /auth/stepup", () => {
     expect(opciones.where.id).toBe(ID_SESION);
     expect(opciones.where.id_usuario).toBe(ID_USUARIO);
   });
+
+  describe("the countdown before the account locks (plan 4D, tarea 2)", () => {
+    // 🔴 Why this exists at all. Five wrong codes lock the whole ERP account,
+    // and every way of failing answers the same sentence. Once locked, the
+    // *login* answers "Usuario o contraseña incorrectos" — indistinguishable
+    // from a mistyped password. So somebody whose phone clock has drifted goes
+    // from "my code does not work" to "I cannot log in", never reads a
+    // warning, and the button that lifts the lock is one an administrator has
+    // to press. This number is the whole of what stands between those two.
+
+    it("says how many guesses are left after a wrong code", async () => {
+      // The database already added one, so `failed_attempts: 1` means this
+      // failure was the first.
+      findOneUsuario.mockResolvedValue({ dataValues: { failed_attempts: 1 } });
+
+      const c = callStepup({ codigo: "000000" });
+      await stepup(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(c.payload).toMatchObject({
+        message: CODIGO_MFA_INVALIDO,
+        intentosRestantes: LOCKOUT_AFTER_FAILURES - 1,
+      });
+    });
+
+    it("says zero on the failure that locks it, not one", async () => {
+      findOneUsuario.mockResolvedValue({
+        dataValues: { failed_attempts: LOCKOUT_AFTER_FAILURES },
+      });
+
+      const c = callStepup({ codigo: "000000" });
+      await stepup(c.req, c.res);
+
+      expect(c.payload).toMatchObject({
+        intentosRestantes: 0,
+      });
+    });
+
+    it("says zero to an account that is already locked", async () => {
+      // Same sentence a wrong code gets — a locked account is never confirmed
+      // to somebody probing — but zero tells the person who has been typing
+      // correct codes that trying again is not the remedy.
+      findByPk.mockResolvedValue({
+        dataValues: {
+          failed_attempts: LOCKOUT_AFTER_FAILURES,
+          locked_until: new Date(Date.now() + 60_000),
+        },
+      });
+
+      const c = callStepup({ codigo: "000000" });
+      await stepup(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(c.payload).toMatchObject({
+        message: CODIGO_MFA_INVALIDO,
+        intentosRestantes: 0,
+      });
+    });
+
+    it("still reports a countdown when the failure was the server's, and does not charge one", async () => {
+      // 🔴 Este test afirmaba lo contrario, y estaba mal.
+      //
+      // Decía que un fallo criptográfico no debía llevar cuenta atrás, porque
+      // no se carga nada. Cierto lo segundo, equivocado lo primero: un campo
+      // que aparece en unas respuestas y falta en otras **es** la señal que
+      // distingue «tu código está mal» de «el servidor no puede leer tu
+      // secreto», y hay un test desde el 4B cuyo trabajo es que no exista esa
+      // señal. Lo que se responde es el contador tal y como está, sin
+      // incrementarlo.
+      const fila = filaTotp(1, ID_USUARIO);
+      const tagRoto = Buffer.from(fila.auth_tag);
+      tagRoto[0] ^= 0xff;
+      filas = [{ ...fila, auth_tag: tagRoto }];
+      const secret = OTPAuth.Secret.fromBase32(SECRETO);
+      const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+
+      const c = callStepup({ codigo: OTPAuth.HOTP.generate({ secret, counter }) });
+      await stepup(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      // Presente, como en cualquier otro fallo: la forma no delata nada.
+      expect(c.payload).toHaveProperty("intentosRestantes");
+      // Y lo que importaba del test original sigue en pie: no se cobra.
+      expect(increment).not.toHaveBeenCalled();
+    });
+  });
+
 });
