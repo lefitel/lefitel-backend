@@ -22,16 +22,33 @@ export type { EstadoSesion } from "../interfaces/index.js";
 import type { EstadoSesion } from "../interfaces/index.js";
 
 
-/** What a session with a password behind it and no factor may reach. */
+/**
+ * What a session with a password behind it and no factor may reach.
+ *
+ * **Every entry here is reachable by somebody holding a password and nothing
+ * else**, so the test for adding one is not "is it harmless" but "may a leaked
+ * password do this". `logout` passes that test — abandoning the session in
+ * hand is the one thing anybody must always be able to do. `logout-all` does
+ * not, and used to be here: it revokes the account's sessions *and* its
+ * remembered devices, which is an operation on the account rather than on the
+ * session, and a `parcial` session is precisely the one that has not shown it
+ * is the account. It moved to `ONBOARDING_EXTRA` below.
+ */
 const PARCIAL: readonly string[] = [
   "/api/auth/mfa",
   "/api/auth/webauthn/login",
   "/api/auth/logout",
-  "/api/auth/logout-all",
   "/api/auth/me",
 ];
 
-/** What `onboarding` adds: the doors that let somebody finish setting up. */
+/**
+ * What `onboarding` adds: the doors that let somebody finish setting up.
+ *
+ * `logout-all` sits here rather than in `PARCIAL` — see that list's comment.
+ * It has to be somewhere: `onboarding` is spread from `PARCIAL`, so deleting
+ * the entry outright would have taken it from a state that has proved a factor
+ * and is only held by a deadline, which was never the point.
+ */
 const ONBOARDING_EXTRA: readonly string[] = [
   "/api/auth/email",
   "/api/auth/totp",
@@ -39,6 +56,7 @@ const ONBOARDING_EXTRA: readonly string[] = [
   "/api/auth/webauthn/credentials",
   "/api/auth/recovery-codes",
   "/api/auth/sessions",
+  "/api/auth/logout-all",
 ];
 const PERMITIDAS: Record<EstadoSesion, readonly string[] | "todo"> = {
   parcial: PARCIAL,

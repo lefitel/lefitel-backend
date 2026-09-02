@@ -6,20 +6,37 @@
 // are either flooding a mail quota that is shared with the rest of the
 // company, or burning CPU against a route that asks for no credential at all.
 //
-// Two of these routes are deliberately mute — `/password/forgot` and
-// `/email/send` answer the exact same 200, whatever actually happened, per
-// Global Constraint #1 — and that mutes the one tool `loginLimiters.ts`
-// built for this: `costsNothing` / `confirmCostsNothing` decide whether to
-// refund a request by reading `res.statusCode`, and on a mute route that
-// status is 200 for a legitimate sender *and* for whoever is probing it.
-// Wiring either refund rule onto a mute route does not fail loudly — it
-// passes every shape test and refunds every request, successful or hostile
-// alike, which is a bucket that only ever reads zero. So neither
-// `passwordForgot*Limiter` nor `emailSendLimiter` below sets
-// `requestWasSuccessful` at all: they charge every request that reaches them,
-// whatever it answers, on purpose. `recoveryLimiters.test.ts` demonstrates
-// this by adding the refund back in and watching the exhaustion test that
-// depends on its absence go red.
+// `/password/forgot` is deliberately mute — it answers the exact same 200,
+// whatever actually happened, per Global Constraint #1 — and that mutes the
+// one tool `loginLimiters.ts` built for this: `costsNothing` /
+// `confirmCostsNothing` decide whether to refund a request by reading
+// `res.statusCode`, and on a mute route that status is 200 for a legitimate
+// sender *and* for whoever is probing it. Wiring either refund rule onto a
+// mute route does not fail loudly — it passes every shape test and refunds
+// every request, successful or hostile alike, which is a bucket that only
+// ever reads zero. So neither `passwordForgotEmailLimiter` nor
+// `passwordForgotIpLimiter` below sets `requestWasSuccessful` at all: they
+// charge every request that reaches them, whatever it answers, on purpose.
+// `recoveryLimiters.test.ts` demonstrates this by adding the refund back in
+// and watching the exhaustion test that depends on its absence go red.
+//
+// `/email/send` looks like the same shape and is not, which is why it does
+// not follow the rule above. It runs behind `authenticate`, so there is no
+// anonymous probe to protect against, and it answers 400 to an address that
+// does not even parse and 401 to a wrong current password. Both statuses talk
+// only about the caller's own typing, on their own already-authenticated
+// account — nothing an attacker without that session could not have learned
+// some other way — so refunding them leaks nothing a mute route would need
+// to hide. What still has to be charged is the 200: on this route a 200
+// means either the link actually went out or the mail budget ran out (see
+// `auth/mailBudget.ts`), and both are real spend of a shared resource.
+// `costsNothing` is exactly the wrong rule to reach for here — it refunds
+// everything under 400, which on this route is the one status that must
+// never be free — so `emailSendLimiter` below carries its own predicate,
+// `emailSendCostsNothing`, defined next to it. `recoveryLimiters.test.ts`
+// also proves this refund cannot leak onto the bucket next door: the same
+// 400 that empties nothing from `emailSendLimiter` still fills
+// `passwordForgotEmailLimiter` exactly as before.
 //
 // `/password/reset` and `/email/verify` are not mute — a bad token really is
 // a 400, a good one really is a 200 — so both of them do reuse
@@ -204,17 +221,44 @@ export function passwordForgotRateLimit(req: Request, res: Response, next: NextF
 }
 
 /**
+ * Whether an `/email/send` answer refunds `emailSendLimiter`'s bucket.
+ *
+ * Not `costsNothing` from `loginLimiters.ts`, and not a call to it either.
+ * That predicate refunds everything under 400, which on a route where
+ * *success* is the expensive outcome is exactly backwards: a 200 here means
+ * either a verification link actually went out or the mail budget ran out
+ * (see `auth/mailBudget.ts`), and both are real consumption of something.
+ * What has to be free instead are the two statuses that talk only about the
+ * caller's own typing, on their own already-authenticated account: 400 for
+ * an address that does not even parse, and 401 for a current password that
+ * was wrong. Neither hands an attacker anything they did not already know —
+ * this route runs behind `authenticate`, so there is no anonymous probe to
+ * protect, and `passwordConfirmLimiter` (mounted ahead of this one on the
+ * real route) already bills a wrong password to its own budget.
+ *
+ * Everything else charges, on purpose, including a 5xx: this route has no
+ * outage-shaped failure mode of the kind `costsNothing`'s own comment
+ * describes for the login, so there is nothing here that needs refunding one.
+ */
+export function emailSendCostsNothing(_req: Request, res: Response): boolean {
+  return res.statusCode === 400 || res.statusCode === 401;
+}
+
+/**
  * `/email/send`'s only budget: by account.
  *
- * No `requestWasSuccessful`, same reasoning as the `/password/forgot`
- * buckets above — this route answers the same 200 whether the address just
- * got registered, replaced somebody else's still-unverified claim on it, or
- * Resend itself is down, so a refund rule reading `res.statusCode` would
- * refund the legitimate sends and the hostile ones alike.
+ * Unlike the `/password/forgot` buckets above, this one does refund —
+ * `emailSendCostsNothing`, just above, frees the two statuses that are about
+ * the caller's own typing (400, 401) and charges everything else, the 200
+ * included. See that function's own comment for why, and the module comment
+ * at the top of this file for why this route is not mute the way
+ * `/password/forgot` is.
  */
 export const emailSendLimiter = rateLimit({
   windowMs: RECOVERY_WINDOW_MS,
   limit: EMAIL_SEND_LIMIT,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: emailSendCostsNothing,
   keyGenerator: emailSendKey,
   message: { message: "Demasiadas solicitudes. Espere unos minutos." },
   standardHeaders: true,

@@ -33,7 +33,7 @@ import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
-import { consumirPresupuestoDeCorreo } from "../auth/mailBudget.js";
+import { hayPresupuestoDeCorreo } from "../auth/mailBudget.js";
 import { avisarPasswordRestablecida } from "../auth/securityNotice.js";
 import { validarPassword } from "../utils/password.js";
 import { logAction } from "../utils/logAction.js";
@@ -180,11 +180,17 @@ async function completeForgotPassword(email: string, ip: string | null): Promise
   // exchange. Asking the budget first means a day that has run out costs
   // nothing at all instead of costing them the link they already had.
   //
+  // `hayPresupuestoDeCorreo()` only looks — it commits nothing. The real
+  // charge happens once, inside `enviarCorreo` below, for the one message
+  // this function actually sends: asking here and charging there is
+  // Decision 2 in `docs/plans/2026-09-01-defectos-previos-al-4b.md`, the same
+  // split `email.controller.ts`'s `sendVerificationEmail` now uses.
+  //
   // Nothing is said to the caller: the response left before this function ran
   // (see the module comment), and a 429 that appeared only for addresses that
   // turn out to have an account would be the enumeration oracle this endpoint
   // is shaped to avoid.
-  if (!consumirPresupuestoDeCorreo("password/forgot")) return;
+  if (!hayPresupuestoDeCorreo()) return;
 
   const token = await crearToken({ id_usuario: id, email_destino: emailDestino, proposito: "reset_password" });
 
@@ -202,6 +208,7 @@ async function completeForgotPassword(email: string, ip: string | null): Promise
   const cuerpo = resetEmailBody(resetLinkFor(token));
   await enviarCorreo({
     para: emailDestino,
+    flujo: "password/forgot",
     asunto: "Restablece tu contraseña — Osefi",
     html: cuerpo.html,
     texto: cuerpo.texto,

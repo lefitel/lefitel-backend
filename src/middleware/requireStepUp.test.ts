@@ -43,6 +43,7 @@ const {
   MOTIVO_ESTADO_INCOMPLETO,
   MOTIVO_SIN_FACTOR_RECIENTE,
   MOTIVO_CONTRASENA_INCORRECTA,
+  MOTIVO_CONTRASENA_REQUERIDA,
 } = await import("./requireStepUp.js");
 const { STEP_UP_WINDOW_MINUTES } = await import("../config/security.js");
 
@@ -558,6 +559,229 @@ describe("requireStepUp", () => {
           expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
         );
       });
+    });
+  });
+
+  /**
+   * `exigeContrasena`, for the routes plan 4B is about to mount.
+   *
+   * The branch above — factor-less account, no password, let it through — is
+   * correct for everything mounted today and becomes a permanent lockout the
+   * moment a route can *register a factor*. Its own docstring names the
+   * mechanism without noticing the consequence: the skip "closes on its own"
+   * once `tieneAlgunFactor` answers `true`, and the window in which it is
+   * still open is exactly the window an attacker needs.
+   *
+   * Somebody holding a stolen session cookie and not the password calls
+   * `/auth/totp/setup` with an empty body, passes here, scans their own QR
+   * and confirms. From that instant `tieneAlgunFactor` is `true`, so this
+   * gate stops offering the victim the password route — and the victim
+   * cannot even delete the attacker's factor. Their next login opens
+   * `parcial`, which is left only by proving the attacker's factor. Changing
+   * the password does not help; `logout-all` revokes sessions, not
+   * credentials.
+   *
+   * So the option exists and defaults to `false`: nothing mounted today
+   * changes. 4B mounts the registration routes with it on.
+   */
+  describe("exigeContrasena, for the routes that register a credential", () => {
+    const cuentaSinFactor = { id: 1, estado: "completa" as const, mfa_satisfied_at: null };
+
+    it("still lets a factor-less account through when the route does not demand a password", async () => {
+      // The guard on the fifteen routes mounted today. If this goes red, the
+      // default flipped and the ERP just lost its permission matrix.
+      const { req, res, next } = contexto(cuentaSinFactor, {});
+      await requireStepUp()(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it("refuses a factor-less account with no password when the route demands one", async () => {
+      const { req, res, next } = contexto(cuentaSinFactor, {});
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ code: CODIGO_STEP_UP, motivo: MOTIVO_CONTRASENA_REQUERIDA }),
+      );
+    });
+
+    it("tells a missing password apart from a wrong one", async () => {
+      // Two different sentences on screen — "type your password" and "that
+      // password is wrong" — and a client can only pick between them by
+      // `motivo`, since both answer the same `code`. Reusing
+      // MOTIVO_CONTRASENA_INCORRECTA here would have the frontend accuse
+      // somebody of mistyping a password they never typed.
+      verifyOwnPassword.mockResolvedValue({ ok: false });
+      const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_CONTRASENA_INCORRECTA }),
+      );
+      expect(res.json).not.toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
+      );
+    });
+
+    it("treats an empty string as no password, on a route that demands one", async () => {
+      const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "" });
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
+      );
+    });
+
+    it("charges nothing for a request that simply forgot the password", async () => {
+      // Nothing was compared, so no bcrypt was spent and there is nothing to
+      // charge. Charging here would let a buggy client — one that forgets the
+      // field — spend somebody's whole confirm budget and lock them out of
+      // the very screen that would fix it.
+      const { req, res, next } = contexto(cuentaSinFactor, {});
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(passwordConfirmLimiter).not.toHaveBeenCalled();
+      expect(passwordConfirmLimiter.getKey).not.toHaveBeenCalled();
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+    });
+
+    it("accepts the right password on a route that demands one", async () => {
+      verifyOwnPassword.mockResolvedValue({ ok: true });
+      const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "la-de-verdad" });
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(passwordConfirmLimiter).not.toHaveBeenCalled();
+    });
+
+    it("refuses the wrong password on a route that demands one, and charges the bucket", async () => {
+      verifyOwnPassword.mockResolvedValue({ ok: false });
+      const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(passwordConfirmLimiter).toHaveBeenCalled();
+    });
+
+    it("writes a refusal to the bitácora, not a skip", async () => {
+      // STEP_UP_SKIPPED means "a sensitive write ran without the extra
+      // proof". Nothing ran here, so writing that line would put a refusal
+      // in the one bucket that is meant to be readable as "these got
+      // through".
+      const { req, res, next } = contexto(cuentaSinFactor, {});
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
+      );
+      expect(logAction).not.toHaveBeenCalledWith(
+        expect.objectContaining({ action: "STEP_UP_SKIPPED" }),
+      );
+    });
+
+    it("changes nothing for an account that already has a factor", async () => {
+      // The option only ever touches the factor-less branch. With a factor,
+      // the gate refuses before the password is looked at either way, and
+      // that is the same refusal it already gave.
+      tieneAlgunFactor.mockResolvedValue(true);
+      const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "la-de-verdad" });
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }),
+      );
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+    });
+
+    it("demands the password even from a session that just proved its factor", async () => {
+      // The case that makes `exigeContrasena` mean one thing instead of two.
+      // Plan 4B seals `mfa_satisfied_at` when somebody spends a **recovery
+      // code** — so without this, whoever holds only the printed sheet spends
+      // one code, lands inside the ten-minute window, and registers their own
+      // factor with no password at all. That is precisely the bound this
+      // option exists to draw, walked around through the front door.
+      tieneAlgunFactor.mockResolvedValue(true);
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
+        {},
+      );
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
+      );
+    });
+
+    it("accepts a fresh factor proof together with the password", async () => {
+      // Something held and something known, which is the whole shape of the
+      // ceremony on a route that registers a credential.
+      tieneAlgunFactor.mockResolvedValue(true);
+      verifyOwnPassword.mockResolvedValue({ ok: true });
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(passwordConfirmLimiter).not.toHaveBeenCalled();
+    });
+
+    it("still asks a stale account to prove its factor first, before any password", async () => {
+      // Order matters and this pins it: with a factor and nothing fresh to
+      // show, the answer is "prove the factor", not "type your password".
+      // Otherwise the option would quietly turn these routes into
+      // password-only ones, which is the opposite of what it is for.
+      tieneAlgunFactor.mockResolvedValue(true);
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(STEP_UP_WINDOW_MINUTES + 1) },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }),
+      );
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+    });
+
+    it("still lets a fresh proof straight through when the route does not demand a password", async () => {
+      // The guard on the fifteen routes mounted today, from the other side:
+      // the new clause must not have made a fresh factor proof insufficient
+      // everywhere.
+      tieneAlgunFactor.mockResolvedValue(true);
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
+        {},
+      );
+      await requireStepUp()(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it("still refuses an onboarding session, which the option does not touch", async () => {
+      // `permiteOnboarding` and `exigeContrasena` are independent: this one
+      // says *what proof* the factor-less branch accepts, not *which states*
+      // reach it. A route that wants both has to ask for both.
+      const { req, res, next } = contexto(
+        { id: 1, estado: "onboarding", mfa_satisfied_at: null },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
+      );
     });
   });
 });

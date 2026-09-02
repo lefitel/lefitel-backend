@@ -437,20 +437,43 @@ casos son el mismo `{ ok: false }` mudo.
 **no debe cobrar presupuesto**: en desarrollo no hay cuota que gastar, y cobrar ahí haría
 que la suite de tests agotara el contador entre ficheros.
 
-- [ ] **Step 4: Los dos controladores dejan de cobrar**
+- [ ] **Step 4: 🔴 Lo que se le pasa al contador es un flujo, no el asunto**
+
+Añadido al ejecutar, y es el error que se comete solo. `consumirPresupuestoDeCorreo(motivo)`
+escribe `motivo` en su línea de registro, y lo que hay a mano dentro de `enviarCorreo` es
+`correo.asunto`. Pero **cuatro de los siete asuntos de este código interpolan un nombre de
+usuario** (`[Seguridad] Rescate ejecutado — reset-mfa: @jperez`), así que pasarlo escribe
+*a quién se rescató* en una línea que nunca nombraba a nadie. Y un asunto es texto libre,
+lo que destruye lo único para lo que sirve ese campo: sumar cuánto gastó hoy cada flujo.
+
+**Se añade un tipo cerrado `FlujoDeCorreo`** —siete valores— y un campo `flujo` obligatorio
+en `CorreoAEnviar`. Obligatorio y no opcional para que el compilador nombre todos los sitios
+de llamada el día que aparezca un flujo nuevo, que es el mismo argumento que `texto` ya hace
+para sí mismo en esa interfaz.
+
+🔴 **Y el parámetro de `consumirPresupuestoDeCorreo` se estrecha a `FlujoDeCorreo`.** Medido:
+con el parámetro tipado `string`, volver a pasar `correo.asunto` **compila limpio** — el tipo
+del campo por sí solo no protege el cableado. Con el parámetro estrechado, es un error de
+compilación. Esa es la comprobación en las dos direcciones de este paso, y se hace con el
+compilador, no con un test.
+
+`mailBudget.ts` importa el tipo con `import type`, así que no hay ciclo en tiempo de
+ejecución.
+
+- [ ] **Step 5: Los dos controladores dejan de cobrar**
 
 `email.controller.ts:397` pasa a `hayPresupuestoDeCorreo()`. `password.controller.ts:187`
 lo mismo. Ninguno de los dos vuelve a llamar a `consumir...`.
 
-- [ ] **Step 5: Romper en las dos direcciones**
+- [ ] **Step 6: Romper en las dos direcciones**
 
 Volver a poner el cobro en un controlador tiene que poner en rojo el test que dice «una
 unidad por mensaje». Y quitar el cobro de `enviarCorreo` tiene que poner en rojo el que
 dice «cobra los avisos de seguridad».
 
-- [ ] **Step 6: `npm run typecheck` y la suite**
+- [ ] **Step 7: `npm run typecheck` y la suite**
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 `fix(mail): the budget now counts at the send site, the way its own header says it does`
 
@@ -596,8 +619,11 @@ retirada de la rama que hoy deja pasar.
 
 **Interfaces:**
 - Produces: `requireStepUp({ exigeContrasena?: boolean })`, con `false` por defecto.
-  Con `true`, una cuenta sin ningún factor que no mande `stepup_password` recibe **401**
-  con el código que el cliente ya conoce, en vez de pasar.
+  Con `true`, la ruta exige `stepup_password` **siempre** — ver abajo por qué «siempre» y no
+  «solo cuando la cuenta no tiene factor», que es como se escribió primero y estaba mal.
+  Y un cuarto motivo exportado, `MOTIVO_CONTRASENA_REQUERIDA`, para que el cliente distinga
+  «no mandaste contraseña» de «la que mandaste está mal»: son dos frases distintas en
+  pantalla y `code` no las separa.
 
 - [ ] **Step 1: Los tests en rojo**
 
@@ -616,12 +642,24 @@ por defecto se cambió sin querer y el ERP se acaba de quedar sin matriz de perm
 `requireStepUp` ya se invoca como función que devuelve middleware (`requireStepUp()`), así
 que el parámetro entra sin tocar ningún sitio de montaje.
 
-🔴 **El código de respuesta importa y no es 403.** El cliente distingue por el `code` de la
-respuesta, no por el estado: el interceptor de `web` cierra sesión ante un 401 sin código
-conocido. Hay que devolver **la misma forma que la puerta ya devuelve** cuando la
-contraseña es incorrecta —mismo estado, mismo `code`—, o el primer usuario que caiga aquí
-en el 4D se ve expulsado del ERP en vez de ver un cuadro pidiéndole la contraseña.
-Comprobarlo leyendo `requireStepUp.ts` y el interceptor de `web`, no de memoria.
+🔴 **Se devuelve la misma forma que la puerta ya devuelve** cuando la contraseña es
+incorrecta: **403**, con `code: CODIGO_STEP_UP` y un `motivo`. Verificado en el árbol — el
+interceptor de `web` solo cierra sesión ante un **401**, así que un 403 con código conocido
+no expulsa a nadie. Cambiarlo a 401 sí lo haría.
+
+🔴 **Y `exigeContrasena` tiene que significar UNA cosa: esta ruta quiere la contraseña
+siempre.** Escrito como «solo cuando la cuenta no tiene ningún factor» —que es lo natural
+leyendo el hallazgo C1— queda un agujero: la ventana de diez minutos se comprueba **antes**
+de esa rama, y el Plan 4B sella esa ventana **cuando alguien gasta un código de
+recuperación**. O sea que quien tuviera solo el papel impreso gasta un código, cae dentro de
+la ventana, y registra su propio factor sin contraseña — justo el límite que el 4B dice que
+no se puede cruzar.
+
+Consecuencia, y va escrita en el comentario: en esas rutas la ceremonia son **dos pasos y en
+este orden — probar el factor, y después teclear la contraseña**. Una cuenta con factor y
+sin prueba fresca sigue recibiendo «prueba tu factor», no «teclea tu contraseña»; si no,
+la opción convertiría esas rutas en rutas de solo contraseña, que es lo contrario de para lo
+que existe.
 
 - [ ] **Step 3: Actualizar el comentario largo de la rama que deja pasar**
 

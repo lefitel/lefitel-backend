@@ -64,6 +64,16 @@ vi.mock("../auth/mailer.js", () => ({
   enviarCorreo: (...a: unknown[]) => enviarCorreo(...a),
 }));
 
+// `hayPresupuestoDeCorreo` only, matching what `email.controller.ts` now
+// imports since Task 4 — the controller no longer calls
+// `consumirPresupuestoDeCorreo` at all, so this file has no business
+// mocking it. Defaults to `true` in `beforeEach`; the one test in "the mail
+// budget" below is what overrides it.
+const hayPresupuestoDeCorreo = vi.fn();
+vi.mock("../auth/mailBudget.js", () => ({
+  hayPresupuestoDeCorreo: (...a: unknown[]) => hayPresupuestoDeCorreo(...a),
+}));
+
 // Mocked wholesale rather than let the real `credentials.js` load: that
 // module imports `UsuarioModel` (fine, already mocked above) but also
 // `bcryptjs`, `config/security.js`'s `fillerHash`/`bcryptCostOf` and
@@ -178,6 +188,7 @@ beforeEach(() => {
   consumirToken.mockResolvedValue({ id_usuario: A, email_destino: "a@osefi.net" });
   enviarCorreo.mockResolvedValue({ ok: true });
   verifyOwnPassword.mockResolvedValue({ ok: true });
+  hayPresupuestoDeCorreo.mockReturnValue(true);
 });
 
 describe("POST /auth/email/send", () => {
@@ -444,6 +455,50 @@ describe("POST /auth/email/send", () => {
 
       expect(c.status).toBe(200);
       expect(enviarCorreo).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /**
+   * Hallazgo A2 / Task 3. The bug this pins: the handler used to wipe
+   * `email_verified_at` and burn every pending token *before* asking the
+   * mail budget, so an exhausted budget destroyed the address already on
+   * file for a token that was then never minted and a mail that was never
+   * sent — while still answering the same "se envió un enlace" sentence. A
+   * test that only reads the response cannot see that at all: per
+   * Constraint #1 the response is identical in both cases on purpose (see
+   * "answers the exact same body whether the mail actually sent or not"
+   * above). What has to be pinned is the write that must NOT happen.
+   */
+  describe("the mail budget", () => {
+    it("leaves the verified address intact when there is no mail budget left", async () => {
+      hayPresupuestoDeCorreo.mockReturnValue(false);
+      findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
+      const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+      await sendVerificationEmail(c.req, c.res);
+
+      // The uniform response, unmoved — Constraint #1 still holds even here.
+      expect(c.status).toBe(200);
+      expect(c.payload).toEqual({ message: EMAIL_ENVIO_RESPUESTA });
+      // What actually matters: the destructive transaction never ran, so the
+      // account keeps the verified address and the pending tokens it had.
+      expect(update).not.toHaveBeenCalled();
+      expect(tokenUpdate).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+      // And nothing downstream of the wipe ran either — no token minted for
+      // an address that was never touched, no mail sent for a link that was
+      // never minted.
+      expect(crearToken).not.toHaveBeenCalled();
+      expect(enviarCorreo).not.toHaveBeenCalled();
+    });
+
+    it("still runs the transaction and sends when the budget has room", async () => {
+      hayPresupuestoDeCorreo.mockReturnValue(true);
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(transaction).toHaveBeenCalledOnce();
+      expect(enviarCorreo).toHaveBeenCalled();
     });
   });
 });

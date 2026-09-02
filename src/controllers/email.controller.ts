@@ -45,7 +45,7 @@ import { TokenUsoUnicoModel } from "../models/tokenUsoUnico.model.js";
 import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
-import { consumirPresupuestoDeCorreo } from "../auth/mailBudget.js";
+import { hayPresupuestoDeCorreo } from "../auth/mailBudget.js";
 import { avisarCorreoCambiado } from "../auth/securityNotice.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
 import { logAction } from "../utils/logAction.js";
@@ -343,6 +343,31 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
   const direccionAnterior = found.dataValues.email;
   const eraVerificada = found.dataValues.email_verified_at !== null;
 
+  // The daily mail budget, asked before anything is written — not merely
+  // before the token is minted, but before the transaction just below even
+  // opens. That transaction is what sets `email_verified_at = NULL` and
+  // burns every pending token on this account: asking only ahead of
+  // `crearToken`, the way this used to, meant a day with no budget left
+  // still destroyed whatever verified address was on file and invalidated
+  // every pending link — for a token that was then never minted and a mail
+  // that was never sent — and still answered with the same "se envió un
+  // enlace" sentence below. Somebody who asked to change their address lost
+  // the one they had, received nothing, and was told it worked. Asking
+  // first means an exhausted budget costs nothing at all: the account keeps
+  // the address and the tokens it already had, the same property
+  // `/password/forgot` already has for the same reason.
+  //
+  // `hayPresupuestoDeCorreo()` only looks — it commits nothing. The actual
+  // charge happens once per real message, inside `enviarCorreo`, further
+  // below — see Decision 2 in
+  // `docs/plans/2026-09-01-defectos-previos-al-4b.md`. The response stays
+  // the uniform one — a caller who could tell "the budget ran out" apart
+  // from "sent" learns nothing useful, and Constraint #1 says the answer
+  // does not move for anything.
+  if (!hayPresupuestoDeCorreo()) {
+    return res.status(200).json({ message: EMAIL_ENVIO_RESPUESTA });
+  }
+
   await sequelize.transaction(async (transaction) => {
     await UsuarioModel.update(
       { email: destino, email_verified_at: null },
@@ -379,25 +404,15 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     });
   }
 
-  // The daily mail budget, asked before the token is minted — see
-  // `auth/mailBudget.ts`. This route had no daily ceiling at all until the
-  // final review did the arithmetic: five calls an hour per account, up to
-  // three messages each, is 360 a day from one logged-in account against a
-  // Resend quota of 100 for the whole company. `passwordConfirmLimiter` in
-  // front of it does not help — it refunds everything that is not a wrong
-  // password, which is exactly what a well-formed request is.
+  // This route had no daily ceiling at all until the final review did the
+  // arithmetic: five calls an hour per account, up to three messages each,
+  // is 360 a day from one logged-in account against a Resend quota of 100
+  // for the whole company. `passwordConfirmLimiter` in front of it does not
+  // help — it refunds everything that is not a wrong password, which is
+  // exactly what a well-formed request is. See the budget check above, well
+  // before this point, for why asking here (only ahead of the mint) was not
+  // enough on its own.
   //
-  // Before minting, for the same reason `/password/forgot` asks first:
-  // `crearToken` marks whatever was pending for this account as used, so a
-  // token that cannot be mailed would destroy a link already sitting in
-  // somebody's inbox and give them nothing back. And the response stays the
-  // uniform one — a caller who could tell "the budget ran out" apart from
-  // "sent" learns nothing useful, and Constraint #1 says the answer does not
-  // move for anything.
-  if (!consumirPresupuestoDeCorreo("email/send")) {
-    return res.status(200).json({ message: EMAIL_ENVIO_RESPUESTA });
-  }
-
   // Constant #2: the token this mints is never logged, never put in the
   // bitácora, never echoed in a response — `crearToken` hands it back
   // exactly once, and the only thing done with it below is putting it in the
@@ -406,6 +421,7 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
   const cuerpo = verificationEmailBody(verificationLinkFor(token));
   await enviarCorreo({
     para: destino,
+    flujo: "email/verificar",
     asunto: "Verifica tu correo — Osefi",
     html: cuerpo.html,
     texto: cuerpo.texto,
@@ -419,6 +435,7 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     const aviso = previousAddressNoticeBody(enmascarada(destino));
     await enviarCorreo({
       para: direccionAnterior,
+      flujo: "email/aviso-direccion-anterior",
       asunto: "Tu dirección de recuperación cambió — Osefi",
       html: aviso.html,
       texto: aviso.texto,

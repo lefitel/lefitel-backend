@@ -372,6 +372,29 @@ export const updateUsuario = handler("updateUsuario", async (req: Request, res: 
     return res.status(403).json({ message: "Solo un administrador puede cambiar el rol de un usuario." });
   }
 
+  /**
+   * `putPermisos`'s precedent, applied to the account instead of the role:
+   * the one mistake with no way back is taking away your own access, and
+   * nobody else can hand it back to you. This is why the block above checks
+   * *permission* and this one checks *whose account it is* — holding
+   * `roles.editar` is exactly what lets the block above fall through here.
+   *
+   * Only when the request is actually asking for a *different* role than the
+   * one already on file: the profile page echoes `id_rol` back untouched on
+   * every save, and that unchanged value must keep working for everybody,
+   * self included — only a real change is the escalation-or-lockout this
+   * closes.
+   */
+  if (
+    loggedUser.id === Number(id) &&
+    requestedRol !== undefined &&
+    Number(requestedRol) !== TempUsuario.dataValues.id_rol
+  ) {
+    return res.status(403).json({
+      message: "No puede cambiar su propio rol. Pídaselo a otro administrador.",
+    });
+  }
+
   const patch = editableFrom(req.body, mayAssignRoles);
   const oldImage = TempUsuario.dataValues.image;
   const udv = TempUsuario.dataValues as unknown as Record<string, unknown>;
@@ -811,6 +834,29 @@ export const deleteUsuario = handler("deleteUsuario", async (req: Request, res: 
   const { id } = req.params;
   if (!(await can(req.user?.id_rol, "seguridad", "archivar"))) {
     return res.status(403).json({ message: "No tienes permiso para eliminar usuarios." });
+  }
+
+  /**
+   * Refuses `Number(id) === req.user.id`, the same shape `rescatarMfaDeUsuario`
+   * below already uses for the same reason: after the permission check, never
+   * before, so somebody who lacks `seguridad.archivar` learns nothing from the
+   * message about whether the id they tried happened to be their own.
+   *
+   * This is the heavier case. Archiving is `UsuarioModel`'s soft delete — the
+   * row survives with a `deletedAt` — but the transaction below also revokes
+   * every session and every remembered device the caller has, so the very
+   * next request finds nobody logged in. And unlike a reset second factor,
+   * there is no door back that does not already require what was just given
+   * up: `desarchivarUsuario` demands `seguridad.archivar` itself — the
+   * permission the caller may have just disarmed on their own account — the
+   * in-app rescue answers 409 "cuenta archivada", and the rescue console has
+   * no order today to undo an archive either. The only way out left is an
+   * `UPDATE` by hand against production.
+   */
+  if (req.user && Number(id) === req.user.id) {
+    return res.status(403).json({
+      message: "No puede archivar su propia cuenta. Pídaselo a otro administrador.",
+    });
   }
 
   /**

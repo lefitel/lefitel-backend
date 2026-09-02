@@ -1,12 +1,20 @@
 // The four budgets `recoveryLimiters.ts` builds, and the two traps this task
 // was warned about by name:
 //
-// - `/password/forgot` and `/email/send` are mute — 200 whatever happened —
-//   so the usual refund rule (`costsNothing` / `confirmCostsNothing`, which
-//   both decide off `res.statusCode`) cannot be wired onto either without
-//   refunding every request, hostile ones included. The "what if it were"
-//   describes below are the demonstration this file's own report cites: add
-//   the refund back, watch the exhaustion test go red.
+// - `/password/forgot` is mute — 200 whatever happened — so the usual refund
+//   rule (`costsNothing` / `confirmCostsNothing`, which both decide off
+//   `res.statusCode`) cannot be wired onto it without refunding every
+//   request, hostile ones included. The "what if it were" describe below is
+//   the demonstration this file's own report cites: add the refund back,
+//   watch the exhaustion test go red.
+// - `/email/send` looks like the same shape and is not: it runs behind
+//   `authenticate`, and its 400 (malformed address) and 401 (wrong current
+//   password) talk only about the caller's own typing, on their own account
+//   — so `emailSendLimiter` refunds those two through its own predicate,
+//   `emailSendCostsNothing`, and charges everything else, the 200 included.
+//   A test below proves that refund cannot leak onto `/password/forgot`'s
+//   bucket, which has to keep charging a 400 or it would start telling a
+//   prober which addresses have accounts.
 // - `/password/reset`'s primary key is the address, not the token — a token
 //   the caller invents fresh every request cannot be what a budget is keyed
 //   on, or the budget never fills. The rotation test below sends a new token
@@ -28,11 +36,12 @@ import express from "express";
 import request from "supertest";
 import type { RateLimitRequestHandler } from "express-rate-limit";
 import rateLimit from "express-rate-limit";
-import type { Request, RequestHandler } from "express";
+import type { Request, RequestHandler, Response } from "express";
 import app from "../app.js";
 import { costsNothing, passwordConfirmLimiter } from "./loginLimiters.js";
 import { hashOpaqueToken } from "../auth/opaqueToken.js";
 import {
+  emailSendCostsNothing,
   emailSendLimiter,
   emailVerifyLimiter,
   passwordForgotEmailLimiter,
@@ -244,14 +253,14 @@ function emailSendKeyOf(req: Request): string {
   return typeof id === "number" ? `es:${id}` : `es:ip:${req.ip}`;
 }
 
-describe("what each mute bucket spends: /password/forgot and /email/send", () => {
+describe("what the mute bucket spends: /password/forgot", () => {
   /**
    * The property Trampa 1 in this task's brief is entirely about: a mute
    * route answers 200 for a probe exactly as often as for a real sender, so
-   * a refund rule that reads `res.statusCode` refunds both alike. These
-   * three charge on every status, with no `requestWasSuccessful` at all —
-   * proven here by driving each one through 200, 400 and 500 and watching
-   * the counter climb every time.
+   * a refund rule that reads `res.statusCode` refunds both alike. These two
+   * charge on every status, with no `requestWasSuccessful` at all — proven
+   * here by driving each one through 200, 400 and 500 and watching the
+   * counter climb every time.
    */
   it("passwordForgotEmailLimiter charges a 200, a 400 and a 500 alike", async () => {
     const bare200 = appAround(passwordForgotEmailLimiter, 200);
@@ -277,15 +286,6 @@ describe("what each mute bucket spends: /password/forgot and /email/send", () =>
       await settled();
     }
     expect(await hits(passwordForgotIpLimiter, `pf-ip:${DESDE}`)).toBe(3);
-  });
-
-  it("emailSendLimiter charges a 200, a 400 and a 500 alike", async () => {
-    for (const status of [200, 400, 500]) {
-      const bare = appConSesion(emailSendLimiter, status, 55);
-      await post(bare, {});
-      await settled();
-    }
-    expect(await hits(emailSendLimiter, "es:55")).toBe(3);
   });
 
   /**
@@ -316,6 +316,82 @@ describe("what each mute bucket spends: /password/forgot and /email/send", () =>
       expect(res.status, `intento ${i + 1}`).toBe(200);
     }
     expect(await hits(brokenWithRefund, "broken:demo")).toBe(0);
+  });
+});
+
+describe("emailSendCostsNothing decides which /email/send answers are free", () => {
+  // Same helper shape as `loginLimiters.test.ts`'s own `conStatus`: a fake
+  // `Response` carrying only the one field this pure function reads.
+  const conStatus = (statusCode: number) => ({ statusCode }) as Response;
+
+  it("refunds exactly 400 and 401 — the caller's own typo, on their own account", () => {
+    for (const status of [400, 401]) {
+      expect(emailSendCostsNothing(fakeReq(DESDE), conStatus(status)), String(status)).toBe(true);
+    }
+  });
+
+  it("charges everything else, the 200 and every other status included", () => {
+    // 200 is the case Task 5's brief calls out by name: it means either the
+    // link went out or the mail budget ran out, and both are real spend.
+    // The 5xx range is charged too, on purpose — unlike the login's
+    // `costsNothing`, this route has no outage-shaped refund to make.
+    for (const status of [200, 201, 403, 404, 429, 500, 503]) {
+      expect(emailSendCostsNothing(fakeReq(DESDE), conStatus(status)), String(status)).toBe(false);
+    }
+  });
+});
+
+describe("Hallazgo A7: emailSendLimiter refunds the caller's own typo, not a mute response", () => {
+  /**
+   * `/email/send` is not mute the way `/password/forgot` is — it runs
+   * behind `authenticate`, and a 400 (malformed address) or a 401 (wrong
+   * current password) talks only about the caller's own typing, on their
+   * own account. Five such typos from a phone used to burn the whole hour's
+   * bucket without a single mail going out; this is the fix.
+   */
+  it("refunds a malformed address and a wrong password on /email/send", async () => {
+    const direccionMalformada = appConSesion(emailSendLimiter, 400, 210);
+    const contrasenaEquivocada = appConSesion(emailSendLimiter, 401, 210);
+
+    await post(direccionMalformada, {});
+    await settled();
+    await post(contrasenaEquivocada, {});
+    await settled();
+
+    expect(await hits(emailSendLimiter, "es:210")).toBe(0);
+  });
+
+  it("still charges a request that actually sent mail", async () => {
+    const bare = appConSesion(emailSendLimiter, 200, 211);
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(emailSendLimiter, "es:211")).toBe(1);
+  });
+
+  it("still charges a 5xx, since this route has no outage-shaped refund to make", async () => {
+    const bare = appConSesion(emailSendLimiter, 500, 212);
+    await post(bare, {});
+    await settled();
+
+    expect(await hits(emailSendLimiter, "es:212")).toBe(1);
+  });
+
+  /**
+   * The guard against spillover, and the one the report singles out: this
+   * refund is a predicate scoped to `emailSendLimiter` alone. If it leaked
+   * onto the bucket next door — wired in by copy-paste, or by generalising
+   * `emailSendCostsNothing` into something both buckets call — this is what
+   * would catch it. `/password/forgot` really is mute, so a 400 there has to
+   * keep charging: refunding it is exactly how the bucket would start
+   * telling a prober which addresses have accounts.
+   */
+  it("still charges everything on /password/forgot, which is mute", async () => {
+    const bare = appAround(passwordForgotEmailLimiter, 400);
+    await post(bare, { email: "isaias@osefi.net" });
+    await settled();
+
+    expect(await hits(passwordForgotEmailLimiter, "pf-email:isaias@osefi.net")).toBe(1);
   });
 });
 

@@ -26,6 +26,44 @@ describe("what each session state opens", () => {
     expect(puedeAlcanzar("parcial", "/api/auth/totp/setup")).toBe(false);
   });
 
+  it("does not let a partial session log somebody out of everywhere", () => {
+    // `logoutAll` revokes the caller's sessions *and* their remembered
+    // devices. A `parcial` session is somebody who typed the right password
+    // and has not proved their second factor — so this is the one door in
+    // that list that acts on the account rather than on the session in hand.
+    //
+    // Left open, a leaked password buys an unlimited loop: log in (which
+    // costs nothing in any bucket, since both login limiters skip successful
+    // requests), call this, repeat. The victim is thrown off every device and
+    // stripped of every remembered device, so each way back demands the full
+    // ceremony — the classic setup for a fatigue campaign or a real-time
+    // phishing page.
+    expect(puedeAlcanzar("parcial", "/api/auth/logout-all")).toBe(false);
+  });
+
+  it("still lets a partial session abandon its own session", () => {
+    // The distinction this whole change rests on: leaving is yours, and
+    // closing everybody else's is the account's. `coincide` is exact-or-
+    // slash-suffix rather than a bare `startsWith`, which is why removing
+    // `logout-all` actually removes it — `/api/auth/logout` does not swallow
+    // it. Written down because if that ever loosens to `startsWith`, this
+    // fix silently becomes a no-op and only this pair of tests would say so.
+    expect(puedeAlcanzar("parcial", "/api/auth/logout")).toBe(true);
+    expect(puedeAlcanzar("parcial", "/api/auth/logout-all")).toBe(false);
+  });
+
+  it("still lets an onboarding session log itself out of everywhere", () => {
+    // `onboarding` is somebody setting their factor up: they proved what
+    // there was to prove and the deadline is what holds them. Closing their
+    // other sessions is theirs to do, and taking it away with the same edit
+    // would be collateral damage — `onboarding` is spread from `PARCIAL`.
+    expect(puedeAlcanzar("onboarding", "/api/auth/logout-all")).toBe(true);
+  });
+
+  it("still lets a complete session log itself out of everywhere", () => {
+    expect(puedeAlcanzar("completa", "/api/auth/logout-all")).toBe(true);
+  });
+
   it("lets an onboarding session set itself up, and nothing else", () => {
     expect(puedeAlcanzar("onboarding", "/api/auth/email/send")).toBe(true);
     expect(puedeAlcanzar("onboarding", "/api/auth/totp/setup")).toBe(true);

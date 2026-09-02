@@ -720,6 +720,20 @@ Va en esta tarea y **no** en «si da tiempo».
 
 - [ ] **Step 1: 🔴 Las dos rutas se montan con `exigeContrasena: true`**
 
+**Qué significa exactamente esa opción, ya construida y verificada en la tanda previa:**
+la ruta exige `stepup_password` **siempre**, incluso a una sesión que acaba de probar su
+factor. No es lo mismo que «solo cuando la cuenta no tiene factor», que es como se escribió
+primero: así redactada, quien tuviera solo el papel de códigos de recuperación gastaría uno,
+caería dentro de la ventana de diez minutos y registraría su factor **sin contraseña**,
+saltándose el límite que la Task 11 Step 3 de este mismo plan dice que no se puede saltar.
+
+**Así que en estas rutas la ceremonia son dos pasos, en este orden: probar el factor, y
+después teclear la contraseña.** Una cuenta con factor y sin prueba fresca recibe
+`MOTIVO_SIN_FACTOR_RECIENTE` («prueba tu factor»), no la petición de contraseña. Y una que
+no manda contraseña recibe el cuarto motivo, `MOTIVO_CONTRASENA_REQUERIDA`, que el cliente
+usa para pedir una contraseña en vez de acusar a alguien de haberla tecleado mal.
+
+
 Sin eso, **quien tenga una cookie de sesión robada y no la contraseña registra su propio
 factor** (hallazgo C1). Y desde ese instante `tieneAlgunFactor` responde `true`, así que la
 puerta deja de ofrecerle a la víctima la vía de la contraseña: no puede ni borrar el factor
@@ -1122,6 +1136,12 @@ Así que **un código sella**, como cualquier otro factor, y el límite de C14 s
 otro sitio: **todas las rutas que dan de alta o quitan una credencial llevan
 `exigeContrasena: true`** (Tasks 6, 8 y 10). Con eso, el papel **solo** no registra un
 factor, no borra uno y no regenera los diez. Hace falta el papel **y** la contraseña.
+
+🔴 **Ese límite solo se sostiene porque `exigeContrasena` exige la contraseña incluso dentro
+de la ventana de diez minutos.** Escrito de la forma natural —exigirla solo a las cuentas
+sin factor— el sellado que hace este código pasaría por delante y el papel bastaría. La
+opción se construyó así a propósito en la tanda previa; **si alguien la relaja, esta decisión
+deja de ser defendible y hay que volver a la recomendación del hallazgo C14.**
 
 Lo que queda expuesto es la matriz de permisos, que sigue detrás de `requireStepUp()` sin
 contraseña hasta el 4D. **No es una regresión**: hoy una cookie de sesión robada ya la

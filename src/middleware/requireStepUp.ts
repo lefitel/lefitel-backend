@@ -90,7 +90,7 @@ const gateLog = log("step-up");
 export const CODIGO_STEP_UP = "STEP_UP_REQUIRED";
 
 /**
- * The three reasons this gate ever refuses with `CODIGO_STEP_UP`, exported so
+ * The reasons this gate ever refuses with `CODIGO_STEP_UP`, exported so
  * a client can act on *which* one rather than matching the Spanish sentence —
  * the same reasoning `CODIGO_STEP_UP` itself is built on, one level down.
  * `code` alone told a client "you must re-authenticate"; it could not tell it
@@ -104,11 +104,25 @@ export const CODIGO_STEP_UP = "STEP_UP_REQUIRED";
 export const MOTIVO_ESTADO_INCOMPLETO = "estado-incompleto";
 export const MOTIVO_SIN_FACTOR_RECIENTE = "sin-factor-reciente";
 export const MOTIVO_CONTRASENA_INCORRECTA = "contraseña-incorrecta";
+/**
+ * The fourth, and the only one a route has to opt into: `exigeContrasena`
+ * asked for a password and the body carried none.
+ *
+ * **Deliberately not `MOTIVO_CONTRASENA_INCORRECTA`**, even though the remedy
+ * looks the same from here. The two are different sentences on screen — "type
+ * your password" against "that password is wrong" — and `code` alone cannot
+ * separate them, so a client folding them together accuses somebody of
+ * mistyping a password they never typed. The whole reason these constants
+ * exist beside `code` is that one class of refusal can have several remedies.
+ */
+export const MOTIVO_CONTRASENA_REQUERIDA = "contraseña-requerida";
 
 const MENSAJE =
   "Esta operación necesita que confirmes tu identidad. Vuelve a autenticarte y repite la acción.";
 const MENSAJE_ONBOARDING =
   "Termina de configurar tu segundo factor antes de realizar esta operación.";
+const MENSAJE_CONTRASENA_REQUERIDA =
+  "Introduce tu contraseña actual para completar esta operación.";
 
 export interface OpcionesStepUp {
   /**
@@ -157,9 +171,29 @@ export interface OpcionesStepUp {
    * line, a factor-less `completa` session already gets.
    */
   permiteOnboarding?: boolean;
+
+  /**
+   * Demand the password from an account that has no factor at all, instead of
+   * letting the write through. Off by default, so every route mounted today
+   * behaves exactly as it did.
+   *
+   * **For the routes that register or remove a credential**, which plan 4B is
+   * about to mount. The skip below is correct for everything mounted today and
+   * becomes a permanent lockout the moment a route can create a factor — see
+   * its own comment for the sequence, which its author described without
+   * noticing where it led.
+   *
+   * Independent of `permiteOnboarding`: that one says *which states* reach the
+   * factor-less branch, this one says *what proof* that branch accepts. A route
+   * that wants both asks for both.
+   */
+  exigeContrasena?: boolean;
 }
 
-export function requireStepUp({ permiteOnboarding = false }: OpcionesStepUp = {}): RequestHandler {
+export function requireStepUp({
+  permiteOnboarding = false,
+  exigeContrasena = false,
+}: OpcionesStepUp = {}): RequestHandler {
   // Named, not anonymous: a later task walks the mounted Express stack the
   // way `routeGuards.test.ts` already does for `requirePermissionGate`, and it
   // can only tell this gate apart from an ordinary handler by this name
@@ -227,15 +261,37 @@ export function requireStepUp({ permiteOnboarding = false }: OpcionesStepUp = {}
           ? NaN
           : Date.now() - new Date(user.mfa_satisfied_at).getTime();
       const satisfecho = probadoHace >= 0 && probadoHace <= STEP_UP_WINDOW_MINUTES * 60_000;
-      if (satisfecho) {
+
+      /**
+       * A fresh proof is enough on its own for every route mounted today, and
+       * **deliberately not enough** for one that asked for `exigeContrasena`:
+       * there the two are wanted together, something held and something known.
+       *
+       * The case that forces this, and it is not hypothetical — plan 4B seals
+       * this very column when somebody spends a **recovery code**. Without this
+       * clause, whoever holds only the printed sheet spends one code, lands
+       * inside the window, and registers their own factor with no password at
+       * all — which is exactly the bound `exigeContrasena` exists to draw. The
+       * option has to mean one thing: this route wants the password, always.
+       *
+       * An account that has a factor and no fresh proof still gets refused
+       * below and has to prove it first. So on these routes the ceremony is two
+       * steps, in this order: prove the factor, then type the password.
+       */
+      if (satisfecho && !exigeContrasena) {
         next();
         return;
       }
 
       // Asked before the password is even looked at: with a factor on the
-      // account, no password is an acceptable answer here, and checking it first
-      // would spend a bcrypt comparison to reach the same refusal.
-      if (await tieneAlgunFactor(user.id)) {
+      // account and nothing fresh to show for it, no password is an acceptable
+      // answer here, and checking it first would spend a bcrypt comparison to
+      // reach the same refusal.
+      //
+      // Skipped when the window is already satisfied — that can only be reached
+      // with `exigeContrasena` on, and there the factor has just been proved,
+      // so asking whether one exists is both answered and beside the point.
+      if (!satisfecho && (await tieneAlgunFactor(user.id))) {
         denegar(req, res, MENSAJE, MOTIVO_SIN_FACTOR_RECIENTE);
         return;
       }
@@ -264,12 +320,39 @@ export function requireStepUp({ permiteOnboarding = false }: OpcionesStepUp = {}
        * that a sensitive write ran without the extra proof, on an account that
        * had no extra proof to give.
        *
+       * **And that self-closing property is the attack, not the reassurance.**
+       * The window in which this branch is still open is exactly the window in
+       * which somebody registers a factor — so the sentence above describes the
+       * mechanism and stops one step short of where it leads. Whoever holds a
+       * stolen session cookie and not the password calls the registration route
+       * with an empty body, passes here, and confirms their own factor. From
+       * that instant `tieneAlgunFactor` answers `true`, so this gate stops
+       * offering *the owner* the password route, and the owner cannot even
+       * delete the attacker's factor. Their next login opens `parcial`, which
+       * is left only by proving the attacker's factor; changing the password
+       * does not help, and `logout-all` revokes sessions, not credentials.
+       *
+       * That is why `exigeContrasena` exists and why **every route that
+       * registers or removes a credential must be mounted with it on**. It is
+       * not a hardening knob to turn on later: on those routes, off is a
+       * permanent lockout.
+       *
        * A caller that *does* send `stepup_password` — the shape the later
        * frontend plan will use, and the only shape this ever refuses for a
        * factor-less account — still has to get it right; see below.
        */
       const password = (req.body as Record<string, unknown> | undefined)?.[STEP_UP_PASSWORD_FIELD];
       if (typeof password !== "string" || password === "") {
+        // The route asked for the password and none came. Refused for free:
+        // nothing was compared, so no bcrypt was spent and there is nothing to
+        // charge — and charging here would let a client that simply forgets
+        // the field burn somebody's whole confirm budget, locking them out of
+        // the very screen that would fix it.
+        if (exigeContrasena) {
+          denegar(req, res, MENSAJE_CONTRASENA_REQUERIDA, MOTIVO_CONTRASENA_REQUERIDA);
+          return;
+        }
+
         logAction({
           id_usuario: req.user?.id,
           action: "STEP_UP_SKIPPED",

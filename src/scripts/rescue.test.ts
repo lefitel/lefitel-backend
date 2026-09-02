@@ -18,6 +18,7 @@ const desbloquearCuentaDeRescate = vi.fn();
 const revocarSesionesDeRescate = vi.fn();
 const establecerEmailDeRescate = vi.fn();
 const limpiarEmailDeRescate = vi.fn();
+const desarchivarCuentaDeRescate = vi.fn();
 vi.mock("../auth/rescueCore.js", () => ({
   resolverCuentaDeRescate: (...a: unknown[]) => resolverCuentaDeRescate(...a),
   restablecerSegundoFactor: (...a: unknown[]) => restablecerSegundoFactor(...a),
@@ -25,6 +26,7 @@ vi.mock("../auth/rescueCore.js", () => ({
   revocarSesionesDeRescate: (...a: unknown[]) => revocarSesionesDeRescate(...a),
   establecerEmailDeRescate: (...a: unknown[]) => establecerEmailDeRescate(...a),
   limpiarEmailDeRescate: (...a: unknown[]) => limpiarEmailDeRescate(...a),
+  desarchivarCuentaDeRescate: (...a: unknown[]) => desarchivarCuentaDeRescate(...a),
 }));
 
 const close = vi.fn();
@@ -52,6 +54,7 @@ const llamadasAlImportar = {
   revocarSesiones: revocarSesionesDeRescate.mock.calls.length,
   setEmail: establecerEmailDeRescate.mock.calls.length,
   clearEmail: limpiarEmailDeRescate.mock.calls.length,
+  unarchive: desarchivarCuentaDeRescate.mock.calls.length,
   close: close.mock.calls.length,
 };
 
@@ -80,6 +83,7 @@ beforeEach(() => {
   revocarSesionesDeRescate.mockResolvedValue(exito({ sesionesRevocadas: 2, dispositivosRevocados: 1 }));
   establecerEmailDeRescate.mockResolvedValue(exito({}));
   limpiarEmailDeRescate.mockResolvedValue(exito({}));
+  desarchivarCuentaDeRescate.mockResolvedValue(exito({ desarchivada: true }));
   close.mockResolvedValue(undefined);
 
   logs = [];
@@ -106,6 +110,7 @@ describe("the direct-execution guard", () => {
       revocarSesiones: 0,
       setEmail: 0,
       clearEmail: 0,
+      unarchive: 0,
       close: 0,
     });
   });
@@ -123,13 +128,16 @@ describe("parseArgs", () => {
     });
   });
 
-  it("parses each of the five operations", () => {
+  it("parses each of the six operations", () => {
     expect(parseArgs(["--user", "a", "--unlock"])).toMatchObject({ operacion: { tipo: "unlock" } });
     expect(parseArgs(["--user", "a", "--revoke-sessions"])).toMatchObject({
       operacion: { tipo: "revoke-sessions" },
     });
     expect(parseArgs(["--user", "a", "--clear-email"])).toMatchObject({
       operacion: { tipo: "clear-email" },
+    });
+    expect(parseArgs(["--user", "a", "--unarchive"])).toMatchObject({
+      operacion: { tipo: "unarchive" },
     });
     expect(parseArgs(["--user", "a", "--set-email", "nueva@osefi.net"])).toEqual({
       user: "a",
@@ -175,6 +183,19 @@ describe("parseArgs", () => {
   it("rejects two unrelated operations at once, generically", () => {
     const r = parseArgs(["--user", "a", "--unlock", "--revoke-sessions"]);
     expect(r).toEqual({
+      error: expect.stringContaining("solo se admite una operación por invocación"),
+    });
+  });
+
+  it("--unarchive rejects being combined with any other order", () => {
+    // `--unarchive` is not part of the H4 pair (`--set-email` +
+    // `--reset-mfa`), so it falls into the same generic "pick one" refusal
+    // as any other pair — this pins down that it does not silently combine
+    // with anything, `--reset-mfa` included.
+    expect(parseArgs(["--user", "a", "--unarchive", "--unlock"])).toEqual({
+      error: expect.stringContaining("solo se admite una operación por invocación"),
+    });
+    expect(parseArgs(["--user", "a", "--unarchive", "--reset-mfa"])).toEqual({
       error: expect.stringContaining("solo se admite una operación por invocación"),
     });
   });
@@ -374,6 +395,54 @@ describe("main — --clear-email", () => {
     expect(limpiarEmailDeRescate).toHaveBeenCalledWith(42, expect.anything());
     expect(code).toBe(0);
     expect(logs.join("\n")).toContain("borrada");
+  });
+});
+
+describe("main — --unarchive", () => {
+  // The trap this whole task is about, from the console side:
+  // `resolverCuentaDeRescate` answers "archivada" for an archived account —
+  // correct for the other five operations, wrong for this one, where an
+  // archived account is exactly what `--user` was typed to find.
+  it("resolves an archived account and calls desarchivarCuentaDeRescate with its id, instead of refusing it", async () => {
+    resolverCuentaDeRescate.mockResolvedValue({ ok: false, motivo: "archivada", user: "ex_empleado", id: 7 });
+    const code = await main(["--user", "ex_empleado", "--unarchive"]);
+    expect(desarchivarCuentaDeRescate).toHaveBeenCalledWith(7, expect.anything());
+    expect(code).toBe(0);
+    expect(logs.join("\n")).toContain("desarchivada");
+    expect(errors.join("\n")).not.toContain("archivada, desarchívala primero");
+  });
+
+  it("refuses a live account with its own message — nothing to unarchive", async () => {
+    resolverCuentaDeRescate.mockResolvedValue({ ok: true, id: 42, user: "tecnico_ana" });
+    desarchivarCuentaDeRescate.mockResolvedValue({ ok: false, motivo: "no-archivada", user: "tecnico_ana" });
+    const code = await main(["--user", "tecnico_ana", "--unarchive"]);
+    expect(code).not.toBe(0);
+    expect(errors.join("\n")).toContain("no está archivada");
+  });
+
+  it("still refuses an unknown username the normal way, without calling the core operation", async () => {
+    resolverCuentaDeRescate.mockResolvedValue({ ok: false, motivo: "no-encontrada" });
+    const code = await main(["--user", "nadie", "--unarchive"]);
+    expect(code).not.toBe(0);
+    expect(errors.join("\n")).toContain("No existe ninguna cuenta");
+    expect(desarchivarCuentaDeRescate).not.toHaveBeenCalled();
+  });
+
+  it("does not disturb --reset-mfa's own refusal of an archived account", async () => {
+    // Regression guard for the fix above: the special case must be scoped to
+    // `--unarchive` alone, or every other operation would start acting on
+    // archived accounts too.
+    resolverCuentaDeRescate.mockResolvedValue({ ok: false, motivo: "archivada", user: "ex_empleado", id: 7 });
+    const code = await main(["--user", "ex_empleado", "--reset-mfa"]);
+    expect(code).not.toBe(0);
+    expect(errors.join("\n")).toContain("Esta cuenta está archivada, desarchívala primero.");
+    expect(restablecerSegundoFactor).not.toHaveBeenCalled();
+  });
+
+  it("says what to tell the rescued person", async () => {
+    resolverCuentaDeRescate.mockResolvedValue({ ok: false, motivo: "archivada", user: "ex_empleado", id: 7 });
+    await main(["--user", "ex_empleado", "--unarchive"]);
+    expect(logs.join("\n")).toMatch(/contarle/i);
   });
 });
 

@@ -5,22 +5,26 @@
 // **Why this file exists at all, and why it is the piece that matters most in
 // this plan.** Two callers need every one of these operations: `POST
 // /usuario/:id/mfa/reset` (this same plan, in `usuario.controller.ts`) and
-// `--reset-mfa`/`--unlock`/`--revoke-sessions`/`--set-email`/`--clear-email`
-// on the console script (the next plan, `src/scripts/rescue.ts`). If each
-// wrote its own copy of "delete the factor rows, revoke sessions, revoke
-// devices, extend the grace, write the audit line", the two would diverge the
-// first time either one changed — and the one used less often, almost
-// certainly the console, is the one that would still be broken the night it
-// is needed for real. So every rule the pre-audit measured
-// (`.superpowers/sdd/2026-08-26-esqueleto-mfa/preaudit-via-de-escape.md`)
-// lives here exactly once, and both doors are thin translations onto these
-// five functions:
+// `--reset-mfa`/`--unlock`/`--revoke-sessions`/`--set-email`/`--clear-email`/
+// `--unarchive` on the console script (the next plan, `src/scripts/rescue.ts`).
+// If each wrote its own copy of "delete the factor rows, revoke sessions,
+// revoke devices, extend the grace, write the audit line", the two would
+// diverge the first time either one changed — and the one used less often,
+// almost certainly the console, is the one that would still be broken the
+// night it is needed for real. So every rule the pre-audit measured
+// (`.superpowers/sdd/2026-08-26-esqueleto-mfa/preaudit-via-de-escape.md`), plus
+// the later fixes the 2026-09-01 four-agent audit found, lives here exactly
+// once, and both doors are thin translations onto these six functions:
 //
-//   restablecerSegundoFactor   — H1, H2, H6, H6-bis
+//   restablecerSegundoFactor   — H1, H2, H6, H6-bis, A4
 //   desbloquearCuentaDeRescate
 //   revocarSesionesDeRescate   — H6-bis
 //   establecerEmailDeRescate   — H4, H8
 //   limpiarEmailDeRescate
+//   desarchivarCuentaDeRescate — A1: the one door Task 1 does not close,
+//                                because it stops you archiving *yourself*,
+//                                not somebody else archiving the last account
+//                                holding `seguridad.archivar`.
 //
 // **No `req`, no `res`, no `process.argv`.** Every function below takes plain
 // values in and returns plain values out. `ActorRescate` is how a caller
@@ -157,6 +161,40 @@ export type ResultadoRescateEmail<T> =
     };
 
 /**
+ * `desarchivarCuentaDeRescate`'s own result shape — deliberately not built on
+ * `ResultadoRescate<T>`. That type's "archivada" arm is a refusal for the
+ * other five operations; here archived is the success case, and the refusal
+ * that replaces it is "no-archivada", for a target that exists but was never
+ * archived in the first place. Same "every arm names every key" treatment as
+ * `ResultadoRescate`, for the identical `strictNullChecks: false` reason.
+ */
+export type ResultadoDesarchivo<T> =
+  | {
+      ok: true;
+      cuenta: CuentaRescatada;
+      avisoEnviado: boolean;
+      datos: T;
+      motivo?: undefined;
+      user?: undefined;
+    }
+  | {
+      ok: false;
+      motivo: "no-encontrada";
+      cuenta?: undefined;
+      avisoEnviado?: undefined;
+      datos?: undefined;
+      user?: undefined;
+    }
+  | {
+      ok: false;
+      motivo: "no-archivada";
+      user: string;
+      cuenta?: undefined;
+      avisoEnviado?: undefined;
+      datos?: undefined;
+    };
+
+/**
  * H1, made a pure function with its own name so it can be tested on its own
  * — the pre-audit's own instruction ("Escríbelo como test con nombre").
  *
@@ -169,14 +207,23 @@ export type ResultadoRescateEmail<T> =
  * cut that down to one day instead. `Math.max` is the whole fix: whichever
  * deadline is later survives.
  *
- * `actual: null` covers both "never logged in since the deploy" (the column
- * is genuinely NULL) and "already rescued and factors never re-registered"
- * cases the same way `estadoInicialDeSesion` treats an unreadable deadline —
- * as nothing to compare against, so the fresh 24 hours simply wins.
+ * **`actual: null` does not mean "no deadline, so start one" — A4.** It
+ * means the clock has never started at all: every account has NULL here
+ * until its first login after the 4A deploy, the same fact
+ * `sessionState.ts`'s own `estadoEfectivo` already reasons about on this
+ * exact column ("every account has NULL in this column until its first
+ * login after the deploy"). A rescue is not a login, so it must not be what
+ * starts that clock — stamping a 24-hour deadline on an account that had
+ * never logged in would *shorten* the fourteen days that account's actual
+ * first login is supposed to hand it, which is the one thing this whole
+ * function exists to prevent. `null` in, `null` out: the caller is told to
+ * leave `usuarios.mfa_grace_until` exactly where it found it — the same
+ * "a date means write it, `null` means leave the column alone" convention
+ * `factorInventory.ts`'s own `graceUntil` already documents.
  */
-export function proximaGraciaDeRescate(actual: Date | null, ahora: Date): Date {
+export function proximaGraciaDeRescate(actual: Date | null, ahora: Date): Date | null {
+  if (actual === null) return null;
   const candidata = new Date(ahora.getTime() + RESCUE_GRACE_HOURS * HORA_MS);
-  if (actual === null) return candidata;
   return actual.getTime() > candidata.getTime() ? actual : candidata;
 }
 
@@ -192,7 +239,10 @@ export function proximaGraciaDeRescate(actual: Date | null, ahora: Date): Date {
  * - **Archived.** `UsuarioModel` is `paranoid`, so a plain lookup would
  *   silently miss an archived row and answer "no existe" about an account
  *   that is very much on file, just soft-deleted. Queried with
- *   `paranoid: false` and refused with its own reason instead.
+ *   `paranoid: false` and refused with its own reason instead — carrying the
+ *   row's `id` too, even though a refusal, because `--unarchive` is the one
+ *   caller (`rescue.ts`'s own `main()`) that needs to act on the account
+ *   despite this exact refusal rather than stop at it.
  * - **Ambiguity.** The unique index is *partial* — `WHERE "deletedAt" IS
  *   NULL` — so with `paranoid: false` in play, one name can legitimately
  *   match more than one row: a live account and an archived one that once
@@ -203,7 +253,7 @@ export function proximaGraciaDeRescate(actual: Date | null, ahora: Date): Date {
 export type ResolucionDeCuenta =
   | { ok: true; id: number; user: string; motivo?: undefined; ids?: undefined }
   | { ok: false; motivo: "no-encontrada"; id?: undefined; user?: undefined; ids?: undefined }
-  | { ok: false; motivo: "archivada"; user: string; id?: undefined; ids?: undefined }
+  | { ok: false; motivo: "archivada"; user: string; id: number; ids?: undefined }
   | { ok: false; motivo: "ambigua"; ids: number[]; id?: undefined; user?: undefined };
 
 export async function resolverCuentaDeRescate(nombreUsuario: string): Promise<ResolucionDeCuenta> {
@@ -217,15 +267,21 @@ export async function resolverCuentaDeRescate(nombreUsuario: string): Promise<Re
     return { ok: false, motivo: "ambigua", ids: filas.map((f) => f.dataValues.id) };
   }
   const fila = filas[0].dataValues;
-  if (fila.deletedAt) return { ok: false, motivo: "archivada", user: fila.user };
+  if (fila.deletedAt) return { ok: false, motivo: "archivada", user: fila.user, id: fila.id };
   return { ok: true, id: fila.id, user: fila.user };
 }
 
 /**
- * Shared first step of every operation below: does this id name a live
- * account? Same "every arm names every key" treatment as `ResultadoRescate`
- * above, and for the same reason: `ejecutarRescate` and
- * `establecerEmailDeRescate` both narrow this result with `if (!cuenta.ok)`.
+ * Shared first step of every operation below except `desarchivarCuentaDeRescate`:
+ * does this id name a live account? Same "every arm names every key"
+ * treatment as `ResultadoRescate` above, and for the same reason:
+ * `ejecutarRescate` and `establecerEmailDeRescate` both narrow this result
+ * with `if (!cuenta.ok)`.
+ *
+ * `desarchivarCuentaDeRescate` cannot use this one: for that operation an
+ * archived account is exactly the case being looked for, the opposite of
+ * what this function refuses. It uses `cuentaArchivadaOrNull` below instead
+ * — same shape, same `paranoid: false` query, the one `if` flipped.
  */
 async function cuentaActivaOrNull(id_usuario: number): Promise<
   | { ok: true; cuenta: CuentaRescatada; motivo?: undefined; user?: undefined }
@@ -240,6 +296,31 @@ async function cuentaActivaOrNull(id_usuario: number): Promise<
   if (!fila) return { ok: false, motivo: "no-encontrada" };
   const v = fila.dataValues;
   if (v.deletedAt) return { ok: false, motivo: "archivada", user: v.user };
+  return { ok: true, cuenta: { id: v.id, user: v.user } };
+}
+
+/**
+ * `cuentaActivaOrNull`'s mirror image, for the one operation that needs the
+ * opposite verdict — see that function's own comment for why copying it
+ * outright and only touching the `if` is the trap here: the four operations
+ * that go through `ejecutarRescate` inherit its "archived is a refusal" rule
+ * from `cuentaActivaOrNull` itself, so reusing that helper (or a copy of one
+ * of those four operations) for `desarchivarCuentaDeRescate` would make the
+ * one case it exists for permanently unreachable.
+ */
+async function cuentaArchivadaOrNull(id_usuario: number): Promise<
+  | { ok: true; cuenta: CuentaRescatada; motivo?: undefined; user?: undefined }
+  | { ok: false; motivo: "no-encontrada"; cuenta?: undefined; user?: undefined }
+  | { ok: false; motivo: "no-archivada"; user: string; cuenta?: undefined }
+> {
+  const fila = await UsuarioModel.findOne({
+    where: { id: id_usuario },
+    paranoid: false,
+    attributes: ["id", "user", "deletedAt"],
+  });
+  if (!fila) return { ok: false, motivo: "no-encontrada" };
+  const v = fila.dataValues;
+  if (!v.deletedAt) return { ok: false, motivo: "no-archivada", user: v.user };
   return { ok: true, cuenta: { id: v.id, user: v.user } };
 }
 
@@ -283,9 +364,13 @@ async function registrarRescateEnBitacora(input: {
 }
 
 /**
- * The shared spine of the four operations that cannot produce a database
- * conflict (`establecerEmailDeRescate` is the fifth, and writes its own —
- * see that function for why H8 needs a branch this shape has no room for).
+ * The shared spine of the three operations that both need a live (not
+ * archived) target and cannot produce a database conflict. The other two
+ * write their own, for two unrelated reasons: `establecerEmailDeRescate`
+ * still needs a live target but can hit H8's unique-index conflict, a branch
+ * this shape has no room for; `desarchivarCuentaDeRescate` needs the opposite
+ * target validation entirely — archived is its success case — so it cannot
+ * resolve through `cuentaActivaOrNull` (this function's first step) at all.
  *
  * Resolve → notify → mutate-in-a-transaction → log-outside-it, in that
  * order and no other: see the module header for why each step is where it
@@ -360,7 +445,13 @@ export interface DatosResetMfa {
   factoresBorrados: { passkeys: number; totp: number; codigos: number };
   sesionesRevocadas: number;
   dispositivosRevocados: number;
-  graceUntil: Date;
+  /**
+   * `null` when the account's grace clock had never started —
+   * `proximaGraciaDeRescate` said so, and `usuarios.mfa_grace_until` was
+   * left untouched. A caller reporting this to a human must not call
+   * `.toISOString()` on it unconditionally.
+   */
+  graceUntil: Date | null;
 }
 
 /**
@@ -394,15 +485,18 @@ export interface DatosResetMfa {
  *    person tries to log in, and is told their correct password is wrong,
  *    with nothing on the screen explaining that a lockout, not the reset,
  *    is what is standing in the way now.
- * 4. **Extend the grace deadline, never reduce it — H1.** See
- *    `proximaGraciaDeRescate`.
+ * 4. **Extend the grace deadline, never reduce it, and never start a clock
+ *    that had not already started — H1, A4.** See `proximaGraciaDeRescate`.
  *
  * All four inside one transaction: any one of them failing must not leave a
  * partial result on the table, and retrying the whole call after a 500 must
- * be safe — which it is, since every step here is idempotent (deleting rows
+ * be safe — which it is, since every step here is idempotent. Deleting rows
  * already gone deletes nothing more, revoking already-revoked rows touches
- * nothing, and `proximaGraciaDeRescate` run twice in a row within the same
- * `RESCUE_GRACE_HOURS` window returns the same instant it just wrote).
+ * nothing, and `proximaGraciaDeRescate` only ever moves the deadline later or
+ * leaves it alone: run this whole operation twice on the same account and
+ * the second call cannot make its grace worse than the first one left it,
+ * whatever `ahora` reads on the retry — never a shorter deadline, and never
+ * one invented on a clock that still had not started.
  */
 export async function restablecerSegundoFactor(
   id_usuario: number,
@@ -433,10 +527,16 @@ export async function restablecerSegundoFactor(
       });
       const graceUntil = proximaGraciaDeRescate(filaActual?.dataValues.mfa_grace_until ?? null, new Date());
 
-      await UsuarioModel.update(
-        { failed_attempts: 0, locked_until: null, mfa_grace_until: graceUntil },
-        { where: { id: id_usuario }, transaction },
-      );
+      // `graceUntil === null` means "leave the column alone", not "write
+      // NULL into it" — those give the same result on a row that already had
+      // NULL, but not on one that carried a real deadline, which is exactly
+      // what would happen if this always named `mfa_grace_until` in the
+      // object below. So the key is only added when there is a value worth
+      // writing.
+      const cambios: Record<string, unknown> = { failed_attempts: 0, locked_until: null };
+      if (graceUntil !== null) cambios.mfa_grace_until = graceUntil;
+
+      await UsuarioModel.update(cambios, { where: { id: id_usuario }, transaction });
 
       return {
         factoresBorrados: { passkeys, totp, codigos },
@@ -710,4 +810,102 @@ export async function limpiarEmailDeRescate(
       return {};
     },
   });
+}
+
+/** What `desarchivarCuentaDeRescate` actually changed. */
+export interface DatosDesarchivo {
+  desarchivada: boolean;
+}
+
+/**
+ * A1, second half: Task 1 (`usuario.controller.ts`) closes the self-archive
+ * door, but not the one that stays open when somebody *else* archives the
+ * last account holding `seguridad.archivar`. Until this function existed,
+ * the only way back was `UPDATE usuarios SET "deletedAt" = NULL` run by hand
+ * against production.
+ *
+ * **The one operation in this file where "archivada" is the goal, not the
+ * refusal — read `cuentaArchivadaOrNull`'s own comment before touching
+ * this.** Every one of this module's other five operations resolves its
+ * target through `cuentaActivaOrNull` (directly or via `ejecutarRescate`)
+ * and refuses an archived account outright. Copying any of them here would
+ * copy that refusal too, and this operation would never run: the one
+ * account it exists to reach is always the one `cuentaActivaOrNull` turns
+ * away.
+ *
+ * Same four-step order as every other operation regardless — resolve,
+ * notify, mutate inside a transaction, log outside it — hand-rolled rather
+ * than routed through `ejecutarRescate` for the same reason
+ * `establecerEmailDeRescate` is: that spine's first step is
+ * `cuentaActivaOrNull`, which this operation cannot use at all.
+ *
+ * `UsuarioModel.restore`, not a plain `update({ deletedAt: null })`: the
+ * same idiom `desarchivarUsuario` (`controllers/usuario.controller.ts`)
+ * already uses to clear a paranoid model's soft-delete column, so a paranoid
+ * model is always un-archived the one way Sequelize itself provides for it.
+ *
+ * **What this deliberately does not do.** `desarchivarUsuario` also checks
+ * the restored name against every live account's `usuarios_user_uniq`
+ * before restoring, because the archived name might since have been handed
+ * to somebody new. That check belongs to a screen with a `:id` from a URL
+ * and a human choosing what to do about a 409; a rescue is invoked with
+ * nothing but a username or an id, no UI to send a conflict message to, and
+ * adding that check here was not asked for by the finding this closes (A1)
+ * or by the encargo that implements it. A restore that collides is not
+ * silently swallowed either way: it throws the same raw unique-constraint
+ * error every other unexpected failure in this module already propagates,
+ * recorded in the bitácora as `resultado: "error"` before it does.
+ */
+export async function desarchivarCuentaDeRescate(
+  id_usuario: number,
+  actor: ActorRescate,
+): Promise<ResultadoDesarchivo<DatosDesarchivo>> {
+  const resolucion = await cuentaArchivadaOrNull(id_usuario);
+  // `=== true` first — see the identical comment on `ejecutarRescate` for why
+  // `if (!resolucion.ok)` does not narrow under this project's
+  // `strictNullChecks: false`.
+  if (resolucion.ok !== true) {
+    if (resolucion.motivo === "no-archivada") {
+      return { ok: false, motivo: "no-archivada", user: resolucion.user };
+    }
+    return { ok: false, motivo: "no-encontrada" };
+  }
+  const { cuenta } = resolucion;
+
+  const accion = "RESCUE_ACCOUNT_UNARCHIVED";
+  const detalle = "Se desarchivó la cuenta, que había quedado archivada.";
+
+  const { enviado } = await avisarRescate({
+    id_usuario,
+    operacion: accion,
+    detalle,
+    actor: actor.descripcion,
+    ip: actor.ip,
+  });
+
+  try {
+    await sequelize.transaction((t) => UsuarioModel.restore({ where: { id: id_usuario }, transaction: t }));
+    await registrarRescateEnBitacora({
+      id_usuario,
+      action: accion,
+      detail: detalle,
+      actor: actor.descripcion,
+      ip: actor.ip,
+      resultado: "ok",
+      avisoEnviado: enviado,
+    });
+    return { ok: true, cuenta, avisoEnviado: enviado, datos: { desarchivada: true } };
+  } catch (err) {
+    await registrarRescateEnBitacora({
+      id_usuario,
+      action: accion,
+      detail: detalle,
+      actor: actor.descripcion,
+      ip: actor.ip,
+      resultado: "error",
+      avisoEnviado: enviado,
+      extra: { error: err instanceof Error ? err.message : String(err) },
+    });
+    throw err;
+  }
 }

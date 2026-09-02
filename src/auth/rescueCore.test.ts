@@ -21,11 +21,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const findOne = vi.fn();
 const findAll = vi.fn();
 const update = vi.fn();
+const restore = vi.fn();
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: {
     findOne: (...a: unknown[]) => findOne(...a),
     findAll: (...a: unknown[]) => findAll(...a),
     update: (...a: unknown[]) => update(...a),
+    restore: (...a: unknown[]) => restore(...a),
   },
 }));
 
@@ -77,6 +79,7 @@ const {
   revocarSesionesDeRescate,
   establecerEmailDeRescate,
   limpiarEmailDeRescate,
+  desarchivarCuentaDeRescate,
 } = await import("./rescueCore.js");
 const { RESCUE_GRACE_HOURS } = await import("../config/security.js");
 
@@ -102,6 +105,7 @@ beforeEach(() => {
   destroyTotp.mockResolvedValue(0);
   destroyCodigos.mockResolvedValue(0);
   updateTokens.mockResolvedValue([0]);
+  restore.mockResolvedValue(undefined);
   crearBitacora.mockResolvedValue(undefined);
   revokeAllSessionsOf.mockResolvedValue(0);
   revokeAllRememberedDevicesOf.mockResolvedValue(0);
@@ -112,36 +116,45 @@ beforeEach(() => {
   transaction.mockImplementation(async (fn: (t: unknown) => Promise<unknown>) => fn(TRANSACCION));
 });
 
-describe("proximaGraciaDeRescate — H1: la gracia nunca se acorta", () => {
+describe("proximaGraciaDeRescate — H1: la gracia nunca se acorta; A4: nunca inventa un reloj", () => {
   const AHORA = new Date("2027-01-10T00:00:00.000Z");
   const VEINTICUATRO_HORAS_MS = RESCUE_GRACE_HOURS * 60 * 60 * 1000;
 
-  it("nunca acorta un plazo que ya estaba más lejos que las 24 horas nuevas", () => {
-    // La regla que rompe una asignación ingenua: a alguien con doce días de
-    // gracia por delante, un rescate NO puede dejárselos en uno.
+  it("leaves an account that never had a clock without one", () => {
+    // A4: NULL here does not mean "no deadline, so start one" — it means
+    // the clock never started (nobody has logged in since the 4A deploy).
+    // A rescue is not a login, so it must not be what starts it either.
+    const resultado = proximaGraciaDeRescate(null, AHORA);
+    expect(resultado).toBeNull();
+  });
+
+  it("still gives 24 hours to an account whose deadline already passed", () => {
+    // Pre-existing test, renamed to match this task's naming convention —
+    // its logic is untouched by A4, which only changes the NULL branch.
+    const vencida = new Date(AHORA.getTime() - 60_000);
+    const resultado = proximaGraciaDeRescate(vencida, AHORA);
+    expect(resultado?.getTime()).toBe(AHORA.getTime() + VEINTICUATRO_HORAS_MS);
+  });
+
+  it("never shortens a deadline that is further away than 24 hours", () => {
+    // Pre-existing test, renamed to match this task's naming convention.
+    // The rule that breaks a naive assignment: somebody with twelve days of
+    // grace left must NOT have a rescue cut that down to one.
     const actual = new Date(AHORA.getTime() + 12 * 24 * 60 * 60 * 1000);
     const resultado = proximaGraciaDeRescate(actual, AHORA);
     expect(resultado).toEqual(actual);
   });
 
-  it("concede 24 horas nuevas cuando no había ninguna gracia (columna NULL)", () => {
-    const resultado = proximaGraciaDeRescate(null, AHORA);
-    expect(resultado.getTime()).toBe(AHORA.getTime() + VEINTICUATRO_HORAS_MS);
-  });
-
-  it("concede 24 horas nuevas cuando la gracia ya había vencido", () => {
-    const vencida = new Date(AHORA.getTime() - 60_000);
-    const resultado = proximaGraciaDeRescate(vencida, AHORA);
-    expect(resultado.getTime()).toBe(AHORA.getTime() + VEINTICUATRO_HORAS_MS);
-  });
-
-  it("nunca devuelve un instante anterior a las 24 horas nuevas, cualquiera sea la entrada", () => {
-    // La forma «en rojo si se rompe la regla»: esta aserción es la que se
-    // enrojece si `proximaGraciaDeRescate` se reescribe alguna vez como una
-    // asignación (`return candidata`) en vez de un máximo.
-    for (const actual of [null, new Date(0), new Date(AHORA.getTime() - 1), new Date(AHORA.getTime() + 1)]) {
+  it("never returns an instant earlier than the fresh 24 hours, for any non-null previous deadline", () => {
+    // The "red if the rule breaks" form for every *non-null* input: this
+    // assertion turns red if `proximaGraciaDeRescate` is ever rewritten as a
+    // bare assignment (`return candidata`) instead of a maximum. `null` is
+    // deliberately not in this list — for `null` the correct answer is
+    // `null` itself, not a floor of 24 hours, and that is what the first
+    // test above already pins down.
+    for (const actual of [new Date(0), new Date(AHORA.getTime() - 1), new Date(AHORA.getTime() + 1)]) {
       const resultado = proximaGraciaDeRescate(actual, AHORA);
-      expect(resultado.getTime()).toBeGreaterThanOrEqual(AHORA.getTime() + VEINTICUATRO_HORAS_MS);
+      expect(resultado?.getTime()).toBeGreaterThanOrEqual(AHORA.getTime() + VEINTICUATRO_HORAS_MS);
     }
   });
 });
@@ -159,10 +172,13 @@ describe("resolverCuentaDeRescate — H7: las tres trampas de --user", () => {
     expect(r).toEqual({ ok: true, id: 7, user: "Omar Mita" });
   });
 
-  it("refuses an archived account with its own reason, not 'no existe'", async () => {
+  it("refuses an archived account with its own reason, not 'no existe' — but still carries its id", async () => {
+    // The id travels with the refusal because `--unarchive` (`rescue.ts`'s
+    // own `main()`) is the one caller that needs to act on the account
+    // despite this exact refusal instead of stopping at it.
     findAll.mockResolvedValue([{ dataValues: { id: 7, user: "ex_empleado", deletedAt: new Date() } }]);
     const r = await resolverCuentaDeRescate("ex_empleado");
-    expect(r).toEqual({ ok: false, motivo: "archivada", user: "ex_empleado" });
+    expect(r).toEqual({ ok: false, motivo: "archivada", user: "ex_empleado", id: 7 });
   });
 
   it("refuses as ambiguous when a live and an archived row share the case-folded name", async () => {
@@ -220,6 +236,25 @@ describe("restablecerSegundoFactor — H1, H2, H6, H6-bis", () => {
     const escrituras = update.mock.calls.map((c) => c[0] as Record<string, unknown>);
     const escrituraDeCuenta = escrituras.find((e) => "mfa_grace_until" in e);
     expect(escrituraDeCuenta?.mfa_grace_until).toEqual(lejos);
+  });
+
+  it("A4: does not write mfa_grace_until at all for an account whose clock never started", async () => {
+    // The trap this closes: writing `NULL` and not naming the column give
+    // the same result on a row that already had NULL — which is exactly
+    // why a shallow fix (writing `mfa_grace_until: null`) would pass a test
+    // that only checked the resulting value. This checks the UPDATE's own
+    // shape instead: the key must be absent, not merely falsy.
+    findOne
+      .mockResolvedValueOnce(filaActiva())
+      .mockResolvedValueOnce({ dataValues: { mfa_grace_until: null } });
+
+    const resultado = await restablecerSegundoFactor(OBJETIVO, ACTOR_CONSOLA);
+
+    expect(resultado.ok).toBe(true);
+    if (resultado.ok) expect(resultado.datos.graceUntil).toBeNull();
+    const escrituras = update.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    const escrituraDeCuenta = escrituras.find((e) => "failed_attempts" in e);
+    expect(escrituraDeCuenta).not.toHaveProperty("mfa_grace_until");
   });
 
   it("runs every mutation inside one transaction", async () => {
@@ -420,6 +455,110 @@ describe("limpiarEmailDeRescate", () => {
     expect(updateTokens).toHaveBeenCalledWith(
       { used_at: expect.any(Date) },
       { where: { id_usuario: OBJETIVO, used_at: null }, transaction: TRANSACCION },
+    );
+  });
+});
+
+describe("desarchivarCuentaDeRescate — A1: the one door Task 1 leaves open", () => {
+  const CUENTA_ARCHIVADA = () => ({
+    dataValues: { id: OBJETIVO, user: "tecnico_ana", deletedAt: new Date("2026-08-01T00:00:00.000Z") },
+  });
+
+  it("clears deletedAt on an archived account", async () => {
+    findOne.mockResolvedValue(CUENTA_ARCHIVADA());
+    const resultado = await desarchivarCuentaDeRescate(OBJETIVO, ACTOR_CONSOLA);
+    expect(resultado.ok).toBe(true);
+    expect(restore).toHaveBeenCalledWith({ where: { id: OBJETIVO }, transaction: TRANSACCION });
+    if (resultado.ok) expect(resultado.datos).toEqual({ desarchivada: true });
+  });
+
+  it("refuses an account that is not archived, and says so", async () => {
+    // The trap the encargo names by hand: copying one of the other four
+    // operations here would drag in `cuentaActivaOrNull`'s refusal of an
+    // archived account, and this order would never work. The live-account
+    // fixture below is the case that must now be refused instead.
+    findOne.mockResolvedValue(filaActiva());
+    const resultado = await desarchivarCuentaDeRescate(OBJETIVO, ACTOR_CONSOLA);
+    expect(resultado).toEqual({ ok: false, motivo: "no-archivada", user: "tecnico_ana" });
+    expect(restore).not.toHaveBeenCalled();
+    expect(avisarRescate).not.toHaveBeenCalled();
+  });
+
+  it("refuses a non-existent account without sending a notice or touching anything", async () => {
+    findOne.mockResolvedValue(null);
+    const resultado = await desarchivarCuentaDeRescate(999, ACTOR_CONSOLA);
+    expect(resultado).toEqual({ ok: false, motivo: "no-encontrada" });
+    expect(avisarRescate).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("sends the security notice before restoring, and confirms the bitácora line after", async () => {
+    findOne.mockResolvedValue(CUENTA_ARCHIVADA());
+    const orden: string[] = [];
+    avisarRescate.mockImplementation(async () => {
+      orden.push("aviso");
+      return { enviado: true };
+    });
+    restore.mockImplementation(async () => {
+      orden.push("restore");
+    });
+    crearBitacora.mockImplementation(async () => {
+      orden.push("bitacora");
+    });
+
+    await desarchivarCuentaDeRescate(OBJETIVO, ACTOR_CONSOLA);
+
+    expect(orden).toEqual(["aviso", "restore", "bitacora"]);
+  });
+
+  it("writes the bitácora line before answering ok", async () => {
+    // The one that matters most: the audit line is the only thing that
+    // survives a rescue, and this operation must confirm it before telling
+    // its caller the account is back.
+    findOne.mockResolvedValue(CUENTA_ARCHIVADA());
+    let bitacoraEscritaAntesDeResolver = false;
+    crearBitacora.mockImplementation(async () => {
+      bitacoraEscritaAntesDeResolver = true;
+    });
+
+    const resultado = await desarchivarCuentaDeRescate(OBJETIVO, ACTOR_CONSOLA);
+
+    expect(bitacoraEscritaAntesDeResolver).toBe(true);
+    expect(resultado.ok).toBe(true);
+    expect(crearBitacora).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id_usuario: OBJETIVO,
+        action: "RESCUE_ACCOUNT_UNARCHIVED",
+        severity: "critical",
+        metadata: expect.objectContaining({ actor: ACTOR_CONSOLA.descripcion, resultado: "ok" }),
+      }),
+    );
+  });
+
+  it("still writes the bitácora line — with resultado 'error' — when restoring fails, and rethrows", async () => {
+    findOne.mockResolvedValue(CUENTA_ARCHIVADA());
+    restore.mockRejectedValue(new Error("conexión perdida"));
+
+    await expect(desarchivarCuentaDeRescate(OBJETIVO, ACTOR_CONSOLA)).rejects.toThrow("conexión perdida");
+
+    expect(crearBitacora).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "RESCUE_ACCOUNT_UNARCHIVED",
+        metadata: expect.objectContaining({ resultado: "error" }),
+      }),
+    );
+  });
+
+  it("attributes the bitácora line to the rescued account, with the real actor in metadata", async () => {
+    findOne.mockResolvedValue(CUENTA_ARCHIVADA());
+    await desarchivarCuentaDeRescate(OBJETIVO, ACTOR_ENDPOINT);
+    expect(crearBitacora).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id_usuario: OBJETIVO,
+        entity_id: OBJETIVO,
+        metadata: expect.objectContaining({ actor: ACTOR_ENDPOINT.descripcion }),
+      }),
     );
   });
 });

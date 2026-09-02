@@ -38,7 +38,7 @@
 //   npm run auth:rescue        -- --user <usuario> --reset-mfa   (development, via tsx)
 //   npm run auth:rescue:deploy -- --user <usuario> --reset-mfa   (the container, via node dist/)
 //
-// The five operations, one flag each — see `parseArgs` below for why an
+// The six operations, one flag each — see `parseArgs` below for why an
 // invocation may only ever name one:
 //
 //   --user <usuario> --reset-mfa
@@ -46,6 +46,16 @@
 //   --user <usuario> --revoke-sessions
 //   --user <usuario> --set-email <dirección>
 //   --user <usuario> --clear-email
+//   --user <usuario> --unarchive
+//
+// **`--unarchive` reads `--user` the opposite way every other flag does.**
+// `resolverCuentaDeRescate` refuses an archived account for the other five,
+// which all need a live target — the right call for them, and the reason
+// `main()` below cannot simply hand every operation the same resolution
+// unconditionally. For `--unarchive` archived is what was typed `--user` to
+// find, so `main()` special-cases that one refusal for that one flag rather
+// than aborting on it, the console-side twin of the same trap
+// `auth/rescueCore.ts` documents on `desarchivarCuentaDeRescate` itself.
 
 import { pathToFileURL } from "node:url";
 import { hostname, userInfo } from "node:os";
@@ -57,6 +67,7 @@ import {
   revocarSesionesDeRescate,
   establecerEmailDeRescate,
   limpiarEmailDeRescate,
+  desarchivarCuentaDeRescate,
   type ActorRescate,
   type ResolucionDeCuenta,
 } from "../auth/rescueCore.js";
@@ -68,7 +79,8 @@ export type Operacion =
   | { tipo: "unlock" }
   | { tipo: "revoke-sessions" }
   | { tipo: "set-email"; email: string }
-  | { tipo: "clear-email" };
+  | { tipo: "clear-email" }
+  | { tipo: "unarchive" };
 
 export interface ArgsRescate {
   user: string;
@@ -82,6 +94,7 @@ const NOMBRE_DE_FLAG: Record<Operacion["tipo"], string> = {
   "revoke-sessions": "--revoke-sessions",
   "set-email": "--set-email",
   "clear-email": "--clear-email",
+  unarchive: "--unarchive",
 };
 
 export const USO = `Uso:
@@ -90,10 +103,12 @@ export const USO = `Uso:
   npm run auth:rescue -- --user <usuario> --revoke-sessions
   npm run auth:rescue -- --user <usuario> --set-email <dirección>
   npm run auth:rescue -- --user <usuario> --clear-email
+  npm run auth:rescue -- --user <usuario> --unarchive
 
 En el contenedor de producción, "auth:rescue:deploy" en vez de "auth:rescue".
 Exactamente una operación por invocación: --set-email y --reset-mfa juntos se
-rechazan a propósito (dos operaciones son dos líneas de bitácora, nunca una).`;
+rechazan a propósito (dos operaciones son dos líneas de bitácora, nunca una).
+--unarchive tampoco se combina con ninguna otra: va siempre sola.`;
 
 /**
  * Turns `process.argv.slice(2)` into a validated command, or an error message
@@ -138,6 +153,9 @@ export function parseArgs(argv: string[]): ArgsRescate | { error: string } {
       case "--clear-email":
         encontradas.push({ tipo: "clear-email" });
         break;
+      case "--unarchive":
+        encontradas.push({ tipo: "unarchive" });
+        break;
       case "--set-email": {
         const value = argv[++i];
         if (!value || value.trim() === "" || value.startsWith("--")) {
@@ -157,7 +175,7 @@ export function parseArgs(argv: string[]): ArgsRescate | { error: string } {
     return {
       error:
         "falta indicar una operación: --reset-mfa, --unlock, --revoke-sessions, " +
-        "--set-email <dirección> o --clear-email.",
+        "--set-email <dirección>, --clear-email o --unarchive.",
     };
   }
 
@@ -243,6 +261,23 @@ function imprimirRescateFallido(
   console.error("La cuenta ya no existe — puede que se haya borrado en este mismo instante.");
 }
 
+/**
+ * `desarchivarCuentaDeRescate`'s own pair of refusals — kept apart from
+ * `imprimirRescateFallido` because "archivada" is not one of them here: for
+ * this one operation an archived account is the success case, and the
+ * refusal that takes its place is "no-archivada" — a target that exists but
+ * was never archived, so there is nothing for `--unarchive` to undo.
+ */
+function imprimirDesarchivoFallido(
+  resultado: { ok: false; motivo: "no-encontrada" } | { ok: false; motivo: "no-archivada"; user: string },
+): void {
+  if (resultado.motivo === "no-archivada") {
+    console.error(`Esa cuenta no está archivada — no hay nada que desarchivar. (@${resultado.user})`);
+    return;
+  }
+  console.error("La cuenta ya no existe — puede que se haya borrado en este mismo instante.");
+}
+
 function imprimirAviso(avisoEnviado: boolean): void {
   if (avisoEnviado) {
     console.log("Aviso de seguridad enviado a MAIL_SECURITY_TO.");
@@ -275,14 +310,34 @@ async function runResetMfa(id: number, actor: ActorRescate): Promise<number> {
     `Bloqueo por intentos fallidos levantado. Sesiones cerradas: ${sesionesRevocadas}. ` +
       `Dispositivos recordados revocados: ${dispositivosRevocados}.`,
   );
-  console.log(`Gracia concedida hasta ${graceUntil.toISOString()} (nunca menor que la que ya tuviera).`);
+  // `graceUntil === null` means this account had never logged in since the
+  // deploy — its clock had not started, so the rescue correctly left
+  // `mfa_grace_until` untouched instead of stamping 24 hours over the
+  // fourteen days its own first login still owes it. See
+  // `rescueCore.ts`'s `proximaGraciaDeRescate` for why inventing a deadline
+  // here would be worse than not answering at all.
+  if (graceUntil === null) {
+    console.log(
+      "No se tocó su plazo de gracia: esta cuenta todavía no había iniciado sesión desde el " +
+        "despliegue, así que sus catorce días completos arrancarán enteros en su primer inicio de sesión.",
+    );
+  } else {
+    console.log(`Gracia concedida hasta ${graceUntil.toISOString()} (nunca menor que la que ya tuviera).`);
+  }
   console.log("");
   console.log(`Qué contarle a @${resultado.cuenta.user}:`);
   console.log("  - Ya puede entrar solo con su contraseña, sin pedirle ningún segundo factor.");
-  console.log(
-    `  - Tiene hasta ${graceUntil.toISOString()} (${RESCUE_GRACE_HOURS} horas desde ahora, o más si ` +
-      "ya le quedaba más) para configurar un factor nuevo antes de que el sistema vuelva a pedírselo.",
-  );
+  if (graceUntil === null) {
+    console.log(
+      "  - En cuanto entre por primera vez tendrá catorce días completos para configurar un factor " +
+        "nuevo, igual que cualquier cuenta que todavía no haya entrado desde el despliegue.",
+    );
+  } else {
+    console.log(
+      `  - Tiene hasta ${graceUntil.toISOString()} (${RESCUE_GRACE_HOURS} horas desde ahora, o más si ` +
+        "ya le quedaba más) para configurar un factor nuevo antes de que el sistema vuelva a pedírselo.",
+    );
+  }
   console.log("  - Sus sesiones y dispositivos recordados se cerraron: tendrá que iniciar sesión de nuevo en todos sus aparatos.");
   return 0;
 }
@@ -370,6 +425,21 @@ async function runClearEmail(id: number, actor: ActorRescate): Promise<number> {
   return 0;
 }
 
+async function runUnarchive(id: number, actor: ActorRescate): Promise<number> {
+  const resultado = await desarchivarCuentaDeRescate(id, actor);
+  if (resultado.ok !== true) {
+    imprimirDesarchivoFallido(resultado);
+    return 1;
+  }
+  imprimirAviso(resultado.avisoEnviado);
+  console.log(`Cuenta desarchivada: @${resultado.cuenta.user}.`);
+  console.log("");
+  console.log(
+    `Qué contarle a @${resultado.cuenta.user}: ya puede volver a iniciar sesión con su contraseña de siempre.`,
+  );
+  return 0;
+}
+
 /**
  * The whole script, as one function returning the process's exit code instead
  * of calling `process.exit` itself — so `run()` below is the only place that
@@ -395,14 +465,26 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   const resolucion = await resolverCuentaDeRescate(parsed.user);
+  const actor = actorDeConsola();
+
   // `!== true`, not `!resolucion.ok` — see the note on `runResetMfa` above.
   if (resolucion.ok !== true) {
+    // `--unarchive` is the one operation for which an archived account is
+    // exactly what `--user` was typed to find, not a refusal —
+    // `resolverCuentaDeRescate`'s "archivada" answer exists for the other
+    // five operations, which all need a live target. See the module header
+    // and `rescueCore.ts`'s own comment on `desarchivarCuentaDeRescate` for
+    // the identical trap on the core side of this same door. Every other
+    // operation still stops right here, unchanged.
+    if (parsed.operacion.tipo === "unarchive" && resolucion.motivo === "archivada") {
+      console.log(`Cuenta objetivo: @${resolucion.user} (id ${resolucion.id}) — archivada.`);
+      return runUnarchive(resolucion.id, actor);
+    }
     imprimirResolucionFallida(resolucion);
     return 1;
   }
 
   console.log(`Cuenta objetivo: @${resolucion.user} (id ${resolucion.id}).`);
-  const actor = actorDeConsola();
 
   switch (parsed.operacion.tipo) {
     case "reset-mfa":
@@ -415,6 +497,8 @@ export async function main(argv: string[]): Promise<number> {
       return runSetEmail(resolucion.id, parsed.operacion.email, actor);
     case "clear-email":
       return runClearEmail(resolucion.id, actor);
+    case "unarchive":
+      return runUnarchive(resolucion.id, actor);
   }
 }
 

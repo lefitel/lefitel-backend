@@ -17,6 +17,7 @@
 
 import { Resend } from "resend";
 import { log } from "../utils/logger.js";
+import { consumirPresupuestoDeCorreo } from "./mailBudget.js";
 
 const mailLog = log("mailer");
 
@@ -40,9 +41,35 @@ function bajoTestRunner(): boolean {
 }
 
 /** The one message this module knows how to send, and its only shape. */
+/**
+ * Which flow a message belongs to — a **closed set, checked by the compiler**,
+ * and the value that reaches the mail budget's log line.
+ *
+ * It exists because the obvious thing to pass there is `asunto`, and `asunto`
+ * is the wrong value twice over. Four of the seven subjects in this codebase
+ * interpolate a username (`[Seguridad] Rescate ejecutado — reset-mfa: @jperez`),
+ * so using them writes *who was rescued* into a log line that never named
+ * anybody before. And a subject is unbounded text, which destroys the one
+ * thing that field is for: adding up what each flow spent today. A union is
+ * what makes both impossible rather than merely discouraged.
+ */
+export type FlujoDeCorreo =
+  | "email/verificar"
+  | "email/aviso-direccion-anterior"
+  | "email/aviso-cambio"
+  | "password/forgot"
+  | "password/aviso-cambio"
+  | "password/aviso-restablecida"
+  | "rescate/aviso";
+
 export interface CorreoAEnviar {
   para: string;
   asunto: string;
+  /**
+   * Required, not optional, so the compiler names every call site the day a
+   * new flow appears — the same argument `texto` below makes for itself.
+   */
+  flujo: FlujoDeCorreo;
   html: string;
   /**
    * Plain-text body, required in the type rather than optional. A message
@@ -66,23 +93,41 @@ export interface CorreoAEnviar {
  * caller's point of view. The return value exists for logging and for this
  * module's own tests, not for a controller to branch a response on.
  *
- * Three ways this can end, in order:
+ * Four ways this can end, in order:
  *
  * 1. Under the test runner: refuses unconditionally, logs the recipient and
  *    subject with a line that says plainly that nothing was sent, and
  *    returns `{ ok: true }`. This is the branch that makes a forgotten mock
- *    harmless — see the module header above.
+ *    harmless — see the module header above. Never touches the daily budget:
+ *    every test in this codebase runs under this branch, and charging it
+ *    here would let one test file's suite exhaust the same in-memory counter
+ *    a later file inherits, failing sends for reasons that have nothing to
+ *    do with what that file is testing.
  * 2. `RESEND_API_KEY` or `MAIL_FROM` missing: the development fallback the
  *    Task 3 brief asks for, so the rest of the flow can be built and run
  *    locally without spending quota. Reachable only outside production —
  *    `requiredEnv` in `config/security.ts` refuses to boot a production
  *    process missing either variable, so this branch and a production
  *    deployment are mutually exclusive by construction, not by trusting
- *    that nobody deploys without them.
- * 3. Both present, not under test: actually calls Resend. A 4xx/5xx from
- *    Resend is logged and answered with `{ ok: false }`; a promise that
- *    rejects before Resend ever answers (a network failure, say) is caught
- *    and answered the same way. Either way this function does not throw.
+ *    that nobody deploys without them. Does not touch the budget either, for
+ *    the plain reason that a development environment has no real Resend
+ *    quota to protect.
+ * 3. The daily budget (`auth/mailBudget.ts`) has none left: this is the one
+ *    call site in the whole codebase for `consumirPresupuestoDeCorreo` —
+ *    once per message actually about to reach Resend, which is what makes a
+ *    request that sends no mail cost nothing and a request that sends three
+ *    messages cost three (see Decision 2 in
+ *    `docs/plans/2026-09-01-defectos-previos-al-4b.md`). Logged with its own
+ *    line, distinct from a Resend rejection below — a caller that only reads
+ *    `{ ok: false }` (six of the seven that call this function do not even
+ *    do that) cannot otherwise tell "the quota ran out" apart from "Resend
+ *    turned it down", and the two call for different reactions from whoever
+ *    reads the log.
+ * 4. Budget available, keys present, not under test: actually calls Resend.
+ *    A 4xx/5xx from Resend is logged and answered with `{ ok: false }`; a
+ *    promise that rejects before Resend ever answers (a network failure,
+ *    say) is caught and answered the same way. Either way this function
+ *    does not throw.
  */
 export async function enviarCorreo(correo: CorreoAEnviar): Promise<{ ok: boolean }> {
   if (bajoTestRunner()) {
@@ -101,6 +146,19 @@ export async function enviarCorreo(correo: CorreoAEnviar): Promise<{ ok: boolean
       "correo NO enviado: faltan RESEND_API_KEY o MAIL_FROM (modo desarrollo)",
     );
     return { ok: true };
+  }
+
+  // The one place this module ever spends the daily budget — see
+  // `auth/mailBudget.ts` and the docstring above. `correo.asunto` doubles as
+  // the log's `motivo`: it already names which flow this message belongs to
+  // (verification, reset, a security notice), so there is no separate label
+  // to keep in sync with the templates that set it.
+  if (!consumirPresupuestoDeCorreo(correo.flujo)) {
+    mailLog.error(
+      { para: correo.para, asunto: correo.asunto },
+      "correo NO enviado: se agotó el presupuesto diario de correo (esto no es un fallo de Resend)",
+    );
+    return { ok: false };
   }
 
   try {

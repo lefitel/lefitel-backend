@@ -114,6 +114,7 @@ export async function avisarPasswordRestablecida(input: {
   ]);
   await enviarCorreo({
     para: input.email_destino,
+    flujo: "password/aviso-cambio",
     asunto: "Tu contraseña ha cambiado — Osefi",
     html: alUsuario.html,
     texto: alUsuario.texto,
@@ -138,6 +139,7 @@ export async function avisarPasswordRestablecida(input: {
   ]);
   await enviarCorreo({
     para: to,
+    flujo: "password/aviso-restablecida",
     asunto: `[Seguridad] Contraseña restablecida: @${usuario}`,
     html: copia.html,
     texto: copia.texto,
@@ -181,6 +183,7 @@ export async function avisarCorreoCambiado(input: {
   ]);
   await enviarCorreo({
     para: to,
+    flujo: "email/aviso-cambio",
     asunto: `[Seguridad] Dirección de recuperación cambiada: @${usuario}`,
     html: copia.html,
     texto: copia.texto,
@@ -273,6 +276,7 @@ export async function avisarRescate(input: {
   ]);
   const { ok } = await enviarCorreo({
     para: to,
+    flujo: "rescate/aviso",
     asunto: `[Seguridad] Rescate ejecutado — ${input.operacion}: @${usuario}`,
     html: copia.html,
     texto: copia.texto,

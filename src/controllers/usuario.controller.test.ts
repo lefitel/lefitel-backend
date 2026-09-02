@@ -452,6 +452,85 @@ describe("what a request may actually change", () => {
     expect(written(stored.set)).toEqual({ name: "Ana", id_rol: ADMIN });
   });
 
+  /**
+   * `putPermisos`'s precedent, on the account instead of the role: the one
+   * mistake with no way back is giving up your own access, and holding
+   * `roles.editar` is exactly what let this one through before — the test
+   * above is what makes that permission real, and this one is what stops it
+   * being turned on yourself.
+   */
+  it("refuses to change the caller's own role", async () => {
+    const stored = storedUser({ id: ADMIN, id_rol: ADMIN });
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(ADMIN) }, body: { name: "Ana", id_rol: TECNICO } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(stored.set).not.toHaveBeenCalled();
+    expect(stored.save).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The control for the test above: an administrator moving somebody *else*
+   * between roles is exactly what "lets the Roles permission move somebody
+   * between roles" already covers, repeated here with a target that is
+   * unambiguously not the caller so the two tests cannot be confused for one
+   * another.
+   */
+  it("still lets an administrator edit their own record without touching the role", async () => {
+    // The over-refusal guard, and the one that would hurt everybody rather
+    // than an attacker: `updateUsuario` is also how somebody changes their own
+    // name or photograph. A refusal keyed on "this is you" instead of on "this
+    // is you *and* the role is moving" locks every administrator out of their
+    // own profile, silently, and only this test says so.
+    const stored = storedUser({ id: ADMIN, id_rol: ADMIN });
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(ADMIN) }, body: { name: "Ana" } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(written(stored.set)).toEqual({ name: "Ana" });
+  });
+
+  it("still lets an administrator resend their own unchanged role", async () => {
+    // A form that round-trips every field it loaded sends `id_rol` back
+    // untouched, which is the shape the real frontend uses. Reading that as an
+    // attempted self-demotion would make the profile screen unusable for the
+    // three people who have this permission.
+    const stored = storedUser({ id: ADMIN, id_rol: ADMIN });
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(ADMIN) }, body: { name: "Ana", id_rol: ADMIN } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+  });
+
+  it("still changes somebody else's role", async () => {
+    const stored = storedUser({ id: OTHER, id_rol: TECNICO });
+    findOne.mockResolvedValue(stored.model);
+
+    const c = call(
+      { id: ADMIN, id_rol: ADMIN },
+      { params: { id: String(OTHER) }, body: { name: "Ana", id_rol: ADMIN } },
+    );
+    await updateUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(written(stored.set)).toEqual({ name: "Ana", id_rol: ADMIN });
+  });
+
   it("stops even administration rewriting a username or password through this route", async () => {
     // Both have their own endpoint: one checks the name is free, the other
     // hashes. Letting them through here would skip both.
@@ -1687,6 +1766,40 @@ describe("archiving an account ends its sessions and its remembered devices", ()
     expect(transaction).not.toHaveBeenCalled();
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
     expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The auto-disparo: archiving revokes every session and every remembered
+   * device the caller has, so an administrator who archives themselves is
+   * locked out on their very next request. And every door back also demands
+   * `seguridad.archivar` — the permission they may have just disarmed on
+   * their own account — so the only remedy left would be an `UPDATE` by hand
+   * against production. `rescatarMfaDeUsuario` refuses the same shape of
+   * request for a lighter operation; this is the same rule for the heavier
+   * one.
+   */
+  it("refuses to archive the caller's own account, even with the permission", async () => {
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(ADMIN) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(403);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(destroy).not.toHaveBeenCalled();
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+    expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The control for the test above: the refusal is about whose account it
+   * is, not about the handler having started rejecting everyone.
+   */
+  it("still archives somebody else's account", async () => {
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(destroy).toHaveBeenCalledWith({ where: { id: String(OTHER) }, transaction: TRANSACCION });
   });
 });
 

@@ -1,11 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 
+// A real member of the closed `FlujoDeCorreo` union rather than the string
+// "prueba" this file used to pass: the parameter is narrow on purpose (see
+// `mailBudget.ts`), and a test that widened it back would have been the one
+// place the guard could rot from.
+const FLUJO = "email/verificar" as const;
+
 const error = vi.fn();
 const warn = vi.fn();
 vi.mock("../utils/logger.js", () => ({ log: () => ({ error, warn, info: vi.fn() }) }));
 
-const { consumirPresupuestoDeCorreo, reiniciarPresupuestoDeCorreo, presupuestoRestante } =
+const { hayPresupuestoDeCorreo, consumirPresupuestoDeCorreo, reiniciarPresupuestoDeCorreo, presupuestoRestante } =
   await import("./mailBudget.js");
 const { MAIL_DAILY_BUDGET, MAIL_DAILY_WINDOW_MS } = await import("../config/security.js");
 
@@ -19,9 +25,9 @@ afterEach(() => vi.useRealTimers());
 describe("the daily mail budget", () => {
   it("allows exactly the budget and refuses the one after it", () => {
     for (let i = 0; i < MAIL_DAILY_BUDGET; i++) {
-      expect(consumirPresupuestoDeCorreo("prueba"), `envío ${i + 1}`).toBe(true);
+      expect(consumirPresupuestoDeCorreo(FLUJO), `envío ${i + 1}`).toBe(true);
     }
-    expect(consumirPresupuestoDeCorreo("prueba")).toBe(false);
+    expect(consumirPresupuestoDeCorreo(FLUJO)).toBe(false);
     expect(presupuestoRestante()).toBe(0);
   });
 
@@ -37,7 +43,7 @@ describe("the daily mail budget", () => {
   });
 
   it("says so loudly when it runs out, because nobody would notice otherwise", () => {
-    for (let i = 0; i < MAIL_DAILY_BUDGET; i++) consumirPresupuestoDeCorreo("prueba");
+    for (let i = 0; i < MAIL_DAILY_BUDGET; i++) consumirPresupuestoDeCorreo(FLUJO);
     expect(error).not.toHaveBeenCalled();
 
     consumirPresupuestoDeCorreo("password/forgot");
@@ -47,9 +53,9 @@ describe("the daily mail budget", () => {
 
   it("warns on the way up, while there is still time to act", () => {
     const umbral = Math.ceil(MAIL_DAILY_BUDGET * 0.8);
-    for (let i = 0; i < umbral - 1; i++) consumirPresupuestoDeCorreo("prueba");
+    for (let i = 0; i < umbral - 1; i++) consumirPresupuestoDeCorreo(FLUJO);
     expect(warn).not.toHaveBeenCalled();
-    consumirPresupuestoDeCorreo("prueba");
+    consumirPresupuestoDeCorreo(FLUJO);
     expect(warn).toHaveBeenCalled();
   });
 
@@ -61,15 +67,15 @@ describe("the daily mail budget", () => {
    */
   it("frees each send only once a full window has passed since that send", () => {
     vi.useFakeTimers();
-    for (let i = 0; i < MAIL_DAILY_BUDGET; i++) consumirPresupuestoDeCorreo("prueba");
-    expect(consumirPresupuestoDeCorreo("prueba")).toBe(false);
+    for (let i = 0; i < MAIL_DAILY_BUDGET; i++) consumirPresupuestoDeCorreo(FLUJO);
+    expect(consumirPresupuestoDeCorreo(FLUJO)).toBe(false);
 
     // One millisecond short of the window: still spent.
     vi.advanceTimersByTime(MAIL_DAILY_WINDOW_MS - 1);
-    expect(consumirPresupuestoDeCorreo("prueba")).toBe(false);
+    expect(consumirPresupuestoDeCorreo(FLUJO)).toBe(false);
 
     vi.advanceTimersByTime(2);
-    expect(consumirPresupuestoDeCorreo("prueba")).toBe(true);
+    expect(consumirPresupuestoDeCorreo(FLUJO)).toBe(true);
   });
 
   it("leaves room under the Resend ceiling for the security copies", () => {
@@ -80,6 +86,33 @@ describe("the daily mail budget", () => {
     // the one message this mechanism must never be the reason for.
     expect(MAIL_DAILY_BUDGET).toBe(80);
     expect(MAIL_DAILY_BUDGET).toBeLessThan(100);
+  });
+});
+
+/**
+ * The property Decision 2 is built on: looking must be free, or asking the
+ * budget ahead of a destructive step (`email.controller.ts`'s
+ * `sendVerificationEmail`, per Task 3) would itself spend the very thing it
+ * exists to protect, and `/auth/email/send` would burn one unit per request
+ * again — the exact bug this task closes, just moved one function over.
+ */
+describe("hayPresupuestoDeCorreo — looks, never spends", () => {
+  it("does not spend anything, however many times it is asked", () => {
+    for (let i = 0; i < MAIL_DAILY_BUDGET + 20; i++) {
+      expect(hayPresupuestoDeCorreo()).toBe(true);
+    }
+    expect(presupuestoRestante()).toBe(MAIL_DAILY_BUDGET);
+
+    // The full budget is still there for whoever actually spends it.
+    for (let i = 0; i < MAIL_DAILY_BUDGET; i++) {
+      expect(consumirPresupuestoDeCorreo(FLUJO), `envío ${i + 1}`).toBe(true);
+    }
+    expect(consumirPresupuestoDeCorreo(FLUJO)).toBe(false);
+  });
+
+  it("answers false once the budget is actually spent, unlike looking alone ever could", () => {
+    for (let i = 0; i < MAIL_DAILY_BUDGET; i++) consumirPresupuestoDeCorreo(FLUJO);
+    expect(hayPresupuestoDeCorreo()).toBe(false);
   });
 });
 
@@ -103,7 +136,7 @@ describe("both senders ask the budget before minting a token", () => {
   it("has the check above the mint in every file that sends", () => {
     for (const file of CALLERS) {
       const src = readFileSync(file, "utf8");
-      const check = src.indexOf("consumirPresupuestoDeCorreo(");
+      const check = src.indexOf("hayPresupuestoDeCorreo(");
       const mint = src.indexOf("await crearToken(");
       expect(check, `${file} ya no consulta el presupuesto de correo`).toBeGreaterThan(-1);
       expect(mint, `${file} ya no acuña ningún token`).toBeGreaterThan(-1);
@@ -112,6 +145,22 @@ describe("both senders ask the budget before minting a token", () => {
         `${file}: el presupuesto se consulta DESPUÉS de acuñar. En un día agotado eso ` +
           "invalida el enlace pendiente de esa persona y no le manda ninguno nuevo.",
       ).toBeLessThan(mint);
+    }
+  });
+
+  /**
+   * Decision 2's other half, pinned the same way: neither controller may
+   * charge the budget directly any more. If one did, `/auth/email/send`
+   * would go back to costing 1 unit per request while sending up to 3
+   * messages — the exact shape of the bug this task closes. Reverting
+   * either call site to `consumirPresupuestoDeCorreo` turns this red.
+   */
+  it("neither controller calls consumirPresupuestoDeCorreo directly — only enviarCorreo does", () => {
+    for (const file of CALLERS) {
+      const src = readFileSync(file, "utf8");
+      expect(src, `${file} sigue cobrando el presupuesto por su cuenta`).not.toContain(
+        "consumirPresupuestoDeCorreo(",
+      );
     }
   });
 });
