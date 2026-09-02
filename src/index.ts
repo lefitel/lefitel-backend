@@ -16,6 +16,7 @@ import { createShutdown } from "./lifecycle.js";
 import { schedulePurge } from "./auth/purgeJob.js";
 import { purgeExpiredSessions } from "./auth/sessionStore.js";
 import { purgeExpiredRememberedDevices } from "./auth/rememberedDeviceStore.js";
+import { comprobarLlaveAlArrancar } from "./auth/mfaKeyCheck.js";
 
 // `quiet` because dotenv 17 prints a line of its own on every load — an
 // "injected env (13) from .env" with a tip appended. Everything else this
@@ -114,6 +115,36 @@ async function main() {
   // session and factor tables coming, what it would take with it grew.
   await sequelize.authenticate();
   bootLog.info("conexión establecida con PostgreSQL");
+
+  /**
+   * Whether `MFA_ENCRYPTION_KEY_ACTIVE` actually opens what it is supposed
+   * to — see `auth/mfaKeyCheck.ts` for the full reasoning (Decisions 1 and 2
+   * of `docs/plans/2026-09-01-factores-mfa.md`, findings A6, B8, B9). The
+   * short version: `requiredEnv` above only proved the variable was *set*;
+   * this proves it *works*, by resolving the keyring and, if a confirmed
+   * TOTP row exists, decrypting it.
+   *
+   * 🔴 A failure here must never reach `die()` or `process.exit`, and must
+   * never move above this line. Doing either would mean a single typo'd env
+   * var takes down the whole ERP for all nine people, including everyone who
+   * has never touched MFA — Decision 2's entire point, and the reason this
+   * check lives in `index.ts` rather than in `config/security.ts`: the
+   * rescue script (`scripts/rescue.ts`) imports that file and has to keep
+   * working precisely when this key is broken, since resetting MFA is how
+   * someone recovers from that. `mfaKeyCheck.test.ts` walks rescue's own
+   * import graph to keep it that way. A failed check only logs and flips the
+   * switch `/auth/totp/*` (Task 6) reads to answer 503 with — everything
+   * else keeps running.
+   */
+  const comprobacionMfa = await comprobarLlaveAlArrancar();
+  if (!comprobacionMfa.ok) {
+    bootLog.fatal(
+      { detalle: comprobacionMfa.detalle },
+      `la clave de cifrado del segundo factor no es válida (${comprobacionMfa.detalle}). ` +
+        "El servidor sigue en pie: /auth/totp/* responderá 503 hasta que se corrija; " +
+        "el resto del ERP, incluida la recuperación por código, sigue funcionando.",
+    );
+  }
 
   /**
    * Starts the background purge of expired sessions: one pass now, then daily

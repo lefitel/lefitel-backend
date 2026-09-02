@@ -314,6 +314,29 @@ const GATE_NOT_APPLICABLE = [
   // AUTHENTICATION_NOT_APPLICABLE for what stands in for a gate instead.
   "POST /api/auth/password/forgot",
   "POST /api/auth/password/reset",
+
+  // ── El segundo factor (plan 4B) ─────────────────────────────────────────
+  // Los cinco que escriben, y el argumento es el mismo de los endpoints de
+  // sesión de arriba: cada uno actúa sobre la propia cuenta de quien llama y
+  // sobre ninguna otra. El factor se busca por `req.user.id`, la sesión que
+  // ascienden es `req.user.id_sesion`, y los códigos se cuentan y se gastan
+  // con `id_usuario` en el mismo `where` — nunca con nada del cuerpo.
+  //
+  // No hay ningún rol que pueda o no pueda tener un segundo factor, así que no
+  // hay casilla que pedir. Lo que sí piden cuatro de los cinco es la
+  // contraseña, y eso es la lista `STEP_UP_GATED`, no ésta: son ejes
+  // distintos — «¿de quién es este dato?» contra «¿con qué te acreditas?».
+  //
+  // `POST /api/auth/mfa/verify` es el único de los cinco que **no** puede
+  // llevar puerta de step-up, y por construcción: lo llama una sesión
+  // `parcial`, que por definición aún no ha probado nada. Es la puerta, no lo
+  // que está detrás de ella.
+  "POST /api/auth/mfa/verify",
+  "POST /api/auth/stepup",
+  "POST /api/auth/totp/setup",
+  "POST /api/auth/totp/confirm",
+  "DELETE /api/auth/totp/",
+  "POST /api/auth/recovery-codes/",
 ];
 
 describe("who may change data", () => {
@@ -447,6 +470,21 @@ const STEP_UP_GATED = [
   // thing: it goes on accepting a password after plan 4B registers a factor,
   // which is precisely what the gate's second branch exists to stop.
   "POST /api/auth/email/send",
+  // ── El segundo factor (plan 4B) — cuatro ────────────────────────────────
+  // Los cuatro con `exigeContrasena: true`, que en esta puerta significa que
+  // piden la contraseña **siempre**, también a quien acaba de probar su
+  // factor. No es celo: un código de recuperación sella esa misma ventana, así
+  // que sin el «siempre» bastaría el papel impreso para dar de alta un factor
+  // nuevo — que es justo el límite que el plan dice que no se puede cruzar.
+  //
+  // Las dos de alta llevan además `permiteOnboarding`, y no es una relajación
+  // sino lo contrario de una caída: sin ella, quien está en `onboarding` no
+  // podría registrar jamás el factor que le saca de `onboarding`. `parcial`
+  // sigue rechazado pase lo que pase.
+  "POST /api/auth/totp/setup",
+  "POST /api/auth/totp/confirm",
+  "DELETE /api/auth/totp/",
+  "POST /api/auth/recovery-codes/",
 ];
 
 describe("which writes also demand a recently proved factor", () => {
@@ -455,7 +493,7 @@ describe("which writes also demand a recently proved factor", () => {
     .map((r) => `${r.method} ${r.path}`)
     .sort();
 
-  it("mounts requireStepUp on exactly those fifteen routes and on no others", () => {
+  it("mounts requireStepUp on exactly those nineteen routes and on no others", () => {
     // `stepUpGate` is the name `requireStepUp()` gives the function it returns,
     // for exactly this — see the comment above the `return` in
     // `requireStepUp.ts`. An anonymous handler there would make this assertion
@@ -565,6 +603,11 @@ const READ_GATE_NOT_APPLICABLE = [
   "GET /api/rol/",
   "GET /api/solucion/evento/:id_evento",
   "GET /api/tipoObs/",
+  // Cuántos códigos de recuperación te quedan. Un número sobre tu propia
+  // cuenta, tomado de `req.user`, y nunca un código. Pedir un permiso para
+  // verlo sería fricción sin defensa; enterarte de que te quedan dos el día
+  // que hacen falta es tarde.
+  "GET /api/auth/recovery-codes/",
 ];
 
 describe("who may read data", () => {

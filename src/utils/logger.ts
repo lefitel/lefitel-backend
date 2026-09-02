@@ -101,6 +101,17 @@ const level = process.env.LOG_LEVEL ?? (underTest ? "silent" : "info");
  * up — the cost of a stale entry is one string compared per response, and the
  * cost of removing one that turns out to be live is a working credential on
  * disk for every request the server has ever answered.
+ *
+ * The six MFA fields (hallazgo B11) are belt and suspenders, not the primary
+ * defence. Nothing in Plan 4B is supposed to write a TOTP secret, an
+ * `otpauth://` URI, a recovery code or the encryption key to a log line in
+ * the first place — everything travels by body and the request/response
+ * bodies are never logged at all (`httpLogger` serialises the request
+ * *without* its body). What these paths catch is the field arriving nested
+ * somewhere unexpected — a validation error that echoes the offending value
+ * back, a debug log added in a hurry six months from now — the same
+ * reasoning that already covers `pass`/`token` by field name rather than by
+ * route.
  */
 export const REDACT_CENSOR = "[oculto]";
 
@@ -118,6 +129,18 @@ export const REDACT_PATHS = [
   "*.oldPass",
   "*.password",
   "*.token",
+  "MFA_ENCRYPTION_KEY",
+  "secreto",
+  "secret",
+  "otpauth",
+  "codigo",
+  "recovery",
+  "*.MFA_ENCRYPTION_KEY",
+  "*.secreto",
+  "*.secret",
+  "*.otpauth",
+  "*.codigo",
+  "*.recovery",
 ] as const;
 
 const redact = { paths: [...REDACT_PATHS], censor: REDACT_CENSOR };

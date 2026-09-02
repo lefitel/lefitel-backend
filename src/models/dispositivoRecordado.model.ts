@@ -34,8 +34,29 @@ export const DispositivoRecordadoModel: ModelDefined<IDispositivoRecordado, Crea
       // every INSERT name two columns that do not exist.
       tableName: "dispositivo_recordado",
       timestamps: false,
+      // Hallazgo B10, confirmed by running `toJSON`: with neither a
+      // `defaultScope` nor a `toJSON` override, a query that reaches this row
+      // — including via `usuarios.hasMany(...)` below through some future
+      // controller's `include` — serialises the hashed cookie value straight
+      // out. `defaultScope` stops a bare read; an explicit `include` that
+      // lists its own `attributes` bypasses a scope, which is why `toJSON`
+      // below exists too — independent, not redundant.
+      defaultScope: {
+        attributes: { exclude: ["token_hash"] },
+      },
     },
   );
+
+// See the comment on `credencialWebauthn.model.ts`'s equivalent block: the
+// prototype is where a per-model `toJSON` lives under the `.define()` API,
+// and the cast sidesteps `Model#toJSON`'s overloads rather than fighting them.
+(DispositivoRecordadoModel.prototype as unknown as Record<string, unknown>).toJSON = function (
+  this: { get(): Record<string, unknown> },
+) {
+  const valores = { ...this.get() };
+  delete valores.token_hash;
+  return valores;
+};
 
 UsuarioModel.hasMany(DispositivoRecordadoModel, { foreignKey: "id_usuario" });
 DispositivoRecordadoModel.belongsTo(UsuarioModel, { foreignKey: "id_usuario" });

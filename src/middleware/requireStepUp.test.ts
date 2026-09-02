@@ -588,7 +588,8 @@ describe("requireStepUp", () => {
     const cuentaSinFactor = { id: 1, estado: "completa" as const, mfa_satisfied_at: null };
 
     it("still lets a factor-less account through when the route does not demand a password", async () => {
-      // The guard on the fifteen routes mounted today. If this goes red, the
+      // The guard on every route mounted with this gate — fifteen when this was
+      // written, nineteen once plan 4B mounted its own. If this goes red, the
       // default flipped and the ERP just lost its permission matrix.
       const { req, res, next } = contexto(cuentaSinFactor, {});
       await requireStepUp()(req, res, next);
@@ -754,7 +755,7 @@ describe("requireStepUp", () => {
     });
 
     it("still lets a fresh proof straight through when the route does not demand a password", async () => {
-      // The guard on the fifteen routes mounted today, from the other side:
+      // The same guard from the other side:
       // the new clause must not have made a fresh factor proof insufficient
       // everywhere.
       tieneAlgunFactor.mockResolvedValue(true);

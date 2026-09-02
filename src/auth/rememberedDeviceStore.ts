@@ -1,10 +1,14 @@
 // The `dispositivo_recordado` table: browsers that have already proved a
 // factor and asked not to be asked again on this machine.
 //
-// Only two of its operations exist in the 4A skeleton, because there is not yet
-// any factor to prove: the sweep that stops the table growing for ever, and the
-// revocation of every device an account has. Issuing and accepting a device
-// cookie belong to the plans that build the factors.
+// Only two of its operations came out of the 4A skeleton, because there was not
+// yet any factor to prove: the sweep that stops the table growing for ever, and
+// the revocation of every device an account has. Issuing and accepting a device
+// cookie now live in `rememberedDeviceIssue.ts`, a sibling module rather than a
+// third pair of exports here — that module needs `Request`/`Response` and
+// `opaqueToken.ts` for the token itself, which have nothing to do with the two
+// queries this file owns, and mixing the two would make this module's own tests
+// (below) need an HTTP shape they do not otherwise touch.
 //
 // **The revocation has four call sites, not one.** An earlier version of this
 // comment named only the archive (`deleteUsuario`), which was true when it was

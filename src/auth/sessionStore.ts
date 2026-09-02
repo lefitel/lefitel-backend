@@ -9,6 +9,7 @@ import {
 } from "../config/security.js";
 import type { ISesion } from "../interfaces/index.js";
 import type { EstadoSesion } from "./sessionState.js";
+import type { FuenteMfa } from "./sessionState.js";
 
 const DAY_MS = 86_400_000;
 
@@ -61,6 +62,22 @@ export async function createSession(
   // mandatory turns "which state does this login deserve" into a question the
   // compiler asks at each of the call sites, where the answer is known.
   estado: EstadoSesion,
+  /**
+   * What proved the factor for this session, when anything did at login time.
+   *
+   * Only ever `"dispositivo"` today: it is the one credential that is checked
+   * *during* the login rather than after it, so it is the only source a row can
+   * carry the moment it is created. A factor proved afterwards is written by
+   * `sessionPromotion.ts` instead, which is why this is optional rather than
+   * required.
+   *
+   * `undefined` writes NULL, which is what every other login does and what this
+   * column meant before. And after plan 4B's change to `estadoEfectivo`, NULL
+   * and `"dispositivo"` are treated identically there — this exists for the
+   * trail, not for the rule: without it there is no way to tell, from a session
+   * row, that somebody got in on a cookie rather than by showing something.
+   */
+  fuente?: FuenteMfa,
 ): Promise<{ token: string; expiresAt: Date }> {
   const token = newSessionToken();
   const now = new Date();
@@ -76,6 +93,7 @@ export async function createSession(
     expires_at: expiresAt,
     revoked_at: null,
     estado,
+    mfa_source: fuente ?? null,
   });
 
   return { token, expiresAt };

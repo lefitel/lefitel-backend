@@ -1,0 +1,548 @@
+// Proving the second factor. Two endpoints, one file, because both endpoints
+// answer the same question — "does this TOTP code or this recovery code
+// belong to the caller's own account, right now?" — for two different
+// sessions in two different states.
+//
+// `verify` (Task 7 of `docs/plans/2026-09-01-factores-mfa.md`) is called from
+// a `parcial`/`onboarding` session that has not proved anything yet, and its
+// success lifts that session to `completa`. `stepup` (Task 17) is called from
+// a live `completa` session whose ten-minute step-up window
+// (`STEP_UP_WINDOW_MINUTES`) has lapsed, and its success re-stamps
+// `mfa_satisfied_at` without touching `estado` at all — there is nothing to
+// lift, the session was never anything but complete.
+//
+// **Three rules bind everything in this file, and they come from the
+// auditoría, not from taste:**
+//
+// 1. **The factor is always looked up by `req.user.id` — never by anything in
+//    the body** (hallazgo C15). `/mfa/verify` in particular is called from a
+//    session that has proved nothing yet, which is the single cheapest place
+//    in the whole plan to get this wrong: a factor found by a body-supplied
+//    id would let a stranger's TOTP satisfy the caller's own session.
+// 2. **A wrong code costs exactly what a wrong password costs** (hallazgo
+//    C3). Today a correct login is free in every rate-limit bucket
+//    (`costsNothing`/`skipSuccessfulRequests` in `loginLimiters.ts`), and
+//    `failed_attempts` only ever moves on a wrong *password*. Without this
+//    file reusing that same counter, the loop "free login → five guesses →
+//    session destroyed → free login again" turns a six-digit code with ±1
+//    step of tolerance (three valid values in a million) into a few hundred
+//    thousand requests — hours, not years, with twenty connections. Every
+//    failure below — a wrong code, a corrupt row, a replay, a code that only
+//    matches inside the wider clock-skew window — arms the *same*
+//    `usuarios.failed_attempts` / `locked_until` pair `verifyCredentials`
+//    already uses, through `siguienteBloqueo`/`estaBloqueada`
+//    (`middleware/loginLimiters.ts`). It is the same machine, reused, not a
+//    second one built beside it.
+// 3. **One answer for every way this can fail** (hallazgo B12). A mistyped
+//    code, a factor row whose `auth_tag` no longer authenticates, and a row
+//    written under a key this deployment no longer holds all answer with the
+//    exact same status and the exact same sentence — `descifrar` throwing is
+//    caught here and folded into "invalid", never surfaced. `errorShape.test.ts`
+//    only patrols `res.status(500)`, so nothing there would catch a handler
+//    that leaked `err.message` into a 400 or a 401; the dedicated test for
+//    that lives in `mfa.controller.test.ts`, named after the rule itself.
+//
+// **The clock-skew diagnosis (§6 of the spec, hallazgo C12) is real but never
+// visible in the response.** The design spec's own retry-at-±10-steps exists
+// so the server can eventually say "your phone's clock is off" — but doing
+// that *in this response* is exactly what hallazgo C12 forbids: it would (a)
+// widen the accepted window from 3 codes in a million to 21, seven times
+// cheaper to brute-force, the moment the diagnostic path is allowed to
+// accept, and (b) confirm a partial guess to whoever is guessing, the moment
+// the wording differs from an ordinary wrong code. So the wider window here
+// only ever *decides whether to write a bitácora line*; it never changes the
+// status, the message, or whether the attempt counts against the lockout.
+// Rule 3 of hallazgo C12 — "que exima del bloqueo por cuenta, si acaso; del
+// cubo, nunca" — is answered on the conservative side: this file does not
+// build any exemption at all. Every failure, skew-diagnosed or not, charges
+// `failed_attempts` identically; the plan makes the exemption optional
+// ("si acaso"), and no test asks for it.
+//
+// **Where the row's id and last-accepted step come from.** `totpStore.ts`
+// exports `leerSecretoConfirmado`, which returns only the decrypted string —
+// enough to *read* the secret, not enough to call `sellarPaso(id_factor, …)`
+// or `pasoYaUsado(ultimo_paso, …)`, both of which this file needs. Rather
+// than add a second, wider export to a module this plan lists as already
+// "terminado y verificado esta noche" (off limits tonight), `leerFactorTotp`
+// below reads the row itself through `FactorTotpModel.unscoped()` — the same
+// pattern `mfaKeyCheck.ts` and `rotateMfaKey.ts` already use for the same
+// reason — and decrypts it with the two primitives that *are* meant to be
+// reused outside `totpStore.ts`: `aadDeFactorTotp` (so the AAD format has
+// exactly one source, per that module's own header) and `mfaCrypto.ts`'s
+// `descifrar`. Worth a real `totpStore.ts` export the next time that file is
+// open; noted rather than done, since Task 7's own file list does not
+// include it and both callers of this logic already live in this one file.
+
+import type { Request, Response } from "express";
+import { Op } from "sequelize";
+import * as OTPAuth from "otpauth";
+import { sequelize } from "../database/sequelize.js";
+import { UsuarioModel } from "../models/usuario.model.js";
+import { SesionModel } from "../models/sesion.model.js";
+import { FactorTotpModel } from "../models/factorTotp.model.js";
+import { descifrar } from "../auth/mfaCrypto.js";
+import { aadDeFactorTotp, sellarPaso, pasoYaUsado } from "../auth/totpStore.js";
+import { gastarCodigo } from "../auth/recoveryCodeStore.js";
+import { promoverSesion } from "../auth/sessionPromotion.js";
+import type { FuenteMfa } from "../auth/sessionState.js";
+import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js";
+import { acunarDispositivo, setRememberedDeviceCookie } from "../auth/rememberedDeviceIssue.js";
+import { REMEMBER_DEVICE_FIELD } from "../config/security.js";
+import { permissionsFor } from "../permissions/store.js";
+import { logAction } from "../utils/logAction.js";
+import { log } from "../utils/logger.js";
+import { makeHandler } from "../utils/handler.js";
+
+const mfaLog = log("mfa");
+const handler = makeHandler(mfaLog);
+
+/** The one body field both endpoints read a code from — a TOTP digit string
+ *  or a recovery code, told apart below by shape alone. */
+const CAMPO_CODIGO = "codigo";
+
+/** Exactly six ASCII digits: what `otpauth`'s default `digits: 6` produces
+ *  and the only shape that is ever attempted as a TOTP code. Anything else —
+ *  including the 26-character recovery codes `recoveryCodeStore.ts` issues —
+ *  falls to the recovery-code path below. The two never overlap: a recovery
+ *  code is always 26 characters (`recoveryCodeStore.ts`'s `LONGITUD_CODIGO`),
+ *  never six. */
+const FORMA_TOTP = /^\d{6}$/;
+
+/** ±1 step (30 s each way): the window a code is actually *accepted* in —
+ *  hallazgo C10 and §6 of the design spec. */
+const VENTANA_ACEPTACION = 1;
+
+/** ±10 steps: the wider window `otpauth.TOTP.validate` is asked to search so
+ *  a genuine clock-skew case can be told apart from garbage — diagnostic
+ *  only, per hallazgo C12. Never the window a code is accepted in. */
+const VENTANA_DIAGNOSTICO = 10;
+
+/**
+ * Exported, not just used internally: `mfa.controller.test.ts` compares
+ * against this constant by name rather than a hardcoded string, so a
+ * reworded message cannot silently make the B12 "same response for three
+ * causes" test pass for the wrong reason.
+ */
+export const CODIGO_MFA_INVALIDO = "Código incorrecto o ya utilizado.";
+export const CODIGO_REQUERIDO =
+  "Introduce el código de tu aplicación de autenticación o uno de tus códigos de recuperación.";
+const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
+
+/**
+ * Thrown, and only ever caught, inside the recovery-code transaction below —
+ * never let past it. It is how "the code was valid but there was nothing
+ * left to promote/re-seal" rolls back the `used_at` write that already
+ * happened in the same transaction, instead of leaving somebody down one of
+ * ten codes for a session that gained nothing from it (Task 11 Step 4: "si
+ * el consumo cuaja y el sellado no, la persona gastó un código para nada").
+ */
+class NadaQueSellar extends Error {}
+
+/** Who the caller is, per `authenticate` — never trusted from the body. */
+function callerOf(req: Request): NonNullable<Request["user"]> | null {
+  return req.user ?? null;
+}
+
+interface FilaFactorTotp {
+  id: number;
+  secreto_cifrado: Buffer;
+  iv: Buffer;
+  auth_tag: Buffer;
+  key_version: number;
+  ultimo_paso: string | null;
+}
+
+/**
+ * This account's confirmed TOTP factor, decrypted — or `null` for "nothing
+ * to check against", which covers three different reasons on purpose and
+ * without telling them apart: no confirmed row at all (the account's only
+ * factor is a passkey, or none), a row whose `auth_tag` no longer
+ * authenticates, and a row whose `key_version` names a key this process does
+ * not hold. Hallazgo B12: every one of those has to look identical from the
+ * outside, and folding them into one `null` here is what makes that
+ * automatic for every caller below instead of something each has to
+ * remember.
+ */
+async function leerFactorTotp(id_usuario: number): Promise<FilaFactorTotp | null> {
+  const fila = await FactorTotpModel.unscoped().findOne({
+    where: { id_usuario, confirmed_at: { [Op.ne]: null } },
+  });
+  if (!fila) return null;
+  const datos = fila.get() as FilaFactorTotp;
+  return datos;
+}
+
+async function secretoDe(fila: FilaFactorTotp, id_usuario: number): Promise<string | null> {
+  try {
+    return descifrar(
+      {
+        ciphertext: fila.secreto_cifrado,
+        iv: fila.iv,
+        auth_tag: fila.auth_tag,
+        key_version: fila.key_version,
+      },
+      aadDeFactorTotp(fila.id),
+    );
+  } catch (err) {
+    // Never reaches a response — see the module header, hallazgo B12. Logged
+    // here only so an operator can tell "somebody mistyped a code" apart
+    // from "this row or this key is actually broken" without either fact
+    // ever reaching the caller.
+    mfaLog.warn({ err, id_usuario, id_factor: fila.id }, "no se pudo descifrar el factor TOTP");
+    return null;
+  }
+}
+
+/**
+ * Check a TOTP code against this account's confirmed factor, sealing the
+ * step it actually matched on success.
+ *
+ * **Order matters, and it is hallazgo C10 and C12 both enforced in one
+ * place.** One `validate` call searches ±`VENTANA_DIAGNOSTICO` steps, so a
+ * match can land anywhere in that range; the anti-replay check
+ * (`pasoYaUsado`) runs on *whichever* step matched, before anything decides
+ * whether that match is inside the acceptance window or only in the wider
+ * diagnostic one — "el anti-repetición va antes que el diagnóstico". Without
+ * that order, a stale code that was accepted minutes ago and has since
+ * drifted outside ±1 relative to *now* would read as fresh evidence of clock
+ * skew instead of the replay it actually is.
+ *
+ * Only a match inside ±`VENTANA_ACEPTACION` is ever accepted. A match only in
+ * the wider window is logged — once, and only when it is not itself a
+ * replay — as a diagnostic signal for §6's clock-skew message, and then
+ * refused exactly like any other wrong code: same status, same message, same
+ * charge against the lockout (hallazgo C12, rules 1 and 3).
+ */
+async function verificarTotp(id_usuario: number, codigo: string, ip: string | null): Promise<boolean> {
+  const fila = await leerFactorTotp(id_usuario);
+  if (!fila) return false;
+  const secreto = await secretoDe(fila, id_usuario);
+  if (secreto === null) return false;
+
+  const secret = OTPAuth.Secret.fromBase32(secreto);
+  const timestamp = Date.now();
+  const counterActual = OTPAuth.TOTP.counter({ timestamp });
+  const delta = OTPAuth.TOTP.validate({ token: codigo, secret, timestamp, window: VENTANA_DIAGNOSTICO });
+  if (delta === null) return false; // No match anywhere in ±10 steps: garbage.
+
+  const pasoCandidato = BigInt(counterActual + delta);
+  const repetido = pasoYaUsado(fila.ultimo_paso, pasoCandidato);
+
+  if (Math.abs(delta) > VENTANA_ACEPTACION) {
+    // Diagnostic range only. Never accepted — hallazgo C12 rule 1 — and the
+    // message never says so — rule 2. `!repetido` guards the log: a stale,
+    // already-sealed step surfacing here as time moves on is not new
+    // evidence of anything, it is the anti-replay rule doing its job one
+    // window later.
+    if (!repetido) {
+      logAction({
+        id_usuario,
+        action: "MFA_CLOCK_SKEW_DETECTED",
+        entity: "Usuario",
+        entity_id: id_usuario,
+        detail: "Un código TOTP encajó fuera de la ventana normal de ±1 paso: posible reloj desincronizado",
+        metadata: { delta_pasos: delta },
+        severity: "info",
+        ip_address: ip,
+      });
+    }
+    return false;
+  }
+
+  if (repetido) return false;
+
+  await sellarPaso(fila.id, pasoCandidato);
+  return true;
+}
+
+/**
+ * The account-level lockout, reused rather than reinvented (hallazgo C3):
+ * the exact same `failed_attempts` / `locked_until` pair, the exact same
+ * `siguienteBloqueo` arithmetic `verifyCredentials` (`auth/credentials.ts`)
+ * already uses for a wrong password. What is duplicated here is only the
+ * glue — increment, re-read, conditionally lock, log — because
+ * `credentials.ts` exports no standalone version of it to call instead; the
+ * throttling math itself is imported, not rewritten.
+ */
+async function cargarIntentoFallido(
+  id_usuario: number,
+  ip: string | null,
+  accion: string,
+  detalle: string,
+): Promise<void> {
+  await UsuarioModel.increment("failed_attempts", { where: { id: id_usuario } });
+  const actualizado = await UsuarioModel.findOne({
+    where: { id: id_usuario },
+    attributes: ["failed_attempts"],
+  });
+  if (actualizado) {
+    const fallos = actualizado.dataValues.failed_attempts ?? 0;
+    // Same reasoning as `verifyCredentials`: the database already added one,
+    // so `siguienteBloqueo` is given the count *before* this failure and
+    // adds it itself, rather than the arithmetic running twice.
+    const { locked_until } = siguienteBloqueo(fallos - 1);
+    if (locked_until) {
+      await UsuarioModel.update({ locked_until }, { where: { id: id_usuario } });
+      logAction({
+        id_usuario,
+        action: "ACCOUNT_LOCKED",
+        entity: "Usuario",
+        entity_id: id_usuario,
+        detail: `Cuenta bloqueada tras ${fallos} intentos fallidos de segundo factor`,
+        metadata: { failed_attempts: fallos, locked_until },
+        severity: "critical",
+        ip_address: ip,
+      });
+    }
+  }
+  logAction({
+    id_usuario,
+    action: accion,
+    entity: "Usuario",
+    entity_id: id_usuario,
+    detail: detalle,
+    metadata: null,
+    severity: "warning",
+    ip_address: ip,
+  });
+}
+
+/** Clears a stale lockout on success, the same way a correct password does
+ *  in `verifyCredentials` — otherwise yesterday's four failures and today's
+ *  one correct code lock an account that never got two wrong in a row. */
+async function limpiarFallosPrevios(
+  id_usuario: number,
+  datos: { failed_attempts?: number; locked_until?: Date | null },
+): Promise<void> {
+  if ((datos.failed_attempts ?? 0) > 0 || datos.locked_until) {
+    await UsuarioModel.update({ failed_attempts: 0, locked_until: null }, { where: { id: id_usuario } });
+  }
+}
+
+/**
+ * `POST /api/auth/mfa/verify` — Task 7. Proves a TOTP code or a recovery
+ * code from a session that has not proved anything yet, and lifts it to
+ * `completa`.
+ */
+export const verify = handler("verify", async (req: Request, res: Response) => {
+  const caller = callerOf(req);
+  if (!caller) return res.sendStatus(401);
+
+  const encontrado = await UsuarioModel.findByPk(caller.id, {
+    attributes: ["failed_attempts", "locked_until"],
+  });
+  if (!encontrado) return res.status(401).json({ message: CUENTA_INACTIVA });
+  const datosUsuario = encontrado.dataValues;
+
+  // Resting exactly like a locked login: answered uniformly, with nothing
+  // compared and nothing charged further — the account is already paying
+  // for this.
+  if (estaBloqueada(datosUsuario)) {
+    return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
+  }
+
+  const crudo = (req.body as Record<string, unknown> | undefined)?.[CAMPO_CODIGO];
+  if (typeof crudo !== "string" || crudo === "") {
+    // Nothing was attempted — no charge, the same shape `CREDENCIALES_INCOMPLETAS`
+    // takes in the login for an equally empty submission.
+    return res.status(400).json({ message: CODIGO_REQUERIDO });
+  }
+
+  const ip = req.ip ?? null;
+  let fuente: FuenteMfa | null = null;
+
+  if (FORMA_TOTP.test(crudo)) {
+    if (await verificarTotp(caller.id, crudo, ip)) {
+      // `promoverSesion` is not composed transactionally with `sellarPaso`
+      // here: `totpStore.ts`'s `sellarPaso` takes no `transaction` parameter
+      // (only the recovery-code path below was built to need one — Task 11
+      // Step 4). Its return value is not checked: a session that was
+      // already `completa` by the time this ran has nothing left to
+      // promote, and the code that got here was still genuinely valid and
+      // is still sealed against replay either way.
+      await promoverSesion(caller.id_sesion, "totp");
+      fuente = "totp";
+    }
+  } else {
+    // Task 11 Step 4: spending the code and sealing the session it proves
+    // succeed or fail together, or the person burns one of ten codes for
+    // nothing and has no trace of why.
+    try {
+      const promovido = await sequelize.transaction(async (transaction) => {
+        const gastado = await gastarCodigo(caller.id, crudo, { transaction });
+        if (!gastado) return false;
+        const ok = await promoverSesion(caller.id_sesion, "codigo", { transaction });
+        if (!ok) throw new NadaQueSellar();
+        return true;
+      });
+      if (promovido) fuente = "codigo";
+    } catch (err) {
+      if (!(err instanceof NadaQueSellar)) throw err;
+      // Rolled back: the code stays unspent, since promoting bought nothing.
+    }
+  }
+
+  if (fuente === null) {
+    await cargarIntentoFallido(
+      caller.id,
+      ip,
+      "MFA_VERIFY_FAILED",
+      "Código de segundo factor incorrecto, repetido o ya utilizado",
+    );
+    return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
+  }
+
+  await limpiarFallosPrevios(caller.id, datosUsuario);
+
+  /**
+   * "Remember this machine", and **this is the only place it can be granted**.
+   *
+   * The login renews a cookie that is already valid; it never mints a first
+   * one, and deliberately — at that point nobody has proved anything beyond a
+   * password. So without this branch the whole feature is chicken-and-egg:
+   * renewal requires a cookie, and nothing can ever hand out the first. The
+   * comment in `auth.controller.ts` that describes minting assumes it happens
+   * here, and nothing did until now.
+   *
+   * Gated on the body asking (`REMEMBER_DEVICE_FIELD`), never automatic — same
+   * rule the login's renewal follows. And after the factor is proved, never
+   * before: a cookie that skips the second factor is only ever handed to
+   * somebody who just showed one.
+   *
+   * Failure is logged and swallowed rather than turned into a 5xx, for the same
+   * reason the login gives: the session is already promoted and works without
+   * this cookie, and refusing here would cost somebody their whole verification
+   * over a convenience that saves them typing six digits.
+   *
+   * Not on `/auth/stepup` below, on purpose: that is re-proving inside a session
+   * that already exists, not arriving at one.
+   */
+  if ((req.body as Record<string, unknown> | undefined)?.[REMEMBER_DEVICE_FIELD] === true) {
+    try {
+      const token = await acunarDispositivo(caller.id, req);
+      setRememberedDeviceCookie(res, token);
+    } catch (err) {
+      mfaLog.error(
+        { err, id_usuario: caller.id },
+        "no se pudo recordar el dispositivo: el segundo factor sí quedó verificado",
+      );
+    }
+  }
+
+  logAction({
+    id_usuario: caller.id,
+    action: "MFA_VERIFIED",
+    entity: "Usuario",
+    entity_id: caller.id,
+    detail: `Segundo factor verificado (${fuente})`,
+    metadata: { id_sesion: caller.id_sesion, fuente },
+    severity: "info",
+    ip_address: ip,
+  });
+
+  return res.status(200).json({
+    message: "Segundo factor verificado.",
+    permisos: await permissionsFor(caller.id_rol),
+  });
+});
+
+/**
+ * `POST /api/auth/stepup` — Task 17, hallazgo C13. Re-seals `mfa_satisfied_at`
+ * on a live `completa` session whose step-up window has lapsed, without
+ * touching `estado` — there is nothing to promote, this session was never
+ * anything but complete.
+ *
+ * **The three rules that bound this endpoint, all satisfied by what this
+ * handler does *not* read:** it never looks at a remembered-device cookie,
+ * it never accepts a password field, and passkeys are 4C's. The only inputs
+ * are `req.user` (never the body) and `CAMPO_CODIGO`, so there is no code
+ * path here a stolen "remember this device" cookie or a bare password could
+ * ever walk through.
+ *
+ * `promoverSesion` cannot be reused here: its `WHERE` deliberately excludes
+ * `estado = 'completa'` (that exclusion is what makes the *original*
+ * promotion idempotent), so calling it from a session that is already
+ * `completa` would always answer "nothing changed" instead of re-sealing it.
+ * This handler writes `sesiones` directly instead, with the same `id_sesion`
+ * + `id_usuario` ownership pair hallazgo C15 asks for everywhere else, plus
+ * `estado: 'completa'` so this can never re-seal a row that should not
+ * exist as a target for it in the first place.
+ */
+export const stepup = handler("stepup", async (req: Request, res: Response) => {
+  const caller = callerOf(req);
+  if (!caller) return res.sendStatus(401);
+
+  const encontrado = await UsuarioModel.findByPk(caller.id, {
+    attributes: ["failed_attempts", "locked_until"],
+  });
+  if (!encontrado) return res.status(401).json({ message: CUENTA_INACTIVA });
+  const datosUsuario = encontrado.dataValues;
+
+  // Same bucket as `verify` (Task 17's own text: "mismo cubo por cuenta que
+  // la Task 7") — the same account-wide counter, not a second one.
+  if (estaBloqueada(datosUsuario)) {
+    return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
+  }
+
+  const crudo = (req.body as Record<string, unknown> | undefined)?.[CAMPO_CODIGO];
+  if (typeof crudo !== "string" || crudo === "") {
+    return res.status(400).json({ message: CODIGO_REQUERIDO });
+  }
+
+  const ip = req.ip ?? null;
+  let fuente: FuenteMfa | null = null;
+
+  if (FORMA_TOTP.test(crudo)) {
+    if (await verificarTotp(caller.id, crudo, ip)) {
+      const [count] = await SesionModel.update(
+        { mfa_satisfied_at: new Date(), mfa_source: "totp" },
+        { where: { id: caller.id_sesion, id_usuario: caller.id, estado: "completa" } },
+      );
+      if (count > 0) fuente = "totp";
+    }
+  } else {
+    try {
+      const promovido = await sequelize.transaction(async (transaction) => {
+        const gastado = await gastarCodigo(caller.id, crudo, { transaction });
+        if (!gastado) return false;
+        const [count] = await SesionModel.update(
+          { mfa_satisfied_at: new Date(), mfa_source: "codigo" },
+          {
+            where: { id: caller.id_sesion, id_usuario: caller.id, estado: "completa" },
+            transaction,
+          },
+        );
+        if (count === 0) throw new NadaQueSellar();
+        return true;
+      });
+      if (promovido) fuente = "codigo";
+    } catch (err) {
+      if (!(err instanceof NadaQueSellar)) throw err;
+    }
+  }
+
+  if (fuente === null) {
+    await cargarIntentoFallido(
+      caller.id,
+      ip,
+      "MFA_VERIFY_FAILED",
+      "Reautenticación de step-up incorrecta, repetida o ya utilizada",
+    );
+    return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
+  }
+
+  await limpiarFallosPrevios(caller.id, datosUsuario);
+
+  logAction({
+    id_usuario: caller.id,
+    action: "STEP_UP_REPROVED",
+    entity: "Usuario",
+    entity_id: caller.id,
+    detail: `Sesión re-acreditada sin cerrar sesión (${fuente})`,
+    metadata: { id_sesion: caller.id_sesion, fuente },
+    severity: "info",
+    ip_address: ip,
+  });
+
+  return res.status(200).json({ message: "Identidad confirmada." });
+});

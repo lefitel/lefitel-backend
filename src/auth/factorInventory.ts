@@ -152,12 +152,57 @@ export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
  * site in `auth.controller.ts` for what starting somebody's fourteen days on a
  * request that ended in a 503 would cost them.
  *
+ * **`dispositivoRecordadoValido`, added by plan 4B's Task 12 (Decision 4).**
+ * Whether the caller already found a live "remember this device" cookie for
+ * this account — see `auth/rememberedDeviceIssue.ts`'s `comprobarDispositivo`.
+ * Defaults to `false` so every caller written before this parameter existed
+ * keeps behaving exactly as it did.
+ *
+ * **This function stays the *only* place that answers "which state does this
+ * session open in", which is why the flag is a parameter here rather than a
+ * second decision made in `login`.** The obvious-looking alternative —
+ * `estadoInicialDeSesion` returns `parcial` as it always did, and the login
+ * controller overwrites that to `completa` when a device is remembered — puts
+ * two places in charge of one question, and the failure mode is not
+ * hypothetical: hallazgo D2 is exactly a function computing this and a second
+ * one recomputing it without knowing that the first one already had. So the
+ * flag comes in here, is read in exactly one branch (the first), and nowhere
+ * else in `src/` decides `estado` on its own account.
+ *
+ * **The flag only ever matters inside branch 1, below, and that placement is
+ * itself part of the contract.** An account with nothing registered has
+ * nothing for a remembered device to skip, so `dispositivoRecordadoValido`
+ * must not be consulted before `tieneAlgunFactor` — reading it first would
+ * short-circuit straight to `completa` with no `graceUntil` stamped, silently
+ * cancelling the fourteen-day clock for an account that has never even been
+ * asked to configure anything.
+ *
+ * **What this function does not do, and whose job that is instead.** It never
+ * calls `comprobarDispositivo` itself, and it never writes
+ * `sesiones.mfa_source`. The caller resolves the cookie — strictly *after*
+ * the password has already checked out, never before (`auth.controller.ts`'s
+ * `login` is the only caller today, and it is written that way on purpose:
+ * resolving whose device a cookie names ahead of the password is the exact
+ * trap `comprobarDispositivo`'s own header warns against). And nothing in
+ * `src/` today can write `mfa_source = 'dispositivo'` on the row this answer
+ * opens — doing that means widening `sessionStore.ts`'s `createSession`,
+ * which is outside this task's file list. Left unwritten, the column reads as
+ * NULL, and `estadoEfectivo`'s third clause in `sessionState.ts` already
+ * treats NULL exactly like `'dispositivo'` — neither counts as durable
+ * evidence a factor was shown — so no security property here depends on that
+ * column actually being set. What is lost without it is observability only:
+ * nothing can tell, from the row alone, that a login took this path. Worth a
+ * small follow-up; not a hole this parameter needs to close.
+ *
  * Three branches, in this order, and the order is the load-bearing part:
  *
- * 1. **There is a factor to prove** → `parcial`. The password got them this
- *    far and no further. First, so that somebody who *has* a passkey is asked
- *    to use it rather than sent to a setup screen for a factor they already
- *    registered.
+ * 1. **There is a factor to prove** → `parcial`, **unless a valid remembered
+ *    device was already presented, which opens `completa` instead.** That is
+ *    Decision 4's whole point: this account has something to prove, and this
+ *    browser already proved it once and asked not to be asked again. Checked
+ *    first, so that somebody who *has* a passkey but no remembered device is
+ *    still asked to use it rather than sent to a setup screen for a factor
+ *    they already registered.
  * 2. **No usable deadline stored** → stamp one, and `completa`. Started at
  *    their first login *after* the deploy rather than filled in by the
  *    migration: from the deploy, somebody on holiday comes back on day 30 to a
@@ -245,11 +290,15 @@ export async function estadoInicialDeSesion(
   // the key is a normal caller of this function and not a mistake.
   usuario: { id: number; mfa_grace_until: Date | null | undefined },
   ahora: Date,
+  dispositivoRecordadoValido = false,
 ): Promise<{ estado: EstadoSesion; graceUntil: Date | null }> {
   if (await tieneAlgunFactor(usuario.id)) {
     // No deadline is stamped on them: they have nothing left to be given
     // fourteen days for, and a date in that column reads as "this account is
-    // still being chased".
+    // still being chased". True whichever of the two states below fires.
+    if (dispositivoRecordadoValido) {
+      return { estado: "completa", graceUntil: null };
+    }
     return { estado: "parcial", graceUntil: null };
   }
 

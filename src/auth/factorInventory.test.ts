@@ -473,6 +473,61 @@ describe("estadoInicialDeSesion", () => {
     expect(codigoCount).not.toHaveBeenCalled();
   });
 
+  // Task 12 (Decision 4): a valid remembered device lets an account with a
+  // factor skip straight to `completa` instead of landing in `parcial`.
+  describe("with a remembered device", () => {
+    it("opens completa directly when the account has a factor and the device is valid", async () => {
+      passkeys = [PASSKEY];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, true);
+      expect(r.estado).toBe("completa");
+    });
+
+    it("does not start a grace clock through the device path either", async () => {
+      // Same rule as the ordinary parcial branch: nothing left to chase this
+      // account for.
+      passkeys = [PASSKEY];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, true);
+      expect(r.graceUntil).toBeNull();
+    });
+
+    it("counts a confirmed TOTP the same way a passkey counts, for this branch too", async () => {
+      secretosTotp = [TOTP_CONFIRMADO];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, true);
+      expect(r.estado).toBe("completa");
+    });
+
+    it("still asks for the factor when the flag is false, even with one registered", async () => {
+      // The default: every call site written before this parameter existed
+      // keeps asking for the factor, because the flag defaults to false.
+      passkeys = [PASSKEY];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+      expect(r.estado).toBe("parcial");
+    });
+
+    it("still starts the grace clock for an account with nothing registered, even if the flag came in true", async () => {
+      // Guards the placement of the check: reading `dispositivoRecordadoValido`
+      // *before* `tieneAlgunFactor` would short-circuit to `completa` with no
+      // deadline stamped, silently cancelling the fourteen-day clock for an
+      // account that was never asked to configure anything and has nothing a
+      // device could have been remembered for.
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, true);
+      expect(r.estado).toBe("completa");
+      expect(r.graceUntil?.getTime()).toBe(ahora.getTime() + MFA_GRACE_DAYS * DIA);
+    });
+
+    it("does not let a device flag stand in for a factor when the deadline has already passed", async () => {
+      // The flag only ever matters inside the "has a factor" branch. An
+      // account with nothing registered and an expired deadline still goes to
+      // onboarding, whatever the device flag says.
+      const r = await estadoInicialDeSesion(
+        { id: YO, mfa_grace_until: new Date(ahora.getTime() - DIA) },
+        ahora,
+        true,
+      );
+      expect(r.estado).toBe("onboarding");
+    });
+  });
+
   it("asks about the account logging in and not about anyone else", async () => {
     // Behaviour and not just the shape of the query: the other account's
     // passkey is in the table, and it must not put this login into `parcial`.

@@ -56,6 +56,21 @@ const revokeAllRememberedDevicesOf = vi.fn();
 vi.mock("../auth/rememberedDeviceStore.js", () => ({
   revokeAllRememberedDevicesOf: (...a: unknown[]) => revokeAllRememberedDevicesOf(...a),
 }));
+// Task 12: whether this browser already proved a factor, and minting a fresh
+// cookie once one has. Mocked at the module boundary — like
+// `rememberedDeviceStore.js` above — so this file tests the login's wiring
+// (when each function is called, and with what) without a real
+// `dispositivo_recordado` row behind it.
+const comprobarDispositivo = vi.fn();
+const acunarDispositivo = vi.fn();
+const readRememberedDeviceCookie = vi.fn();
+const setRememberedDeviceCookie = vi.fn();
+vi.mock("../auth/rememberedDeviceIssue.js", () => ({
+  comprobarDispositivo: (...a: unknown[]) => comprobarDispositivo(...a),
+  acunarDispositivo: (...a: unknown[]) => acunarDispositivo(...a),
+  readRememberedDeviceCookie: (...a: unknown[]) => readRememberedDeviceCookie(...a),
+  setRememberedDeviceCookie: (...a: unknown[]) => setRememberedDeviceCookie(...a),
+}));
 
 // The three factor tables, mocked at the model rather than mocking
 // `factorInventory.js` wholesale: what the login does with the state is the
@@ -108,7 +123,7 @@ vi.mock("../utils/logger.js", () => ({
 
 const { login, me, logout, logoutAll, sessions, endSession } = await import("./auth.controller.js");
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
-const { CREDENCIALES_INCOMPLETAS, CREDENCIALES_INVALIDAS } = await import(
+const { CREDENCIALES_INCOMPLETAS, CREDENCIALES_INVALIDAS, REMEMBER_DEVICE_FIELD } = await import(
   "../config/security.js"
 );
 const bcryptjs = (await import("bcryptjs")).default;
@@ -270,6 +285,11 @@ beforeEach(() => {
   revokeSessionOf.mockResolvedValue(true);
   revokeAllSessionsOf.mockResolvedValue(0);
   revokeAllRememberedDevicesOf.mockResolvedValue(0);
+  // No cookie, no device, nothing to renew — the shape of every account on
+  // the day this deploys.
+  readRememberedDeviceCookie.mockReturnValue(undefined);
+  comprobarDispositivo.mockResolvedValue(false);
+  acunarDispositivo.mockResolvedValue("un-token-nuevo-de-dispositivo");
   permissionsFor.mockResolvedValue(PERMISOS);
   purgeExpiredTokens.mockResolvedValue(0);
   // Nothing registered, which is every account on the day this deploys.
@@ -362,7 +382,7 @@ describe("POST /api/auth/login", () => {
       // Withholding the matrix must not turn into refusing the login, which
       // would lock out every account the day its deadline passed.
       expect(c.status, estado).toBe(200);
-      expect(createSession, estado).toHaveBeenCalledWith(YO, expect.anything(), estado);
+      expect(createSession, estado).toHaveBeenCalledWith(YO, expect.anything(), estado, undefined);
       expect(Object.keys(c.payload ?? {}).sort(), estado).toEqual(["message", "usuario"]);
       // Absent, and absent because it was never asked for.
       expect(permissionsFor, estado).not.toHaveBeenCalled();
@@ -378,7 +398,7 @@ describe("POST /api/auth/login", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "completa");
+    expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "completa", undefined);
     expect(Object.keys(c.payload ?? {}).sort()).toEqual(["message", "permisos", "usuario"]);
     expect(c.payload?.permisos).toEqual(PERMISOS);
   });
@@ -505,6 +525,126 @@ describe("POST /api/auth/login", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
+  });
+
+  /**
+   * Task 12 (Decision 4): whether an existing "remember this device" cookie
+   * lets the login skip straight to `completa`, and whether the login mints a
+   * fresh one afterwards.
+   */
+  describe("with a remembered device", () => {
+    it("does not look at the cookie before the password checks out", async () => {
+      // The account does not exist, so `verifyCredentials` refuses before a
+      // single row of `dispositivo_recordado` could matter.
+      findOne.mockResolvedValue(null);
+      readRememberedDeviceCookie.mockReturnValue("un-token-cualquiera");
+      const c = call(undefined, { body: { user: "nadie", pass: "x" } });
+      await login(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(comprobarDispositivo).not.toHaveBeenCalled();
+    });
+
+    it("does not exempt a remembered login from the account lockout", async () => {
+      // The rule Decision 4 is built around: `LOCKOUT_MAX_MINUTES` already
+      // bounds the cost of a wrong-account lockout to fifteen minutes, and
+      // building an exemption here would hand whoever holds this cookie —
+      // the stolen laptop — unlimited password guesses. `comprobarDispositivo`
+      // is stubbed to answer `true`, so if the handler ever checked the
+      // device before (or instead of) the lockout, this would come back 200
+      // instead of the same 400 a wrong password gets.
+      findOne.mockResolvedValue(storedUser({ locked_until: new Date(Date.now() + 60_000) }));
+      readRememberedDeviceCookie.mockReturnValue("un-token-valido");
+      comprobarDispositivo.mockResolvedValue(true);
+      const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+      await login(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(c.message).toBe(CREDENCIALES_INVALIDAS);
+      expect(comprobarDispositivo).not.toHaveBeenCalled();
+      expect(createSession).not.toHaveBeenCalled();
+    });
+
+    it("opens completa directly for an account with a factor, when the presented device is valid", async () => {
+      passkeyCount.mockResolvedValue(1);
+      readRememberedDeviceCookie.mockReturnValue("un-token-valido");
+      comprobarDispositivo.mockResolvedValue(true);
+      const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+      await login(c.req, c.res);
+
+      expect(comprobarDispositivo).toHaveBeenCalledWith("un-token-valido", YO);
+      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "completa", "dispositivo");
+      expect(c.status).toBe(200);
+      expect(c.payload?.permisos).toEqual(PERMISOS);
+    });
+
+    it("still opens parcial for an account with a factor when no cookie was sent", async () => {
+      passkeyCount.mockResolvedValue(1);
+      // Default fixture: `readRememberedDeviceCookie` returns undefined.
+      const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+      await login(c.req, c.res);
+
+      expect(comprobarDispositivo).not.toHaveBeenCalled();
+      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "parcial", undefined);
+    });
+
+    it("still opens parcial for an account with a factor when the presented device is not valid", async () => {
+      passkeyCount.mockResolvedValue(1);
+      readRememberedDeviceCookie.mockReturnValue("un-token-caducado");
+      comprobarDispositivo.mockResolvedValue(false);
+      const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+      await login(c.req, c.res);
+
+      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "parcial", undefined);
+    });
+
+    it("renews the cookie only when the body asks for it and the existing one was already valid", async () => {
+      passkeyCount.mockResolvedValue(1);
+      readRememberedDeviceCookie.mockReturnValue("un-token-valido");
+      comprobarDispositivo.mockResolvedValue(true);
+      const c = call(undefined, {
+        body: { user: "isaias", pass: "secreta", [REMEMBER_DEVICE_FIELD]: true },
+      });
+      await login(c.req, c.res);
+
+      expect(acunarDispositivo).toHaveBeenCalledWith(YO, c.req);
+      expect(setRememberedDeviceCookie).toHaveBeenCalledWith(c.res, "un-token-nuevo-de-dispositivo");
+    });
+
+    it("never mints a cookie the body did not ask for, however trusted the device already was", async () => {
+      passkeyCount.mockResolvedValue(1);
+      readRememberedDeviceCookie.mockReturnValue("un-token-valido");
+      comprobarDispositivo.mockResolvedValue(true);
+      const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
+      await login(c.req, c.res);
+
+      expect(acunarDispositivo).not.toHaveBeenCalled();
+      expect(setRememberedDeviceCookie).not.toHaveBeenCalled();
+    });
+
+    it("never mints a cookie for a login that has not proved a factor, whatever the body asks", async () => {
+      // No factor, no cookie presented: `dispositivoRecordadoValido` is false,
+      // so asking for `recordar` has nothing proven to attach a cookie to.
+      const c = call(undefined, {
+        body: { user: "isaias", pass: "secreta", [REMEMBER_DEVICE_FIELD]: true },
+      });
+      await login(c.req, c.res);
+
+      expect(acunarDispositivo).not.toHaveBeenCalled();
+    });
+
+    it("still answers 200 when renewing the device cookie fails", async () => {
+      passkeyCount.mockResolvedValue(1);
+      readRememberedDeviceCookie.mockReturnValue("un-token-valido");
+      comprobarDispositivo.mockResolvedValue(true);
+      acunarDispositivo.mockRejectedValue(new Error("no se pudo escribir la fila"));
+      const c = call(undefined, {
+        body: { user: "isaias", pass: "secreta", [REMEMBER_DEVICE_FIELD]: true },
+      });
+      await login(c.req, c.res);
+
+      expect(c.status).toBe(200);
+    });
   });
 });
 
@@ -664,6 +804,48 @@ describe("GET /api/auth/me", () => {
     expect((c.payload?.usuario as { id: number }).id).toBe(YO);
     expect(c.payload?.expires_at).toEqual(CADUCA);
     expect(c.payload?.estado).toBe("onboarding");
+  });
+
+  it("masks the email for any session that is not complete", async () => {
+    /**
+     * Hallazgo C16. Whoever has only the password is in `parcial`, and this
+     * endpoint was handing them the verified recovery address along with the
+     * name and picture. `/password/forgot` spends paragraphs refusing to
+     * confirm an address has an account at all, and §11 argues that address
+     * *is* the account — so leaking it to somebody who has cleared none of
+     * the second factor is the same secret, given away one door down.
+     *
+     * `completa` is the only state that proved the factor, so it is the only
+     * one that gets the real address. Both other states get the masked one —
+     * the fix is about the state, not about `parcial` specifically.
+     */
+    findByPk.mockResolvedValue(storedUser({ email: "isaias@osefi.net" }));
+
+    for (const estado of ["parcial", "onboarding"] as const) {
+      const c = call(sesionCompleta({ estado }));
+      await me(c.req, c.res);
+
+      expect(c.status, estado).toBe(200);
+      expect((c.payload?.usuario as { email: string }).email, estado).toBe("i***@osefi.net");
+    }
+
+    const c = call(sesionCompleta({ estado: "completa" }));
+    await me(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect((c.payload?.usuario as { email: string }).email).toBe("isaias@osefi.net");
+  });
+
+  it("leaves a missing email alone instead of masking null", async () => {
+    // Verified email is optional (`allowNull: true`) — every one of the nine
+    // real accounts has no verified address yet, per the plan. Masking must
+    // not crash on the shape it will meet on day one in production.
+    findByPk.mockResolvedValue(storedUser({ email: null }));
+    const c = call(sesionCompleta({ estado: "parcial" }));
+    await me(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect((c.payload?.usuario as { email: unknown }).email).toBeNull();
   });
 
   it("answers with this session's own expiry, not one computed in the handler", async () => {

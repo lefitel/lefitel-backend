@@ -248,7 +248,22 @@ export interface IFactorTotp {
   iv: Buffer;
   auth_tag: Buffer;
   key_version: number;
-  ultimo_paso: number | null;
+  /**
+   * The last TOTP step this factor accepted — **typed as the string it really
+   * is**, not as the number it looks like.
+   *
+   * `pg` hands a `BIGINT` column back as a string, always, and declaring this
+   * `number` was a lie the compiler then helped enforce in the wrong direction.
+   * The consequences were measured (finding C10) and two of the three obvious
+   * ways to use it are holes: `paso === ultimo_paso` is **false for every
+   * value**, so an anti-replay rule written as equality — which is exactly how
+   * the spec words it — never rejects anything and the same six digits stay
+   * usable for ninety seconds; and `ultimo_paso + 1` concatenates instead of
+   * adding. Only `<=` coerces the way the reader expects.
+   *
+   * Compare through `pasoYaUsado` in `auth/totpStore.ts`, never by hand.
+   */
+  ultimo_paso: string | null;
   confirmed_at: Date | null;
   created_at: Date;
 }
@@ -258,6 +273,22 @@ export interface ICodigoRecuperacion {
   id: number;
   id_usuario: number;
   codigo_hash: string;
+  /**
+   * The first 8 characters of the code, **stored in clear** — and not a leak.
+   * `codigo_hash` covers the whole code, prefix included, so whoever steals the
+   * database still faces bcrypt for the rest of it.
+   *
+   * It exists because verifying a code without it means bcrypt-comparing the
+   * account's ten codes one by one, and that was measured at **2646 ms with the
+   * event loop stalled 88% of the time** — five attempts is 12.4 seconds of
+   * stopped server, and provoking it does not require guessing any code right.
+   * With the prefix indexed there is exactly one candidate, so it is one
+   * compare. See `20260902000001-recovery-code-prefix.ts`.
+   *
+   * Not optional, because it is derived from the code at the same instant as
+   * `codigo_hash`: there is no creation path that has one without the other.
+   */
+  prefijo: string;
   used_at: Date | null;
   created_at: Date;
 }

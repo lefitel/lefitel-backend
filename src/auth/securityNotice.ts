@@ -55,6 +55,17 @@ function securityRecipient(): string | null {
 }
 
 /** `n***@dominio.com` — enough to recognise, not enough to hand over. */
+/**
+ * Why the mask is a **fixed** run of asterisks and not one per real character:
+ * the length of an address is itself a hint, and this value goes to mailboxes
+ * and to responses whose whole purpose is to say less than they know.
+ *
+ * There used to be a second copy of this in `controllers/email.controller.ts`,
+ * called `enmascarada` and not exported, splitting on the *first* `@` rather
+ * than the last — so a local part containing a quoted `@` masked to the wrong
+ * domain. Merged here rather than left as a pair that agrees today: plan 4B's
+ * `/auth/me` needed the same function, and two of them is how they drift.
+ */
 export function maskEmail(email: string): string {
   const at = email.lastIndexOf("@");
   // No `@` at all, or one at either end: not an address this can reason

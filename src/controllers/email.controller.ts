@@ -46,7 +46,7 @@ import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
 import { hayPresupuestoDeCorreo } from "../auth/mailBudget.js";
-import { avisarCorreoCambiado } from "../auth/securityNotice.js";
+import { avisarCorreoCambiado, maskEmail } from "../auth/securityNotice.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
@@ -197,22 +197,6 @@ function verificationEmailBody(enlace: string): { html: string; texto: string } 
       "Este enlace caduca en una hora. Si no fuiste tú, puedes ignorar este mensaje.",
     ].join("\n"),
   };
-}
-
-/**
- * `nueva@osefi.net` → `n***@osefi.net`.
- *
- * The notice below goes to a mailbox this account may no longer control —
- * that is the whole reason it is sent — so the new address is not spelled
- * out in it: enough for the real owner to recognise their own account did
- * this, not enough to hand the new address to whoever now reads the old
- * inbox. A fixed run of asterisks rather than one per real character, so the
- * mask does not also leak the new address's length.
- */
-function enmascarada(email: string): string {
-  const [usuario, dominio] = email.split("@");
-  if (!usuario || !dominio) return "***";
-  return `${usuario.slice(0, 1)}***@${dominio}`;
 }
 
 /**
@@ -432,7 +416,7 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     // Sent to the address that is *leaving* the account, never the new one,
     // and never blocking or altering the response: same contract as the
     // verification mail above.
-    const aviso = previousAddressNoticeBody(enmascarada(destino));
+    const aviso = previousAddressNoticeBody(maskEmail(destino));
     await enviarCorreo({
       para: direccionAnterior,
       flujo: "email/aviso-direccion-anterior",

@@ -50,6 +50,25 @@ vi.mock("../models/usuario.model.js", () => ({
     increment: (...args: unknown[]) => increment(...args),
   },
 }));
+// One more module kept away from the plain stub above, for the reason the five
+// comments below already give: `auth.controller.ts` now reads and mints the
+// remembered-device cookie, so it imports `rememberedDeviceIssue.js`, which
+// reaches `dispositivoRecordado.model.ts` and its association calls.
+//
+// Mocked at the module, not patched on the stub — I tried the stub first, with
+// `hasMany`/`belongsTo` as no-ops, on the theory that it would close this whole
+// class of breakage at once. **It does not.** The association is declared in
+// both directions, and the second one is
+// `DispositivoRecordadoModel.belongsTo(UsuarioModel, …)` — the *real* model
+// calling Sequelize with our fake as the argument, and Sequelize checks that
+// argument is a genuine Model subclass. Only the direction where the fake is
+// the receiver can be stubbed, so the module mock is the one that works.
+vi.mock("../auth/rememberedDeviceIssue.js", () => ({
+  acunarDispositivo: vi.fn(),
+  comprobarDispositivo: vi.fn(async () => false),
+  readRememberedDeviceCookie: () => undefined,
+  setRememberedDeviceCookie: vi.fn(),
+}));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 vi.mock("bcryptjs", () => ({
   default: { compare: vi.fn().mockResolvedValue(true), hash: vi.fn().mockResolvedValue("hashed") },

@@ -644,13 +644,30 @@ entre Vercel y Coolify deje de importar (§11).
 | `POST` · `DELETE` | `/auth/totp/setup` · `/confirm` · `/auth/totp` | Alta · confirmación · baja. **Step-up.** |
 | `POST` | `/auth/email/send` · `/verify` | Verificación de email. |
 | `POST` | `/auth/password/forgot` · `/reset` | Recuperación. |
-| `POST` | `/auth/recovery-codes/regenerate` | **Step-up**, o un código de recuperación válido. |
+| `POST` | `/auth/recovery-codes` | Genera o regenera los diez. **Step-up con contraseña, siempre — nunca un código de recuperación.** Ver nota. |
+| `GET` | `/auth/recovery-codes` | Cuántos códigos quedan sin gastar. Sin step-up: contar no es una operación sensible. |
 | `POST` | `/api/usuario/:id/mfa/reset` | **El administrador desbloquea a alguien desde la aplicación.** Ver §8. |
 
 Los `DELETE` van explícitos porque §7 promete la pantalla que los usa, y una
 ruta sin especificar en un código con historial de IDOR es cómo aparece un
 `DELETE /:id` sin filtro por `id_usuario` — y con eso un rol 3 borra las passkeys
 del administrador y lo empuja al camino de la contraseña.
+
+**Regenerar códigos nunca acepta un código de recuperación como prueba — esta
+revisión corrige lo que decía la tabla de arriba.** La redacción original
+("step-up, o un código de recuperación válido") es exactamente lo que el
+hallazgo C14 de la auditoría del Plan 4B señaló como el agujero: si un código
+basta para regenerar los diez, el papel impreso en un cajón se convierte en
+llave maestra — quien lo tenga regenera el juego entero y la víctima se queda
+sin ninguno, con un papel que ya no vale nada. El Plan 4B construye solo la
+mitad segura: `POST /auth/recovery-codes` exige `requireStepUp({
+exigeContrasena: true })`, que pide la contraseña siempre, incluso a quien
+acaba de probar su factor dentro de la ventana de diez minutos — así que un
+código de recuperación, por sí solo, nunca es suficiente para regenerar nada.
+Consecuencia de coherencia: la ruta se queda fuera de `PARCIAL` en
+`auth/sessionState.ts` (hoy vive en `ONBOARDING_EXTRA`); quien está en
+`parcial` no ha terminado de entrar y no la alcanza, que es lo correcto —
+regenerar exige haber demostrado la sesión.
 
 **El step-up es un middleware `requireStepUp`**, y se monta también sobre rutas
 que ya existen fuera de `/auth`: `PUT /usuario/userpass/:id`,
@@ -955,9 +972,10 @@ de prueba real registrado como requisito previo — la propagación DNS es de ho
 y descubrirla el sábado por la noche deja a todo el mundo, dueño incluido, sin
 código de verificación.
 
-Variables nuevas en Coolify: `MFA_ENCRYPTION_KEY`, `RESEND_API_KEY`, `MAIL_FROM`,
-`MAIL_SECURITY_TO`, `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGIN` (lista de orígenes exactos),
-`COOKIE_NAME`, `COOKIE_SECURE`.
+Variables nuevas en Coolify: `MFA_ENCRYPTION_KEY_1` y `MFA_ENCRYPTION_KEY_ACTIVE`
+(el llavero — ver más abajo; `_2`, `_3`… solo aparecen el día que se rota),
+`RESEND_API_KEY`, `MAIL_FROM`, `MAIL_SECURITY_TO`, `WEBAUTHN_RP_ID`,
+`WEBAUTHN_ORIGIN` (lista de orígenes exactos), `COOKIE_NAME`, `COOKIE_SECURE`.
 
 **Y hay dos categorías entre ellas, que no es lo mismo.** `RESEND_API_KEY` y
 `MAIL_FROM` están en `requiredEnv`: **sin ellas el proceso no arranca**, porque sin
@@ -969,15 +987,77 @@ una caída. Pero cada aviso omitido escribe una línea de log, porque un desplie
 nunca la puso se parece exactamente a uno donde los avisos funcionan, hasta el día en
 que alguien busca la alerta que nunca se mandó.
 
-**`MFA_ENCRYPTION_KEY` es material de copia de seguridad, igual que el dump.** 32
-bytes en hexadecimal, **validados por longitud al arrancar** — que la variable
-exista no es que sea válida: una clave de 20 caracteres pasa la comprobación y
-revienta en el primer alta de TOTP. Junto a los datos se guarda una **huella de
-la clave** (HMAC de una constante conocida) y el servidor **se niega a arrancar
-si no coincide**: sin eso, cambiarla por descuido convierte todos los secretos
-TOTP en basura, el servidor levanta tan contento, y cada usuario recibe "código
-incorrecto" para siempre sin diagnóstico posible. Un fallo de descifrado GCM se
-registra como tal y no se confunde con un código mal escrito.
+`MFA_ENCRYPTION_KEY_ACTIVE` está también en `requiredEnv` — pero **nunca**
+`MFA_ENCRYPTION_KEY_1` ni ninguna versión concreta. La lista solo prueba que
+la variable está puesta; que apunte a una versión que de verdad existe y que
+esa clave sea válida lo comprueba el arranque por separado (más abajo).
+Poner una versión concreta en `requiredEnv` parecía lo prudente y es
+justamente lo que rompería el último paso del procedimiento de rotación: ese
+paso borra `MFA_ENCRYPTION_KEY_1`, así que una rotación bien hecha dejaría el
+siguiente arranque de producción rechazado por su propia lista de variables
+obligatorias.
+
+**`MFA_ENCRYPTION_KEY_*` es material de copia de seguridad, igual que el dump —
+y no es una sola variable, es un llavero.** `MFA_ENCRYPTION_KEY_1`,
+`MFA_ENCRYPTION_KEY_2`, … cada una 32 bytes en hexadecimal (64 caracteres),
+**validados por longitud del buffer decodificado y no solo por longitud de la
+cadena** — un valor de 65 caracteres se trunca en silencio a 32 bytes y pasaría
+una comprobación más floja. Más `MFA_ENCRYPTION_KEY_ACTIVE`, el número de la
+que cifra ahora mismo. Descifrar usa siempre la clave que indica el
+`key_version` de la fila; cifrar usa siempre la activa. Con una sola clave
+configurada esto se comporta exactamente como si no hubiera llavero — es el
+caso normal.
+
+**Ya no hay huella de la clave.** La idea original —un HMAC de una constante
+guardado junto a los datos, y el servidor negándose a arrancar si no
+cuadra— se descartó al escribir el Plan 4B (Decisión 1): no hay ninguna tabla
+de configuración donde guardarla, y aunque la hubiera, una huella prueba «la
+clave cambió», no «la clave abre estos datos» — restaurar una copia vieja de
+`factor_totp` sobre la base actual deja la huella cuadrando y todos los
+secretos ilegibles, que es justo el fallo que existía para evitar. En su lugar
+el arranque **descifra una fila real** (la primera con `confirmed_at` no nulo,
+si existe alguna) y, si la clave activa no la abre, dice qué versión de clave
+probó contra qué fila. El fallo no tira todo el ERP: solo `/auth/totp/*`
+responde 503, con una línea `fatal` en el registro — quitarle a nueve personas
+todo el sistema por una errata en una variable, incluidas las que no tienen
+ningún factor, es peor que el problema que resolvía. Un fallo de descifrado GCM
+se registra como tal y no se confunde con un código mal escrito.
+
+**Rotar la clave: el procedimiento, en orden.** Nunca en un solo paso — cada
+uno se despliega y se comprueba antes de seguir al siguiente:
+
+1. Añadir `MFA_ENCRYPTION_KEY_2` (32 bytes nuevos en hexadecimal) **sin tocar
+   `MFA_ENCRYPTION_KEY_ACTIVE`**. Desplegar. En este punto el sistema sigue
+   cifrando y descifrando con la clave 1; la 2 solo está disponible.
+2. Cambiar `MFA_ENCRYPTION_KEY_ACTIVE=2`. Desplegar. A partir de aquí todo lo
+   que se cifre de nuevo usa la clave 2; las filas ya existentes siguen en la
+   1 y se siguen leyendo bien, porque el descifrado usa el `key_version` de
+   cada fila, no la activa.
+3. Ejecutar `npm run auth:rotate-mfa-key:deploy` en el contenedor (o
+   `auth:rotate-mfa-key` en desarrollo). Reescribe cada fila que no esté ya en
+   la versión activa, una fila y una transacción a la vez — se puede
+   interrumpir y volver a lanzar cuantas veces haga falta sin perder lo que ya
+   se convirtió.
+4. Comprobar que ninguna fila queda en la versión 1. El propio comando lo dice
+   al terminar («filas que quedan fuera de la versión activa: 0»); también se
+   puede confirmar aparte contando `factor_totp` por `key_version`.
+5. Solo entonces, quitar `MFA_ENCRYPTION_KEY_1`. Desplegar.
+
+🔴 **QUITAR LA CLAVE VIEJA ANTES DE QUE EL COMANDO TERMINE Y CONFIRME CERO
+FILAS PENDIENTES ES EL ERROR QUE PIERDE LOS DATOS.** Cualquier fila que
+todavía no se hubiera convertido queda cifrada bajo una clave que ya no existe
+en ningún sitio — irrecuperable, sin excepción y sin aviso previo. El propio
+comando repite esta misma advertencia en su ayuda (`--help`), porque quien lo
+ejecuta a las ocho de la mañana con una incidencia abierta no siempre ha leído
+esta especificación primero.
+
+Construido enteramente a pesar de que en la práctica nadie va a rotar esta
+clave con frecuencia — con 15-60 filas de un secreto que solo existe en un
+móvil, `--reset-mfa` (la vía de escape, §8) ya es una forma más rápida de
+resolver una clave comprometida para una cuenta concreta. Se construyó de
+todos modos porque la columna `key_version` existe en el esquema desde el
+4A, y dejarla sin un procedimiento de verdad es la opción que pierde datos el
+día que alguien la necesite de emergencia (hallazgo B4).
 
 **`JWT_SECRET` no se borra el día del despliegue.** La revisión 1 lo mandaba
 borrar de Coolify, y eso destruye la vuelta atrás: `index.ts:37-40` de la imagen

@@ -249,14 +249,20 @@ describe("the state actually in force, once a session has been open a while", ()
       expect(estadoEfectivo(haceUnMes, VENCIDO, AHORA)).toBe("completa");
     });
 
-    it("does not narrow a session that got in on a remembered device", () => {
-      // `mfa_satisfied_at` is NULL on a remembered-device login **on purpose**
-      // — see the column's own comment in the migration — so that login is
-      // invisible to the clause above and would have been narrowed by the
-      // deadline alone. `mfa_source` is what names it, and a device can only
-      // have been remembered for an account that proved a factor once.
+    it("does not treat a remembered device as proof that a factor was shown", () => {
+      // This used to assert the opposite, on the premise that "a device can
+      // only have been remembered for an account that proved a factor once".
+      // True when written, and it stops being true the moment that account
+      // deletes its last factor — after which the exemption is **permanent and
+      // has no window**, so the session keeps the whole ERP for its full thirty
+      // days on the strength of a cookie nobody proved anything with.
+      //
+      // `dispositivo` is the worst of the four sources for exactly that reason:
+      // it is the only one written **without anybody proving anything at that
+      // moment**. The other three name a factor that was shown.
       const dispositivo = sesion({ mfa_source: "dispositivo" });
-      expect(estadoEfectivo(dispositivo, VENCIDO, AHORA)).toBe("completa");
+      expect(estadoEfectivo(dispositivo, VENCIDO, AHORA)).toBe("onboarding");
+
       for (const fuente of ["passkey", "totp", "codigo"]) {
         expect(estadoEfectivo(sesion({ mfa_source: fuente }), VENCIDO, AHORA), fuente).toBe(
           "completa",

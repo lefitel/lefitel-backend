@@ -58,6 +58,30 @@ const ONBOARDING_EXTRA: readonly string[] = [
   "/api/auth/sessions",
   "/api/auth/logout-all",
 ];
+/**
+ * The one value of `sesiones.mfa_source` that is **not** evidence a factor was
+ * shown — see clause 3 of `estadoEfectivo`. Named rather than typed inline so
+ * the string has a single home: the database's own CHECK spells the same four
+ * words, and a typo here would fail open, silently.
+ */
+/**
+ * What proved the factor for a session — the vocabulary of `sesiones.mfa_source`
+ * minus `passkey`, which is plan 4C.
+ *
+ * Lives here rather than beside the endpoint that writes it, because **two
+ * modules write this column and one reads it**: `sessionPromotion.ts` on a
+ * proved factor, `sessionStore.ts` on a login that came in on a remembered
+ * device, and `estadoEfectivo` below on every request. A type owned by one of
+ * the writers would make the other import from a sibling for no reason.
+ *
+ * The database has its own CHECK over the same four words (migration
+ * `20260826000002`); this union is a strict subset of it, and a value here that
+ * the CHECK does not know fails in production in the middle of a login.
+ */
+export type FuenteMfa = "totp" | "codigo" | "dispositivo";
+
+const FUENTE_DISPOSITIVO = "dispositivo";
+
 const PERMITIDAS: Record<EstadoSesion, readonly string[] | "todo"> = {
   parcial: PARCIAL,
   onboarding: [...PARCIAL, ...ONBOARDING_EXTRA],
@@ -342,7 +366,16 @@ export function estadoEfectivo(
   // being built — the shared fixture in `app.auth.test.ts` omitted this very
   // column until Task 15 filled it in, and 66 tests read that one object. The
   // reachable way in is a projection that stops naming a column.
-  if (sesion.mfa_satisfied_at != null || sesion.mfa_source != null) return guardado;
+  //
+  // **`dispositivo` is not one of them, and that is the change plan 4B made
+  // here.** The other three sources name a factor somebody showed. A remembered
+  // device is written **without anybody proving anything at that moment**, on
+  // the premise that the device could only have been remembered for an account
+  // that had proved one — a premise that expires silently the day that account
+  // deletes its last factor, leaving a thirty-day, windowless exemption resting
+  // on a cookie.
+  if (sesion.mfa_satisfied_at != null) return guardado;
+  if (sesion.mfa_source != null && sesion.mfa_source !== FUENTE_DISPOSITIVO) return guardado;
 
   // Clause 2: opened after the deadline had already gone by, so its `completa`
   // cannot have come from a login that found grace left.

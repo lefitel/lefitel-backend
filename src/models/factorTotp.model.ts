@@ -44,8 +44,37 @@ export const FactorTotpModel: ModelDefined<IFactorTotp, FactorTotpCreation> = se
   {
     tableName: "factor_totp",
     timestamps: false,
+    // Hallazgo B10, confirmed by actually running `toJSON`, not by reading
+    // the model: with no `defaultScope` and no `toJSON` override, a query
+    // that reaches this row — including one that gets here through
+    // `usuarios.hasMany(...)` below, via an `include` on some future
+    // controller — serialises `{"secreto_cifrado":{...},"iv":{...},"auth_tag":{...}}`.
+    // That matters for a reason that is not obvious: the ciphertext leaking
+    // once is enough to recover the TOTP secret *retroactively* the day
+    // `MFA_ENCRYPTION_KEY` is ever compromised, and this row is never
+    // rotated on its own — today's ciphertext is still today's ciphertext
+    // three years from now. `defaultScope` stops a bare read; an explicit
+    // `include` that lists its own `attributes` bypasses a scope, which is
+    // exactly why `toJSON` below exists too — the two are independent, not
+    // one standing in for the other.
+    defaultScope: {
+      attributes: { exclude: ["secreto_cifrado", "iv", "auth_tag"] },
+    },
   },
 );
+
+// See the comment on `credencialWebauthn.model.ts`'s equivalent block: the
+// prototype is where a per-model `toJSON` lives under the `.define()` API,
+// and the cast sidesteps `Model#toJSON`'s overloads rather than fighting them.
+(FactorTotpModel.prototype as unknown as Record<string, unknown>).toJSON = function (
+  this: { get(): Record<string, unknown> },
+) {
+  const valores = { ...this.get() };
+  delete valores.secreto_cifrado;
+  delete valores.iv;
+  delete valores.auth_tag;
+  return valores;
+};
 
 UsuarioModel.hasMany(FactorTotpModel, { foreignKey: "id_usuario" });
 FactorTotpModel.belongsTo(UsuarioModel, { foreignKey: "id_usuario" });

@@ -35,6 +35,7 @@
 
 import { describe, it, expect } from "vitest";
 import { up } from "../migrations/20260826000003-create-factor-tables.js";
+import { up as upPrefijo } from "../migrations/20260902000001-recovery-code-prefix.js";
 import { CredencialWebauthnModel } from "./credencialWebauthn.model.js";
 import { FactorTotpModel } from "./factorTotp.model.js";
 import { CodigoRecuperacionModel } from "./codigoRecuperacion.model.js";
@@ -61,18 +62,29 @@ const MODELOS: { Model: FactorModel; tabla: string }[] = [
 ];
 
 /**
- * Records what the real migration calls `createTable` with, per table — the
- * exact column-definition object Sequelize would send to Postgres, not a
- * slice of the file's text. No database is touched: `createTable`,
- * `addIndex` and `sequelize.query` just resolve, the same shape
+ * Records what the real migrations call `createTable`/`addColumn` with, per
+ * table — the exact column-definition objects Sequelize would send to
+ * Postgres, not a slice of file text. No database is touched: every
+ * queryInterface method here just records and resolves, the same shape
  * `20260826000003-create-factor-tables.test.ts` already relies on to test
- * this same migration.
+ * that migration on its own.
+ *
+ * Two migrations run against the same accumulator, in the order they were
+ * written: `20260826000003` creates the four tables, and `20260902000001`
+ * (Task 9) adds `codigo_recuperacion.prefijo` on top. The columns compared
+ * below have to be the schema **after both**, or this test would demand that
+ * `codigoRecuperacion.model.ts` forget a column a real, already-applied
+ * migration put on the table.
  */
 async function tablasDeLaMigracion() {
   const tablas: Record<string, Record<string, unknown>> = {};
   const qi = {
     createTable: (nombre: string, columnas: Record<string, unknown>) => {
       tablas[nombre] = columnas;
+      return Promise.resolve();
+    },
+    addColumn: (nombre: string, columna: string, definicion: Record<string, unknown>) => {
+      tablas[nombre] = { ...(tablas[nombre] ?? {}), [columna]: definicion };
       return Promise.resolve();
     },
     addIndex: () => Promise.resolve(),
@@ -82,6 +94,7 @@ async function tablasDeLaMigracion() {
     },
   };
   await up({ context: qi as never });
+  await upPrefijo({ context: qi as never });
   return tablas;
 }
 

@@ -74,6 +74,9 @@ import tipoObsRoutes from "./routes/tipoObs.routes.js";
 import usuarioRoutes from "./routes/usuario.routes.js";
 import loginRoutes from "./routes/login.routes.js";
 import authRoutes from "./routes/auth.routes.js";
+import mfaRoutes from "./routes/mfa.routes.js";
+import totpRoutes from "./routes/totp.routes.js";
+import recoveryCodesRoutes from "./routes/recoveryCodes.routes.js";
 import reporteRoutes from "./routes/reporte.routes.js";
 import generadorRoutes from "./routes/generador.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
@@ -255,6 +258,26 @@ app.use("/api/login", loginRateLimit, loginRoutes);
 // each route in auth.routes.ts declares its own — which is also what makes the
 // exception visible on the line it applies to instead of here.
 app.use("/api/auth", authRoutes);
+/**
+ * The second factor, in three routers rather than folded into `authRoutes`.
+ *
+ * Each was built by a different task and each declares its own gates on the
+ * line they apply to — `totpRoutes` also puts a 503 in front of all of its
+ * routes when the encryption key does not open the stored secrets, which is the
+ * whole of "a wrong key stops the TOTP, not the ERP".
+ *
+ * Mounted after `authRoutes` and under the same prefix: Express falls through a
+ * router that matches nothing, and keeping them apart means each file reads end
+ * to end without sorting out which endpoint belongs to which half of the plan.
+ *
+ * `authenticate` is declared inside each router rather than here, matching
+ * `authRoutes` above and for the same reason — `/api/auth/mfa/verify` is
+ * reached by a session that has a cookie and has not proved a factor, so which
+ * middleware guards it is a fact about the route, not about the mount.
+ */
+app.use("/api/auth", mfaRoutes);
+app.use("/api/auth/totp", totpRoutes);
+app.use("/api/auth/recovery-codes", recoveryCodesRoutes);
 
 app.use("/api/upload", authenticate, uploadRoutes);
 app.use("/api/reporte", authenticate, reporteRoutes);

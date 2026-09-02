@@ -173,6 +173,28 @@ export const RESCUE_GRACE_HOURS = 24;
  */
 export const HSTS_MAX_AGE_SECONDS = 63072000;
 
+/**
+ * AES-256-GCM parameters for the TOTP secret's encryption (`auth/mfaCrypto.ts`
+ * and `auth/mfaKeyring.ts`), named here rather than left as bare numbers
+ * inside those modules because two of them are mirrored by a Postgres
+ * `CHECK` written independently, in the migration that created
+ * `factor_totp`: `factor_totp_iv_len_chk` (`octet_length(iv) = 12`) and
+ * `factor_totp_tag_len_chk` (`octet_length(auth_tag) = 16`). A magic number
+ * living in two files with nothing tying them together is exactly the drift
+ * this file's own header warns about — the bcrypt cost that went from 8 to
+ * 12 while two of its three call sites did not notice. If either of these
+ * ever needs to change, the DB constraint is the other place to look.
+ *
+ * `MFA_ENCRYPTION_KEY_BYTES` is AES-256's own key length. The keyring uses
+ * it to reject anything else — including the 65-hex-character typo that
+ * `Buffer.from(x, 'hex')` would otherwise decode to exactly 32 bytes by
+ * silently dropping the last nibble (finding B2, measured in
+ * `auth/mfaKeyring.ts`'s own comment).
+ */
+export const MFA_ENCRYPTION_KEY_BYTES = 32;
+export const MFA_IV_BYTES = 12;
+export const MFA_AUTH_TAG_BYTES = 16;
+
 /** Variables the process refuses to start without, by environment. */
 export function requiredEnv(nodeEnv: string | undefined): string[] {
   // Nothing is required outside production any more. JWT_SECRET used to be
@@ -199,8 +221,34 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
   // boot: any non-empty string is a usable attempt, and whether it is the
   // *right* key or address is Resend's problem to reject, the same way a
   // wrong CORS_ORIGIN is the browser's problem to reject.
+  //
+  // MFA_ENCRYPTION_KEY_ACTIVE: which entry of the keyring in
+  // `auth/mfaKeyring.ts` encrypts. Without a usable key the TOTP secret can be
+  // written and never read back again.
+  //
+  // 🔴 **This names the pointer, never a key.** Requiring `MFA_ENCRYPTION_KEY_1`
+  // — which is what the plan first asked for — contradicts the rotation
+  // procedure the same plan documents, whose final step removes exactly that
+  // variable: a rotation done perfectly would then refuse the next production
+  // boot. And this list cannot name the right one instead, because deciding a
+  // variable's *name* from another variable's *value* is not something a
+  // function whose contract is "a plain list of names, given only `nodeEnv`"
+  // can do.
+  //
+  // So the split is the same one `COOKIE_NAME` already uses two paragraphs up:
+  // this list proves the variable was *set*, and `index.ts` runs the *value*
+  // check separately at boot — there, `llaveActiva()` resolves the pointer and
+  // throws by name if it points at a key that is absent or malformed. Presence
+  // here, meaning there. Neither half is enough alone.
   return nodeEnv === "production"
-    ? ["CORS_ORIGIN", "COOKIE_NAME", "COOKIE_SECURE", "RESEND_API_KEY", "MAIL_FROM"]
+    ? [
+        "CORS_ORIGIN",
+        "COOKIE_NAME",
+        "COOKIE_SECURE",
+        "RESEND_API_KEY",
+        "MAIL_FROM",
+        "MFA_ENCRYPTION_KEY_ACTIVE",
+      ]
     : [];
 }
 
@@ -501,6 +549,43 @@ export const REMEMBERED_DEVICE_REVOKED_MAX_AGE_DAYS = 30;
  * without that being a decision about sessions.
  */
 export const REMEMBERED_DEVICE_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The name of the "remember this device" cookie — `auth/rememberedDeviceIssue.ts`.
+ *
+ * Its own name and not a second use of `SESSION_COOKIE_NAME`: the two cookies
+ * answer different questions (which session is this vs. has this browser
+ * already proved a factor) and a browser has to be able to hold, and clear,
+ * one without touching the other. No `__Host-` prefix — that prefix demands
+ * `path=/`, and this cookie's whole point is a `Path` scoped to the login
+ * route (see `rememberedDeviceIssue.ts`), so it could never carry it anyway.
+ */
+export const REMEMBERED_DEVICE_COOKIE_NAME = "osefi_remember_device";
+
+/**
+ * How long a minted "remember this device" cookie is trusted for, in days.
+ *
+ * Thirty, the same figure Decision 4 of the MFA plan reasons about throughout
+ * — including in `REMEMBERED_DEVICE_REVOKED_MAX_AGE_DAYS` above, which caps
+ * how long a *revoked* row's personal data survives, not how long a live one
+ * is honoured. This constant is the other one: it is what
+ * `rememberedDeviceIssue.ts` writes into a fresh row's `expires_at`, and what
+ * the cookie itself is told to expire at, so the two can never disagree about
+ * how long "do not ask me again on this machine" means.
+ */
+export const REMEMBERED_DEVICE_TTL_DAYS = 30;
+
+/**
+ * The login body field that asks for a "remember this device" cookie.
+ *
+ * Named `recordar` to match the field the design spec already gives
+ * `/auth/mfa/verify` for the same request, so a later plan wiring that
+ * endpoint does not have to invent a second spelling of the same idea. Read
+ * only by `login` today, and only ever after the second factor is already
+ * proven — see that handler for why a login can only ever have one moment
+ * where that is true.
+ */
+export const REMEMBER_DEVICE_FIELD = "recordar";
 
 /**
  * How stale `last_used_at` is allowed to get before it is worth a write.

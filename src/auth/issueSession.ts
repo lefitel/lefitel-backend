@@ -21,6 +21,7 @@ import { createSession, findLiveSession, revokeSessionOf } from "./sessionStore.
 import { readSessionCookie, setSessionCookie } from "./sessionCookie.js";
 import { SESSION_EXPIRES_HEADER } from "../config/security.js";
 import type { EstadoSesion } from "./sessionState.js";
+import type { FuenteMfa } from "./sessionState.js";
 
 /**
  * Open a session for this person and put it in the response as a cookie.
@@ -75,6 +76,8 @@ export async function issueSession(
   res: Response,
   id_usuario: number,
   estado: EstadoSesion,
+  /** Passed straight through to `createSession` — see its own comment. */
+  fuente?: FuenteMfa,
 ): Promise<void> {
   await rotateOut(req);
   const { token, expiresAt } = await createSession(
@@ -84,6 +87,7 @@ export async function issueSession(
       ip: req.ip,
     },
     estado,
+    fuente,
   );
   setSessionCookie(res, token, expiresAt);
   res.setHeader(SESSION_EXPIRES_HEADER, expiresAt.toISOString());

@@ -104,6 +104,22 @@ vi.mock("../models/codigoRecuperacion.model.js", () => ({
 // `dispositivoRecordado.model.ts`, one more caller of `UsuarioModel.hasMany`
 // on the plain stub above.
 vi.mock("../auth/rememberedDeviceStore.js", () => ({ revokeAllRememberedDevicesOf: vi.fn() }));
+// The same failure again, by a second route into the same model. `login` now
+// reads and mints the remembered-device cookie, so `auth.controller.ts` imports
+// `rememberedDeviceIssue.js` as well — and that also reaches
+// `dispositivoRecordado.model.ts` and its `UsuarioModel.hasMany` call, which the
+// plain stub above does not have.
+//
+// `readRememberedDeviceCookie` returns undefined rather than `vi.fn()`: every
+// test in this file logs in without a cookie, which is the shape that keeps
+// `comprobarDispositivo` from being reached at all, and a bare `vi.fn()`
+// returning undefined would do the same thing less obviously.
+vi.mock("../auth/rememberedDeviceIssue.js", () => ({
+  acunarDispositivo: vi.fn(),
+  comprobarDispositivo: vi.fn(async () => false),
+  readRememberedDeviceCookie: () => undefined,
+  setRememberedDeviceCookie: vi.fn(),
+}));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 // `login` sweeps `token_uso_unico` opportunistically after a successful
 // login (see `tokenStore.ts`). Mocked wholesale for the same reason
@@ -250,6 +266,10 @@ describe("the login, once the credential is good", () => {
       // account on deploy day. The state block below covers the other
       // answers `estadoInicialDeSesion` can give.
       "completa",
+      // No source: this login proved nothing beyond the password, so the
+      // column stays NULL. Only a login carried past the second factor by a
+      // remembered-device cookie names one — see `auth.controller.ts`.
+      undefined,
     );
   });
 
@@ -390,7 +410,7 @@ describe("the login, once the credential is good", () => {
     expect(findLiveSession).toHaveBeenCalledWith("token-anterior");
     expect(revokeSessionOf).toHaveBeenCalledWith(7, "la-anterior");
     // And the new one still gets opened: rotation replaces, it does not skip.
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), expect.anything());
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), expect.anything(), undefined);
   });
 
   it("revokes nothing when the cookie it was sent is already dead", async () => {
@@ -520,7 +540,7 @@ describe("the state the login opens the session in", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "completa");
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "completa", undefined);
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -536,7 +556,7 @@ describe("the state the login opens the session in", () => {
 
     expect(c.status).toBe(200);
     expect(c.cookieCall?.[0]).toBe(SESSION_COOKIE_NAME);
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "onboarding");
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "onboarding", undefined);
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -550,7 +570,7 @@ describe("the state the login opens the session in", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "parcial");
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "parcial", undefined);
     // No deadline for somebody who has already registered something.
     expect(update).not.toHaveBeenCalled();
   });

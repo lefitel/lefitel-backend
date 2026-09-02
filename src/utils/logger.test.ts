@@ -62,6 +62,34 @@ describe("what never reaches the log", () => {
     expect(JSON.stringify(nested)).not.toContain("hunter1");
   });
 
+  it("hides the MFA fields wherever in the object they appear (hallazgo B11)", async () => {
+    // Belt and suspenders, not the primary defence — see the comment on
+    // `REDACT_PATHS` in logger.ts. Nothing in Plan 4B is supposed to log a
+    // secret, an encryption key, an otpauth URI or a code in the first
+    // place; this is what still catches it if one ever does.
+    const [top, nested] = await captured((log) => {
+      log.info({ secreto: "JBSWY3DPEHPK3PXP", MFA_ENCRYPTION_KEY: "f".repeat(64) }, "arriba");
+      log.info(
+        {
+          body: {
+            secret: "otro-secreto",
+            otpauth: "otpauth://totp/x?secret=y",
+            codigo: "12345678",
+            recovery: "papel-en-un-cajon",
+          },
+        },
+        "anidado",
+      );
+    });
+
+    expect(JSON.stringify(top)).not.toContain("JBSWY3DPEHPK3PXP");
+    expect(JSON.stringify(top)).not.toContain("f".repeat(64));
+    expect(JSON.stringify(nested)).not.toContain("otro-secreto");
+    expect(JSON.stringify(nested)).not.toContain("otpauth://totp");
+    expect(JSON.stringify(nested)).not.toContain("12345678");
+    expect(JSON.stringify(nested)).not.toContain("papel-en-un-cajon");
+  });
+
   it("leaves everything else alone", async () => {
     // Redaction that swallowed the useful fields would be its own kind of
     // failure: a log nobody can read is not safer, it is just empty.

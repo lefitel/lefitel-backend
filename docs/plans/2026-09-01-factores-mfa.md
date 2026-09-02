@@ -216,6 +216,21 @@ Es la Task 5, es MEDIANA, y **sin ella nada de lo demás sirve**.
 
 ---
 
+## 🔴 Un fichero de rutas por tarea, y el montaje al final
+
+Decidido al ejecutar. El plan nombraba **un solo** `src/routes/mfa.routes.ts` para las Tasks
+6, 7, 10 y 12. Con varias tareas en marcha a la vez eso es un choque garantizado, y con
+tareas en serie es un fichero que cambia cuatro veces por motivos distintos.
+
+**Cada tarea crea su propio fichero de rutas y su propio controlador** — `totp.routes.ts`,
+`mfa.routes.ts`, `recoveryCodes.routes.ts` — y **nadie toca `src/app.ts`**. El montaje lo
+hace una pasada final, cuando todos existen, que es además el único momento en que se puede
+comprobar de una vez que las cuatro listas de `routeGuards.test.ts` cuadran con lo que hay
+montado de verdad.
+
+Efecto lateral bueno: cada fichero de rutas se lee entero sin tener que separar mentalmente
+qué endpoint pertenece a qué mitad del plan.
+
 ## Orden, tamaño y camino crítico
 
 **22 tareas.** Con el desvío real medido en el 4A —11 planeadas, 15 entregadas, +36%—
@@ -343,8 +358,18 @@ Lee `MFA_ENCRYPTION_KEY_1`, `_2`, … y `MFA_ENCRYPTION_KEY_ACTIVE`. Reglas:
   con su nombre — no se cae en la clave 1 «por si acaso».
 - Con un llavero de una sola clave, todo esto se comporta exactamente como si no hubiera
   llavero. Es el caso normal y el que hay que tener suave.
-- 🔴 **`MFA_ENCRYPTION_KEY_1` y `MFA_ENCRYPTION_KEY_ACTIVE` entran en `requiredEnv`** para
-  producción. Hoy `requiredEnv` devuelve cinco nombres; pasan a siete.
+- 🔴 **Solo `MFA_ENCRYPTION_KEY_ACTIVE` entra en `requiredEnv`. Nunca una versión concreta.**
+  Corregido al ejecutar: pedir `MFA_ENCRYPTION_KEY_1` —que es lo que este plan decía y lo que
+  parece lo seguro— **contradice el procedimiento de rotación de la Task 3**, cuyo último paso
+  borra exactamente esa variable. Una rotación hecha bien dejaría el siguiente arranque de
+  producción rechazado, teniendo todas las claves que de verdad hacen falta.
+
+  Y esta lista no puede nombrar la correcta, porque decidir el **nombre** de una variable a
+  partir del **valor** de otra no cabe en una función cuyo contrato es «una lista de nombres,
+  dado `nodeEnv`». El reparto es el mismo que `COOKIE_NAME` ya usa: la lista prueba que la
+  variable **está puesta**, y `index.ts` comprueba el **valor** por separado. Hay un test de
+  regresión (`index.boot.test.ts`) que recorre las versiones 1, 2 y 3 y exige que ninguna
+  aparezca en la lista.
 - 🔴 **Ni una clave, ni parte de una, en ningún registro ni en ningún mensaje de error.**
   `REDACT_PATHS` no cubre nada del 4B (hallazgo B11); la Task 14 lo amplía, pero lo que no
   se escribe no hace falta redactarlo.
@@ -430,17 +455,32 @@ recuperación, gracia, las 25 pantallas— sigue funcionando.
 El interruptor es un valor del módulo, no una consulta por petición: la comprobación se
 hace una vez, al arrancar.
 
-- [ ] **Step 4: Qué fila se elige**
+- [ ] **Step 4: 🔴 Comprobar la llave también cuando NO hay filas**
+
+Se descubrió al arreglar `requiredEnv` (Task 1). El reparto que quedó es: la lista prueba que
+`MFA_ENCRYPTION_KEY_ACTIVE` **está puesta**, y **este arranque** comprueba que **vale**. Si
+esta comprobación solo mira cuando hay filas, un despliegue sin ninguna clave puesta —o con el
+puntero apuntando a una versión que no existe— arranca contento y nadie se entera hasta que la
+primera persona intenta registrar su factor.
+
+Así que son dos cosas, en este orden:
+
+1. **`llaveActiva()` resuelve**, siempre, haya filas o no. El llavero ya lanza con un error
+   con nombre si el puntero apunta a una versión ausente o mal formada.
+2. **Si además hay filas, se descifra la primera.** Sin filas no hay nada que probar y arrancar
+   es correcto — es el primer despliegue.
+
+- [ ] **Step 5: Qué fila se elige**
 
 La primera por `id`, con `confirmed_at IS NOT NULL`. Una fila sin confirmar puede ser un
 `setup` a medias que nadie va a usar; una confirmada es un secreto que alguien está usando
 de verdad, que es lo que la comprobación quiere probar.
 
-- [ ] **Step 5: Romper y verificar en las dos direcciones**
+- [ ] **Step 6: Romper y verificar en las dos direcciones**
 
-- [ ] **Step 6: `npm run typecheck` y la suite**
+- [ ] **Step 7: `npm run typecheck` y la suite**
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 `feat(mfa): the boot check decrypts a real row, and lives where the rescue cannot reach`
 
@@ -939,11 +979,36 @@ silencioso**, y quien lo hace cree que sigue protegido.
 Línea de bitácora `critical` cuando el borrado deja la cuenta sin ningún factor, y la
 pantalla de la Task 19 lo dice **antes** de hacerlo.
 
-- [ ] **Step 4: Romper y verificar**
+- [ ] **Step 4: 🔴 Borrar el último factor revoca los dispositivos recordados**
 
-- [ ] **Step 5: `npm run typecheck` y la suite**
+Trazado al hacer la Task 13, y no está en la auditoría. La cadena, con las piezas ya
+construidas:
 
-- [ ] **Step 6: Commit**
+1. Alguien registra su factor. La Task 5 le **limpia** `mfa_grace_until`.
+2. Lo borra. `tieneAlgunFactor` pasa a `false`, pero la columna sigue NULL.
+3. Entra con el **dispositivo recordado** que le quedó de cuando sí tenía factor. La sesión
+   abre `completa` con `mfa_source = 'dispositivo'`.
+
+Sin la Task 13 eso era una exención **permanente y sin ventana**: treinta días de ERP
+completo sobre una cookie. Con la Task 13 la sesión sí se estrecha cuando vence el plazo
+nuevo — pero la cookie sigue viva y la siguiente entrada vuelve a saltarse el factor.
+
+**Así que al borrar el último factor se revocan también sus dispositivos recordados.** La
+función ya existe y ya se usa en cuatro sitios: `revokeAllRememberedDevicesOf`. Es la misma
+lógica que el archivado y el cambio de contraseña ya aplican — quitar una credencial invalida
+lo que colgaba de ella.
+
+**Lo que NO hace falta:** volver a armar el plazo de catorce días a mano. Verificado leyendo
+`estadoInicialDeSesion`: sin factor y con la columna a NULL, la siguiente entrada arranca un
+plazo nuevo por sí sola. La única diferencia es que el reloj empieza en la siguiente entrada
+y no en el borrado, y con las sesiones deslizándose eso son a lo sumo unas seis semanas de
+margen — hygiene, no agujero. Se deja dicho para que nadie lo «arregle» dos veces.
+
+- [ ] **Step 5: Romper y verificar**
+
+- [ ] **Step 6: `npm run typecheck` y la suite**
+
+- [ ] **Step 7: Commit**
 
 `fix(totp): an unconfirmed row has to be deletable, or setup fails forever`
 
@@ -1247,17 +1312,36 @@ contraseña, **esa misma cookie le salta el factor**.
 Escribirlo en el comentario del módulo con el número de los quince minutos, o el siguiente
 que lea la §6 lo añade creyendo que falta.
 
-- [ ] **Step 5: El login acuña, y solo si se lo piden**
+- [ ] **Step 5: 🔴 Quién decide el estado inicial de la sesión — auditado, y no es donde parece**
+
+Verificado leyendo `estadoInicialDeSesion` en `src/auth/factorInventory.ts`: **con un factor
+registrado devuelve siempre `parcial`**, y no sabe nada de dispositivos recordados. Así que
+una entrada con la cookie del equipo, si nadie hace nada, **abre en `parcial`** y le pide el
+código igual — que es exactamente lo que la comodidad venía a evitar.
+
+La salida evidente es que el controlador del login pise el resultado. **No lo hagas.** Eso
+deja dos sitios decidiendo el estado de una sesión, y ese par diverge: es la misma clase de
+error que el hallazgo D2, donde una función decidía el estado y otra lo recalculaba sin
+saberlo.
+
+**`estadoInicialDeSesion` recibe un parámetro más** —si se presentó un dispositivo recordado
+válido— y sigue siendo el único sitio que responde a la pregunta. Es una firma más ancha a
+cambio de que la respuesta siga viviendo en un solo lugar.
+
+Y el orden importa: el dispositivo se comprueba **después** de la contraseña, nunca antes.
+Al revés, la cookie decidiría cosas sobre una petición que aún no ha demostrado nada.
+
+- [ ] **Step 6: El login acuña, y solo si se lo piden**
 
 `auth.controller.ts` acuña la cookie **solo** cuando el cuerpo del login lo pide
 explícitamente y **solo después** de que el segundo factor quede probado. Acuñarla antes es
 acuñarla para una sesión que todavía no ha demostrado nada.
 
-- [ ] **Step 6: Romper y verificar en las dos direcciones**
+- [ ] **Step 7: Romper y verificar en las dos direcciones**
 
-- [ ] **Step 7: `npm run typecheck` y la suite**
+- [ ] **Step 8: `npm run typecheck` y la suite**
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 `feat(device): remembering a machine, without the lockout exemption the spec asks for`
 
@@ -1487,7 +1571,16 @@ borra la frontera entera de la §4:
 Y el mismo cubo por cuenta que la Task 7: un intento fallido aquí cuesta lo mismo que en
 `/auth/mfa/verify`.
 
-- [ ] **Step 3: Los tests en rojo**
+- [ ] **Step 3: La ruta tiene que estar en las listas de estados**
+
+`/api/auth/stepup` es un prefijo nuevo. Una sesión `completa` lo alcanza —`PERMITIDAS` le da
+`"todo"`—, y esa es la única que lo necesita: auditado, un estado `onboarding` implica
+**cuenta sin ningún factor** (`estadoInicialDeSesion` devuelve `parcial` en cuanto hay uno),
+así que quien está en `onboarding` pasa por la rama de la contraseña y no tiene nada que
+re-sellar. Aun así, comprueba el razonamiento contra el código antes de darlo por bueno: si
+alguna vez `onboarding` pudiera tener un factor, esta ruta le haría falta y no la alcanzaría.
+
+- [ ] **Step 4: Los tests en rojo**
 
 ```
 it("re-seals a live complete session with a totp code")
@@ -1497,11 +1590,11 @@ it("refuses a password on an account that has a factor")
 it("charges a failed attempt the same way mfa/verify does")
 ```
 
-- [ ] **Step 4: Romper y verificar en las dos direcciones**
+- [ ] **Step 5: Romper y verificar en las dos direcciones**
 
-- [ ] **Step 5: `npm run typecheck` y la suite**
+- [ ] **Step 6: `npm run typecheck` y la suite**
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 `feat(stepup): proving the factor again without having to log out and back in`
 
@@ -1751,6 +1844,36 @@ Lo que hay que tener resuelto antes de pulsar:
       exacto está en `.superpowers/sdd/2026-08-26-esqueleto-mfa/rescate-B-report.md`.
 
 ---
+
+## 🔴 Una decisión que queda abierta para Isaias: el aviso de reloj desfasado
+
+Construido de la forma **conservadora**: el servidor reintenta con ±10 pasos, y si el código
+era válido en un paso lejano **lo apunta en la bitácora y no cambia la respuesta**. Quien
+está delante ve «código incorrecto», igual que si hubiera tecleado cualquier cosa.
+
+**Es culpa de cómo redacté el encargo**, que llevaba dos reglas tirando en direcciones
+opuestas: «el mensaje no distingue válido-en-otro-paso de basura» y «al usuario se le habla
+del reloj cuando el desfase es consistente». El agente eligió la segura y dejó el
+razonamiento escrito; el del cliente lo detectó al construir la pantalla.
+
+**Lo que se gana cambiándolo:** el desfase de reloj del móvil es **la primera causa real** de
+«código incorrecto», y hoy la única persona que puede diagnosticarlo es quien lea la bitácora
+del servidor — no quien está a las ocho de la mañana mirando seis dígitos que no le valen.
+
+**Lo que se arriesga:** que la respuesta difiera le confirma a quien esté probando códigos que
+su intento casó con **algún** paso. Analizado: para llegar a esa rama hay que producir un
+código del secreto real, lo que sin el secreto ocurre 1 vez de cada 47.600 en vez de 1 de cada
+333.000 — siete veces más probable, y aun así **no acerca a nadie al secreto**, porque una
+coincidencia entre 21 pasos no estrecha nada. Quien sí tenga el secreto no necesita el
+oráculo: genera un código válido y entra.
+
+**Mi lectura:** el riesgo es teórico y el coste es real y diario. Pero es un cambio con
+implicaciones de seguridad y la versión construida es la segura, así que **no lo toqué**.
+Decide tú.
+
+Lo que **no** está en discusión y ya está bien: el camino de diagnóstico **no acepta** (si
+aceptara, los códigos válidos pasarían de 3 a 21 por millón), y todo fallo cobra igual contra
+el bloqueo, con diagnóstico o sin él.
 
 ## Lo que queda después
 

@@ -41,6 +41,14 @@ import {
   revokeSessionOf,
 } from "../auth/sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
+import {
+  acunarDispositivo,
+  comprobarDispositivo,
+  readRememberedDeviceCookie,
+  setRememberedDeviceCookie,
+} from "../auth/rememberedDeviceIssue.js";
+import { REMEMBER_DEVICE_FIELD } from "../config/security.js";
+import { maskEmail } from "../auth/securityNotice.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -146,6 +154,31 @@ export const login = handler("login", async (req: Request, res: Response) => {
   }
 
   /**
+   * Whether this browser already proved a factor once and asked not to be
+   * asked again — Decision 4 of the MFA plan (Task 12).
+   *
+   * **Checked here, strictly after `verifyCredentials` has already
+   * succeeded, and never a line earlier.** Resolving whose cookie this is
+   * before the password is known is the one shortcut `comprobarDispositivo`'s
+   * own header warns is the trap: the cheap way to do it early is to look the
+   * row up by `token_hash` alone, which is the exact omission hallazgo C15
+   * exists to close. Being here, after `check.ok`, means the account is
+   * already fixed — `check.usuario.id` — before a single row of
+   * `dispositivo_recordado` is ever read.
+   *
+   * **Deliberately does not exempt anything from the account lockout above.**
+   * That refusal already happened, if it was going to: `verifyCredentials`
+   * answered `{ ok: false }` before this line ever runs, for the same
+   * uniform message and timing a wrong password gets. See
+   * `rememberedDeviceIssue.ts`'s own header for why that exemption is not
+   * built at all, on purpose (hallazgo C4).
+   */
+  const dispositivoToken = readRememberedDeviceCookie(req);
+  const dispositivoRecordadoValido = dispositivoToken
+    ? await comprobarDispositivo(dispositivoToken, check.usuario.id)
+    : false;
+
+  /**
    * Which of the three states this session opens in, decided before it is
    * opened. `graceUntil` comes back non-null only when this is the first
    * login this account has ever made past the MFA migration, and it means
@@ -161,11 +194,17 @@ export const login = handler("login", async (req: Request, res: Response) => {
    * `mfa_grace_until` rides beside `check.usuario` rather than inside it
    * because `UsuarioAutenticado` is published verbatim in the response body;
    * see `ResultadoCredenciales` in `auth/credentials.ts`.
+   *
+   * `dispositivoRecordadoValido` is the only new input from Task 12, and
+   * `estadoInicialDeSesion` stays the one place that turns it into an
+   * `estado` — see that function's own comment for why this handler must not
+   * also decide `completa` on its own account once the answer comes back.
    */
   const ahora = new Date();
   const { estado, graceUntil } = await estadoInicialDeSesion(
     { id: check.usuario.id, mfa_grace_until: check.mfa_grace_until },
     ahora,
+    dispositivoRecordadoValido,
   );
 
   /**
@@ -200,13 +239,71 @@ export const login = handler("login", async (req: Request, res: Response) => {
     // decision to make and the storage layer's to record, and a default there
     // would be the kind that stays correct until the day somebody adds a
     // second caller.
-    await issueSession(req, res, check.usuario.id, estado);
+    //
+    // The source, when the cookie is what carried this login past the second
+    // factor. Without it the row says NULL and there is no way to tell, after
+    // the fact, that somebody got in on a remembered device rather than by
+    // showing something — the whole column would be written by exactly one
+    // caller and never by this one, which is the shape of a column that
+    // quietly means less than the schema claims.
+    //
+    // It does **not** change what the session may reach: since plan 4B,
+    // `estadoEfectivo` treats `"dispositivo"` and NULL identically, because a
+    // remembered device is the one source written without anybody proving
+    // anything at that moment. This is the trail, not the rule.
+    await issueSession(
+      req,
+      res,
+      check.usuario.id,
+      estado,
+      dispositivoRecordadoValido ? "dispositivo" : undefined,
+    );
   } catch (err) {
     authLog.error(
       { err, id_usuario: check.usuario.id },
       "no se pudo abrir la sesión de cookie: se rechaza el login, porque la cookie es la única credencial",
     );
     return res.status(503).json({ message: SESION_NO_DISPONIBLE });
+  }
+
+  /**
+   * Renewing a "remember this device" cookie — the *only* moment `login` can
+   * ever mint one.
+   *
+   * A fresh cookie is minted for the first time once a second factor is
+   * actually proved, which happens at the endpoints that verify one
+   * (`/auth/totp/confirm`, `/auth/mfa/verify` — neither of which is this
+   * handler). The one case where `login` itself already holds a proven
+   * factor to attach a new cookie to is the one this block guards:
+   * `dispositivoRecordadoValido`, computed above, is `true` only when this
+   * very request walked in on an existing, still-valid cookie. So what this
+   * does is slide that thirty-day window forward on a machine somebody keeps
+   * using — the same shape `slidingExpiry` gives the session cookie — never
+   * hand out a cookie to a request that has not shown anything.
+   *
+   * Gated on the request body asking for it (`REMEMBER_DEVICE_FIELD`) as well
+   * as on the proof, per Task 12's own wording: minting is never automatic,
+   * even for a login that would qualify.
+   *
+   * Failure here is logged and swallowed rather than turned into a 503: the
+   * session this response is about to hand over already exists and works
+   * without this cookie, so refusing the login over a renewal that could not
+   * be written would cost somebody their whole session for a convenience
+   * that only ever saves them typing six digits.
+   */
+  if (
+    dispositivoRecordadoValido &&
+    (req.body as Record<string, unknown> | undefined)?.[REMEMBER_DEVICE_FIELD] === true
+  ) {
+    try {
+      const token = await acunarDispositivo(check.usuario.id, req);
+      setRememberedDeviceCookie(res, token);
+    } catch (err) {
+      authLog.error(
+        { err, id_usuario: check.usuario.id },
+        "no se pudo renovar la cookie de dispositivo recordado: la sesión sigue abierta con normalidad",
+      );
+    }
   }
 
   /**
@@ -382,7 +479,38 @@ export const me = handler("me", async (req: Request, res: Response) => {
 
   const usuario = found.dataValues;
   const cuerpo = {
-    usuario,
+    /**
+     * Hallazgo C16. `usuario.email` is the *verified recovery address* —
+     * §11 argues that address **is** the account, and `/password/forgot`
+     * spends paragraphs refusing to confirm whether one exists at all. A
+     * `parcial` session belongs to whoever typed the right password and
+     * nothing else, so handing it the real address one door down from that
+     * refusal was the same secret, given away for free.
+     *
+     * Gated on **the state, not on `parcial` specifically**: any session
+     * that is not `completa` — `onboarding` included — gets the masked
+     * form. Only the value changes; the key stays present in every state,
+     * because the caller does not yet know sessions have states and a
+     * missing field would be read as "no address on file".
+     *
+     * `maskEmail` from `auth/securityNotice.ts` and not a second copy: the
+     * finding names `enmascarada` in `email.controller.ts`, but that
+     * function is private to its module (never exported) and that file is
+     * off limits to this task. `maskEmail` produces the identical
+     * `n***@dominio` shape and is already the one other place in this
+     * codebase masks a recovery address for a security-sensitive reader —
+     * reusing it satisfies the "do not write a second one" rule the finding
+     * states, even though the specific name it cites is not reachable.
+     *
+     * `usuario.email` is nullable (`allowNull: true`) — every one of the
+     * nine real accounts starts with no verified address at all — so a
+     * missing address stays missing rather than being run through the mask
+     * and crashing the endpoint for the exact accounts this plan is about.
+     */
+    usuario:
+      caller.estado === "completa"
+        ? usuario
+        : { ...usuario, email: usuario.email ? maskEmail(usuario.email) : usuario.email },
     expires_at: caller.expires_at,
     /**
      * Which of the three states this session is in, so the client can say why.

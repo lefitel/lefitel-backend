@@ -5,7 +5,12 @@
 // notices.
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { requiredEnv, cookieNameCarriesHostPrefix } from "./config/security.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 describe("required configuration", () => {
   it("names CORS_ORIGIN as required in production", () => {
@@ -26,6 +31,34 @@ describe("required configuration", () => {
     // §11 is the write-up of why keeping it was the actual danger.
     expect(requiredEnv("production")).not.toContain("JWT_SECRET");
     expect(requiredEnv("development")).not.toContain("JWT_SECRET");
+  });
+
+  it("names the MFA keyring pointer as required in production", () => {
+    // Without a usable key the TOTP secret can be written and never read back.
+    // This half only proves the variable was set; `index.ts` runs the value
+    // check, where `llaveActiva()` resolves the pointer and throws by name if
+    // it names a key that is absent or malformed. Same split as COOKIE_NAME
+    // below.
+    expect(requiredEnv("production")).toContain("MFA_ENCRYPTION_KEY_ACTIVE");
+    expect(requiredEnv("development")).not.toContain("MFA_ENCRYPTION_KEY_ACTIVE");
+  });
+
+  it("never requires a specific key version, because rotation removes them", () => {
+    // 🔴 The regression this exists to stop, and it was written the wrong way
+    // first. Requiring `MFA_ENCRYPTION_KEY_1` reads as the safe, obvious thing
+    // and contradicts the rotation procedure in
+    // docs/plans/2026-09-01-factores-mfa.md, whose final step removes exactly
+    // that variable — so a rotation carried out perfectly would refuse the next
+    // production boot, with every key it actually needs present.
+    //
+    // The loop rather than one assertion: `_2` is the version a first rotation
+    // creates, and pinning only `_1` would let the same mistake back in one
+    // number along.
+    for (const version of [1, 2, 3]) {
+      expect(requiredEnv("production"), `versión ${version}`).not.toContain(
+        `MFA_ENCRYPTION_KEY_${version}`,
+      );
+    }
   });
 
   it("names COOKIE_NAME as required in production", () => {
@@ -85,5 +118,64 @@ describe("cookieNameCarriesHostPrefix", () => {
     // insecure cookie could never carry the prefix in the first place.
     // Development's plain name is not a violation of anything.
     expect(cookieNameCarriesHostPrefix("osefi_session", false)).toBe(true);
+  });
+});
+
+// `index.ts`'s `main()` is not exported and genuinely boots a server —
+// connects to Postgres, starts `app.listen` — so it is not something a unit
+// test can call directly (and `vitest.config.ts`'s own coverage config
+// excludes this file for the same reason: it is the boot sequence, not a
+// unit). What can be tested without booting anything is that the source
+// actually wires in `auth/mfaKeyCheck.ts`'s check, and — the part that
+// matters, Decision 2 of `docs/plans/2026-09-01-factores-mfa.md` — that a
+// failed check's own branch never calls `die()` or `process.exit`. This is
+// the same source-level approach `controllers/logShape.test.ts` and
+// `controllers/requestShape.test.ts` already take for a rule that is
+// otherwise only checkable by reading the file yourself.
+describe("the MFA key check at boot", () => {
+  const indexSrc = readFileSync(resolve(here, "index.ts"), "utf8");
+
+  it("calls comprobarLlaveAlArrancar during boot", () => {
+    // `(` included in the needle so this matches the call site and not the
+    // `import { comprobarLlaveAlArrancar } from ...` line above it, which
+    // names the same identifier without invoking it.
+    expect(indexSrc).toMatch(/comprobarLlaveAlArrancar\s*\(/);
+  });
+
+  it("a failed key check logs fatal but never stops the process", () => {
+    // Walks the braces of the `if (!comprobacionMfa.ok) { ... }` block that
+    // follows the call — the same brace-depth approach `logShape.test.ts`
+    // uses to find one call's whole argument — rather than a single regex
+    // over the entire file, which would just as happily match a `die()` or
+    // `process.exit()` three screens away that has nothing to do with this
+    // check, and pass this test for the wrong reason.
+    const marcador = indexSrc.indexOf("comprobarLlaveAlArrancar(");
+    expect(marcador).toBeGreaterThan(-1);
+
+    const abre = indexSrc.indexOf("{", marcador);
+    expect(abre).toBeGreaterThan(-1);
+
+    let profundidad = 0;
+    let cierre = -1;
+    for (let i = abre; i < indexSrc.length; i++) {
+      if (indexSrc[i] === "{") profundidad++;
+      if (indexSrc[i] === "}") {
+        profundidad--;
+        if (profundidad === 0) {
+          cierre = i;
+          break;
+        }
+      }
+    }
+    expect(cierre).toBeGreaterThan(abre);
+
+    const bloque = indexSrc.slice(abre, cierre + 1);
+    // Sanity check on the walker itself, same reason as
+    // `mfaKeyCheck.test.ts`'s "the graph is not suspiciously empty": if this
+    // ever comes back not matching `bootLog.fatal`, the two assertions below
+    // would pass on an empty or wrong slice for the wrong reason.
+    expect(bloque).toMatch(/bootLog\.fatal/);
+    expect(bloque).not.toMatch(/process\.exit/);
+    expect(bloque).not.toMatch(/\bdie\(/);
   });
 });

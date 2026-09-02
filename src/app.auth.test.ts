@@ -212,6 +212,130 @@ const codigoCount = vi.spyOn(CodigoRecuperacionModel, "count");
  */
 const dispositivoUpdate = vi.spyOn(DispositivoRecordadoModel, "update");
 
+/**
+ * Task 15 (hallazgo D4): closing this hole for every model instead of
+ * growing a fixed list by hand.
+ *
+ * Until this task, the named spies above were this file's entire promise —
+ * a fixed roster, and of the four factor models only `count`. That was safe
+ * only because nothing had ever written to `credencial_webauthn`,
+ * `factor_totp`, `codigo_recuperacion` or `dispositivo_recordado` through
+ * this file; plan 4B is the first one that does, and a fixed list is exactly
+ * the kind of thing the next plan forgets to widen. It has already happened
+ * once with a model that *is* on the list above: see the note near the
+ * bottom of "the login rate limit" describing a test that reached the real,
+ * unspied `UsuarioModel.increment` and sent a genuine UPDATE to whatever
+ * `.env` pointed at.
+ *
+ * So instead of another name added to a list, this reads `sequelize.models`
+ * — every model Sequelize has ever `define`d, which by this point in the
+ * file is every model this project has, because `app.js` above imports
+ * every router and every router pulls in the models its controllers use —
+ * and gives every write method on every one of them a spy, unless a spy
+ * declared above already covers it. A model added next month needs no edit
+ * here to be covered; neither does a factor model gaining a write path
+ * nobody has thought about yet.
+ */
+
+/**
+ * The write surface of a Sequelize model, reasoned from the actual static
+ * methods `Model` exposes in this project's installed `sequelize` version —
+ * not "everything that is not a `find*`", which is exactly the shortcut
+ * that drops one silently instead of naming which:
+ *
+ * - `create`, `bulkCreate`, `findOrCreate` and `findCreateFind` can all
+ *   insert a row (the last two only when their search comes up empty, which
+ *   is still a real INSERT the day it does).
+ * - `upsert` inserts or updates — its own line rather than folded into
+ *   either list, because it is both.
+ * - `update`, `increment` and `decrement` all mutate rows that already
+ *   exist.
+ * - `destroy` and `restore` remove and bring back rows; `truncate` does
+ *   both to the entire table at once.
+ *
+ * Left out on purpose: the read-only finders (`findAll`, `findOne`,
+ * `findByPk`, `count`, `aggregate`, `max`, `min`, `sum`, `describe`);
+ * `build`, `bulkBuild` and `findOrBuild`, which hand back an unsaved
+ * instance and touch nothing until something later calls `.save()` on the
+ * result; the `before*`/`after*` hook registrars, which attach a callback
+ * and run no query themselves; association wiring (`belongsTo`, `hasMany`,
+ * ...); and schema/introspection methods (`sync`, `drop`, `getTableName`,
+ * `scope`, ...) — none of these write a row.
+ */
+const WRITE_METHODS = [
+  "create",
+  "bulkCreate",
+  "findOrCreate",
+  "findCreateFind",
+  "upsert",
+  "update",
+  "increment",
+  "decrement",
+  "destroy",
+  "restore",
+  "truncate",
+] as const;
+
+type WriteMethod = (typeof WRITE_METHODS)[number];
+
+/** A registered Sequelize model, as far as this harness needs to see it: a
+ * name for the failure message, and an index signature to read its static
+ * write methods off by name. Typed as functions (not `unknown`) so that
+ * `vi.spyOn` below knows what it is replacing and `.mockImplementation`
+ * type-checks against it. */
+type SpyableModel = { name: string } & Record<WriteMethod, (...args: unknown[]) => unknown>;
+
+const registeredModels = (): SpyableModel[] => Object.values(sequelize.models) as never;
+
+/**
+ * Every `[model, method]` pair whose write method exists on that model and
+ * is not currently a vitest mock — i.e. is still the real Sequelize
+ * implementation, which reaches the configured database for real the moment
+ * a test calls it.
+ */
+const unspiedWriteMethods = (): Array<[SpyableModel, WriteMethod]> => {
+  const found: Array<[SpyableModel, WriteMethod]> = [];
+  for (const model of registeredModels()) {
+    for (const method of WRITE_METHODS) {
+      const candidate = model[method];
+      if (typeof candidate === "function" && !vi.isMockFunction(candidate)) {
+        found.push([model, method]);
+      }
+    }
+  }
+  return found;
+};
+
+// The fix: give every write method the pass above finds a spy that throws
+// unless a test gives it its own implementation. A spy with no
+// `mockImplementation` still calls through to the real method by default —
+// that is what makes an *unconfigured* spy just as dangerous as no spy at
+// all — so this default is not silence, it is a loud refusal, exactly like
+// the `transaction` spy above and for the same reason.
+for (const [model, method] of unspiedWriteMethods()) {
+  vi.spyOn(model, method).mockImplementation(() => {
+    throw new Error(
+      `${model.name}.${method} was called with no spy configured in ` +
+        `app.auth.test.ts. Give it one (vi.spyOn + mockResolvedValue) before the ` +
+        `request that reaches it — otherwise this write lands on osefi_local for real.`,
+    );
+  });
+}
+
+describe("the write-method spy harness itself (task 15, hallazgo D4)", () => {
+  it("has an active spy on every write method every registered model exposes", () => {
+    // Read fresh rather than trusting the pass above ran: this is what turns
+    // red the day a model gains a write method the fix above does not reach
+    // (see this task's own report for the two directions this was broken
+    // and fixed in).
+    const missing = unspiedWriteMethods().map(([model, method]) => `${model.name}.${method}`);
+    expect(
+      missing,
+      "these write methods would reach osefi_local for real because nothing spies them",
+    ).toEqual([]);
+  });
+});
+
 const YO = 7;
 const MI_ROL = 2;
 const TOKEN = "un-token-opaco-de-treinta-y-dos-bytes";
@@ -2574,16 +2698,39 @@ describe("the fourteen-day deadline, against a session that was already open", (
       expect(res.status).toBe(200);
     });
 
-    it("keeps the ERP for a session that got in on a remembered device", async () => {
-      // `mfa_satisfied_at` stays NULL on a remembered-device login on purpose —
-      // see the column's comment in the migration — so that login is invisible
-      // to the clause above. `mfa_source` names it, and a device can only have
-      // been remembered for an account that proved a factor once.
+    it("does NOT keep the ERP for a session that got in on a remembered device", async () => {
+      // This asserted the opposite until plan 4B, on the premise that "a device
+      // can only have been remembered for an account that proved a factor
+      // once". True when written, and false the moment that account deletes its
+      // last factor — after which the exemption was **permanent and had no
+      // window**, so the session kept the whole ERP for its full thirty days on
+      // the strength of a cookie nobody proved anything with.
+      //
+      // `dispositivo` is the worst of the four sources for exactly that reason:
+      // it is the only one written **without anybody proving anything at that
+      // moment**. `mfa_satisfied_at` still stays NULL on such a login on
+      // purpose — see the column's comment in the migration — so with the
+      // source no longer counting as evidence, the deadline reaches this
+      // session like any other.
+      //
+      // The end-to-end half of the same rule `sessionState.test.ts` pins as a
+      // unit. Both, because this one goes through the real `authenticate` and
+      // the real projection: a column quietly dropped from `attributes` would
+      // switch the rule off here and nowhere else.
       sesionAbierta({ mfa_source: "dispositivo" });
 
       const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
+    });
+
+    it("still keeps the ERP for the three sources that do mean a factor was shown", async () => {
+      // The guard against the fix above swallowing the rule it belongs to.
+      for (const fuente of ["passkey", "totp", "codigo"]) {
+        sesionAbierta({ mfa_source: fuente });
+        const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+        expect(res.status, fuente).toBe(200);
+      }
     });
   });
 

@@ -51,8 +51,34 @@ export const CredencialWebauthnModel: ModelDefined<ICredencialWebauthn, Credenci
     {
       tableName: "credencial_webauthn",
       timestamps: false,
+      // `public_key` never has to leave the process: it is read here only to
+      // verify an assertion, server-side, and a client never needs it back.
+      // `defaultScope` keeps it out of a bare `findAll`/`findByPk`, but an
+      // explicit `include: [{ model: CredencialWebauthnModel, attributes: [...] }]`
+      // from another model's query overrides a scope's attribute list —
+      // that is what `usuarios.hasMany(...)` below makes reachable from any
+      // query that includes this table by name. `toJSON` further down is the
+      // second, independent choke point: even a row read in full cannot leave
+      // the process serialised with its key still on it.
+      defaultScope: {
+        attributes: { exclude: ["public_key"] },
+      },
     },
   );
+
+// Sequelize's `.define()` API has no `instanceMethods` option any more (that
+// went away after v3), so the prototype is the only place left to hang a
+// per-model `toJSON`. Cast through `unknown` rather than fighting
+// `Model#toJSON`'s overloaded signature — the assignment is real at runtime
+// regardless of the cast, and the cast is only there to give TypeScript an
+// `unknown` target instead of an incompatible overload.
+(CredencialWebauthnModel.prototype as unknown as Record<string, unknown>).toJSON = function (
+  this: { get(): Record<string, unknown> },
+) {
+  const valores = { ...this.get() };
+  delete valores.public_key;
+  return valores;
+};
 
 UsuarioModel.hasMany(CredencialWebauthnModel, { foreignKey: "id_usuario" });
 CredencialWebauthnModel.belongsTo(UsuarioModel, { foreignKey: "id_usuario" });
