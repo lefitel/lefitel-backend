@@ -21,7 +21,11 @@ interface Fila {
   iv: Buffer;
   auth_tag: Buffer;
   key_version: number;
-  ultimo_paso: number | null;
+  // A string, matching how `pg` actually hands a `BIGINT` column back —
+  // never a `number` — the same shape `pasoYaUsado`'s own tests below insist
+  // on, and the shape `sellarPaso`'s atomic `WHERE` (hallazgo F4/C-3) now
+  // has to compare against correctly.
+  ultimo_paso: string | null;
   confirmed_at: Date | null;
   created_at: Date;
 }
@@ -29,10 +33,14 @@ interface Fila {
 let filas: Fila[] = [];
 
 /**
- * Decides whether one row satisfies a Sequelize `where`, understanding only
- * the shapes this module actually produces: plain equality (including
- * against `null`) and `{ [Op.ne]: null }`. Anything else throws rather than
- * quietly matching everything — the same "the fake shrugs at nothing" rule
+ * Decides whether one row satisfies every *string-keyed* clause of a
+ * Sequelize `where` — plain equality (including against `null`),
+ * `{ [Op.ne]: null }`, and `{ [Op.lt]: value }`. `Object.entries` never sees
+ * a *symbol*-keyed clause at all (that is `matchesOr` below, kept separate
+ * because of exactly this), so this function on its own is only ever the
+ * right answer for a `where` with no top-level `[Op.or]`. Anything shaped
+ * differently than the two Ops above throws rather than quietly matching
+ * everything — the same "the fake shrugs at nothing" rule
  * `factorInventory.test.ts` and `mfaKeyCheck.test.ts` document, so a query
  * that grows a condition this fake does not understand fails loudly instead
  * of passing by accident.
@@ -42,13 +50,35 @@ function matches(row: Fila, where: Record<string, unknown>): boolean {
     const valor = (row as unknown as Record<string, unknown>)[campo];
     if (clausula !== null && typeof clausula === "object" && !(clausula instanceof Date)) {
       const simbolos = Object.getOwnPropertySymbols(clausula);
-      if (simbolos.length !== 1 || simbolos[0] !== Op.ne) {
-        throw new Error("the fake table only understands { [Op.ne]: value }");
+      if (simbolos.length !== 1) {
+        throw new Error("the fake table only understands a single Op per clause");
       }
-      return valor !== (clausula as Record<symbol, unknown>)[Op.ne];
+      const [simbolo] = simbolos;
+      const operando = (clausula as Record<symbol, unknown>)[simbolo];
+      if (simbolo === Op.ne) return valor !== operando;
+      if (simbolo === Op.lt) return BigInt(valor as string) < BigInt(operando as string);
+      throw new Error("the fake table only understands { [Op.ne]: value } and { [Op.lt]: value }");
     }
     return valor === clausula;
   });
+}
+
+/**
+ * Whether a row satisfies a whole `where`, including a top-level
+ * `[Op.or]: [...]` — `sellarPaso`'s own shape for making its `UPDATE`
+ * atomic (hallazgo F4/C-3): `ultimo_paso IS NULL OR ultimo_paso < :paso`.
+ * `Op.or` is a *symbol* key, invisible to `Object.entries`, which is why
+ * `matches` above cannot see it and this reads it separately with
+ * `Object.getOwnPropertySymbols` before delegating every other, plain,
+ * string-keyed clause back to `matches`.
+ */
+function coincideConWhere(row: Fila, where: Record<string, unknown>): boolean {
+  if (!matches(row, where)) return false;
+  const simbolos = Object.getOwnPropertySymbols(where);
+  const orKey = simbolos.find((s) => s === Op.or);
+  if (!orKey) return true;
+  const ramas = (where as unknown as Record<symbol, Record<string, unknown>[]>)[orKey];
+  return ramas.some((rama) => matches(row, rama));
 }
 
 const create = vi.fn();
@@ -62,7 +92,7 @@ vi.mock("../models/factorTotp.model.js", () => ({
     update: (...a: unknown[]) => updateMock(...a),
     unscoped: () => ({
       findOne: (opciones: { where: Record<string, unknown> }) => {
-        const encontrada = filas.find((f) => matches(f, opciones.where));
+        const encontrada = filas.find((f) => coincideConWhere(f, opciones.where));
         return Promise.resolve(encontrada ? { get: () => ({ ...encontrada }) } : null);
       },
     }),
@@ -100,15 +130,20 @@ beforeEach(() => {
 
   destroyMock.mockImplementation((opciones: { where: Record<string, unknown> }) => {
     const antes = filas.length;
-    filas = filas.filter((f) => !matches(f, opciones.where));
+    filas = filas.filter((f) => !coincideConWhere(f, opciones.where));
     return Promise.resolve(antes - filas.length);
   });
 
   updateMock.mockImplementation(
     (valores: Record<string, unknown>, opciones: { where: Record<string, unknown> }) => {
+      // Deliberately synchronous — no `await` before the mutation, the same
+      // rule `recoveryCodeStore.test.ts` documents for its own fake `update`:
+      // this is what lets the fake behave atomically across a genuinely
+      // concurrent test the way a real `UPDATE ... WHERE ...` does, instead
+      // of two overlapping calls both reading the pre-write state.
       let contador = 0;
       filas = filas.map((f) => {
-        if (!matches(f, opciones.where)) return f;
+        if (!coincideConWhere(f, opciones.where)) return f;
         contador += 1;
         return { ...f, ...(valores as Partial<Fila>) };
       });
@@ -222,23 +257,29 @@ describe("pasoYaUsado", () => {
   });
 });
 
-describe("sellarPaso", () => {
-  it("stores the exact step it is given, on the row it is given", async () => {
-    filas = [
-      {
-        id: 4,
-        id_usuario: 1,
-        secreto_cifrado: Buffer.alloc(0),
-        iv: Buffer.alloc(12),
-        auth_tag: Buffer.alloc(16),
-        key_version: 1,
-        ultimo_paso: null,
-        confirmed_at: new Date(),
-        created_at: new Date(),
-      },
-    ];
+/** A confirmed TOTP row, seeded with whichever `ultimo_paso` a test needs — a
+ *  string or `null`, never a `bigint` or a `number`, matching exactly what
+ *  `pg` hands back for a `BIGINT` column (see the `Fila` interface's own
+ *  comment above). */
+function filaFactor(id: number, ultimo_paso: string | null): Fila {
+  return {
+    id,
+    id_usuario: 1,
+    secreto_cifrado: Buffer.alloc(0),
+    iv: Buffer.alloc(12),
+    auth_tag: Buffer.alloc(16),
+    key_version: 1,
+    ultimo_paso,
+    confirmed_at: new Date(),
+    created_at: new Date(),
+  };
+}
 
-    await sellarPaso(4, 58012345n);
+describe("sellarPaso", () => {
+  it("stores the exact step it is given, on the row it is given, and reports one row changed", async () => {
+    filas = [filaFactor(4, null)];
+
+    await expect(sellarPaso(4, 58012345n)).resolves.toBe(1);
 
     const [valores, opciones] = updateMock.mock.calls[0] as [
       Record<string, unknown>,
@@ -250,7 +291,7 @@ describe("sellarPaso", () => {
     // makes it the kind of shortcut that stays invisible until the day it is
     // not.
     expect(valores.ultimo_paso).toBe("58012345");
-    expect(opciones.where).toEqual({ id: 4 });
+    expect(opciones.where.id).toBe(4);
   });
 
   it("does not accept the step it just sealed", () => {
@@ -262,5 +303,49 @@ describe("sellarPaso", () => {
     const guardadoPorLaBase = "58012345";
     expect(pasoYaUsado(guardadoPorLaBase, 58012345n)).toBe(true);
     expect(pasoYaUsado(guardadoPorLaBase, 58012346n)).toBe(false);
+  });
+
+  describe("the write is atomic — hallazgo F4/C-3/A-8", () => {
+    it("refuses to reseal a step already sealed at or after the one being sealed now, and changes nothing", async () => {
+      filas = [filaFactor(4, "58012345")];
+
+      // Same step again: the `WHERE`'s `ultimo_paso < :paso` is false, so
+      // the old, unconditional version of this function — which only ever
+      // matched on `id` — is exactly what this guards against. Before the
+      // fix, this call silently "succeeded" a second time.
+      await expect(sellarPaso(4, 58012345n)).resolves.toBe(0);
+      expect(filas[0].ultimo_paso).toBe("58012345");
+    });
+
+    it("refuses to move ultimo_paso backwards", async () => {
+      filas = [filaFactor(4, "58012345")];
+
+      // A concurrent request sealing an earlier step it also validly
+      // matched inside the ±1 tolerance window — accepting this would let
+      // the step this row already sealed become reusable again.
+      await expect(sellarPaso(4, 58012344n)).resolves.toBe(0);
+      expect(filas[0].ultimo_paso).toBe("58012345");
+    });
+
+    it("accepts a genuinely later step", async () => {
+      filas = [filaFactor(4, "58012345")];
+
+      await expect(sellarPaso(4, 58012346n)).resolves.toBe(1);
+      expect(filas[0].ultimo_paso).toBe("58012346");
+    });
+
+    it("lets exactly one of two concurrent seals of the same step through", async () => {
+      // Launched together, not one `await` after another — run in series
+      // this passes even against the old, unconditional `UPDATE`, which is
+      // exactly the shape hallazgo F4 measured as "both requests seal, both
+      // return true". Only racing them the way `recoveryCodeStore.test.ts`
+      // races ten `gastarCodigo` calls at once catches that regression.
+      filas = [filaFactor(4, null)];
+
+      const resultados = await Promise.all([sellarPaso(4, 58012345n), sellarPaso(4, 58012345n)]);
+
+      expect(resultados.sort()).toEqual([0, 1]);
+      expect(filas[0].ultimo_paso).toBe("58012345");
+    });
   });
 });

@@ -185,13 +185,41 @@ export async function leerSecretoSinConfirmar(
 }
 
 /**
- * Record the time step a code was just accepted for.
+ * Record the time step a code was just accepted for — atomically, or find
+ * out somebody else (or a concurrent request for the very same code) got
+ * there first.
  *
- * `paso` is converted to a plain `number` for the write — safe unlike the
- * *read* side (see `pasoYaUsado`): a TOTP step is `Date.now() / 30_000`,
- * nowhere near `Number.MAX_SAFE_INTEGER` for the working lifetime of this
- * software, and the column only ever round-trips as a string once it comes
- * back out of Postgres, not on the way in.
+ * **Hallazgo F4/C-3/A-8: this used to be an unconditional write, and that is
+ * exactly what let the same code succeed twice.** `mfa.controller.ts`'s
+ * `verificarTotp` reads a row, decides a code is fresh against that snapshot
+ * (`pasoYaUsado`), and only then calls this function — two round trips to the
+ * database, with a gap between them. Two requests carrying the same code,
+ * arriving inside that gap, both read `ultimo_paso` before either writes it,
+ * both compute the same accepted step, and an unconditional `UPDATE ...
+ * WHERE id = ?` would let both win. Worse, without an ordering guard a *later*
+ * writer sealing an *earlier* step (its own valid match inside the ±1
+ * tolerance window) would silently move `ultimo_paso` backwards and leave the
+ * step the first writer just sealed reusable again.
+ *
+ * The `WHERE` below repeats the freshness check against the row this call is
+ * about to commit to — the same shape `recoveryCodeStore.ts`'s `gastarCodigo`
+ * already uses for the identical race on recovery codes (hallazgo B6): never
+ * trust a read taken before this statement, trust only what this statement's
+ * own `WHERE` still sees true at the instant it runs. `pasoYaUsado`'s
+ * snapshot-based check stays useful as a cheap, safe *early reject* — a step
+ * it already saw as used cannot un-become used — but it is no longer the
+ * thing that decides acceptance; the row count this function returns is.
+ *
+ * Returns the number of rows the `UPDATE` actually changed: `1` for a genuine
+ * seal, `0` for "this step was already sealed, at or after the value being
+ * sealed now, by the time this statement ran" — which the caller has to treat
+ * exactly like `pasoYaUsado` returning `true`, never as success.
+ *
+ * `paso` is converted to a plain `number`-shaped string for the write — safe
+ * unlike the *read* side (see `pasoYaUsado`): a TOTP step is
+ * `Date.now() / 30_000`, nowhere near `Number.MAX_SAFE_INTEGER` for the
+ * working lifetime of this software, and the column only ever round-trips as
+ * a string once it comes back out of Postgres, not on the way in.
  *
  * The caller decides *which* step to pass, and that choice is the whole of
  * hallazgo C10's third rule: it has to be the step that actually matched
@@ -206,11 +234,19 @@ export async function sellarPaso(
   id_factor: number,
   paso: bigint,
   opciones: { transaction?: Transaction } = {},
-): Promise<void> {
-  await FactorTotpModel.update(
-    { ultimo_paso: paso.toString() },
-    { where: { id: id_factor }, transaction: opciones.transaction },
+): Promise<number> {
+  const pasoTexto = paso.toString();
+  const [afectadas] = await FactorTotpModel.update(
+    { ultimo_paso: pasoTexto },
+    {
+      where: {
+        id: id_factor,
+        [Op.or]: [{ ultimo_paso: null }, { ultimo_paso: { [Op.lt]: pasoTexto } }],
+      },
+      transaction: opciones.transaction,
+    },
   );
+  return afectadas;
 }
 
 /**

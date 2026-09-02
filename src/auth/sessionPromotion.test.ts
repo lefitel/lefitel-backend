@@ -18,7 +18,7 @@ vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: { update: (...a: unknown[]) => usuarioUpdate(...a) },
 }));
 
-const { promoverSesion, apagarLaMecha } = await import("./sessionPromotion.js");
+const { promoverSesion, apagarLaMecha, sellarPruebaDeFactor } = await import("./sessionPromotion.js");
 
 /** The bound of a `{ [Op.x]: value }` clause, read past the Symbol key. */
 const boundOf = (clause: unknown, op: symbol) => (clause as Record<symbol, unknown>)[op];
@@ -87,6 +87,61 @@ describe("promoverSesion", () => {
     // already satisfied.
     sesionUpdate.mockResolvedValue([0]);
     expect(await promoverSesion("s1", "totp")).toBe(false);
+  });
+});
+
+describe("sellarPruebaDeFactor", () => {
+  // Hallazgo F2/B-1: `estadoInicialDeSesion` can open a brand-new session as
+  // `completa` for an account with no factor still inside its grace period.
+  // When that account registers its first factor, `promoverSesion`'s WHERE
+  // matches nothing — the row was never `parcial`/`onboarding` — so it never
+  // seals `mfa_satisfied_at`, and `requireStepUp` refuses that session
+  // step-up for the rest of its life. This function is the other half of
+  // that write, for the one case `promoverSesion` was never meant to cover.
+  it("seals mfa_satisfied_at and mfa_source unconditionally, whatever the row's own estado is", async () => {
+    sesionUpdate.mockResolvedValue([1]);
+    await sellarPruebaDeFactor("s1", "totp");
+
+    const [values, options] = sesionUpdate.mock.calls[0] as [
+      Record<string, unknown>,
+      { where: Record<string, unknown> },
+    ];
+    expect(values.mfa_satisfied_at).toBeInstanceOf(Date);
+    expect(values.mfa_source).toBe("totp");
+    // No `estado` clause in the WHERE at all — unlike `promoverSesion`, this
+    // writes the caller's own session id and nothing else.
+    expect(options.where).toEqual({ id: "s1" });
+  });
+
+  it("does not write estado — the row is already completa by the time this is ever called", async () => {
+    await sellarPruebaDeFactor("s1", "totp");
+    const [values] = sesionUpdate.mock.calls[0] as [Record<string, unknown>];
+    expect(values.estado).toBeUndefined();
+    expect(Object.keys(values).sort()).toEqual(["mfa_satisfied_at", "mfa_source"]);
+  });
+
+  it("refuses to touch a session that is not the caller's own — the WHERE names exactly the id it was given", async () => {
+    await sellarPruebaDeFactor("mine", "totp");
+    const [, first] = sesionUpdate.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
+    expect(Object.keys(first.where)).toEqual(["id"]);
+    expect(first.where.id).toBe("mine");
+  });
+
+  it("joins a transaction it is handed", async () => {
+    const t = { LOCK: "fake" } as never;
+    await sellarPruebaDeFactor("s1", "totp", { transaction: t });
+    expect(sesionUpdate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ transaction: t }),
+    );
+  });
+
+  it("works with no transaction at all", async () => {
+    await sellarPruebaDeFactor("s1", "totp");
+    expect(sesionUpdate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ transaction: undefined }),
+    );
   });
 });
 

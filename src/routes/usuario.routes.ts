@@ -134,33 +134,50 @@ router.patch(
 // `usuario.controller.ts`, which writes both to zero and NULL and files a
 // `critical` line saying what it undid.
 //
-// The recovery path still works, and this is what it costs the administrator in
-// a hurry: nothing at all while no account has a factor, and one proof of their
-// own factor afterwards — the same one the neighbouring routes will ask them
-// for. `requireStepUp()` with no options, like every other administrative
-// mount: an `onboarding` session is refused outright rather than falling to
-// the password fallback.
+// 🔴 **`exigeContrasena: true` — added by the 2026-09-02 closure audit,
+// hallazgo F8 (auditor B-6).** The paragraph above stopped short: it is true
+// that "every route above answers 403 to a session that has not proved one",
+// but only once that account *has* a factor to prove. Today, with zero of
+// nine accounts registered, `tieneAlgunFactor` is `false` for everybody,
+// including whichever administrator's cookie gets stolen — so without this
+// option, this route sat in exactly the gap the paragraph above thought it
+// had closed: a factor-less cookie, no `stepup_password`, and
+// `requireStepUp`'s own third branch waves it through, same as it always
+// did. `exigeContrasena` closes that specific gap: from the very first
+// deploy, lifting a lockout costs the administrator's own current password,
+// not merely a live cookie — the same requirement `requireStepUp.ts`'s own
+// docstring on this option was already written to demand, and which this
+// mount had never actually turned on.
 router.patch(
   "/:id/desbloquear",
   requirePermission("seguridad", "editar"),
-  requireStepUp(),
+  requireStepUp({ exigeContrasena: true }),
   desbloquearUsuario,
 );
 // The escape hatch from §8 of the MFA design: an administrator clears
 // somebody else's second factor from the browser. `editar`, the same
 // permission `/desbloquear` above asks for and for the same reason — this
 // is the other way an administrator undoes a state that leaves an account
-// unable to log in. `requireStepUp()` with no options: an `onboarding`
-// session is refused outright, same as every other administrative mount on
-// this router, never the exception. See `rescatarMfaDeUsuario` in
-// `usuario.controller.ts` for the refusal this route adds on top of both
-// gates — resetting your own factors through here is rejected even with the
-// permission and a proved factor, because it would leave the caller's own
-// session past `requireStepUp`'s gate on nothing but the cookie.
+// unable to log in. See `rescatarMfaDeUsuario` in `usuario.controller.ts`
+// for the refusal this route adds on top of both gates — resetting your own
+// factors through here is rejected even with the permission and a proved
+// factor, because it would leave the caller's own session past
+// `requireStepUp`'s gate on nothing but the cookie.
+//
+// 🔴 **`exigeContrasena: true` — same hallazgo F8, and the more severe half
+// of it.** `rescatarMfaDeUsuario` deletes the target account's rows in all
+// three factor tables and revokes every one of its live sessions and
+// remembered devices — literally the "removes a credential" case
+// `requireStepUp.ts`'s docstring on `exigeContrasena` names by name. Without
+// this option, and with no account anywhere holding a factor yet, a stolen
+// administrator cookie could clear the second factor of every one of the
+// other eight accounts and sign them all out, in eight requests, without
+// ever typing a password. `exigeContrasena` is what makes that cost the
+// administrator's own current password instead of nothing.
 router.post(
   "/:id/mfa/reset",
   requirePermission("seguridad", "editar"),
-  requireStepUp(),
+  requireStepUp({ exigeContrasena: true }),
   rescatarMfaDeUsuario,
 );
 router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);

@@ -373,6 +373,25 @@ describe("gastarCodigo", () => {
     expect(opciones.transaction).toBe(propia);
   });
 
+  it("passes the same transaction through to the read that finds candidate codes — hallazgo F3/C-1", async () => {
+    // Not a load test: `sequelize` has no `useCLS` wired up (verified in the
+    // auditor's report), so a `findAll` that does not carry the caller's own
+    // transaction runs on a *second* connection from the pool instead of
+    // inside the first. Fifteen callers doing that at once — the pool's own
+    // `max` — exhausts it: every one of them holds a connection open waiting
+    // for a second that will never come, and the whole API stalls for
+    // `acquire`'s full 30 seconds. The fix is this one bound argument; this
+    // assertion is what keeps it from silently drifting loose again.
+    sembrar({ id_usuario: 1, codigo: CODE_A });
+    const propia = { id: "la-transaccion-del-llamante" };
+
+    await gastarCodigo(1, CODE_A, { transaction: propia as unknown as never });
+
+    expect(findAllMock).toHaveBeenCalledTimes(1);
+    const [opciones] = findAllMock.mock.calls[0] as [{ transaction?: unknown }];
+    expect(opciones.transaction).toBe(propia);
+  });
+
   it("never prints a code, on success or on failure", async () => {
     sembrar({ id_usuario: 1, codigo: CODE_A });
     await gastarCodigo(1, CODE_A);

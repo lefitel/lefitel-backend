@@ -41,6 +41,29 @@
 // half-decided notification path to it is a larger, separate decision than
 // "wrap the store in two endpoints".
 //
+// 🔴 **`regenerateRecoveryCodes` refuses an account with no confirmed factor
+// at all — hallazgo F1 (auditors C-2 and D-1, closure audit of 2026-09-02).**
+// `factorInventory.ts:13-17` says why in its own words: recovery codes are
+// the way back in when a real factor is unreachable, "handed out at the
+// *end* of registering one, precisely because that assumes one already
+// exists." Nothing here enforced that assumption. `requireStepUp({
+// exigeContrasena: true })` only proves the caller's own current password —
+// it says nothing about whether the account has anything for the ten codes
+// to back up, and an account with nothing is
+// exactly the account that gate's password fallback exists to let through
+// (see `requireStepUp.ts`'s own docstring on the branch that answers "no
+// factor, no fresh proof, but a correct password"). Composed, those two
+// individually correct pieces used to open a hole the fourteen-day grace
+// period was supposed to close: the password alone minted ten codes for an
+// account with nothing else registered, and one of those codes promoted the
+// very same session to `completa` in `mfa.controller.ts`'s `verify` — the
+// mirror half of this same finding, fixed alongside this file and not in
+// it — indefinitely, since a fresh ten regenerate with that same password.
+// `tieneAlgunFactor(caller.id)` is checked first, before `regenerarCodigos`
+// runs or writes anything, and an account with nothing registered is turned
+// back with a 409 that says what to do next — see
+// `MENSAJE_SIN_FACTOR_PARA_CODIGOS` — rather than only that it refused.
+//
 // **`GET /api/auth/recovery-codes` carries no `requireStepUp` at all.**
 // Counting how many of the ten remain reveals nothing an authenticated
 // caller cannot already infer by trying to spend one, and it creates no
@@ -51,6 +74,7 @@
 
 import type { Request, Response } from "express";
 import { regenerarCodigos, contarCodigosRestantes } from "../auth/recoveryCodeStore.js";
+import { tieneAlgunFactor } from "../auth/factorInventory.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -61,6 +85,17 @@ const handler = makeHandler(recoveryCodesLog);
 export const MENSAJE_CODIGOS_GENERADOS =
   "Estos son tus nuevos códigos de recuperación. Guárdalos en un lugar seguro: " +
   "no volverán a mostrarse y los anteriores han dejado de funcionar.";
+
+/**
+ * Hallazgo F1. Told plainly, not just refused: whoever reaches this
+ * legitimately is doing the right thing in the wrong order, and the way out
+ * is to finish the first step, not to retry this one.
+ */
+export const MENSAJE_SIN_FACTOR_PARA_CODIGOS =
+  "Todavía no tienes ningún segundo factor configurado. Los códigos de recuperación " +
+  "son la copia de repuesto de ese factor, no un sustituto suyo: configura primero tu " +
+  "segundo factor (por ejemplo, un código TOTP desde tu perfil) y, una vez confirmado, " +
+  "vuelve aquí para generar tus diez códigos.";
 
 /**
  * `POST /api/auth/recovery-codes` — issue a fresh set of ten, discarding
@@ -78,12 +113,22 @@ export const MENSAJE_CODIGOS_GENERADOS =
  * once**: this handler is the only caller of `regenerarCodigos` in the 4B
  * codebase, and nothing here writes them to a log, a bitácora `detail` or
  * `metadata` field, or anywhere they could be read back later.
+ *
+ * **Refuses an account with no confirmed factor, before anything is
+ * written** — hallazgo F1. See the module header for the shape of the hole
+ * this closes. No bitácora line for that refusal: nothing changed, matching
+ * `totp.controller.ts`'s own precondition 409s (unverified email, factor
+ * already configured), neither of which logs either.
  */
 export const regenerateRecoveryCodes = handler(
   "regenerateRecoveryCodes",
   async (req: Request, res: Response) => {
     const caller = req.user;
     if (!caller) return res.sendStatus(401);
+
+    if (!(await tieneAlgunFactor(caller.id))) {
+      return res.status(409).json({ message: MENSAJE_SIN_FACTOR_PARA_CODIGOS });
+    }
 
     const codigos = await regenerarCodigos(caller.id);
 

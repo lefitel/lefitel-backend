@@ -166,19 +166,27 @@ describe("🔴 POST / demands the password, always — hallazgo C14", () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }));
   });
 
-  it("lets an onboarding session past the state check (five ONBOARDING_EXTRA doors, this is one)", async () => {
+  it("🔴 refuses an onboarding session outright at the state check — hallazgo F1, `permiteOnboarding` removed", async () => {
+    // This mount used to carry `permiteOnboarding: true`. It does not any
+    // more: `onboarding` means no confirmed factor by construction (see
+    // `factorInventory.ts`'s `estadoInicialDeSesion`), and the controller
+    // now refuses exactly that account regardless of state — see
+    // `recoveryCodes.controller.ts`'s own guard and its test. Letting an
+    // `onboarding` session past this gate only bought it a chance to type a
+    // password on a request that was always going to end in a 409, so the
+    // option was removed rather than kept as a detour to the same refusal.
     const stepUpGate = stepUpGateOf("POST", "/");
     if (!stepUpGate) throw new Error("POST / no monta requireStepUp");
-    tieneAlgunFactor.mockResolvedValue(false);
     const { req, res, next } = contexto({ id: 1, estado: "onboarding", mfa_satisfied_at: null }, {});
 
     await stepUpGate(req, res, next);
 
-    // Reaches the password branch (still refused, since none was sent) —
-    // proving the *state* check passed, without needing `exigeContrasena`
-    // turned off to observe it.
+    // Refused at the very first check, before the factor lookup or the
+    // password field are ever read.
     expect(next).not.toHaveBeenCalled();
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }));
+    expect(tieneAlgunFactor).not.toHaveBeenCalled();
+    expect(verifyOwnPassword).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }));
   });
 
   it("refuses a parcial session outright at the state check — belt and suspenders alongside sessionState.ts", async () => {

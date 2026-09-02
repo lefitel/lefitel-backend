@@ -41,10 +41,11 @@ import {
   leerSecretoSinConfirmar,
   confirmarFactor,
 } from "../auth/totpStore.js";
-import { promoverSesion, apagarLaMecha } from "../auth/sessionPromotion.js";
+import { promoverSesion, sellarPruebaDeFactor, apagarLaMecha } from "../auth/sessionPromotion.js";
 import { sequelize } from "../database/sequelize.js";
 import { tieneAlgunFactor } from "../auth/factorInventory.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
+import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -106,6 +107,23 @@ export const MENSAJE_FACTOR_CONFIRMADO = "Segundo factor configurado correctamen
 export const MENSAJE_SIN_FACTOR = "No tienes ningún factor de autenticación registrado.";
 
 export const MENSAJE_FACTOR_ELIMINADO = "Factor de autenticación eliminado.";
+
+/**
+ * El caso del último factor, que **no** puede compartir mensaje con el anterior.
+ *
+ * Borrar el último factor revoca todas las sesiones vivas de la cuenta,
+ * incluida la pestaña desde la que se pulsó el botón — ver la nota junto a
+ * `revokeAllSessionsOf` más abajo para por qué no lleva `except`. Con el
+ * mensaje genérico, esa persona lee «eliminado», y acto seguido la aplicación
+ * la echa con «tu sesión se cerró», que suena a que algo falló.
+ *
+ * Dos hechos y una instrucción, en ese orden, porque es lo que necesita saber:
+ * qué pasó, qué implica, y qué hacer ahora.
+ */
+export const MENSAJE_ULTIMO_FACTOR_ELIMINADO =
+  "Factor de autenticación eliminado. Era el último que te quedaba, así que a partir de ahora " +
+  "entrarás solo con tu contraseña, y hemos cerrado tus sesiones en todos los dispositivos. " +
+  "Vuelve a iniciar sesión.";
 
 /**
  * `POST /auth/totp/setup` — start registering a TOTP factor.
@@ -221,13 +239,23 @@ export const setupTotp = handler("setupTotp", async (req: Request, res: Response
  * sealing the wrong one leaves the neighbouring one still open to replay.
  * `sellarPaso` (Task 4) is handed exactly that value.
  *
- * **On success, four writes, in this order, matching the plan's own
+ * **On success, four or five writes, in this order, matching the plan's own
  * ordering:** mark the row confirmed, seal the step that matched, promote
  * the session that just proved it (`sessionPromotion.ts`, Task 5 — without
  * this, `estadoEfectivo` only ever narrows and an `onboarding` or `parcial`
- * session that just registered its factor stays exactly what it was),
- * and clear the fourteen-day deadline (`apagarLaMecha`) so it does not read
- * as "still overdue" for an account that just did what it was asked.
+ * session that just registered its factor stays exactly what it was) —
+ * and the fifth, conditional write: if there was no `parcial`/`onboarding`
+ * row for `promoverSesion` to promote, because this session opened
+ * `completa` already (an account with no factor, still inside its grace
+ * period — see `estadoInicialDeSesion`), seal this session's own proof
+ * anyway (`sellarPruebaDeFactor`, hallazgo F2/B-1). Skipping that fifth
+ * write is exactly the bug it fixes: the account that registers its factor
+ * *on time* would leave this endpoint with `mfa_satisfied_at` still NULL,
+ * and every step-up gate would refuse it for the rest of the session's
+ * life — while somebody who registers late, whose session opened
+ * `onboarding`, sails through `promoverSesion` and is fine. Finally, clear
+ * the fourteen-day deadline (`apagarLaMecha`) so it does not read as "still
+ * overdue" for an account that just did what it was asked.
  *
  * The bitácora line is `critical`: hallazgo (Task 6 Step 7) — registering a
  * credential is a security event worth a permanent record even though
@@ -269,7 +297,7 @@ export const confirmTotp = handler("confirmTotp", async (req: Request, res: Resp
   const pasoAceptado = BigInt(TOTP.counter({ period: TOTP_PERIOD, timestamp: ahora })) + BigInt(delta);
 
   /**
-   * The four writes that finish a registration, together or not at all.
+   * The writes that finish a registration, together or not at all.
    *
    * They were four separate statements, and the states in between are the kind
    * nobody notices until somebody is in one. Confirmed-but-not-sealed leaves the
@@ -281,10 +309,24 @@ export const confirmTotp = handler("confirmTotp", async (req: Request, res: Resp
    *
    * `confirmarFactor` also folds the first two into one statement, since both
    * columns live on the same row.
+   *
+   * **Hallazgo F2/B-1: `promoverSesion`'s own return has to be looked at.**
+   * It writes nothing when this session opened `completa` already — an
+   * account with no factor, still inside its grace period — and the bug
+   * this whole block exists to close was exactly a caller that ran
+   * `promoverSesion` and never checked whether it did anything.
+   * `sellarPruebaDeFactor` is the sibling that seals proof on that same row
+   * unconditionally; see its own docstring in `sessionPromotion.ts` for why
+   * it is a separate function rather than a flag on `promoverSesion` itself.
+   * Called only when `promoverSesion` found nothing to promote, so a session
+   * that *did* just get promoted is not written to twice.
    */
   await sequelize.transaction(async (transaction) => {
     await confirmarFactor(pendiente.id, pasoAceptado, { transaction });
-    await promoverSesion(caller.id_sesion, "totp", { transaction });
+    const promovida = await promoverSesion(caller.id_sesion, "totp", { transaction });
+    if (!promovida) {
+      await sellarPruebaDeFactor(caller.id_sesion, "totp", { transaction });
+    }
     await apagarLaMecha(caller.id, { transaction });
   });
 
@@ -331,6 +373,46 @@ export const confirmTotp = handler("confirmTotp", async (req: Request, res: Resp
  * `completa` session on an account that, as of this call, has nothing behind
  * it. Same treatment archiving a user and changing a password already give —
  * removing a credential invalidates whatever trusted it.
+ *
+ * **Revoking every live session, hallazgo F7/C-5/B-3 — `factorInventory.ts`
+ * calls this out by name as a non-optional duty of this endpoint.** A
+ * session already stored as `completa` is never rewritten by anything in
+ * `src/`; `estadoEfectivo` only ever narrows, and it exits on its very first
+ * clause whenever `guardado === "completa"`, never re-checking whether the
+ * account still holds a factor. So a browser that logged in while this
+ * factor existed goes on being `completa` for up to `SESSION_ABSOLUTE_DAYS`
+ * after this call — and the instant `tieneAlgunFactor` starts answering
+ * `false`, `requireStepUp`'s "nothing to prove" branch treats that stale
+ * session exactly like an account that never had a factor at all, waving
+ * gated writes through on the cookie alone wherever a route does not also
+ * demand a password. A stolen cookie from before this call becomes a
+ * password-free key to the whole security panel, for as long as that cookie
+ * has left to live.
+ *
+ * **Revoke, not degrade — decided here, not left to whoever reads this
+ * next.** Degrading in place would mean writing some `estado` short of
+ * `completa` onto rows that, by construction, belong to an account with
+ * *zero* factors left: there is nothing for `/mfa/verify` to check against
+ * to lift them back out, so a degraded session would be stuck exactly where
+ * it landed — a worse failure than the one being fixed, and a silent one.
+ * Revoking is what `revokeAllSessionsOf` already does at its other four call
+ * sites (`logoutAll`, an administrator's password reset, archiving an
+ * account, the rescue console) whenever an account's security posture
+ * changes enough that its old cookies should not survive it; deleting your
+ * last factor is exactly that kind of change, not a smaller one.
+ *
+ * **No `except` — this ends the caller's own session too, in the same tab
+ * that just clicked delete.** `changePassword` spares nobody either, for a
+ * far more frequent action than this one, and does so by rotating a fresh
+ * cookie in for the caller right after — see its own comment in
+ * `usuario.controller.ts`. Building that same rotation here would be new
+ * machinery for a rare, deliberate action, not the routine one it exists
+ * for; simply asking the person to log back in is the correct cost; the
+ * next login opens the account with the same "nothing to prove" treatment
+ * every zero-factor account already gets, so it is no friction beyond
+ * typing the password again. Sparing the caller's own session here would
+ * leave exactly the exposure this fix closes, just narrowed to one browser
+ * instead of several — the same hole, smaller, not gone.
  */
 export const deleteTotp = handler("deleteTotp", async (req: Request, res: Response) => {
   const caller = req.user;
@@ -369,13 +451,14 @@ export const deleteTotp = handler("deleteTotp", async (req: Request, res: Respon
   const quedaAlgunFactor = await tieneAlgunFactor(caller.id);
   if (!quedaAlgunFactor) {
     await revokeAllRememberedDevicesOf(caller.id);
+    const sesionesRevocadas = await revokeAllSessionsOf(caller.id);
     logAction({
       id_usuario: caller.id,
       action: "TOTP_DELETED",
       entity: "FactorTotp",
       entity_id: fila.dataValues.id,
       detail: "Eliminó su último factor de autenticación; la cuenta queda sin ningún factor registrado",
-      metadata: { id_sesion: caller.id_sesion, ultimo_factor: true },
+      metadata: { id_sesion: caller.id_sesion, ultimo_factor: true, sesiones_revocadas: sesionesRevocadas },
       severity: "critical",
       ip_address: req.ip ?? null,
     });
@@ -392,5 +475,7 @@ export const deleteTotp = handler("deleteTotp", async (req: Request, res: Respon
     });
   }
 
-  res.status(200).json({ message: MENSAJE_FACTOR_ELIMINADO });
+  res.status(200).json({
+    message: quedaAlgunFactor ? MENSAJE_FACTOR_ELIMINADO : MENSAJE_ULTIMO_FACTOR_ELIMINADO,
+  });
 });

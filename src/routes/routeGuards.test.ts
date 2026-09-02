@@ -438,6 +438,9 @@ const STEP_UP_GATED = [
   "PATCH /api/usuario/:id/desarchivar",
   // The one that was outside this list until an audit read its reason again.
   // See the paragraph above, and the rewritten comment beside the route.
+  // Also one of the two mounts below carrying `exigeContrasena: true` since
+  // hallazgo F8 (2026-09-02 closure audit) — see the "cuatro, y dos más
+  // arriba" note near the bottom of this array for why.
   "PATCH /api/usuario/:id/desbloquear",
   "PUT /api/usuario/:id",
   "PUT /api/usuario/username/:id",
@@ -447,7 +450,8 @@ const STEP_UP_GATED = [
   // explains the refusal this route adds on top of the gate: resetting your
   // own factors here would leave your own session past `requireStepUp` on
   // nothing but the cookie, since an account with no factors is exactly what
-  // this gate lets through unchallenged.
+  // this gate lets through unchallenged. The other of the two mounts with
+  // `exigeContrasena: true` — hallazgo F8, same note below.
   "POST /api/usuario/:id/mfa/reset",
   // rol.routes.ts — four. `GET /` is a read and carries no gate of any kind:
   // every screen that shows a person needs the name of their role.
@@ -464,23 +468,36 @@ const STEP_UP_GATED = [
   // alive. The neighbouring session routes stay ungated on purpose — see the
   // comment beside this one in `auth.routes.ts`.
   "DELETE /api/auth/sessions/:id",
-  // auth.routes.ts — and one more, the only mount that passes an option.
-  // The design's step-up list has "cambiar el email propio" on it, and this
-  // is the route that does it. The handler's own `pass` check is not the same
-  // thing: it goes on accepting a password after plan 4B registers a factor,
-  // which is precisely what the gate's second branch exists to stop.
+  // auth.routes.ts — and one more that also passes an option, `permiteOnboarding`
+  // and not `exigeContrasena` — the two `usuario.routes.ts` mounts above that
+  // pass an option ask for the password instead; this one asks to let
+  // `onboarding` through. The design's step-up list has "cambiar el email
+  // propio" on it, and this is the route that does it. The handler's own
+  // `pass` check is not the same thing: it goes on accepting a password
+  // after plan 4B registers a factor, which is precisely what the gate's
+  // second branch exists to stop.
   "POST /api/auth/email/send",
-  // ── El segundo factor (plan 4B) — cuatro ────────────────────────────────
-  // Los cuatro con `exigeContrasena: true`, que en esta puerta significa que
-  // piden la contraseña **siempre**, también a quien acaba de probar su
-  // factor. No es celo: un código de recuperación sella esa misma ventana, así
-  // que sin el «siempre» bastaría el papel impreso para dar de alta un factor
-  // nuevo — que es justo el límite que el plan dice que no se puede cruzar.
+  // ── El segundo factor (plan 4B) — cuatro, y dos más arriba ──────────────
+  // Seis rutas en total llevan `exigeContrasena: true`, no cuatro: las dos
+  // señaladas arriba en `usuario.routes.ts` — `desbloquear` y `mfa/reset`,
+  // hallazgo F8 del cierre del 2026-09-02 — y estas cuatro. En esta puerta
+  // la opción significa que piden la contraseña **siempre**, también a
+  // quien acaba de probar su factor. Para las cuatro de aquí abajo, no es
+  // celo: un código de recuperación sella esa misma ventana, así que sin el
+  // «siempre» bastaría el papel impreso para dar de alta un factor nuevo —
+  // que es justo el límite que el plan dice que no se puede cruzar. Para las
+  // dos de `usuario.routes.ts` la razón es más simple: con ninguna cuenta
+  // de las nueve con un factor, la contraseña de quien llama es la única
+  // prueba que le queda pedir a la puerta antes de borrar el segundo factor
+  // de otra cuenta o de levantarle su bloqueo de inicio de sesión.
   //
-  // Las dos de alta llevan además `permiteOnboarding`, y no es una relajación
-  // sino lo contrario de una caída: sin ella, quien está en `onboarding` no
-  // podría registrar jamás el factor que le saca de `onboarding`. `parcial`
-  // sigue rechazado pase lo que pase.
+  // Las dos de alta (TOTP) llevan además `permiteOnboarding`, y no es una
+  // relajación sino lo contrario de una caída: sin ella, quien está en
+  // `onboarding` no podría registrar jamás el factor que le saca de
+  // `onboarding`. `parcial` sigue rechazado pase lo que pase. Las dos de
+  // `usuario.routes.ts` no la llevan — nunca la llevaron, y siguen sin
+  // necesitarla: ninguna de las dos es una de las puertas por las que
+  // `onboarding` sale de `onboarding`.
   "POST /api/auth/totp/setup",
   "POST /api/auth/totp/confirm",
   "DELETE /api/auth/totp/",

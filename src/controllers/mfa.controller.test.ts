@@ -53,15 +53,24 @@ vi.mock("../models/factorTotp.model.js", () => ({
     update: (...a: unknown[]) => factorUpdate(...(a as [Record<string, unknown>, { where: { id: number } }])),
   },
 }));
-// `sellarPaso` (real, from `totpStore.ts`) writes through this mock — see
-// `resetFilas`'s implementation below, which is what makes a second call to
-// `verificarTotp` in the same test see the sealed step, exactly the way a
-// real `UPDATE` followed by a real `SELECT` would.
+// `sellarPaso` (real, from `totpStore.ts`) writes through this mock. Its
+// `where` now carries the atomic anti-replay guard hallazgo F4/C-3/A-8 added
+// — `id` plus `ultimo_paso IS NULL OR ultimo_paso < :paso` — and this fake
+// has to actually enforce that second half, not just `id`: otherwise a
+// concurrency test racing two `verify()` calls with the same code would pass
+// whether or not the real guard exists, which is precisely the kind of test
+// this whole audit exists to rule out. Deliberately synchronous — no `await`
+// before the mutation — so two overlapping calls interleave the same way two
+// real transactions racing the same `UPDATE` would: whichever's write lands
+// first is the only one that can still match.
 factorUpdate.mockImplementation(
-  (valores: Record<string, unknown>, opciones: { where: { id: number } }) => {
+  (valores: Record<string, unknown>, opciones: { where: { id: number; [key: symbol]: unknown } }) => {
+    const nuevo = BigInt(valores.ultimo_paso as string);
     let contador = 0;
     filas = filas.map((f) => {
       if (f.id !== opciones.where.id) return f;
+      const actual = f.ultimo_paso === null ? null : BigInt(f.ultimo_paso);
+      if (actual !== null && actual >= nuevo) return f; // Already sealed at or past this step.
       contador += 1;
       // `pg` hands `BIGINT` back as a string — `String(...)` here is what
       // keeps a second read of this row shaped the way hallazgo C10 demands,
@@ -93,6 +102,29 @@ vi.mock("../models/sesion.model.js", () => ({
 const gastarCodigo = vi.fn();
 vi.mock("../auth/recoveryCodeStore.js", () => ({
   gastarCodigo: (...a: unknown[]) => gastarCodigo(...a),
+}));
+
+// `tieneAlgunFactor` (hallazgo F1/C-2/D-1): mocked at the module, the same
+// way `gastarCodigo` above is — `factorInventory.test.ts` already covers its
+// own two-table COUNT correctness, so this file only needs to control what
+// it answers, not re-derive it from a fake `CredencialWebauthnModel` and
+// `FactorTotpModel.count` this file has no other reason to stand up.
+// Defaults to `true` in `beforeEach` below: every existing recovery-code test
+// in this file predates F1 and assumes an account that already has a factor
+// to rescue — the account with none is its own, explicit test.
+const tieneAlgunFactorMock = vi.fn();
+vi.mock("../auth/factorInventory.js", () => ({
+  tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactorMock(...a),
+}));
+
+// Real `mfaLog` (pino) is otherwise silent-but-untestable; mocked here only
+// so hallazgo F5/A5/C-4 — a crypto failure logged at `error`, never `warn` —
+// has something to assert against. Same shape `password.controller.test.ts`
+// and `securityNotice.test.ts` already use for the same reason.
+const loggerWarn = vi.fn();
+const loggerError = vi.fn();
+vi.mock("../utils/logger.js", () => ({
+  log: () => ({ warn: loggerWarn, error: loggerError, info: vi.fn(), debug: vi.fn() }),
 }));
 
 const logActionMock = vi.fn();
@@ -233,6 +265,7 @@ beforeEach(() => {
   findOneUsuario.mockResolvedValue({ dataValues: { failed_attempts: 1 } });
   gastarCodigo.mockResolvedValue(false);
   sesionUpdate.mockResolvedValue([1]);
+  tieneAlgunFactorMock.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -474,6 +507,143 @@ describe("POST /auth/mfa/verify", () => {
     );
   });
 
+  it("lets exactly one of two concurrent requests with the same code through — hallazgo F4/C-3/A-8", async () => {
+    // Launched together, not one `await` after another: run in series this
+    // passes even against the old read-then-write `sellarPaso`, since a
+    // second, later request would simply see the already-sealed step through
+    // a fresh read. Only racing them the way `recoveryCodeStore.test.ts`
+    // races ten `gastarCodigo` calls at once catches the regression this
+    // guards — see `factorUpdate`'s own mock above for the half of this that
+    // makes the fake capable of failing at all.
+    filas = [filaTotp(1, ID_USUARIO)];
+    const secret = OTPAuth.Secret.fromBase32(SECRETO);
+    const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+    const valido = OTPAuth.HOTP.generate({ secret, counter });
+
+    const a = call({ codigo: valido });
+    const b = call({ codigo: valido });
+    await Promise.all([verify(a.req, a.res), verify(b.req, b.res)]);
+
+    const estados = [a.status, b.status].sort((x, y) => x - y);
+    expect(estados).toEqual([200, 400]);
+    // Exactly one seal survives, whichever request won the race.
+    expect(filas[0].ultimo_paso).not.toBeNull();
+  });
+
+  describe("a crypto failure never charges the lockout — hallazgo F5/A5/C-4", () => {
+    function filaConAuthTagRoto(): FilaFake {
+      const fila = filaTotp(1, ID_USUARIO);
+      const tagRoto = Buffer.from(fila.auth_tag);
+      tagRoto[0] ^= 0xff;
+      return { ...fila, auth_tag: tagRoto };
+    }
+
+    it("does not increment failed_attempts when the row cannot be decrypted", async () => {
+      filas = [filaConAuthTagRoto()];
+      const secret = OTPAuth.Secret.fromBase32(SECRETO);
+      const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+
+      const c = call({ codigo: OTPAuth.HOTP.generate({ secret, counter }) });
+      await verify(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(c.message).toBe(CODIGO_MFA_INVALIDO);
+      expect(increment).not.toHaveBeenCalled();
+    });
+
+    it("still charges failed_attempts for a plain wrong code against a healthy row — the exemption above is not a general softening", async () => {
+      filas = [filaTotp(1, ID_USUARIO)];
+      const secret = OTPAuth.Secret.fromBase32(SECRETO);
+      const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+
+      const c = call({ codigo: codigoQueNuncaValida(secret, counter) });
+      await verify(c.req, c.res);
+
+      expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: ID_USUARIO } });
+    });
+
+    it("logs the failure at error severity, not warn, so an operator actually sees it", async () => {
+      filas = [filaConAuthTagRoto()];
+      const secret = OTPAuth.Secret.fromBase32(SECRETO);
+      const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+
+      const c = call({ codigo: OTPAuth.HOTP.generate({ secret, counter }) });
+      await verify(c.req, c.res);
+
+      expect(loggerError).toHaveBeenCalled();
+      expect(loggerWarn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("estado: \"onboarding\" — hallazgo F1/C-2/D-1, D-1's own missing coverage", () => {
+    it("refuses a recovery code when the account has no factor to rescue at all — the exact hole F1 closes", async () => {
+      // Day 15: grace expired, zero factors, `onboarding`. `gastarCodigo`
+      // resolving `true` stands in for a genuinely unspent, correctly-shaped
+      // code — the point is that it must never even be asked, because an
+      // account with nothing confirmed has nothing a recovery code could be
+      // rescuing. Before this guard existed, inserting it and measuring the
+      // suite is exactly what the auditor did to get "23/23 verdes".
+      tieneAlgunFactorMock.mockResolvedValue(false);
+      gastarCodigo.mockResolvedValue(true);
+
+      const c = call({ codigo: "A".repeat(26) }, usuarioAutenticado({ estado: "onboarding" }));
+      await verify(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(c.message).toBe(CODIGO_MFA_INVALIDO);
+      expect(gastarCodigo).not.toHaveBeenCalled();
+      expect(sesionUpdate).not.toHaveBeenCalled();
+    });
+
+    it("accepts a recovery code from onboarding when the account already has a confirmed factor to rescue", async () => {
+      // The legitimate shape of this same request: somebody who registered a
+      // factor, then lost it (a broken phone, a deleted TOTP) while codes
+      // printed earlier are still outstanding. `tieneAlgunFactor` answering
+      // `true` here is what tells the two apart — never `estado` itself,
+      // which this file's guard does not read.
+      tieneAlgunFactorMock.mockResolvedValue(true);
+      gastarCodigo.mockResolvedValue(true);
+
+      const c = call({ codigo: "A".repeat(26) }, usuarioAutenticado({ estado: "onboarding" }));
+      await verify(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(sesionUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it("accepts a genuinely valid TOTP code and promotes an onboarding session to completa", async () => {
+      filas = [filaTotp(1, ID_USUARIO)];
+      const secret = OTPAuth.Secret.fromBase32(SECRETO);
+      const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+
+      const c = call(
+        { codigo: OTPAuth.HOTP.generate({ secret, counter }) },
+        usuarioAutenticado({ estado: "onboarding" }),
+      );
+      await verify(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(sesionUpdate).toHaveBeenCalledTimes(1);
+      const [valores] = sesionUpdate.mock.calls[0] as [Record<string, unknown>];
+      expect(valores).toMatchObject({ estado: "completa", mfa_source: "totp" });
+    });
+
+    it("charges a failed attempt for a wrong code from onboarding, exactly like any other session", async () => {
+      filas = [filaTotp(1, ID_USUARIO)];
+      const secret = OTPAuth.Secret.fromBase32(SECRETO);
+      const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+
+      const c = call(
+        { codigo: codigoQueNuncaValida(secret, counter) },
+        usuarioAutenticado({ estado: "onboarding" }),
+      );
+      await verify(c.req, c.res);
+
+      expect(c.status).toBe(400);
+      expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: ID_USUARIO } });
+    });
+  });
+
   describe("«recordar este equipo», which only this endpoint can grant", () => {
     /**
      * The login **renews** a device cookie that is already valid and never
@@ -613,6 +783,21 @@ describe("POST /auth/stepup", () => {
 
     expect(c.status).toBe(400);
     expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: ID_USUARIO } });
+  });
+
+  it("does not charge failed_attempts for a crypto failure either — hallazgo F5/A5/C-4", async () => {
+    const secret = OTPAuth.Secret.fromBase32(SECRETO);
+    const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+    const filaSana = filaTotp(1, ID_USUARIO);
+    const tagRoto = Buffer.from(filaSana.auth_tag);
+    tagRoto[0] ^= 0xff;
+    filas = [{ ...filaSana, auth_tag: tagRoto }];
+
+    const c = callStepup({ codigo: OTPAuth.HOTP.generate({ secret, counter }) });
+    await stepup(c.req, c.res);
+
+    expect(c.status).toBe(400);
+    expect(increment).not.toHaveBeenCalled();
   });
 
   it("scopes the re-seal to the caller's own session and account", async () => {

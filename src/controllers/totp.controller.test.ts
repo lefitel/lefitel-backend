@@ -47,9 +47,11 @@ vi.mock("../auth/totpStore.js", () => ({
 }));
 
 const promoverSesion = vi.fn();
+const sellarPruebaDeFactor = vi.fn();
 const apagarLaMecha = vi.fn();
 vi.mock("../auth/sessionPromotion.js", () => ({
   promoverSesion: (...a: unknown[]) => promoverSesion(...a),
+  sellarPruebaDeFactor: (...a: unknown[]) => sellarPruebaDeFactor(...a),
   apagarLaMecha: (...a: unknown[]) => apagarLaMecha(...a),
 }));
 
@@ -61,6 +63,11 @@ vi.mock("../auth/factorInventory.js", () => ({
 const revokeAllRememberedDevicesOf = vi.fn();
 vi.mock("../auth/rememberedDeviceStore.js", () => ({
   revokeAllRememberedDevicesOf: (...a: unknown[]) => revokeAllRememberedDevicesOf(...a),
+}));
+
+const revokeAllSessionsOf = vi.fn();
+vi.mock("../auth/sessionStore.js", () => ({
+  revokeAllSessionsOf: (...a: unknown[]) => revokeAllSessionsOf(...a),
 }));
 
 const logAction = vi.fn();
@@ -91,6 +98,7 @@ const {
   MENSAJE_FACTOR_CONFIRMADO,
   MENSAJE_SIN_FACTOR,
   MENSAJE_FACTOR_ELIMINADO,
+  MENSAJE_ULTIMO_FACTOR_ELIMINADO,
 } = await import("./totp.controller.js");
 
 const CALLER = {
@@ -152,9 +160,11 @@ beforeEach(() => {
   leerSecretoSinConfirmar.mockReset().mockResolvedValue(null);
   confirmarFactor.mockReset().mockResolvedValue(undefined);
   promoverSesion.mockReset().mockResolvedValue(true);
+  sellarPruebaDeFactor.mockReset().mockResolvedValue(undefined);
   apagarLaMecha.mockReset().mockResolvedValue(undefined);
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
   revokeAllRememberedDevicesOf.mockReset().mockResolvedValue(0);
+  revokeAllSessionsOf.mockReset().mockResolvedValue(0);
   logAction.mockReset();
 });
 
@@ -347,6 +357,47 @@ describe("confirmTotp", () => {
     });
   });
 
+  describe("hallazgo F2/B-1 — a session that opened `completa` already", () => {
+    // `estadoInicialDeSesion` opens a session `completa` for an account with
+    // no factor still inside its grace period. `promoverSesion`'s WHERE
+    // only matches `parcial`/`onboarding`, so on this session it returns
+    // `false` and writes nothing — that is not a broken mock, it is exactly
+    // what the real function does for a row that is already `completa`.
+    function fijarCodigoValido() {
+      const { secret, base32 } = secretoDeFila();
+      leerSecretoSinConfirmar.mockResolvedValue({ id: 55, secreto: base32 });
+      return TOTP.generate({ secret, algorithm: "SHA1", digits: 6, period: 30, timestamp: FIXED_NOW });
+    }
+
+    it("seals mfa_satisfied_at/mfa_source on its own session when promoverSesion found nothing to promote", async () => {
+      promoverSesion.mockResolvedValue(false);
+      const codigo = fijarCodigoValido();
+      const c = call(CALLER, { codigo });
+
+      await confirmTotp(c.req, c.res);
+
+      // 🔴 The load-bearing assertion. Before this fix, `confirmTotp` called
+      // `promoverSesion` and never looked at its return — so this exact
+      // scenario (registering on time) left `mfa_satisfied_at` unsealed
+      // forever, and every later `requireStepUp` call refused the session.
+      expect(c.status).toBe(200);
+      expect(sellarPruebaDeFactor).toHaveBeenCalledWith(CALLER.id_sesion, "totp", {
+        transaction: TRANSACCION,
+      });
+    });
+
+    it("does not double-write when promoverSesion did promote a parcial/onboarding row", async () => {
+      promoverSesion.mockResolvedValue(true);
+      const codigo = fijarCodigoValido();
+      const c = call(CALLER, { codigo });
+
+      await confirmTotp(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(sellarPruebaDeFactor).not.toHaveBeenCalled();
+    });
+  });
+
   it("clears the fourteen-day grace deadline on confirm", async () => {
     const { secret, base32 } = secretoDeFila();
     leerSecretoSinConfirmar.mockResolvedValue({ id: 55, secreto: base32 });
@@ -393,6 +444,39 @@ describe("deleteTotp", () => {
     expect(c.status).toBe(404);
     expect(c.payload.message).toBe(MENSAJE_SIN_FACTOR);
     expect(factorDestroy).not.toHaveBeenCalled();
+  });
+
+  it("tells somebody who removed their last factor that they are about to be logged out", async () => {
+    // The response used to say only "Factor de autenticación eliminado." while
+    // `revokeAllSessionsOf` — deliberately without `except` — was ending the very
+    // tab that had just pressed the button. So the person read a cheerful
+    // confirmation and the application then threw them out with "your session
+    // ended", which reads as something having gone wrong.
+    //
+    // Three things, in this order, because it is what they need: what happened,
+    // what it means from now on, and what to do next.
+    factorFindOne.mockResolvedValue({ dataValues: { id: 10, confirmed_at: new Date() } });
+    tieneAlgunFactor.mockResolvedValue(false);
+    const c = call(CALLER);
+
+    await deleteTotp(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.payload.message).toBe(MENSAJE_ULTIMO_FACTOR_ELIMINADO);
+    expect(c.payload.message).not.toBe(MENSAJE_FACTOR_ELIMINADO);
+  });
+
+  it("keeps the plain message when another factor survives, since nothing was revoked", async () => {
+    // The other side of the same rule: with a factor left, no sessions are
+    // revoked and nobody is about to be thrown out, so promising it would be a
+    // second, opposite kind of lie.
+    factorFindOne.mockResolvedValue({ dataValues: { id: 10, confirmed_at: new Date() } });
+    tieneAlgunFactor.mockResolvedValue(true);
+    const c = call(CALLER);
+
+    await deleteTotp(c.req, c.res);
+
+    expect(c.payload.message).toBe(MENSAJE_FACTOR_ELIMINADO);
   });
 
   it("deletes an unconfirmed row without treating it as the loss of a factor (hallazgo C11 tail)", async () => {
@@ -449,5 +533,70 @@ describe("deleteTotp", () => {
         metadata: expect.objectContaining({ ultimo_factor: false }),
       }),
     );
+  });
+
+  describe("hallazgo F7/C-5/B-3 — revoking live sessions when the last factor goes", () => {
+    it("revokes every live session of the account when this was the last factor", async () => {
+      factorFindOne.mockResolvedValue({ dataValues: { id: 13, confirmed_at: new Date() } });
+      tieneAlgunFactor.mockResolvedValue(false);
+      revokeAllSessionsOf.mockResolvedValue(3);
+      const c = call(CALLER);
+
+      await deleteTotp(c.req, c.res);
+
+      // 🔴 The load-bearing assertion: `factorInventory.ts` declares this a
+      // non-optional duty of this endpoint. Without it, every session that
+      // was `completa` before this call stays `completa` — `estadoEfectivo`
+      // never re-checks whether the account still holds a factor — and once
+      // `tieneAlgunFactor` answers `false`, `requireStepUp`'s "nothing to
+      // prove" branch waves those stale sessions through the security panel
+      // on the cookie alone.
+      expect(c.status).toBe(200);
+      expect(revokeAllSessionsOf).toHaveBeenCalledWith(CALLER.id);
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "TOTP_DELETED",
+          metadata: expect.objectContaining({ ultimo_factor: true, sesiones_revocadas: 3 }),
+        }),
+      );
+    });
+
+    it("spares no session — no `except` for the caller's own, unlike changePassword's self-change rotation", async () => {
+      factorFindOne.mockResolvedValue({ dataValues: { id: 14, confirmed_at: new Date() } });
+      tieneAlgunFactor.mockResolvedValue(false);
+      const c = call(CALLER);
+
+      await deleteTotp(c.req, c.res);
+
+      // A single positional argument: no `{ except: ... }` sparing the
+      // session that is making this very request. See the docstring on
+      // `deleteTotp` for why revoking everything, including this tab, is
+      // the decision — degrading in place has nothing left for `/mfa/verify`
+      // to lift a session back out of, on an account with zero factors.
+      expect(revokeAllSessionsOf).toHaveBeenCalledWith(CALLER.id);
+      expect(revokeAllSessionsOf.mock.calls[0]).toHaveLength(1);
+    });
+
+    it("does not revoke any session when another factor remains on the account", async () => {
+      factorFindOne.mockResolvedValue({ dataValues: { id: 15, confirmed_at: new Date() } });
+      tieneAlgunFactor.mockResolvedValue(true);
+      const c = call(CALLER);
+
+      await deleteTotp(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+    });
+
+    it("does not revoke any session when the deleted row was never confirmed", async () => {
+      factorFindOne.mockResolvedValue({ dataValues: { id: 16, confirmed_at: null } });
+      const c = call(CALLER);
+
+      await deleteTotp(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(tieneAlgunFactor).not.toHaveBeenCalled();
+      expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+    });
   });
 });

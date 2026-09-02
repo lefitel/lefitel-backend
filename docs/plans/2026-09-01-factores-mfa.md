@@ -1808,72 +1808,83 @@ Antes de dar el 4B por cerrado:
 
 ## El día del despliegue
 
-🔴 **Nada de este arco está en producción.** La imagen que corre hoy hace `process.exit(1)`
-sin `JWT_SECRET`; `requiredEnv` ya no lo pide. **Son imágenes distintas.**
+🔴 **El runbook es el de la especificación, §11, y solo ése.** Está en
+[`docs/specs/2026-08-21-autenticacion-mfa-design.md`](../specs/2026-08-21-autenticacion-mfa-design.md),
+como bloque numerado de 0 a 10.
 
-Así que el «trozo mínimo» no lo acota el 4B: sale en un despliegue que además estrena
-sesiones opacas, cookie `httpOnly`, CSRF, correo, recuperación de contraseña y el esqueleto
-MFA del 4A. La §12 habla de «cuatro sospechosos»; **son siete**.
+**Esta sección tenía una segunda lista, y eso era el fallo.** La auditoría de cierre lo llamó
+el riesgo operativo más caro de todo lo que encontró — más que cualquier defecto de código —
+porque quien despliegue va a seguir una de las dos y no hay forma de saber cuál. Las dos se
+contradecían en el orden de despliegue, en dónde se guarda la clave de cifrado y en si la
+marcha atrás sobrevive. Y a ésta, además, le faltaban cinco pasos que la otra sí tenía:
+correr las migraciones, desplegar `web`, el `pg_dump` con restauración probada, verificar
+SPF/DKIM, y crear la cuenta de rescate.
 
-Lo que hay que tener resuelto antes de pulsar:
+**Aquí queda solo lo que este arco añade al runbook.** Si algo de abajo contradice a la §11,
+manda la §11 y hay un error que corregir.
 
-- [ ] **Rotar `JWT_SECRET` en Coolify.** Solo Isaias. Pendiente desde el 2026-08-24.
-      Producción acepta hoy tokens firmados con una palabra de diccionario que está en el
-      historial de git.
-- [ ] **`MFA_ENCRYPTION_KEY_1` y `MFA_ENCRYPTION_KEY_ACTIVE` puestas en Coolify**, con la
-      clave generada donde no quede en ningún historial de consola.
-- [ ] **La clave se custodia FUERA del archivo de la copia de seguridad** (hallazgo B13). La
-      §11 manda guardarla con el dump, y eso anula el cifrado entero: la única amenaza contra
-      la que este cifrado defiende es precisamente **una copia de la base que se escapa**.
-      Con la clave en el mismo `.zip`, cifrar no protege de nada. Soporte distinto, y la
-      restauración se prueba trayendo las dos piezas de sitios distintos.
-- [ ] **La migración `20260827000001` sigue pendiente en local** (hallazgo D8.1), así que
-      toda migración probada aquí se probó contra un esquema distinto del de producción.
-- [ ] 🔴 **La vuelta atrás muere con la primera fila**, y eso pasa cuando la primera persona
-      confirma su TOTP — no el día del despliegue. A partir de ahí, la única marcha atrás es
-      el dump.
-- [ ] **Decirle a las nueve personas que primero verifican su correo.** Decisión 5: hoy 0 de
-      9 lo tienen, y sin él no pueden registrar factor. El plazo de catorce días corre desde
-      su primer login, no desde que consigan verificarlo.
+---
+
+### Lo que el 4B añade
+
+- [ ] **Rotar `JWT_SECRET` en Coolify.** Es el paso previo de todo y no depende de nada más:
+      producción acepta hoy tokens firmados con una palabra de diccionario que está en el
+      historial de git. Pendiente desde el 2026-08-24.
+- [ ] **`MFA_ENCRYPTION_KEY_1` y `MFA_ENCRYPTION_KEY_ACTIVE`** en Coolify, con la clave
+      generada donde no quede en ningún historial de consola. 🔴 **Comprobar la primera línea
+      del log de arranque**: `requiredEnv` exige el puntero pero **no puede exigir la clave**
+      —su nombre depende del valor de otra variable—, así que `_ACTIVE=1` sin `_1` **arranca
+      limpio**, con un `fatal` que nadie mira y un mensaje al usuario que invita a esperar a
+      que se arregle solo.
+- [ ] **Las claves de cifrado NO viajan con el dump.** Ver el paso 1 de la §11, corregido:
+      la única amenaza contra la que ese cifrado defiende es precisamente una copia de la base
+      que se escapa.
+- [ ] **Decirle a las nueve personas que primero verifican su correo.** Hoy 0 de 9 lo tienen,
+      y sin él no se puede registrar factor. El plazo de catorce días corre desde su primer
+      login, no desde que consigan verificarlo — así que si Resend o el DNS fallan, el reloj
+      corre igual. De ahí que el paso 2 de la §11 (SPF/DKIM y envío de prueba real, días
+      antes) sea el prerrequisito del prerrequisito.
 - [ ] **Que los tres administradores no compartan clase de factor** (hallazgo A12). Una
       variable de entorno equivocada mata **todos** los TOTP a la vez; los códigos de
       recuperación sobreviven porque van con bcrypt y no cifrados. Si los tres dependen de lo
       mismo, la causa común los deja fuera a los tres.
-- [ ] **Probar el comando de rescate dentro del contenedor.** La §8 lo pide como condición
-      de despliegue y **nadie lo ha podido hacer**: hace falta acceso a Coolify. El comando
-      exacto está en `.superpowers/sdd/2026-08-26-esqueleto-mfa/rescate-B-report.md`.
+- [ ] **La migración `20260827000001` sigue pendiente en local** (hallazgo D8.1), así que toda
+      migración probada aquí se probó contra un esquema distinto del de producción. El paso 0
+      de la §11 existe para esto: refrescar la copia local **antes** de ensayar.
 
----
+### La marcha atrás — corregido tras la auditoría
 
-## 🔴 Una decisión que queda abierta para Isaias: el aviso de reloj desfasado
+Esta sección decía: «la vuelta atrás muere con la primera fila confirmada, y a partir de ahí
+la única marcha atrás es el dump». **Las dos mitades eran falsas.**
 
-Construido de la forma **conservadora**: el servidor reintenta con ±10 pasos, y si el código
-era válido en un paso lejano **lo apunta en la bitácora y no cambia la respuesta**. Quien
-está delante ve «código incorrecto», igual que si hubiera tecleado cualquier cosa.
+El destino del rollback lo nombra el paso 9 de la §11: **la imagen JWT actual**, que no
+consulta `factor_totp` ni `sesiones`. Para ella una fila confirmada no significa nada, así que
+**la marcha atrás sigue viva** después de que la primera persona registre su factor.
 
-**Es culpa de cómo redacté el encargo**, que llevaba dos reglas tirando en direcciones
-opuestas: «el mensaje no distingue válido-en-otro-paso de basura» y «al usuario se le habla
-del reloj cuando el desfase es consistente». El agente eligió la segura y dejó el
-razonamiento escrito; el del cliente lo detectó al construir la pantalla.
+Donde sí muere es si se vuelve a la **imagen del 4A** —esqueleto MFA sin las rutas montadas—:
+ahí `tieneAlgunFactor` devuelve `true`, la sesión abre `parcial`, y no hay ningún endpoint
+montado que la levante. Y **ni siquiera entonces el remedio es el dump**: es borrar la fila
+(`DELETE FROM factor_totp WHERE id_usuario = …`) o la consola de rescate, que devuelve esa
+cuenta a `completa` en el siguiente login.
 
-**Lo que se gana cambiándolo:** el desfase de reloj del móvil es **la primera causa real** de
-«código incorrecto», y hoy la única persona que puede diagnosticarlo es quien lea la bitácora
-del servidor — no quien está a las ocho de la mañana mirando seis dígitos que no le valen.
+Decir «la única marcha atrás es el dump» hace que alguien a las tres de la mañana restaure una
+copia entera cuando lo que necesita es borrar una fila.
 
-**Lo que se arriesga:** que la respuesta difiera le confirma a quien esté probando códigos que
-su intento casó con **algún** paso. Analizado: para llegar a esa rama hay que producir un
-código del secreto real, lo que sin el secreto ocurre 1 vez de cada 47.600 en vez de 1 de cada
-333.000 — siete veces más probable, y aun así **no acerca a nadie al secreto**, porque una
-coincidencia entre 21 pasos no estrecha nada. Quien sí tenga el secreto no necesita el
-oráculo: genera un código válido y entra.
+### La migración aparcada, que no va en este despliegue
 
-**Mi lectura:** el riesgo es teórico y el coste es real y diario. Pero es un cambio con
-implicaciones de seguridad y la versión construida es la segura, así que **no lo toqué**.
-Decide tú.
+`src/migrations/pending/20260827000002-drop-sesiones-estado-default.ts` **no está en el
+conjunto que corre `migrate:deploy`**, y eso es deliberado: vive en un subdirectorio que el
+glob de umzug no alcanza.
 
-Lo que **no** está en discusión y ya está bien: el camino de diagnóstico **no acepta** (si
-aceptara, los códigos válidos pasarían de 3 a 21 por millón), y todo fallo cobra igual contra
-el bloqueo, con diagnóstico o sin él.
+🔴 **Su requisito de entrada: no aplicarla mientras la imagen anterior pueda seguir atendiendo
+tráfico.** El `createSession` viejo no nombra `estado` en su `INSERT`, y `DEFAULT 'completa'`
+es lo único que hace legal esa sentencia. Medido: la misma sentencia pasa antes de la
+migración y muere después. O sea que aplicarla dentro de la ventana de despliegue **rompe
+todos los logins nuevos de la imagen vieja**, y de paso anula la vuelta atrás del paso 9, que
+depende de ese valor por defecto.
+
+Se arma moviendo el fichero y su test un nivel arriba. Nada más. Y **solo** cuando la imagen
+anterior esté retirada del todo.
 
 ## Lo que queda después
 

@@ -23,6 +23,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import jwt from "jsonwebtoken";
 import request from "supertest";
+import { Model } from "sequelize";
 
 const permisos = { seguridad: { ver: true, crear: false } };
 /**
@@ -200,9 +201,55 @@ const tokenUsoUnicoUpdate = vi.spyOn(TokenUsoUnicoModel, "update");
  * to open one says so by giving the spy an implementation.
  */
 const transaction = vi.spyOn(sequelize, "transaction");
+/**
+ * The other gateway every Sequelize operation — static or instance, read or
+ * write — eventually funnels through, spied for the same reason and given
+ * the same default as `transaction` above.
+ *
+ * **Hallazgo D5/F17's sharpest concrete example.** `totpStore.ts`'s
+ * `guardarSecretoSinConfirmar` runs
+ * `SELECT nextval(pg_get_serial_sequence('factor_totp', 'id'))` through
+ * `sequelize.query` **directly**, before it ever opens the transaction
+ * `transaction` above already guards. Every model-level spy in this file
+ * replaces the method outright, so none of them ever reach this far down —
+ * this is the one spy that would have caught a test reaching `POST
+ * /api/auth/totp/setup` with the rest of this harness still green, and the
+ * one the audit found missing. `reportBuilder/execute.ts` is the only other
+ * production caller in this codebase, and it is not reachable through any
+ * route this file exercises.
+ */
+const sequelizeQuery = vi.spyOn(sequelize, "query");
 const passkeyCount = vi.spyOn(CredencialWebauthnModel, "count");
 const totpCount = vi.spyOn(FactorTotpModel, "count");
 const codigoCount = vi.spyOn(CodigoRecuperacionModel, "count");
+/**
+ * `find*` for the same four factor models, alongside their `count` above —
+ * the other concrete gap hallazgo D5/F17 named. `count` alone was safe only
+ * because nothing exercised here used to reach a `findOne`/`findAll` on
+ * these four; plan 4B's own code already does:
+ *
+ * - `comprobarDispositivo` (`rememberedDeviceIssue.ts`, called from `login`
+ *   whenever the request carries a remembered-device cookie) runs a real
+ *   `findOne` against `DispositivoRecordadoModel`.
+ * - `gastarCodigo` (`recoveryCodeStore.ts`, reachable from the recovery-code
+ *   branch of `POST /api/auth/mfa/verify`) runs a real `findAll` against
+ *   `CodigoRecuperacionModel`.
+ *
+ * Both go straight to `osefi_local` today, and no test in this file
+ * exercises either route yet to have noticed.
+ *
+ * `totpStore.ts`, `mfa.controller.ts` and `totp.controller.ts` all call
+ * `FactorTotpModel.unscoped().findOne(...)` rather than the bare static
+ * method — spying the base `findOne` here still covers that: `unscoped()`
+ * (`Model.scope()` underneath) returns `class extends FactorTotpModel {}`,
+ * a fresh subclass that never redefines `findOne` itself, so the call
+ * inherits this exact spy through the prototype chain (verified against
+ * this project's installed Sequelize version, not assumed).
+ */
+const passkeyFindOne = vi.spyOn(CredencialWebauthnModel, "findOne");
+const totpFindOne = vi.spyOn(FactorTotpModel, "findOne");
+const codigoFindAll = vi.spyOn(CodigoRecuperacionModel, "findAll");
+const dispositivoFindOne = vi.spyOn(DispositivoRecordadoModel, "findOne");
 /**
  * One more, for the remembered-device revocation `updateUserPass` gained
  * alongside its rotation (see that handler's own comment). Left real, this
@@ -322,17 +369,204 @@ for (const [model, method] of unspiedWriteMethods()) {
   });
 }
 
-describe("the write-method spy harness itself (task 15, hallazgo D4)", () => {
-  it("has an active spy on every write method every registered model exposes", () => {
+/**
+ * The instance half of the same promise — hallazgo D5/F17's second concrete
+ * gap.
+ *
+ * Every static method above is called on the model *class*
+ * (`FactorTotpModel.destroy(...)`); a row a controller already has in hand
+ * writes through the *instance* methods instead — `.save()`, `.destroy()`,
+ * `.update()`, `.increment()`, `.decrement()`, `.restore()` — which live on
+ * `Model.prototype` (imported straight from `"sequelize"` above, not from
+ * any of this project's own model files), not on any one entry of
+ * `sequelize.models`. Eight controllers in this codebase call one of these
+ * on a row they just read.
+ *
+ * **Reachable today only by accident.** Every fixture in this file standing
+ * in for a found row is a plain object (`{ dataValues: {...} }`), which has
+ * none of these methods, so a controller that called `.save()` on one would
+ * already throw a *visible* `TypeError` rather than write anywhere. That
+ * accident is not a guarantee: a fixture built with `Model.build(...)`, or
+ * any mock that resolves a real instance instead of a plain literal, would
+ * hand back an object with these methods live and reaching for
+ * `osefi_local`. This closes for these six methods the exact gap the
+ * `transaction` spy above already closed for transactions specifically.
+ *
+ * **One spy per method, not one per model.** Every model this project
+ * defines inherits these six from the same `Model.prototype` — none
+ * overrides them (verified: no `models/*.model.ts` file assigns to
+ * `.prototype.save`/`.destroy`/`.update`/`.increment`/`.decrement`/
+ * `.restore`, and a direct check against the installed Sequelize confirms
+ * every defined model's prototype method is `===` `Model.prototype`'s) — so
+ * patching the base class here protects every instance of every model,
+ * current and future, the same way the loop above protects every
+ * registered model's static methods without naming one. And this cannot
+ * leak into another test file: each `*.test.ts` file gets its own fresh
+ * module graph, `"sequelize"`'s own module included (verified directly —
+ * patching `Model.prototype.save` in one file left it untouched in
+ * another run alongside it).
+ */
+const INSTANCE_WRITE_METHODS = ["save", "destroy", "update", "increment", "decrement", "restore"] as const;
+for (const method of INSTANCE_WRITE_METHODS) {
+  vi.spyOn(Model.prototype as unknown as Record<string, (...args: unknown[]) => unknown>, method).mockImplementation(
+    () => {
+      throw new Error(
+        `Model.prototype.${method} was called on a real instance with no spy configured in ` +
+          `app.auth.test.ts. Give that row's fixture its own ${method}(), or spy this call ` +
+          `directly — otherwise this write lands on osefi_local for real.`,
+      );
+    },
+  );
+}
+
+/**
+ * The independent half of hallazgo D5/F17's fix to the self-test below.
+ *
+ * `unspiedWriteMethods()` above answers "which pairs in `WRITE_METHODS` are
+ * not yet spied" — which is exactly why checking *that* used to be
+ * tautological: the loop that installs the spies and the assertion that
+ * verified them both walked the same array, so shrinking `WRITE_METHODS`
+ * shrank the thing being verified along with the thing doing the verifying.
+ * Measured on the file as audited: adding `"aggregate"` — a real Sequelize
+ * method, just not a write — to `WRITE_METHODS` left 77/77 green, which is
+ * only possible if the assertion never actually depended on which names
+ * were in the list.
+ *
+ * The fix is not a better list to share; it is to stop sharing one. Nothing
+ * below reads `WRITE_METHODS`. It reflects Sequelize's actual `Model` base
+ * class at the moment the test runs and reasons about *that* — so deleting
+ * a name from `WRITE_METHODS` (which only starves the install loop above)
+ * no longer starves the check that follows: the check still expects the
+ * real method to be spied, on every model, and says so by name.
+ */
+function modelStaticMethodNames(): string[] {
+  const names = new Set<string>();
+  // Walked rather than read off one model, because these are inherited —
+  // not own — on every model this project defines (see the comment above
+  // `registeredModels`). `Model` itself is where they are all own.
+  let target: unknown = Model;
+  while (typeof target === "function" && target !== Function.prototype) {
+    for (const name of Object.getOwnPropertyNames(target)) {
+      const descriptor = Object.getOwnPropertyDescriptor(target, name);
+      if (descriptor && typeof descriptor.value === "function") names.add(name);
+    }
+    target = Object.getPrototypeOf(target);
+  }
+  return [...names];
+}
+
+/**
+ * Every category of static `Model` method that is not a write, reasoned the
+ * same way the comment on `WRITE_METHODS` below already does — restated as
+ * code, independently, so `trueStaticWriteMethods` can act on it without
+ * consulting `WRITE_METHODS` itself. Whatever this does not clear is
+ * presumed dangerous and has to be spied.
+ *
+ * Verified once, directly against this project's installed Sequelize
+ * version (not assumed): reflecting `Model`'s real static surface and
+ * filtering out everything this function clears reproduces `WRITE_METHODS`
+ * below exactly, name for name.
+ */
+function isKnownSafeStaticMethod(name: string): boolean {
+  if (name.startsWith("_")) return true; // Sequelize's own "do not call this" marker.
+  // Hook registration/inspection and the lifecycle callbacks themselves:
+  // attach or query a function, run no query of their own. The write a hook
+  // *observes* is covered by the operation that fires it (create, update,
+  // destroy, ...), already in WRITE_METHODS.
+  if (/^(before|after)[A-Z]/.test(name)) return true;
+  if (
+    ["addHook", "removeHook", "hasHook", "hasHooks", "runHooks", "validationFailed", "addScope"].includes(name)
+  )
+    return true;
+  // Association wiring: declares a relationship between two already-defined
+  // models. Sends no query of its own.
+  if (
+    [
+      "belongsTo", "belongsToMany", "hasMany", "hasOne",
+      "getAssociationForAlias", "getAssociations", "hasAlias",
+    ].includes(name)
+  )
+    return true;
+  // Schema/introspection/config: describe or reshape the model definition
+  // itself, never a row.
+  if (
+    [
+      "init", "sync", "schema", "unscoped", "scope", "drop", "dropSchema",
+      "getTableName", "getAttributes", "refreshAttributes", "removeAttribute",
+      "warnOnInvalidOptions",
+    ].includes(name)
+  )
+    return true;
+  // Read-only finders/aggregates, and the three that hand back an unsaved,
+  // untouched instance (`build`, `bulkBuild`, `findOrBuild`) — see
+  // WRITE_METHODS's own comment for why those three are not writes either.
+  if (
+    [
+      "findAll", "findOne", "findByPk", "findAndCountAll", "count", "aggregate",
+      "max", "min", "sum", "describe", "build", "bulkBuild", "findOrBuild",
+    ].includes(name)
+  )
+    return true;
+  return false;
+}
+
+/**
+ * The real static write surface, independent of `WRITE_METHODS` — see the
+ * header comment above `modelStaticMethodNames`.
+ */
+const trueStaticWriteMethods = (): string[] =>
+  modelStaticMethodNames().filter((name) => !isKnownSafeStaticMethod(name));
+
+describe("the write-method spy harness itself (task 15, hallazgo D4; and D5/F17's fix to it)", () => {
+  it("has an active spy on every write method WRITE_METHODS names", () => {
     // Read fresh rather than trusting the pass above ran: this is what turns
-    // red the day a model gains a write method the fix above does not reach
-    // (see this task's own report for the two directions this was broken
-    // and fixed in).
+    // red the day a model gains a write method the fix above does not reach.
+    // Kept for the value it always had — proving the install loop actually
+    // ran — but see the next test for why this one, on its own, used to
+    // prove nothing about whether `WRITE_METHODS` itself was complete.
     const missing = unspiedWriteMethods().map(([model, method]) => `${model.name}.${method}`);
     expect(
       missing,
       "these write methods would reach osefi_local for real because nothing spies them",
     ).toEqual([]);
+  });
+
+  it("is not fooled by an incomplete WRITE_METHODS the way the previous test is (hallazgo D5/F17)", () => {
+    // The bug this test exists to catch: `unspiedWriteMethods()` only ever
+    // looks at pairs it is told about, so shrinking `WRITE_METHODS` by one
+    // real name makes the test above stop checking that name at all — it
+    // does not go red, it goes silent.
+    //
+    // `trueStaticWriteMethods()` never reads `WRITE_METHODS` — it reflects
+    // Sequelize's real `Model` class and reasons about the result on its
+    // own (see its comment). So this assertion keeps expecting "destroy" to
+    // be spied on every model even in a version of this file where
+    // "destroy" has been quietly deleted from `WRITE_METHODS` above, which
+    // is exactly the scenario the previous test cannot detect — and this
+    // one names it.
+    const groundTruth = trueStaticWriteMethods();
+    const missing: string[] = [];
+    for (const model of registeredModels()) {
+      for (const method of groundTruth) {
+        const candidate = (model as unknown as Record<string, unknown>)[method];
+        if (typeof candidate === "function" && !vi.isMockFunction(candidate)) {
+          missing.push(`${model.name}.${method}`);
+        }
+      }
+    }
+    expect(
+      missing,
+      "these write methods would reach osefi_local for real, independently of what WRITE_METHODS says",
+    ).toEqual([]);
+  });
+
+  it("keeps WRITE_METHODS itself honest against the same ground truth", () => {
+    // Not a safety check on its own — the test above no longer needs
+    // `WRITE_METHODS` to be right. This one exists so a drift between the
+    // hand-typed list and reality is caught by name, immediately, instead
+    // of surfacing later as an unexplained difference in behaviour between
+    // the two tests above.
+    expect([...WRITE_METHODS].sort()).toEqual(trueStaticWriteMethods().sort());
   });
 });
 
@@ -445,6 +679,13 @@ beforeEach(() => {
       "este test alcanzó una transacción real; si es a propósito, dale una implementación al spy",
     );
   }) as never);
+  // Same default, same reason, for the gateway underneath `transaction`
+  // itself — see this spy's own comment near its declaration.
+  sequelizeQuery.mockImplementation((() => {
+    throw new Error(
+      "este test alcanzó sequelize.query real; si es a propósito, dale una implementación al spy",
+    );
+  }) as never);
   usuarioFindByPk.mockResolvedValue({
     dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null, pass_changed_at: PASS_CAMBIADA },
   } as never);
@@ -466,6 +707,14 @@ beforeEach(() => {
   passkeyCount.mockResolvedValue(0);
   totpCount.mockResolvedValue(0);
   codigoCount.mockResolvedValue(0);
+  // Same default for the find* spies alongside them: nothing found, so
+  // `comprobarDispositivo` sees no remembered device and `gastarCodigo` sees
+  // no candidate recovery code, matching the "no factor, ordinary account"
+  // shape every other fixture in this file already assumes.
+  passkeyFindOne.mockResolvedValue(null as never);
+  totpFindOne.mockResolvedValue(null as never);
+  codigoFindAll.mockResolvedValue([] as never);
+  dispositivoFindOne.mockResolvedValue(null as never);
   // No remembered devices to revoke, by default — matching every other
   // fixture in this file, which models an ordinary account under plan 4A.
   dispositivoUpdate.mockResolvedValue([0] as never);
@@ -1829,14 +2078,26 @@ describe("requireStepUp, mounted on the real routes", () => {
     }
   });
 
-  it("still lifts a lockout with no password while no account has a factor", async () => {
-    // The other half, and the reason the recovery path does not become a
-    // ceremony the day this shipped: with nothing registered anywhere — the
-    // real, shipped state — the gate's third branch lets the request through
-    // untouched, so an administrator in a hurry types nothing extra. The 500
-    // is `desbloquearUsuario`'s own write against a fixture with no `.set`,
-    // i.e. the handler was reached; a gate refusing here would answer 403
-    // before it.
+  it("now refuses to lift a lockout without the password, even with no factor anywhere", async () => {
+    // 🔴 **Este test afirmaba lo contrario, y su razonamiento era el agujero.**
+    //
+    // Decía: «con nada registrado en ninguna parte —el estado real de hoy— la
+    // tercera rama de la puerta deja pasar la petición intacta, así que un
+    // administrador con prisa no teclea nada extra». Verdadero como
+    // descripción, y equivocado como decisión.
+    //
+    // Lo que la auditoría de cierre midió: **hoy, con 0 de 9 cuentas con
+    // factor**, `tieneAlgunFactor` del administrador es `false`, así que esa
+    // rama significa que **una cookie de administrador robada desbloquea
+    // cualquier cuenta sin contraseña**. Y en su ruta hermana —
+    // `POST /usuario/:id/mfa/reset`, que borra las tres tablas de factores de
+    // otra persona y revoca todas sus sesiones— significa borrar el segundo
+    // factor de toda la plantilla en nueve peticiones.
+    //
+    // La regla estaba escrita desde el principio, en el docstring de la propia
+    // opción: «every route that registers or **removes** a credential must be
+    // mounted with it on. It is not a hardening knob to turn on later». La
+    // comodidad del administrador con prisa no la vence.
     puede = true;
     try {
       const res = await request(app)
@@ -1845,17 +2106,21 @@ describe("requireStepUp, mounted on the real routes", () => {
         .set(DEL_FRONTEND)
         .send({});
 
-      expect(res.status).toBe(500);
-      // And it went through the skip rather than around the gate: the two are
-      // indistinguishable by status code, which is how a gate goes missing.
-      expect(logAction).toHaveBeenCalledWith(
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe(CODIGO_STEP_UP);
+      // Y no por el motivo genérico: el cliente necesita saber que lo que
+      // falta es la contraseña, no un factor que esta cuenta no tiene.
+      expect(res.body.motivo).toBe("contraseña-requerida");
+      // La otra mitad, y es la que prueba que se cerró de verdad: ya no se
+      // escribe la línea que decía «una escritura sensible pasó sin la prueba
+      // extra». No pasó nada.
+      expect(logAction).not.toHaveBeenCalledWith(
         expect.objectContaining({ action: "STEP_UP_SKIPPED" }),
       );
     } finally {
       puede = false;
     }
   });
-
   it("applies the same corrected rule to the permission matrix: no factor, no password, let through", async () => {
     // `/3` and not `/2`: `MI_ROL` is 2, and `putPermisos` refuses a caller
     // editing its own role (409) before it ever reads the body — a

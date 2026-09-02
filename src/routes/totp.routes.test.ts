@@ -105,10 +105,33 @@ beforeEach(() => {
 });
 
 describe("the availability gate (Decision 2)", () => {
-  it("is mounted first, ahead of every route, as a pathless layer", () => {
+  // 🔴 Hallazgo F6/B-5/E-5: this used to be `router.use(requireTotpKeyAvailable)`,
+  // a pathless layer ahead of every route — including `DELETE /`, which does
+  // not touch the encrypted secret at all. A wrong `MFA_ENCRYPTION_KEY_ACTIVE`
+  // then made it impossible to remove the one factor that had gone dead,
+  // because the removal route answered 503 too. The gate now mounts only on
+  // `/setup` and `/confirm` — see the two tests right below.
+  it("mounts ahead of the controller on /setup and /confirm, not as a pathless layer", () => {
+    expect(routeChain("POST", "/setup")[0].name).toBe("requireTotpKeyAvailable");
+    expect(routeChain("POST", "/confirm")[0].name).toBe("requireTotpKeyAvailable");
+  });
+
+  it("does not mount on DELETE / at all — deleting a factor needs no encryption key (hallazgo F6)", () => {
+    const names = routeChain("DELETE", "/").map((h) => h.name);
+    expect(names).not.toContain("requireTotpKeyAvailable");
+  });
+
+  it("is never a pathless router.use layer any more — that shape is exactly what applied it to DELETE before", () => {
+    // The old bug was invisible to `routeChain` above by construction: a
+    // pathless `router.use(requireTotpKeyAvailable)` sits in the router's own
+    // top-level stack, outside any single route's `route.stack`, so it ran
+    // ahead of *every* route — DELETE included — without ever showing up in
+    // that route's own chain. This is the check that would catch a
+    // regression back to that shape even though the two tests above,
+    // reading only route-scoped chains, would not.
     const layers = (totpRoutes as unknown as { stack: ExpressLayer[] }).stack;
-    expect(layers[0].route).toBeUndefined();
-    expect(layers[0].handle.name).toBe("requireTotpKeyAvailable");
+    const pathless = layers.filter((l) => l.route === undefined);
+    expect(pathless.some((l) => l.handle.name === "requireTotpKeyAvailable")).toBe(false);
   });
 
   it("answers 503 with a message that does not blame the caller, and never calls next", async () => {
@@ -182,10 +205,19 @@ describe("🔴 exigeContrasena on all three routes (hallazgo C1)", () => {
   );
 });
 
-describe("🔴 permiteOnboarding: on for setup/confirm, off for delete", () => {
+describe("🔴 permiteOnboarding: on for all three routes (hallazgo F6/E-5)", () => {
+  // Before this fix, `DELETE /` mounted `requireStepUp({ exigeContrasena: true })`
+  // with no `permiteOnboarding`, so an `onboarding` session — by construction
+  // one with no *confirmed* factor — was refused at the state check with
+  // "Termina de configurar tu segundo factor antes de realizar esta operación",
+  // shown on the very screen that button lives on, right under "Añadir". The
+  // correct answer for that account is the controller's own 404 ("no tienes
+  // ningún factor"), which needs the state check to let the request through
+  // first — exactly what `setup` and `confirm` already did.
   it.each([
     ["POST", "/setup"],
     ["POST", "/confirm"],
+    ["DELETE", "/"],
   ] as const)("%s %s lets an onboarding session past the state check", async (method, path) => {
     const stepUpGate = stepUpGateOf(method, path);
     tieneAlgunFactor.mockResolvedValue(false);
@@ -195,23 +227,27 @@ describe("🔴 permiteOnboarding: on for setup/confirm, off for delete", () => {
 
     // Reaches the password branch (still refused, since none was sent) —
     // proving the *state* check passed, without needing `exigeContrasena`
-    // turned off to observe it.
+    // turned off to observe it. `exigeContrasena` stays on for `DELETE` too:
+    // removing a credential is exactly the kind of write that must not go
+    // through on an onboarding session's cookie alone.
     expect(next).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
     );
   });
 
-  it("DELETE / refuses an onboarding session outright, at the state check", async () => {
-    const stepUpGate = stepUpGateOf("DELETE", "/");
-    const { req, res, next } = contexto({ id: 1, estado: "onboarding", mfa_satisfied_at: null }, {});
+  it("still refuses `parcial` outright on all three routes — permiteOnboarding never widens past onboarding", async () => {
+    for (const [method, path] of [["POST", "/setup"], ["POST", "/confirm"], ["DELETE", "/"]] as const) {
+      const stepUpGate = stepUpGateOf(method, path);
+      const { req, res, next } = contexto({ id: 1, estado: "parcial", mfa_satisfied_at: null }, {});
 
-    await stepUpGate(req, res, next);
+      await stepUpGate(req, res, next);
 
-    expect(next).not.toHaveBeenCalled();
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
-    );
+      expect(next, `${method} ${path}`).not.toHaveBeenCalled();
+      expect(res.json, `${method} ${path}`).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
+      );
+    }
   });
 });
 
@@ -227,8 +263,18 @@ describe("route shape", () => {
   it("every route carries authenticate ahead of the controller handler", () => {
     for (const [method, path] of [["POST", "/setup"], ["POST", "/confirm"], ["DELETE", "/"]] as const) {
       const names = routeChain(method, path).map((h) => h.name);
-      expect(names[0]).toBe("authenticate");
+      expect(names).toContain("authenticate");
+      expect(names.indexOf("authenticate")).toBeLessThan(names.indexOf("stepUpGate"));
       expect(names[names.length - 1]).toMatch(/^(setupTotp|confirmTotp|deleteTotp)$/);
     }
+  });
+
+  it("setup and confirm carry requireTotpKeyAvailable ahead of authenticate; delete carries none (hallazgo F6)", () => {
+    for (const [method, path] of [["POST", "/setup"], ["POST", "/confirm"]] as const) {
+      const names = routeChain(method, path).map((h) => h.name);
+      expect(names.indexOf("requireTotpKeyAvailable"), `${method} ${path}`).toBe(0);
+      expect(names.indexOf("authenticate"), `${method} ${path}`).toBe(1);
+    }
+    expect(routeChain("DELETE", "/").map((h) => h.name)).not.toContain("requireTotpKeyAvailable");
   });
 });

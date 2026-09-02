@@ -41,7 +41,12 @@ let filas: FilaFake[] = [];
 vi.mock("../models/factorTotp.model.js", () => ({
   FactorTotpModel: {
     unscoped: () => ({
-      findOne: async (opciones: {
+      // `findAll`, not `findOne` — finding A1. The check now has to look at
+      // every confirmed row to group them by `key_version`, not stop at the
+      // first one `ORDER BY id ASC` happens to hand back. See
+      // `mfaKeyCheck.ts`'s "Which rows" section for why a single row is
+      // structurally blind to a rotation left half-finished.
+      findAll: async (opciones: {
         where?: { confirmed_at?: unknown };
         order?: [string, "ASC" | "DESC"][];
       }) => {
@@ -59,15 +64,13 @@ vi.mock("../models/factorTotp.model.js", () => ({
         }
 
         const confirmadas = filas.filter((f) => f.confirmed_at !== null);
-        if (confirmadas.length === 0) return null;
 
         const [[campo, direccion]] = opciones.order ?? [["id", "ASC"]];
         if (campo !== "id") throw new Error("the fake table only orders by id");
         const ordenadas = [...confirmadas].sort((a, b) =>
           direccion === "ASC" ? a.id - b.id : b.id - a.id,
         );
-        const elegida = ordenadas[0];
-        return { get: () => elegida };
+        return ordenadas.map((f) => ({ get: () => f }));
       },
     }),
   },
@@ -193,6 +196,72 @@ describe("comprobarLlaveAlArrancar", () => {
     const resultado = await comprobarLlaveAlArrancar();
 
     expect(resultado.ok).toBe(true);
+  });
+
+  // Finding A1. Both `rotateMfaKey.ts` and this check sort `id ASC`, so a
+  // rotation that dies half way always leaves the *lowest* ids converted
+  // first. A check that reads only the lowest confirmed id — the pre-A1
+  // behaviour the mock above used to enforce with `findOne` — lands on
+  // exactly the one row guaranteed to already be safe, and reports green
+  // while the higher-id rows still waiting on the deleted old key are never
+  // looked at.
+  it("fails when a higher-id row is stuck on a key_version whose key is gone, even though the lowest confirmed id already rotated and decrypts fine", async () => {
+    vi.stubEnv("MFA_ENCRYPTION_KEY_2", CLAVE_2);
+    vi.stubEnv("MFA_ENCRYPTION_KEY_ACTIVE", "2");
+    // id 3: already converted to version 2 by a rotation that died mid-run.
+    const cifradoNuevo = cifrar("secreto rotado", "factor:3");
+    const filaYaRotada: FilaFake = {
+      id: 3,
+      secreto_cifrado: cifradoNuevo.ciphertext,
+      iv: cifradoNuevo.iv,
+      auth_tag: cifradoNuevo.auth_tag,
+      key_version: cifradoNuevo.key_version,
+      confirmed_at: new Date("2026-08-20T09:00:00.000Z"),
+    };
+    // id 11: never got its turn before the run died. Still on version 1 —
+    // and MFA_ENCRYPTION_KEY_1 is deliberately never stubbed in this test,
+    // the exact state after the operator follows §9 and deletes it.
+    const filaSinRotar: FilaFake = {
+      id: 11,
+      secreto_cifrado: Buffer.from("no importa, la clave 1 ya no existe"),
+      iv: Buffer.alloc(12),
+      auth_tag: Buffer.alloc(16),
+      key_version: 1,
+      confirmed_at: new Date("2026-08-20T09:00:00.000Z"),
+    };
+    filas = [filaYaRotada, filaSinRotar];
+
+    const resultado = await comprobarLlaveAlArrancar();
+
+    expect(resultado.ok).toBe(false);
+    expect(resultado.detalle).toContain("factor_totp.id=11");
+    expect(resultado.detalle).toContain("versión 1");
+    expect(totpEstaDisponible()).toBe(false);
+  });
+
+  it("passes while a rotation is genuinely still in progress: every key_version present still has its key configured and still decrypts", async () => {
+    // The normal, safe state *during* a rotation: nothing has been deleted
+    // yet, so both the old and the new key still open their own rows. This
+    // must stay green — the check exists to catch a key that stopped
+    // working, not merely "a rotation has not finished".
+    vi.stubEnv("MFA_ENCRYPTION_KEY_1", CLAVE_1);
+    vi.stubEnv("MFA_ENCRYPTION_KEY_ACTIVE", "1");
+    // Written while key 1 was active — `cifrar` always uses whichever key is
+    // active *at encryption time*, so this has to happen before `_ACTIVE`
+    // moves to 2 below, the same ordering `cifrarBajoVersion` in
+    // `rotateMfaKey.test.ts` uses for the identical reason.
+    const cifradoViejo = cifrar("secreto uno", "factor:1");
+    vi.stubEnv("MFA_ENCRYPTION_KEY_2", CLAVE_2);
+    vi.stubEnv("MFA_ENCRYPTION_KEY_ACTIVE", "2");
+    filas = [
+      { id: 1, secreto_cifrado: cifradoViejo.ciphertext, iv: cifradoViejo.iv, auth_tag: cifradoViejo.auth_tag, key_version: 1, confirmed_at: new Date("2026-08-19T09:00:00.000Z") },
+      filaSana(5), // written just now, under the active version 2
+    ];
+
+    const resultado = await comprobarLlaveAlArrancar();
+
+    expect(resultado.ok).toBe(true);
+    expect(totpEstaDisponible()).toBe(true);
   });
 });
 

@@ -1140,14 +1140,52 @@ vuelta atrás **no** es segura» más abajo.
    contra un estado de hace semanas.
 1. pg_dump -Fc de PRODUCCIÓN  →  RESTAURAR en otra base y verificar recuentos.
    Un dump sin restauración probada es una suposición, no una copia.
-   Guardar también MFA_ENCRYPTION_KEY: sin ella el dump es inservible para MFA.
+   🔴 LAS CLAVES DE CIFRADO NO VAN DENTRO DEL DUMP, NI EN EL MISMO SOPORTE.
+   Soporte distinto, custodia distinta. La ÚNICA amenaza contra la que ese
+   cifrado defiende es una copia de la base que se escapa: con la clave
+   dentro, cifrar no protege de nada. La restauración se prueba trayendo las
+   dos piezas de sitios distintos, y eso es parte de la prueba.
+   (Y las variables son MFA_ENCRYPTION_KEY_<n> y MFA_ENCRYPTION_KEY_ACTIVE.
+   `MFA_ENCRYPTION_KEY` a secas no existe y no la lee nadie.)
 2. Verificar SPF/DKIM de osefi.net en Resend. Envío de prueba real. (Días antes.)
 3. Añadir las variables nuevas. NO borrar JWT_SECRET.
-   🔴 RESEND_API_KEY y MAIL_FROM son OBLIGATORIAS: sin ellas la API NO ARRANCA.
+   🔴 OBLIGATORIAS en producción — sin CUALQUIERA de ellas la API NO ARRANCA
+   y Coolify reinicia en bucle:
+     CORS_ORIGIN · COOKIE_NAME (=__Host-osefi_session) · COOKIE_SECURE (=true)
+     RESEND_API_KEY · MAIL_FROM · MFA_ENCRYPTION_KEY_ACTIVE
+   🔴 Y una que `requiredEnv` NO puede exigir, porque su nombre depende del
+   valor de otra: MFA_ENCRYPTION_KEY_<n>, la que apunte _ACTIVE. Poner
+   _ACTIVE=1 y olvidar _1 ARRANCA LIMPIO, con una línea `fatal` que nadie
+   mira y un mensaje al usuario que invita a esperar a que se arregle solo.
+   Compruébalo en la primera línea del log de arranque: es la única señal.
 4. Probar auth:rescue:deploy DENTRO del contenedor.
 5. Crear la cuenta de rescate (rol 1) y guardar sus códigos impresos.
 6. migrate:deploy
-7. Desplegar la API. Desplegar la web. (Da igual el orden: /api/login sigue vivo.)
+7. 🔴 VENTANA COORDINADA CON LAS NUEVE PERSONAS. NO es un despliegue rodante,
+   y la frase que había aquí ("da igual el orden: /api/login sigue vivo") es
+   verdadera y no sirve.
+   NINGÚN orden funciona por sí solo, y conviene entender por qué antes de
+   improvisar en caliente:
+     · El navegador de cada persona tiene un service worker con
+       `registerType: "prompt"`: sirve el bundle VIEJO y NO se actualiza solo.
+       Ese bundle llama a POST /api/login y GET /api/login.
+     · El bundle NUEVO llama a POST /api/auth/login y GET /api/auth/me, que la
+       imagen vieja no tiene.
+   Así que: API primero deja al bundle viejo mandando la contraseña, recibiendo
+   200, sin encontrar el `token` que la API nueva ya no devuelve, y recogiendo
+   401 en todo — PARECE QUE EL LOGIN FUNCIONA, que es lo que hace el fallo
+   confuso en vez de evidente. Y web primero deja al bundle nuevo contra una
+   API que le contesta 404.
+   EL PROCEDIMIENTO, con nueve personas, es una ventana de quince minutos:
+     a) Avisar el día antes: "a las 09:00 cerrad el ERP y no lo abráis".
+     b) Desplegar API y web seguidas, sin hueco entre las dos.
+     c) Decirles que abran y, si ven el aviso "Hay una versión nueva",
+        pulsen Actualizar; y si aterrizan en el login una y otra vez,
+        Ctrl+Shift+R.
+     d) COMPROBAR UNA POR UNA que las nueve entran, antes de dar el
+        despliegue por bueno. Son nueve; se puede.
+   Alternativa que quita el paso (c) pero hay que decidirla ANTES de construir
+   la imagen: `registerType: "autoUpdate"` en web/vite.config.ts.
 8. Probar el flujo completo con la cuenta de prueba.
 9. Si falla → volver a la imagen anterior en Coolify. Arranca porque JWT_SECRET
    sigue puesto. DEJAR EL ESQUEMA NUEVO: el código viejo lo ignora.

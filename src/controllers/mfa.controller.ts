@@ -83,6 +83,7 @@ import { FactorTotpModel } from "../models/factorTotp.model.js";
 import { descifrar } from "../auth/mfaCrypto.js";
 import { aadDeFactorTotp, sellarPaso, pasoYaUsado } from "../auth/totpStore.js";
 import { gastarCodigo } from "../auth/recoveryCodeStore.js";
+import { tieneAlgunFactor } from "../auth/factorInventory.js";
 import { promoverSesion } from "../auth/sessionPromotion.js";
 import type { FuenteMfa } from "../auth/sessionState.js";
 import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js";
@@ -185,13 +186,30 @@ async function secretoDe(fila: FilaFactorTotp, id_usuario: number): Promise<stri
     );
   } catch (err) {
     // Never reaches a response — see the module header, hallazgo B12. Logged
-    // here only so an operator can tell "somebody mistyped a code" apart
-    // from "this row or this key is actually broken" without either fact
-    // ever reaching the caller.
-    mfaLog.warn({ err, id_usuario, id_factor: fila.id }, "no se pudo descifrar el factor TOTP");
+    // here so an operator can tell "somebody mistyped a code" apart from
+    // "this row or this key is actually broken" without either fact ever
+    // reaching the caller. `error`, not `warn` (hallazgo F5/A5/C-4): a row
+    // this process cannot open — a rotated key, an orphaned `key_version`, a
+    // partial restore — is the server's fault, not a shrug-worthy user typo,
+    // and it is the one cause of "invalid code" this file can and should
+    // surface to whoever watches the logs, since `verify`/`stepup` below
+    // deliberately never charge the account's lockout budget for it.
+    mfaLog.error({ err, id_usuario, id_factor: fila.id }, "no se pudo descifrar el factor TOTP");
     return null;
   }
 }
+
+/** What checking a TOTP code actually found — never just "yes or no".
+ *  `fallaCriptografica` is the one bit `verify`/`stepup` need and `boolean`
+ *  alone could not carry: whether the failure was a crypto/key problem this
+ *  process caused, as opposed to a wrong code, a replay, or a diagnostic-only
+ *  match. Hallazgo F5/A5/C-4 — see `secretoDe` above and both callers below. */
+interface ResultadoTotp {
+  valido: boolean;
+  fallaCriptografica: boolean;
+}
+
+const NO_VALIDO: ResultadoTotp = { valido: false, fallaCriptografica: false };
 
 /**
  * Check a TOTP code against this account's confirmed factor, sealing the
@@ -212,18 +230,28 @@ async function secretoDe(fila: FilaFactorTotp, id_usuario: number): Promise<stri
  * replay — as a diagnostic signal for §6's clock-skew message, and then
  * refused exactly like any other wrong code: same status, same message, same
  * charge against the lockout (hallazgo C12, rules 1 and 3).
+ *
+ * **`pasoYaUsado` here is a cheap pre-check, never the final word (hallazgo
+ * F4/C-3/A-8).** It reads a snapshot of `ultimo_paso` taken a moment ago by
+ * `leerFactorTotp`; a step it already calls "used" cannot un-become unused,
+ * so it is safe as a fast reject and as the gate for the diagnostic log. But
+ * two requests carrying the same code can both read that snapshot *before*
+ * either one writes, both compute `repetido = false`, and both reach
+ * `sellarPaso` believing they are first. `sellarPaso`'s own `WHERE` is what
+ * actually decides that atomically; its returned count of `0` means exactly
+ * what `pasoYaUsado` returning `true` means, and is treated identically.
  */
-async function verificarTotp(id_usuario: number, codigo: string, ip: string | null): Promise<boolean> {
+async function verificarTotp(id_usuario: number, codigo: string, ip: string | null): Promise<ResultadoTotp> {
   const fila = await leerFactorTotp(id_usuario);
-  if (!fila) return false;
+  if (!fila) return NO_VALIDO;
   const secreto = await secretoDe(fila, id_usuario);
-  if (secreto === null) return false;
+  if (secreto === null) return { valido: false, fallaCriptografica: true };
 
   const secret = OTPAuth.Secret.fromBase32(secreto);
   const timestamp = Date.now();
   const counterActual = OTPAuth.TOTP.counter({ timestamp });
   const delta = OTPAuth.TOTP.validate({ token: codigo, secret, timestamp, window: VENTANA_DIAGNOSTICO });
-  if (delta === null) return false; // No match anywhere in ±10 steps: garbage.
+  if (delta === null) return NO_VALIDO; // No match anywhere in ±10 steps: garbage.
 
   const pasoCandidato = BigInt(counterActual + delta);
   const repetido = pasoYaUsado(fila.ultimo_paso, pasoCandidato);
@@ -246,13 +274,14 @@ async function verificarTotp(id_usuario: number, codigo: string, ip: string | nu
         ip_address: ip,
       });
     }
-    return false;
+    return NO_VALIDO;
   }
 
-  if (repetido) return false;
+  if (repetido) return NO_VALIDO;
 
-  await sellarPaso(fila.id, pasoCandidato);
-  return true;
+  const selladas = await sellarPaso(fila.id, pasoCandidato);
+  if (selladas === 0) return NO_VALIDO; // Lost the race — someone else sealed it first.
+  return { valido: true, fallaCriptografica: false };
 }
 
 /**
@@ -350,9 +379,12 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
 
   const ip = req.ip ?? null;
   let fuente: FuenteMfa | null = null;
+  let fallaCriptografica = false;
+  let sinFactorConfirmado = false;
 
   if (FORMA_TOTP.test(crudo)) {
-    if (await verificarTotp(caller.id, crudo, ip)) {
+    const resultado = await verificarTotp(caller.id, crudo, ip);
+    if (resultado.valido) {
       // `promoverSesion` is not composed transactionally with `sellarPaso`
       // here: `totpStore.ts`'s `sellarPaso` takes no `transaction` parameter
       // (only the recovery-code path below was built to need one — Task 11
@@ -363,32 +395,61 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
       await promoverSesion(caller.id_sesion, "totp");
       fuente = "totp";
     }
+    fallaCriptografica = resultado.fallaCriptografica;
   } else {
-    // Task 11 Step 4: spending the code and sealing the session it proves
-    // succeed or fail together, or the person burns one of ten codes for
-    // nothing and has no trace of why.
-    try {
-      const promovido = await sequelize.transaction(async (transaction) => {
-        const gastado = await gastarCodigo(caller.id, crudo, { transaction });
-        if (!gastado) return false;
-        const ok = await promoverSesion(caller.id_sesion, "codigo", { transaction });
-        if (!ok) throw new NadaQueSellar();
-        return true;
-      });
-      if (promovido) fuente = "codigo";
-    } catch (err) {
-      if (!(err instanceof NadaQueSellar)) throw err;
-      // Rolled back: the code stays unspent, since promoting bought nothing.
+    // Hallazgo F1/C-2/D-1: a recovery code rescues an existing factor, it is
+    // never one of its own (`factorInventory.ts`'s own header). Without this,
+    // a password alone gets ten codes from `/recovery-codes` — which does not
+    // check for a factor either, that is this fix's other half — and one of
+    // them promotes straight to `completa`, indefinitely, since the account
+    // can always regenerate ten more with the same password. Refused before
+    // even asking whether `crudo` names a real code: an account with nothing
+    // confirmed has nothing to rescue, so there is nothing here worth
+    // spending one of ten codes on. `sinFactorConfirmado` only ever changes
+    // what this failure's own bitácora line says — never the HTTP response,
+    // which stays the one answer this file gives for every way a recovery
+    // code can fail (hallazgo B12).
+    if (!(await tieneAlgunFactor(caller.id))) {
+      sinFactorConfirmado = true;
+    } else {
+      // Task 11 Step 4: spending the code and sealing the session it proves
+      // succeed or fail together, or the person burns one of ten codes for
+      // nothing and has no trace of why.
+      try {
+        const promovido = await sequelize.transaction(async (transaction) => {
+          const gastado = await gastarCodigo(caller.id, crudo, { transaction });
+          if (!gastado) return false;
+          const ok = await promoverSesion(caller.id_sesion, "codigo", { transaction });
+          if (!ok) throw new NadaQueSellar();
+          return true;
+        });
+        if (promovido) fuente = "codigo";
+      } catch (err) {
+        if (!(err instanceof NadaQueSellar)) throw err;
+        // Rolled back: the code stays unspent, since promoting bought nothing.
+      }
     }
   }
 
   if (fuente === null) {
-    await cargarIntentoFallido(
-      caller.id,
-      ip,
-      "MFA_VERIFY_FAILED",
-      "Código de segundo factor incorrecto, repetido o ya utilizado",
-    );
+    if (fallaCriptografica) {
+      // Hallazgo F5/A5/C-4: a row this process cannot decrypt is the
+      // server's fault, never the caller's — `secretoDe` already logged it at
+      // `error` severity, with the row and key version an operator needs.
+      // Charging `failed_attempts` here would lock out the very person a
+      // broken key or a bad rotation already failed; skipping it is the only
+      // thing this branch does differently; the response below is identical
+      // either way, on purpose (same status, same message, same shape).
+    } else {
+      await cargarIntentoFallido(
+        caller.id,
+        ip,
+        "MFA_VERIFY_FAILED",
+        sinFactorConfirmado
+          ? "Se intentó un código de recuperación sin ningún factor confirmado en la cuenta: nada que rescatar"
+          : "Código de segundo factor incorrecto, repetido o ya utilizado",
+      );
+    }
     return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
   }
 
@@ -491,15 +552,18 @@ export const stepup = handler("stepup", async (req: Request, res: Response) => {
 
   const ip = req.ip ?? null;
   let fuente: FuenteMfa | null = null;
+  let fallaCriptografica = false;
 
   if (FORMA_TOTP.test(crudo)) {
-    if (await verificarTotp(caller.id, crudo, ip)) {
+    const resultado = await verificarTotp(caller.id, crudo, ip);
+    if (resultado.valido) {
       const [count] = await SesionModel.update(
         { mfa_satisfied_at: new Date(), mfa_source: "totp" },
         { where: { id: caller.id_sesion, id_usuario: caller.id, estado: "completa" } },
       );
       if (count > 0) fuente = "totp";
     }
+    fallaCriptografica = resultado.fallaCriptografica;
   } else {
     try {
       const promovido = await sequelize.transaction(async (transaction) => {
@@ -522,12 +586,18 @@ export const stepup = handler("stepup", async (req: Request, res: Response) => {
   }
 
   if (fuente === null) {
-    await cargarIntentoFallido(
-      caller.id,
-      ip,
-      "MFA_VERIFY_FAILED",
-      "Reautenticación de step-up incorrecta, repetida o ya utilizada",
-    );
+    // Hallazgo F5/A5/C-4 — same exemption `verify` above makes, for the same
+    // reason: a row this process cannot decrypt is the server's fault, not
+    // the caller's, and must not spend the account's lockout budget.
+    // `secretoDe` already logged it at `error` severity.
+    if (!fallaCriptografica) {
+      await cargarIntentoFallido(
+        caller.id,
+        ip,
+        "MFA_VERIFY_FAILED",
+        "Reautenticación de step-up incorrecta, repetida o ya utilizada",
+      );
+    }
     return res.status(400).json({ message: CODIGO_MFA_INVALIDO });
   }
 

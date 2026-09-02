@@ -7,6 +7,9 @@
 # Env
 .env
 .env.*
+# ...salvo la plantilla, que es el único sitio donde las variables vivas
+# quedan escritas para quien monte un entorno nuevo. No lleva ningún valor.
+!.env.example
 
 # Logs
 *.log

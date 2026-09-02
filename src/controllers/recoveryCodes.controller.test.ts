@@ -20,6 +20,13 @@ vi.mock("../auth/recoveryCodeStore.js", () => ({
   contarCodigosRestantes: (...a: unknown[]) => contarCodigosRestantes(...a),
 }));
 
+// Hallazgo F1: `regenerateRecoveryCodes` now checks the real module before
+// ever calling the store above. Mocked the same way `totp.routes.test.ts`
+// and `recoveryCodes.routes.test.ts` mock it, so this file proves what the
+// *controller* does with each answer, never the two COUNTs behind it.
+const tieneAlgunFactor = vi.fn();
+vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a) }));
+
 const logAction = vi.fn();
 vi.mock("../utils/logAction.js", () => ({ logAction: (...a: unknown[]) => logAction(...a) }));
 
@@ -27,9 +34,12 @@ vi.mock("../utils/logger.js", () => ({
   log: () => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 
-const { regenerateRecoveryCodes, countRecoveryCodes, MENSAJE_CODIGOS_GENERADOS } = await import(
-  "./recoveryCodes.controller.js"
-);
+const {
+  regenerateRecoveryCodes,
+  countRecoveryCodes,
+  MENSAJE_CODIGOS_GENERADOS,
+  MENSAJE_SIN_FACTOR_PARA_CODIGOS,
+} = await import("./recoveryCodes.controller.js");
 
 const CALLER = {
   id: 7,
@@ -75,6 +85,10 @@ function call(user: NonNullable<Request["user"]> | undefined, body: unknown = {}
 beforeEach(() => {
   regenerarCodigos.mockReset().mockResolvedValue(DIEZ_CODIGOS);
   contarCodigosRestantes.mockReset().mockResolvedValue(3);
+  // `true` by default: every pre-existing test in this file exercises an
+  // account that already has a factor, and only the describe block below
+  // narrows this to `false`.
+  tieneAlgunFactor.mockReset().mockResolvedValue(true);
   logAction.mockReset();
 });
 
@@ -141,6 +155,39 @@ describe("regenerateRecoveryCodes", () => {
     const [entrada] = logAction.mock.calls[0] as [{ metadata: unknown; detail: string }];
     expect(entrada.metadata).not.toHaveProperty("codigos");
     expect(entrada.detail).not.toMatch(/[A-Z0-9]{20,}/);
+  });
+
+  describe("🔴 hallazgo F1 — refuses an account with no confirmed factor at all", () => {
+    it("answers 409 instead of issuing codes, and writes nothing", async () => {
+      tieneAlgunFactor.mockResolvedValue(false);
+      const c = call(CALLER);
+
+      await regenerateRecoveryCodes(c.req, c.res);
+
+      expect(c.status).toBe(409);
+      expect(c.payload.message).toBe(MENSAJE_SIN_FACTOR_PARA_CODIGOS);
+      expect(regenerarCodigos).not.toHaveBeenCalled();
+      expect(logAction).not.toHaveBeenCalled();
+    });
+
+    it("checks the caller's own id, never anything from the body", async () => {
+      tieneAlgunFactor.mockResolvedValue(false);
+      const c = call(CALLER, { id_usuario: 999999 });
+
+      await regenerateRecoveryCodes(c.req, c.res);
+
+      expect(tieneAlgunFactor).toHaveBeenCalledWith(CALLER.id);
+    });
+
+    it("still issues the ten once the account has a factor — the ordinary case is unaffected", async () => {
+      tieneAlgunFactor.mockResolvedValue(true);
+      const c = call(CALLER);
+
+      await regenerateRecoveryCodes(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(c.payload.codigos).toEqual(DIEZ_CODIGOS);
+    });
   });
 });
 

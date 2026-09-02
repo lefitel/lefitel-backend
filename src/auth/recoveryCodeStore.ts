@@ -259,6 +259,7 @@ export async function gastarCodigo(
   // nobody can engineer on demand.
   const candidatas = await CodigoRecuperacionModel.unscoped().findAll({
     where: { id_usuario, prefijo, used_at: null },
+    transaction: opciones.transaction,
   });
 
   for (const fila of candidatas) {

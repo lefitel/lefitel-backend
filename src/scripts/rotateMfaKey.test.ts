@@ -73,9 +73,17 @@ function coincideWhere(fila: FilaFalsa, where: Record<string, unknown> | undefin
     const valor = (fila as unknown as Record<string, unknown>)[campo];
     if (condicion !== null && typeof condicion === "object" && Op.ne in (condicion as object)) {
       if (valor === (condicion as Record<symbol, unknown>)[Op.ne]) return false;
-    } else if (valor !== condicion) {
-      return false;
+      continue;
     }
+    // Finding A2: the row-picking query has to be able to exclude ids the
+    // current run already found irrecoverable, or the loop reselects the
+    // exact same unreadable row forever.
+    if (condicion !== null && typeof condicion === "object" && Op.notIn in (condicion as object)) {
+      const lista = (condicion as Record<symbol, unknown>)[Op.notIn] as unknown[];
+      if (lista.includes(valor)) return false;
+      continue;
+    }
+    if (valor !== condicion) return false;
   }
   return true;
 }
@@ -221,6 +229,7 @@ describe("rotarClaveMfa", () => {
       yaEnVersionActiva: 0,
       pendientesAlEmpezar: 2,
       filasRotadas: 2,
+      filasIrrecuperables: 0,
       pendientesAlTerminar: 0,
     });
     expect(filas.every((f) => f.key_version === 2)).toBe(true);
@@ -269,6 +278,7 @@ describe("rotarClaveMfa", () => {
       yaEnVersionActiva: 2,
       pendientesAlEmpezar: 0,
       filasRotadas: 0,
+      filasIrrecuperables: 0,
       pendientesAlTerminar: 0,
     });
     expect(updateMock).not.toHaveBeenCalled();
@@ -314,10 +324,126 @@ describe("rotarClaveMfa", () => {
       yaEnVersionActiva: 1,
       pendientesAlEmpezar: 2,
       filasRotadas: 2,
+      filasIrrecuperables: 0,
       pendientesAlTerminar: 0,
     });
     expect(filas.every((f) => f.key_version === 2)).toBe(true);
     expect(logs.join("\n")).toContain("Ya en la versión activa (2): 1");
+  });
+
+  // Finding A2. Before this fix, `rotarUnaFila` always re-selected "the
+  // pending row with the lowest id" — so a row that cannot decrypt (a
+  // corrupted `auth_tag` from a partial restore, an orphaned `key_version`)
+  // made every single call pick that exact row again, throw again, and the
+  // whole run never made progress on anything, healthy rows included.
+  describe("a row that will not decrypt (finding A2)", () => {
+    /** A row whose `auth_tag` a healthy key still cannot open — the shape a
+     *  partial restore leaves behind. */
+    function filaCorrupta(id: number, secreto: string): FilaFalsa {
+      const sana = cifrarBajoVersion(secreto, aadDeFactorTotp(id), 1);
+      const tagAlterado = Buffer.from(sana.auth_tag);
+      tagAlterado[0] ^= 0xff;
+      return { id, key_version: 1, ...sana, auth_tag: tagAlterado };
+    }
+
+    it("skips it, keeps rotating the healthy rows around it, and reports it as irrecuperable rather than aborting the whole run", async () => {
+      sembrarFilas([
+        { id: 1, key_version: 1, ...cifrarBajoVersion("secreto uno", aadDeFactorTotp(1), 1) },
+        filaCorrupta(2, "secreto dos"),
+        { id: 3, key_version: 1, ...cifrarBajoVersion("secreto tres", aadDeFactorTotp(3), 1) },
+      ]);
+
+      const resultado = await rotarClaveMfa();
+
+      expect(resultado).toEqual({
+        totalFilas: 3,
+        yaEnVersionActiva: 0,
+        pendientesAlEmpezar: 3,
+        filasRotadas: 2,
+        filasIrrecuperables: 1,
+        pendientesAlTerminar: 1,
+      });
+      // The healthy rows either side of the bad one actually got rotated —
+      // the property that dies under the old "always the same row" bug.
+      expect(filas.find((f) => f.id === 1)!.key_version).toBe(2);
+      expect(filas.find((f) => f.id === 3)!.key_version).toBe(2);
+      // The unreadable row was never written to: still on its original
+      // version, still carrying the tampered tag.
+      expect(filas.find((f) => f.id === 2)!.key_version).toBe(1);
+
+      expect(errors.join("\n")).toContain("factor_totp.id=2");
+      // The go-ahead-and-delete-the-old-key message must not appear: one
+      // row is still stuck on it.
+      expect(logs.join("\n")).not.toContain("Ya puedes borrar la clave vieja");
+      expect(errors.join("\n")).toContain("NO borres la clave vieja");
+    });
+
+    it("finishes cleanly (no crash, no exception) instead of throwing the way an update-failure still does", async () => {
+      sembrarFilas([filaCorrupta(1, "secreto uno")]);
+
+      await expect(rotarClaveMfa()).resolves.toMatchObject({
+        filasRotadas: 0,
+        filasIrrecuperables: 1,
+        pendientesAlTerminar: 1,
+      });
+    });
+
+    it("does not spin forever with more than one unreadable row mixed in with healthy ones", async () => {
+      sembrarFilas([
+        filaCorrupta(1, "secreto uno"),
+        { id: 2, key_version: 1, ...cifrarBajoVersion("secreto dos", aadDeFactorTotp(2), 1) },
+        filaCorrupta(3, "secreto tres"),
+        { id: 4, key_version: 1, ...cifrarBajoVersion("secreto cuatro", aadDeFactorTotp(4), 1) },
+      ]);
+
+      const resultado = await rotarClaveMfa();
+
+      expect(resultado.filasRotadas).toBe(2);
+      expect(resultado.filasIrrecuperables).toBe(2);
+      expect(resultado.pendientesAlTerminar).toBe(2);
+      expect(errors.join("\n")).toContain("factor_totp.id=1");
+      expect(errors.join("\n")).toContain("factor_totp.id=3");
+    });
+
+    it("keeps reporting the same unreadable row as irrecuperable on a second run, without re-touching the rows already converted", async () => {
+      sembrarFilas([
+        { id: 1, key_version: 1, ...cifrarBajoVersion("secreto uno", aadDeFactorTotp(1), 1) },
+        filaCorrupta(2, "secreto dos"),
+      ]);
+
+      await rotarClaveMfa();
+      updateMock.mockClear();
+      const segunda = await rotarClaveMfa();
+
+      expect(segunda.filasRotadas).toBe(0); // row 1 already converted, nothing left to do for it
+      expect(segunda.filasIrrecuperables).toBe(1);
+      expect(updateMock).not.toHaveBeenCalled();
+    });
+
+    it("still throws (and does not call it merely irrecoverable) when the failure is in the write itself, not the decrypt", async () => {
+      // A genuine crash mid-write — e.g. a lost database connection — is not
+      // "this one row is unreadable"; papering over it the same way would
+      // hide a systemic fault behind a per-row label it does not deserve.
+      sembrarFilas([{ id: 1, key_version: 1, ...cifrarBajoVersion("secreto uno", aadDeFactorTotp(1), 1) }]);
+      // `Once`, not a standing override: this must not leak into later tests
+      // the way `beforeEach`'s `vi.clearAllMocks()` would not undo a
+      // standing `mockImplementation` — see the other tests in this file
+      // that restore theirs by hand for the same reason.
+      updateMock.mockImplementationOnce(async () => {
+        throw new Error("connection lost mid-write");
+      });
+
+      await expect(rotarClaveMfa()).rejects.toThrow("connection lost mid-write");
+    });
+  });
+
+  it("prints the go-ahead to delete the old key only once every row is actually on the active version", async () => {
+    sembrarFilas([{ id: 1, key_version: 1, ...cifrarBajoVersion("secreto uno", aadDeFactorTotp(1), 1) }]);
+
+    await rotarClaveMfa();
+
+    expect(logs.join("\n")).toContain("Ya puedes borrar la clave vieja");
+    expect(errors.join("\n")).toBe("");
   });
 
   it("refuses to start when the active key is not in the keyring", async () => {

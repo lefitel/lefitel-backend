@@ -47,14 +47,32 @@
 //      a deploy with no key at all, or with the pointer aimed at a version
 //      nobody configured, boot cleanly — and nobody would notice until the
 //      first person tries to register a factor.
-//   2. Only if a confirmed row exists, decrypt it. Zero rows is the correct,
-//      unremarkable state of a first deploy: there is nothing to protect yet,
-//      so there is nothing to fail.
+//   2. Only if at least one confirmed row exists, decrypt a representative of
+//      every `key_version` those rows actually carry (see "Which rows"
+//      below — finding A1). Zero confirmed rows is the correct, unremarkable
+//      state of a first deploy: there is nothing to protect yet, so there is
+//      nothing to fail.
 //
-// **Which row (Step 5): the lowest `id` with `confirmed_at IS NOT NULL`.** An
-// unconfirmed row can be a half-finished `setup` nobody is going to use; a
-// confirmed one is a secret somebody is actually relying on, which is what
-// this check exists to prove still opens.
+// **Which rows (Step 5) — finding A1, not the original single-row design.**
+// The first draft decrypted only the lowest `id` with `confirmed_at IS NOT
+// NULL`, reasoning that an unconfirmed row can be a half-finished `setup`
+// nobody is going to use while a confirmed one is a secret somebody actually
+// relies on. True, but incomplete: `src/scripts/rotateMfaKey.ts` also sorts
+// `id ASC`, so a rotation that dies half way always converts the *lowest*
+// ids first — which means "the lowest confirmed id" is exactly the one row
+// in the whole table guaranteed to already sit on the new key. It decrypts
+// fine, this check says `ok: true`, and the higher-id rows still waiting on
+// the key the operator is about to delete are never looked at. Once that key
+// is gone, those rows are unreadable forever, behind a check that stayed
+// green the whole time.
+//
+// The fix keeps "a confirmed row, never an unconfirmed one" and drops "only
+// one": every distinct `key_version` present among the confirmed rows gets
+// its own lowest-id representative decrypted, so a key that stopped working
+// — including one removed before every row had actually moved off it — is
+// caught no matter which version happens to sort first. `factor_totp` holds
+// at most one confirmed row per person, so reading all of them once at boot
+// is not a cost worth engineering around.
 //
 // **The AAD convention, because `auth/totpStore.ts` (Task 4) has to produce
 // the exact same string or every decryption here fails, always.** It is
@@ -123,47 +141,62 @@ export async function comprobarLlaveAlArrancar(): Promise<ResultadoComprobacion>
   // `unscoped()` is required, not a stylistic choice: `FactorTotpModel`'s own
   // `defaultScope` (finding B10) excludes exactly the three columns this
   // check has to read — `secreto_cifrado`, `iv`, `auth_tag` — so a plain
-  // `findOne` here would always see them as `undefined` and always "fail" to
+  // `findAll` here would always see them as `undefined` and always "fail" to
   // decrypt, on a perfectly healthy key.
-  const fila = await FactorTotpModel.unscoped().findOne({
+  const filas = await FactorTotpModel.unscoped().findAll({
     where: { confirmed_at: { [Op.ne]: null } },
     order: [["id", "ASC"]],
   });
 
-  if (!fila) {
+  if (filas.length === 0) {
     // No confirmed row anywhere: the first deploy, or every account still
     // mid-registration. Nothing to protect yet, so there is nothing to fail.
     disponible = true;
     return { ok: true };
   }
 
-  const datos = fila.get() as {
+  interface FilaCifrada {
     id: number;
     secreto_cifrado: Buffer;
     iv: Buffer;
     auth_tag: Buffer;
     key_version: number;
-  };
+  }
 
-  try {
-    descifrar(
-      {
-        ciphertext: datos.secreto_cifrado,
-        iv: datos.iv,
-        auth_tag: datos.auth_tag,
-        key_version: datos.key_version,
-      },
-      aadDeFactorTotp(datos.id),
-    );
-  } catch {
-    // Never the caught error's own `.message` here — see finding B12 in the
-    // module header. The row id and the key version it tried are the only
-    // detail worth keeping; both name where to look without naming why.
-    disponible = false;
-    return {
-      ok: false,
-      detalle: `factor_totp.id=${datos.id} no se pudo descifrar con la clave de la versión ${datos.key_version}`,
-    };
+  // One representative per `key_version` actually present, lowest id first
+  // within each — see "Which rows" in the module header. `filas` is already
+  // sorted `id ASC`, so the first row seen for a given version is always its
+  // lowest id, exactly what the pre-A1 single-row check picked when only one
+  // version existed.
+  const representantePorVersion = new Map<number, FilaCifrada>();
+  for (const filaModel of filas) {
+    const datos = filaModel.get() as FilaCifrada;
+    if (!representantePorVersion.has(datos.key_version)) {
+      representantePorVersion.set(datos.key_version, datos);
+    }
+  }
+
+  for (const datos of representantePorVersion.values()) {
+    try {
+      descifrar(
+        {
+          ciphertext: datos.secreto_cifrado,
+          iv: datos.iv,
+          auth_tag: datos.auth_tag,
+          key_version: datos.key_version,
+        },
+        aadDeFactorTotp(datos.id),
+      );
+    } catch {
+      // Never the caught error's own `.message` here — see finding B12 in the
+      // module header. The row id and the key version it tried are the only
+      // detail worth keeping; both name where to look without naming why.
+      disponible = false;
+      return {
+        ok: false,
+        detalle: `factor_totp.id=${datos.id} no se pudo descifrar con la clave de la versión ${datos.key_version}`,
+      };
+    }
   }
 
   disponible = true;

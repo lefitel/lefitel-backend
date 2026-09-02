@@ -108,6 +108,57 @@ export async function promoverSesion(
 }
 
 /**
+ * Seal this exact session as having just proved a factor, whatever `estado`
+ * the row is stored as. **Not a replacement for `promoverSesion` and never
+ * called in its place** — see `confirmTotp` in `totp.controller.ts` for the
+ * one gap this fills, and why a parameter on `promoverSesion` was rejected
+ * for it.
+ *
+ * `promoverSesion`'s `WHERE estado IN (...)` is not an oversight to route
+ * around: it is what its own docstring says makes a retry of that function
+ * harmless — a session already `completa` matches nothing, so confirming a
+ * factor twice never re-stamps `mfa_satisfied_at` over one already
+ * satisfied. Widening that WHERE, or adding a flag that bypasses it, would
+ * hand every future caller of `promoverSesion` — today the recovery-code
+ * path, tomorrow whatever proves a factor next — the option of also
+ * re-stamping an already-satisfied session, which is exactly the footgun
+ * that WHERE exists to rule out. Composing two functions with narrow,
+ * separate contracts keeps that guarantee intact for everyone who calls
+ * `promoverSesion` and gives `confirmTotp` a tool whose only job is
+ * "whatever this row's `estado` is, it must come away holding fresh proof".
+ *
+ * **What forces this to exist at all — hallazgo F2/B-1.**
+ * `estadoInicialDeSesion` (`factorInventory.ts`) can open a brand-new
+ * session as `completa` for an account that has no factor yet but is still
+ * inside its fourteen-day grace period. When that account then registers
+ * its first factor, `promoverSesion`'s WHERE matches nothing — the row was
+ * never `parcial` or `onboarding` — so it returns `false` and writes
+ * nothing. Without this function, `mfa_satisfied_at` would never be sealed
+ * on that session, and `requireStepUp` would refuse it step-up for the rest
+ * of its life: the very account that registered its factor *on time* ends
+ * up locked out of the screen it just used, while somebody who registers
+ * late (session opened `onboarding`) goes through `promoverSesion` normally
+ * and is fine. This function is the other half of that same write, for the
+ * one case `promoverSesion` was never meant to cover.
+ *
+ * **Deliberately does not touch `estado`.** The only caller invokes this
+ * after `promoverSesion` has already returned `false`, which — given the
+ * three session states — means this row is already `completa` (or the
+ * session is gone). There is no state left to promote here, only proof left
+ * to record.
+ */
+export async function sellarPruebaDeFactor(
+  id_sesion: string,
+  fuente: FuenteMfa,
+  opciones: { transaction?: Transaction } = {},
+): Promise<void> {
+  await SesionModel.update(
+    { mfa_satisfied_at: new Date(), mfa_source: fuente },
+    { where: { id: id_sesion }, transaction: opciones.transaction },
+  );
+}
+
+/**
  * Turn off the fourteen-day clock: clear `usuarios.mfa_grace_until`.
  *
  * This is the write `factorInventory.ts`'s own docblock asks 4B for by
