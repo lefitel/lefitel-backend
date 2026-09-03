@@ -195,16 +195,15 @@ describe("avisarRescate", () => {
     expect(error).not.toHaveBeenCalled();
   });
 
-  it("does not stop to check the daily mail budget — deliberately not gated by mailBudget.ts", async () => {
-    // A console invocation is its own OS process with its own copy of that
-    // module's in-memory counter, so it cannot see what the server has spent
-    // today and the server cannot see what the console just spent — see this
-    // function's own docblock. Reconciling the two needs a database-backed
-    // counter this plan does not build; the cheap, correct answer is to never
-    // ask it, matching `avisarPasswordRestablecida` and `avisarCorreoCambiado`
-    // above, neither of which calls it either.
+  it("spends the reserved share of the chain like every other message: it never calls a budget, only enviarCorreo (plan 4E)", () => {
+    // The old test asserted that a name nobody uses any more was absent —
+    // green for ever. What is true: this module sends through `enviarCorreo`
+    // and nothing else, and `rescate/aviso` is one of the reserved flows the
+    // relay keeps a quarter of every ceiling for, so a flood of other mail
+    // cannot be the reason this trace was not sent.
     const src = readFileSync("src/auth/securityNotice.ts", "utf8");
-    expect(src).not.toMatch(/consumirPresupuestoDeCorreo/);
+    expect(src).not.toMatch(/from "\.\/mail(Budget|Relay)\.js"|crearPresupuesto|\.consumir\(/);
+    expect(src).toMatch(/flujo: "rescate\/aviso"/);
   });
 });
 

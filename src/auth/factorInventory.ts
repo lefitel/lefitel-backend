@@ -1,31 +1,48 @@
 // What an account already has to prove a second factor with — and what does
 // not count, on purpose.
 //
-// Two rules live here because a shortcut through either one turns onboarding,
-// and later `requireStepUp`, into theatre:
+// 🔴 **Two questions live here, and since plan 4E they have different
+// answers.** Until then every caller asked the same thing — "is there a
+// passkey or a confirmed TOTP?" — and one function served them all. A verified
+// email address is now a factor (`tieneAlgunFactor`), and it is *not* a
+// credential (`tieneCredencialRegistrada`). Three audits of that plan found
+// the same hole by three different roads: code that asks about **credentials**
+// — the passwordless login's "was the key deleted under me" guard, the "last
+// credential removed" tails of `deleteTotp` and `deleteCredential`, the rescue
+// console's wording — must not start answering `true` because an address was
+// verified. And code that asks about **factors** — which state a session opens
+// in, whether `requireStepUp` refuses, whether recovery codes may be minted or
+// spent — must. Each caller names the question it means; a new caller picks
+// one and says why.
+//
+// Two rules that predate that split still hold, because a shortcut through
+// either one turns onboarding, and later `requireStepUp`, into theatre:
 //
 // - An unconfirmed TOTP secret is not a factor. Generating one only proves a
 //   QR code was drawn, not that anybody scanned it — the screen could have
 //   been photographed wrong, or abandoned halfway. Counting it would let a
 //   session pass a gate it cannot actually satisfy: nobody can type a code
-//   back for a secret they never captured.
+//   back for a secret they never captured. **A verified address is the
+//   opposite case**: verifying it *is* typing something back — a link that
+//   only that mailbox received — so the row already carries the proof an
+//   unconfirmed secret lacks.
 // - Recovery codes are the way back in when a real factor is unreachable, not
 //   a factor of their own. They are handed out at the *end* of registering
 //   one, precisely because that assumes one already exists. Counting them
 //   here would let onboarding — and later, `requireStepUp` — finish with
 //   nothing but a sheet of paper, which is the exact hole the second factor
-//   was built to close.
+//   was built to close. (Since 4E an account whose only factor is its email
+//   may hold codes too: they are its way back in when the mailbox is not.)
 //
-// The three tables this file queries were empty when it was written, and are
-// not any more: `registerVerify` inserts a passkey, `confirmTotp` a confirmed
-// secret, `escribirCodigos` a batch of recovery codes. Everything below is
-// answering about real rows, so a change here changes who gets through a gate
-// today rather than on some future deploy day.
+// The tables this file queries are read on every login and every gated write,
+// so a change here changes who gets through a gate today rather than on some
+// future deploy day.
 
 import { Op, type Transaction } from "sequelize";
 import { CredencialWebauthnModel } from "../models/credencialWebauthn.model.js";
 import { FactorTotpModel } from "../models/factorTotp.model.js";
 import { CodigoRecuperacionModel } from "../models/codigoRecuperacion.model.js";
+import { UsuarioModel } from "../models/usuario.model.js";
 import { MFA_GRACE_DAYS } from "../config/security.js";
 import { totpEstaDisponible } from "./mfaKeyCheck.js";
 import type { EstadoSesion, FuenteEnElLogin } from "./sessionState.js";
@@ -37,6 +54,36 @@ export interface InventarioFactores {
   passkeys: number;
   totp: number;
   codigos: number;
+  /** `1` when the account's address is verified, `0` otherwise — a factor since plan 4E. */
+  correo: 0 | 1;
+}
+
+/**
+ * Whether this account's address is verified — the fourth thing a factor can
+ * be, since plan 4E.
+ *
+ * **`findByPk` with one attribute, and not `count`.** The obvious query is
+ * `UsuarioModel.count({ where: { id, email_verified_at: { [Op.ne]: null } } })`,
+ * and it would be wrong for a reason that has nothing to do with SQL:
+ * `app.auth.test.ts` spies `UsuarioModel.count` once and shares that spy with
+ * `deleteRol`'s "is this role still in use" check, so the two unrelated
+ * questions would ride one fixture and the "no factor" tests in that file
+ * would keep passing for whatever answer the role check happened to need.
+ * Reading the column is also what `authenticate` and `/auth/me` already do
+ * with this model, so the fake tables in the tests have a shape to follow.
+ *
+ * `paranoid: true` on the model means an archived account reads as `null`
+ * here, and `null` is "no factor": an archived account has nothing to prove.
+ */
+async function correoVerificado(
+  id_usuario: number,
+  opciones: { transaction?: Transaction } = {},
+): Promise<boolean> {
+  const fila = await UsuarioModel.findByPk(id_usuario, {
+    attributes: ["email_verified_at"],
+    transaction: opciones.transaction,
+  });
+  return fila?.dataValues.email_verified_at != null;
 }
 
 /**
@@ -49,42 +96,47 @@ export interface InventarioFactores {
  * showing somebody deciding whether to generate a fresh batch. `passkeys` is
  * a plain count: every row here already went through a WebAuthn ceremony
  * that proved possession, so there is no confirmation step left to ask for.
+ * `correo` is the verified address as a `0 | 1`, so that callers summing or
+ * comparing the inventory treat it like the others.
  */
 export async function factoresDe(id_usuario: number): Promise<InventarioFactores> {
-  const [passkeys, totp, codigos] = await Promise.all([
+  const [passkeys, totp, codigos, correo] = await Promise.all([
     CredencialWebauthnModel.count({ where: { id_usuario } }),
     FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } } }),
     CodigoRecuperacionModel.count({ where: { id_usuario, used_at: null } }),
+    correoVerificado(id_usuario),
   ]);
-  return { passkeys, totp, codigos };
+  return { passkeys, totp, codigos, correo: correo ? 1 : 0 };
 }
 
 /**
- * Whether this account has anything `requireStepUp` may accept in place of
- * the current password.
+ * Whether this account has a **credential** registered: a passkey or a
+ * confirmed TOTP secret. Not the same question as `tieneAlgunFactor` below,
+ * and the header of this file says why the two split.
  *
- * Deliberately `passkeys > 0 || totp > 0` and nothing else — the second rule
- * this file exists to enforce is that recovery codes never join that `||`.
+ * This is what `tieneAlgunFactor` used to be, under the name that says what it
+ * counts. Ask it when the question is about the *credential rows*: the
+ * passwordless login checking that the key it just verified still exists
+ * (`terminarLogin`'s `factor-desaparecido` guard), `deleteTotp` and
+ * `deleteCredential` deciding whether the row they removed was the last one,
+ * the rescue console describing what it just deleted. A verified address is
+ * none of those things, and answering `true` for it here would have let a
+ * deleted key open a session, and left a remembered-device cookie alive after
+ * the credential it trusted was gone.
  *
- * Queries the two relevant tables directly rather than calling `factoresDe`
- * and discarding its `codigos` count: this runs on the hot path of every
- * gated write `requireStepUp` guards, and a third COUNT this function has no
- * use for is a third round trip charged to every one of them. `factoresDe`
- * keeps all three, for callers that actually want the full inventory (a
- * settings screen showing "2 passkeys, no TOTP, 5 recovery codes left").
- * Both share the same confirmed-only TOTP rule, each in its own query, since
- * there is no third function here for one copy of it to live in without one
- * of these two calling the other and paying for a table it does not need.
+ * Deliberately `passkeys > 0 || totp > 0` and nothing else — recovery codes
+ * never join that `||`, for the reason the header gives.
  */
-export async function tieneAlgunFactor(
+export async function tieneCredencialRegistrada(
   id_usuario: number,
   /**
    * The caller's transaction, so that a login that already holds one runs
    * these two counts on the same connection instead of borrowing a second
    * from the pool while the first sits waiting — with `max: 15`, fifteen
    * such logins at once would starve the whole API. Optional and normally
-   * absent: `deleteCredential` in particular must NOT pass one, so that it
-   * counts committed state and never the row it is in the middle of removing.
+   * absent: `deleteCredential` and `deleteTotp` in particular must NOT pass
+   * one, so that they count committed state and never the row they are in
+   * the middle of removing.
    */
   opciones: { transaction?: Transaction } = {},
 ): Promise<boolean> {
@@ -94,6 +146,34 @@ export async function tieneAlgunFactor(
     FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } }, transaction }),
   ]);
   return passkeys > 0 || totp > 0;
+}
+
+/**
+ * Whether this account has anything `requireStepUp` may accept in place of
+ * the current password — a credential, **or a verified address**.
+ *
+ * This is the question that decides which state a session opens in
+ * (`estadoInicialDeSesion`), whether the gate refuses at all, and whether
+ * recovery codes may be minted or spent. Since plan 4E a verified email is a
+ * factor on its own (Isaias, 2026-09-03: automatic, on a par with the app and
+ * the key, complete), so an account that has verified its address and nothing
+ * else opens `parcial` and is asked for a code by email, and `requireStepUp`'s
+ * "nothing to prove, let through" branch no longer applies to it.
+ *
+ * Three reads, in parallel, and none of them `factoresDe`: this runs on the
+ * hot path of every gated write, and the recovery-code count that function
+ * also pays for has no bearing on the answer.
+ */
+export async function tieneAlgunFactor(
+  id_usuario: number,
+  /** Forwarded to every read — see `tieneCredencialRegistrada` for the pool. */
+  opciones: { transaction?: Transaction } = {},
+): Promise<boolean> {
+  const [credencial, correo] = await Promise.all([
+    tieneCredencialRegistrada(id_usuario, opciones),
+    correoVerificado(id_usuario, opciones),
+  ]);
+  return credencial || correo;
 }
 
 /**
@@ -110,27 +190,33 @@ export async function tieneAlgunFactor(
  * lockout. This function is what lets the seam be closed without touching
  * `tieneAlgunFactor`.
  *
- * 🔴 **And `tieneAlgunFactor` is deliberately left alone.** Teaching *it* to
- * skip an unreadable TOTP looks like the same fix and is a far worse hole: it
- * has five live callers, and one of them is `estadoInicialDeSesion` below,
- * which decides what state a session opens in. A mistyped
- * `MFA_ENCRYPTION_KEY_ACTIVE` would then open **every** session as if nobody
- * had a second factor at all — a configuration typo turned into a silent,
- * fleet-wide downgrade. The narrow question belongs in its own function, asked
- * only by the one route that needs it.
+ * 🔴 **And `tieneCredencialRegistrada` — and `tieneAlgunFactor`, which reads
+ * it — are deliberately left alone.** Teaching either to skip an unreadable
+ * TOTP looks like the same fix and is a far worse hole: `estadoInicialDeSesion`
+ * below reads `tieneCredencialRegistrada` to decide what state a session
+ * opens in, and `requireStepUp` reads `tieneAlgunFactor` to decide whether to
+ * refuse at all. A mistyped `MFA_ENCRYPTION_KEY_ACTIVE` would then open
+ * **every** session as if nobody had a second factor at all — a configuration
+ * typo turned into a silent, fleet-wide downgrade. The narrow question belongs
+ * in its own function, asked only by the one route that needs it.
  *
  * **Passkeys are unconditionally verifiable**: nothing about them is encrypted
  * with the TOTP keyring, so a broken key does not touch them. Which is also
  * why the answer is not simply `!totpEstaDisponible()` — an account holding a
  * passkey *and* an unreadable TOTP can still prove itself, and must still be
- * asked to.
+ * asked to. **And so is a verified address, since plan 4E**: the code goes by
+ * email, and the keyring has nothing to do with it. Which closes the seam
+ * this function was written for in one more way — an account whose only
+ * credential is a TOTP nobody can decrypt used to have no way to prove itself
+ * short of the rescue console; with a verified address it has the email code.
  */
 export async function hayFactorVerificable(id_usuario: number): Promise<boolean> {
-  const [passkeys, totp] = await Promise.all([
+  const [passkeys, totp, correo] = await Promise.all([
     CredencialWebauthnModel.count({ where: { id_usuario } }),
     FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } } }),
+    correoVerificado(id_usuario),
   ]);
-  return passkeys > 0 || (totp > 0 && totpEstaDisponible());
+  return passkeys > 0 || (totp > 0 && totpEstaDisponible()) || correo;
 }
 
 /**
@@ -182,8 +268,17 @@ export async function hayFactorVerificable(id_usuario: number): Promise<boolean>
  *
  * **The order is load-bearing.** The client renders the options in the order
  * they arrive, and a passkey is one gesture where a code is a device, an app
- * and a transcription. Recovery codes come last on purpose: they are the way
- * back in, not a method, and each one spent is one fewer.
+ * and a transcription. `correo` sits after `totp`: an app code is on the
+ * phone already, an email code has to be requested and waited for. Recovery
+ * codes come last on purpose: they are the way back in, not a method, and
+ * each one spent is one fewer.
+ *
+ * **`correo` since plan 4E**, on a par with the others by decision: the window
+ * offers "send me a code" whenever the address is verified, even beside a
+ * passkey or an app — a person whose phone is at home enters from the PC by
+ * email. Isaias declined the alternative (hide the email once a stronger
+ * factor exists) and the security notice that would have marked the weaker
+ * path; the bitácora line carries `fuente: "correo"`, and that is the record.
  *
  * 🔴 **And this is `factoresDe`'s first live caller.** Its own docblock, and
  * the note in `estadoInicialDeSesion` below, gave that function an expiry
@@ -192,8 +287,11 @@ export async function hayFactorVerificable(id_usuario: number): Promise<boolean>
  * docblock imagined — that screen still does not exist, and the count of
  * unspent codes it wanted is deliberately dropped here, because a refusal
  * naming how many codes are left tells a stolen cookie how much runway it has.
+ * (Which is also why this list is **not** sent to a `parcial` session on the
+ * login body: plan 4E's first draft did, and the audit named it what it was —
+ * the factor inventory handed to whoever holds only the password.)
  */
-export type MetodoReautenticacion = "passkey" | "totp" | "codigo";
+export type MetodoReautenticacion = "passkey" | "totp" | "correo" | "codigo";
 
 export async function metodosDeReautenticacion(
   id_usuario: number,
@@ -202,6 +300,7 @@ export async function metodosDeReautenticacion(
   const metodos: MetodoReautenticacion[] = [];
   if (inventario.passkeys > 0) metodos.push("passkey");
   if (inventario.totp > 0 && totpEstaDisponible()) metodos.push("totp");
+  if (inventario.correo > 0) metodos.push("correo");
   if (inventario.codigos > 0) metodos.push("codigo");
   return metodos;
 }
@@ -282,6 +381,19 @@ export async function metodosDeReautenticacion(
  * tell them apart from the state alone. A review found the guard it had
  * written on `estado` and `graceUntil` passing exactly that case.
  *
+ * **`conCredencial` is the narrower witness that guard actually needs, since
+ * plan 4E.** With a verified email counting as a factor, `conFactor` is `true`
+ * for every account that has verified its address — whether or not the
+ * passkey the ceremony just verified still exists. The guard is about the
+ * *credential*: it reads `conCredencial`, which comes from
+ * `tieneCredencialRegistrada` and ignores the address. Both are returned
+ * rather than one, because branch 1 fires on either and the answer has to
+ * say which: `conFactor` has no reader in `src/` today — the tests read it,
+ * as the branch's own statement of why it fired — and it stays because a
+ * caller that needs "did branch 1 fire" and is handed only `conCredencial`
+ * would reconstruct it wrong. The header of this file says why the two
+ * questions split.
+ *
  * **`fuenteEnElLogin` — what, if anything, already covered the second factor
  * during this login.** Two values are possible, and they are the two
  * credentials checked *during* a login rather than after it: `"dispositivo"`,
@@ -358,14 +470,19 @@ export async function metodosDeReautenticacion(
  * on day 15 would otherwise get a generic red toast with no button and no
  * instruction.
  *
- * **A verified email deliberately does not appear here.** The specification
- * says both that `onboarding` means "todo lo demás: 403" and, three paragraphs
- * later, that in `onboarding` "se puede trabajar"; those cannot both hold, and
- * the rule this plan settled on is that email verification closes step-up
- * operations rather than the state of the session. Requiring it here would put
- * the whole payroll — who today have neither an email nor a factor — in front
- * of a setup screen on deploy day, which is the outcome the specification
- * spends two paragraphs avoiding.
+ * **A verified email counts here since plan 4E, and the paragraph that used
+ * to say the opposite is worth keeping in view.** It argued that requiring the
+ * address as a *precondition* would put the whole payroll in front of a setup
+ * screen on deploy day. That is still true and still avoided: nobody is
+ * *required* to verify anything to get in. What changed is the other
+ * direction — an address, once verified, is enough to be asked for a second
+ * factor, because the code by email is one. So on deploy day the nine
+ * accounts, none of them verified, take branch 2 exactly as before; the day
+ * one of them verifies its address, `verifyEmail` promotes that session and
+ * clears the deadline, and its next login opens `parcial` and asks for a
+ * code. The way out of `parcial` for that account — `/mfa/email-code` and
+ * `/mfa/verify` with `metodo: "correo"` — ships in the same deploy as this
+ * paragraph, for the reason the constraint below gives.
  *
  * ---
  *
@@ -431,17 +548,29 @@ export async function estadoInicialDeSesion(
   usuario: { id: number; mfa_grace_until: Date | null | undefined },
   ahora: Date,
   fuenteEnElLogin?: FuenteEnElLogin,
-  /** Forwarded to `tieneAlgunFactor` — see its own comment for the pool. */
+  /** Forwarded to both reads — see `tieneCredencialRegistrada` for the pool. */
   opciones: { transaction?: Transaction } = {},
-): Promise<{ estado: EstadoSesion; graceUntil: Date | null; conFactor: boolean }> {
-  if (await tieneAlgunFactor(usuario.id, opciones)) {
+): Promise<{
+  estado: EstadoSesion;
+  graceUntil: Date | null;
+  conFactor: boolean;
+  conCredencial: boolean;
+}> {
+  // The two questions, asked side by side rather than through
+  // `tieneAlgunFactor`, because the caller needs both answers: `conFactor`
+  // decides the branch, `conCredencial` is what the passwordless guard reads.
+  const [conCredencial, correo] = await Promise.all([
+    tieneCredencialRegistrada(usuario.id, opciones),
+    correoVerificado(usuario.id, opciones),
+  ]);
+  if (conCredencial || correo) {
     // No deadline is stamped on them: they have nothing left to be given
     // fourteen days for, and a date in that column reads as "this account is
     // still being chased". True whichever of the two states below fires.
     if (fuenteEnElLogin) {
-      return { estado: "completa", graceUntil: null, conFactor: true };
+      return { estado: "completa", graceUntil: null, conFactor: true, conCredencial };
     }
-    return { estado: "parcial", graceUntil: null, conFactor: true };
+    return { estado: "parcial", graceUntil: null, conFactor: true, conCredencial };
   }
 
   // **`Number.isNaN` is the guard that matters here; the loose `== null` is
@@ -465,6 +594,7 @@ export async function estadoInicialDeSesion(
       estado: "completa",
       graceUntil: new Date(ahora.getTime() + MFA_GRACE_DAYS * DIA_MS),
       conFactor: false,
+      conCredencial: false,
     };
   }
 
@@ -474,5 +604,6 @@ export async function estadoInicialDeSesion(
     estado: limite <= ahora.getTime() ? "onboarding" : "completa",
     graceUntil: null,
     conFactor: false,
+    conCredencial: false,
   };
 }

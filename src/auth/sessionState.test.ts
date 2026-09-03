@@ -269,7 +269,7 @@ describe("the state actually in force, once a session has been open a while", ()
       const dispositivo = sesion({ mfa_source: "dispositivo" });
       expect(estadoEfectivo(dispositivo, VENCIDO, AHORA)).toBe("onboarding");
 
-      for (const fuente of ["passkey", "totp", "codigo"]) {
+      for (const fuente of ["passkey", "totp", "codigo", "correo"]) {
         expect(estadoEfectivo(sesion({ mfa_source: fuente }), VENCIDO, AHORA), fuente).toBe(
           "completa",
         );
@@ -354,6 +354,7 @@ describe("the state actually in force, once a session has been open a while", ()
       "/api/auth/me",
       "/api/auth/logout",
       "/api/auth/mfa/verify",
+      "/api/auth/mfa/email-code",
       "/api/auth/email/send",
       "/api/auth/totp/setup",
       "/api/auth/sessions",
@@ -400,7 +401,7 @@ describe("the state actually in force, once a session has been open a while", ()
  */
 describe("esPruebaDeFactor — which sources are evidence a factor was shown", () => {
   it("counts every source that names something somebody showed", () => {
-    for (const fuente of ["passkey", "totp", "codigo"]) {
+    for (const fuente of ["passkey", "totp", "codigo", "correo"]) {
       expect(esPruebaDeFactor(fuente), fuente).toBe(true);
     }
   });

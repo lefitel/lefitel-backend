@@ -1,31 +1,39 @@
-// The one function in this codebase that talks to Resend, and the reason
-// there is only one: no controller — not email verification, not password
-// reset — imports `resend` directly. If a second provider is ever needed
-// (Resend suspends the account, or the daily quota bites) only this file
-// changes. Not written today: the quota is 3,000/month against real traffic
-// of a few dozen, and the escape hatch for "email is down" is the rescue
-// account from spec §8, not a second SMTP client.
+// The one door every message in this codebase leaves by. No controller
+// imports a provider: they call `enviarCorreo`, and what is behind it —
+// since plan 4E a chain of five providers with relay (`mailRelay.ts`) — is
+// this module's business. When that chain changes, only these three files
+// change.
 //
-// The quota is also why this module refuses to send for real under a test
-// runner, unconditionally, before it even checks whether the caller
-// remembered to mock it. The company's whole daily budget is 100 sends, the
-// domain went live yesterday with no delivery history of its own, and a
-// bounce against a fresh domain teaches spam filters to distrust everything
-// it sends next — including a stranger's password-reset link an hour later.
-// A forgotten `vi.mock("./mailer.js", ...)` has to be harmless by
-// construction, not by whoever remembered to add it.
+// This module keeps exactly two decisions of its own, and both are refusals:
+//
+// **Under a test runner it refuses to send, unconditionally, before it even
+// checks whether the caller remembered to mock it.** The company's whole
+// daily quota sits behind this function, the domain is young, and a bounce
+// against a fresh domain teaches spam filters to distrust everything it
+// sends next — including a stranger's password-reset link an hour later. A
+// forgotten `vi.mock("./mailer.js", ...)` has to be harmless by construction,
+// not by whoever remembered to add it. The SMTP transport factory in
+// `mailProviders.ts` refuses a second time for the same reason.
+//
+// **Outside production, with no chain configured, it answers `{ ok: true }`
+// and sends nothing.** That is the development fallback the rest of the
+// flow is built against, and the relay says so in its log. **In production
+// the same situation answers `{ ok: false }`** and an `error` line: `index.ts`
+// refuses to boot on an empty chain, but the rescue console never runs that
+// check, and with the mail variables missing from *its* environment a first
+// draft answered `ok: true` — and `--set-email` recorded `enviado: true` in
+// the bitácora for a notice nobody received (audit of Task 7).
 
-import { Resend } from "resend";
+import { enviar, type MotivoDeRelevo, type ResultadoRelevo } from "./mailRelay.js";
+import { maskEmail } from "./maskEmail.js";
 import { log } from "../utils/logger.js";
-import { consumirPresupuestoDeCorreo } from "./mailBudget.js";
 
 const mailLog = log("mailer");
 
 /**
  * True while this process is a vitest run. Checked fresh on every call
  * rather than cached at module load — `mailer.test.ts` needs to flip these
- * two variables for one test at a time and restore them right after, to
- * exercise the Resend-calling branch below with `resend` mocked.
+ * two variables for one test at a time and restore them right after.
  *
  * Two independent signals, either one enough on its own: `NODE_ENV ===
  * "test"` still catches a future vitest that stops setting `VITEST`, and
@@ -40,18 +48,20 @@ function bajoTestRunner(): boolean {
   return process.env.VITEST === "true" || process.env.NODE_ENV === "test";
 }
 
-/** The one message this module knows how to send, and its only shape. */
 /**
  * Which flow a message belongs to — a **closed set, checked by the compiler**,
- * and the value that reaches the mail budget's log line.
+ * and the value that reaches each provider's budget line.
  *
  * It exists because the obvious thing to pass there is `asunto`, and `asunto`
- * is the wrong value twice over. Four of the seven subjects in this codebase
+ * is the wrong value twice over. Four of the eight subjects in this codebase
  * interpolate a username (`[Seguridad] Rescate ejecutado — reset-mfa: @jperez`),
  * so using them writes *who was rescued* into a log line that never named
  * anybody before. And a subject is unbounded text, which destroys the one
  * thing that field is for: adding up what each flow spent today. A union is
  * what makes both impossible rather than merely discouraged.
+ *
+ * Since plan 4E the flow also decides which share of a provider's budget a
+ * message may spend — see `FLUJOS_RESERVADOS` in `mailBudget.ts`.
  */
 export type FlujoDeCorreo =
   | "email/verificar"
@@ -60,7 +70,11 @@ export type FlujoDeCorreo =
   | "password/forgot"
   | "password/aviso-cambio"
   | "password/aviso-restablecida"
-  | "rescate/aviso";
+  | "rescate/aviso"
+  // Plan 4E: the six-digit login code. On the login path, so the relay's
+  // reserved share of each provider's budget is for this flow and the
+  // security notices — see `mailBudget.ts`.
+  | "mfa/codigo";
 
 export interface CorreoAEnviar {
   para: string;
@@ -75,114 +89,90 @@ export interface CorreoAEnviar {
    * Plain-text body, required in the type rather than optional. A message
    * with no `text` part reads as spam to clients that score on that, and is
    * unreadable in the ones that never render HTML at all — see Global
-   * Constraint #5. One was measured to arrive anyway on 2026-08-24, but that
-   * was the credit of a domain with a clean slate, not evidence that
-   * skipping it is fine — the slate will not stay clean for long. Making
-   * the field mandatory in the type is what stops a caller from finding
-   * that out by omission instead of by the compiler refusing to build.
+   * Constraint #5 of the original mail task. Making the field mandatory in
+   * the type is what stops a caller from finding that out by omission
+   * instead of by the compiler refusing to build.
    */
   texto: string;
 }
 
 /**
+ * What `enviarCorreo` answers. `ok` is the whole contract for six of its
+ * eight callers; the rest is for the bitácora and the log: which provider
+ * carried it, the provider's message id, and — when nothing went out — why.
+ */
+export interface ResultadoDeCorreo {
+  ok: boolean;
+  proveedor?: string;
+  id?: string | null;
+  motivo?: MotivoDeRelevo;
+}
+
+/**
  * Send one email, or say honestly that nothing was sent.
  *
- * Always resolves; never throws. The caller must not change its HTTP
- * response based on `ok` — doing so would enumerate who has an account
- * (Global Constraint #1) — so this is deliberately fire-and-forget from the
- * caller's point of view. The return value exists for logging and for this
- * module's own tests, not for a controller to branch a response on.
+ * Always resolves; never throws. **The caller must not change its HTTP
+ * response based on `ok`** — doing so would enumerate who has an account
+ * (Global Constraint #1) — so for the flows that are asked about an address
+ * this is deliberately fire-and-forget from the caller's point of view.
+ * **The one exception, by design (plan 4E): `POST /auth/mfa/email-code`.**
+ * There the caller is already authenticated and the address is its own, so
+ * nothing is enumerated by answering 503 when the code could not be sent —
+ * and answering 200 would send the person to type a code that never left.
  *
- * Four ways this can end, in order:
+ * `plazo_ms` bounds the whole walk of the chain. The flows with a person
+ * waiting on the screen pass `MAIL_PLAZO_INTERACTIVO_MS`; the detached ones
+ * take the default, `MAIL_PLAZO_DIFERIDO_MS`. Without a bound, nodemailer's
+ * own per-phase timeouts add up to minutes per provider.
+ *
+ * Three ways this can end, in order:
  *
  * 1. Under the test runner: refuses unconditionally, logs the recipient and
  *    subject with a line that says plainly that nothing was sent, and
- *    returns `{ ok: true }`. This is the branch that makes a forgotten mock
- *    harmless — see the module header above. Never touches the daily budget:
- *    every test in this codebase runs under this branch, and charging it
- *    here would let one test file's suite exhaust the same in-memory counter
- *    a later file inherits, failing sends for reasons that have nothing to
- *    do with what that file is testing.
- * 2. `RESEND_API_KEY` or `MAIL_FROM` missing: the development fallback the
- *    Task 3 brief asks for, so the rest of the flow can be built and run
- *    locally without spending quota. Reachable only outside production —
- *    `requiredEnv` in `config/security.ts` refuses to boot a production
- *    process missing either variable, so this branch and a production
- *    deployment are mutually exclusive by construction, not by trusting
- *    that nobody deploys without them. Does not touch the budget either, for
- *    the plain reason that a development environment has no real Resend
- *    quota to protect.
- * 3. The daily budget (`auth/mailBudget.ts`) has none left: this is the one
- *    call site in the whole codebase for `consumirPresupuestoDeCorreo` —
- *    once per message actually about to reach Resend, which is what makes a
- *    request that sends no mail cost nothing and a request that sends three
- *    messages cost three (see Decision 2 in
- *    `docs/plans/2026-09-01-defectos-previos-al-4b.md`). Logged with its own
- *    line, distinct from a Resend rejection below — a caller that only reads
- *    `{ ok: false }` (six of the seven that call this function do not even
- *    do that) cannot otherwise tell "the quota ran out" apart from "Resend
- *    turned it down", and the two call for different reactions from whoever
- *    reads the log.
- * 4. Budget available, keys present, not under test: actually calls Resend.
- *    A 4xx/5xx from Resend is logged and answered with `{ ok: false }`; a
- *    promise that rejects before Resend ever answers (a network failure,
- *    say) is caught and answered the same way. Either way this function
- *    does not throw.
+ *    returns `{ ok: true }`. Never touches any budget: every test in this
+ *    codebase runs under this branch, and charging it here would let one
+ *    test file's suite exhaust an in-memory counter a later file inherits.
+ * 2. No chain configured (development, no `MAIL_PROVIDERS`, or nothing usable
+ *    behind it): the relay logs and answers `{ ok: true, motivo:
+ *    "desarrollo" }`, so the rest of the flow can be built and run locally
+ *    without spending anybody's quota. In production the same answer is
+ *    `{ ok: false, motivo: "desarrollo" }` — see the header.
+ * 3. A configured chain: `mailRelay.enviar` walks it. Each provider's budget
+ *    is charged once per message it actually carried (or may have carried),
+ *    never per request — see the relay for what each class of failure does.
  */
-export async function enviarCorreo(correo: CorreoAEnviar): Promise<{ ok: boolean }> {
+export async function enviarCorreo(
+  correo: CorreoAEnviar,
+  opciones: { plazo_ms?: number } = {},
+): Promise<ResultadoDeCorreo> {
+  const para = maskEmail(correo.para);
   if (bajoTestRunner()) {
-    mailLog.warn(
-      { para: correo.para, asunto: correo.asunto },
-      "correo NO enviado: el proceso corre bajo el test runner",
-    );
+    mailLog.warn({ para, asunto: correo.asunto }, "correo NO enviado: el proceso corre bajo el test runner");
     return { ok: true };
   }
 
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.MAIL_FROM;
-  if (!apiKey || !from) {
-    mailLog.warn(
-      { para: correo.para, asunto: correo.asunto },
-      "correo NO enviado: faltan RESEND_API_KEY o MAIL_FROM (modo desarrollo)",
-    );
-    return { ok: true };
-  }
-
-  // The one place this module ever spends the daily budget — see
-  // `auth/mailBudget.ts` and the docstring above. `correo.asunto` doubles as
-  // the log's `motivo`: it already names which flow this message belongs to
-  // (verification, reset, a security notice), so there is no separate label
-  // to keep in sync with the templates that set it.
-  if (!consumirPresupuestoDeCorreo(correo.flujo)) {
-    mailLog.error(
-      { para: correo.para, asunto: correo.asunto },
-      "correo NO enviado: se agotó el presupuesto diario de correo (esto no es un fallo de Resend)",
-    );
-    return { ok: false };
-  }
-
+  let r: ResultadoRelevo;
   try {
-    const { data, error } = await new Resend(apiKey).emails.send({
-      from,
-      to: correo.para,
-      subject: correo.asunto,
-      html: correo.html,
-      text: correo.texto,
-    });
-
-    if (error) {
-      // `error` is Resend's own `{ message, statusCode, name }` — never the
-      // body, which is where a verification or reset token lives. Logging
-      // it is exactly what Global Constraint #2 permits: metadata about the
-      // failed attempt, not the credential.
-      mailLog.error({ para: correo.para, asunto: correo.asunto, error }, "Resend rechazó el envío");
-      return { ok: false };
-    }
-
-    mailLog.info({ para: correo.para, asunto: correo.asunto, id: data.id }, "correo enviado");
-    return { ok: true };
+    r = await enviar(correo, opciones);
   } catch (err) {
-    mailLog.error({ para: correo.para, asunto: correo.asunto, err }, "fallo inesperado enviando correo");
-    return { ok: false };
+    // The relay catches every provider's failure; a throw here is a bug in
+    // it. The contract is "always resolves", and the rescue console writes
+    // to the bitácora on the strength of it.
+    mailLog.error({ para, asunto: correo.asunto, err }, "correo NO enviado: el relevo lanzó una excepción");
+    return { ok: false, motivo: "error" };
   }
+  if (r.ok) return { ok: true, proveedor: r.proveedor, id: r.id };
+  if (r.motivo === "desarrollo") {
+    if (process.env.NODE_ENV === "production") {
+      mailLog.error(
+        { para, asunto: correo.asunto },
+        "correo NO enviado: la cadena de proveedores está vacía en producción. Revisa MAIL_PROVIDERS y las variables de cada proveedor en el entorno de ESTE proceso",
+      );
+      return { ok: false, motivo: "desarrollo" };
+    }
+    mailLog.warn({ para, asunto: correo.asunto }, "correo NO enviado: sin proveedores configurados (modo desarrollo)");
+    return { ok: true, motivo: "desarrollo" };
+  }
+  mailLog.error({ para, asunto: correo.asunto, motivo: r.motivo, proveedor: r.proveedor }, "correo NO enviado");
+  return { ok: false, motivo: r.motivo, proveedor: r.proveedor };
 }

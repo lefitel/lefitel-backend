@@ -135,10 +135,13 @@ export type ResultadoLogin = LoginTerminado | LoginNoTerminado;
  * chase the account had already finished. The row lock the caller holds makes
  * this branch unreachable in practice; this guard is what makes it *closed*
  * rather than merely unlikely, and what keeps the property from resting on a
- * caller remembering the transaction. **It reads `conFactor`, not the state**:
- * a first version compared `estado` and `graceUntil`, and a review found the
- * no-factor branch with a deadline still ahead answering exactly what the
- * factor branch answers.
+ * caller remembering the transaction. **It reads `conCredencial`, not the
+ * state and not `conFactor`**: a first version compared `estado` and
+ * `graceUntil`, and a review found the no-factor branch with a deadline still
+ * ahead answering exactly what the factor branch answers; a second version
+ * read `conFactor`, and plan 4E's audit found it `true` for every account
+ * with a verified address — key deleted or not — because the address is a
+ * factor now. Only the credential count says whether the key is still there.
  *
  * **Everything here runs on the caller's `transaction` when there is one** —
  * the counts, the rotation, the insert — because a query issued around an
@@ -197,17 +200,24 @@ export async function terminarLogin(
 ): Promise<ResultadoLogin> {
   const { usuario } = cuenta;
   const ahora = new Date();
-  const { estado, graceUntil, conFactor } = await estadoInicialDeSesion(
+  const { estado, graceUntil, conCredencial } = await estadoInicialDeSesion(
     { id: usuario.id, mfa_grace_until: cuenta.mfa_grace_until },
     ahora,
     fuente,
     opciones,
   );
 
-  if (fuente === "passkey" && !conFactor) {
+  // 🔴 `conCredencial`, not `conFactor`, since plan 4E. A verified email is a
+  // factor, so `conFactor` is `true` for every account that verified its
+  // address — including one whose passkey was deleted under this ceremony.
+  // The question this guard asks is whether the *credential* the caller just
+  // verified still exists, and only the credential count answers it. An audit
+  // of that plan's first draft found the guard silently disabled for every
+  // verified account; this is the line that keeps it closed.
+  if (fuente === "passkey" && !conCredencial) {
     loginLog.warn(
       { id_usuario: usuario.id, estado },
-      "la credencial que acaba de verificar ya no cuenta como factor: se rechaza el login",
+      "la credencial que acaba de verificar ya no existe: se rechaza el login",
     );
     return { ok: false, motivo: "factor-desaparecido" };
   }

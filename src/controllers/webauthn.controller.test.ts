@@ -72,9 +72,12 @@ vi.mock("../models/credencialWebauthn.model.js", () => ({
   },
 }));
 
+// Plan 4E: two questions, mocked separately — see `totp.controller.test.ts`.
 const tieneAlgunFactor = vi.fn();
+const tieneCredencialRegistrada = vi.fn();
 vi.mock("../auth/factorInventory.js", () => ({
   tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
+  tieneCredencialRegistrada: (...a: unknown[]) => tieneCredencialRegistrada(...a),
 }));
 const revokeAllSessionsOf = vi.fn();
 vi.mock("../auth/sessionStore.js", () => ({
@@ -191,6 +194,7 @@ beforeEach(() => {
   // Por defecto queda otra llave: revocar las sesiones de todo el mundo es lo
   // excepcional, y un test que lo quiera tiene que pedirlo.
   tieneAlgunFactor.mockResolvedValue(true);
+  tieneCredencialRegistrada.mockResolvedValue(true);
   revokeAllSessionsOf.mockResolvedValue(3);
   revokeAllRememberedDevicesOf.mockResolvedValue(2);
   // The library calls `expectedChallenge` itself; the fake has to do the same
@@ -1069,6 +1073,7 @@ describe("deleteCredential", () => {
   // revoke anything — and "make these three writes atomic" is exactly the
   // refactor somebody will propose. With an unobservable fake it lands green.
   it("runs outside any transaction, on purpose", async () => {
+    tieneCredencialRegistrada.mockResolvedValue(false);
     tieneAlgunFactor.mockResolvedValue(false);
     await deleteCredential(peticionBorrado() as never, respuestaFalsa() as never);
 
@@ -1081,6 +1086,7 @@ describe("deleteCredential", () => {
   // factor behind it, for up to `SESSION_ABSOLUTE_DAYS`. A remembered device
   // is the same key by another name.
   it("revokes every session and every remembered device when the last factor goes", async () => {
+    tieneCredencialRegistrada.mockResolvedValue(false);
     tieneAlgunFactor.mockResolvedValue(false);
     const res = respuestaFalsa();
     await deleteCredential(peticionBorrado() as never, res as never);
@@ -1105,10 +1111,11 @@ describe("deleteCredential", () => {
       orden.push("destroy");
       return 1;
     });
-    tieneAlgunFactor.mockImplementation(async () => {
+    tieneCredencialRegistrada.mockImplementation(async () => {
       orden.push("count");
       return false;
     });
+    tieneAlgunFactor.mockResolvedValue(false);
     await deleteCredential(peticionBorrado() as never, respuestaFalsa() as never);
 
     expect(orden).toEqual(["destroy", "count"]);
@@ -1148,7 +1155,7 @@ describe("deleteCredential", () => {
       await Promise.resolve();
       orden.push(l.action);
     });
-    tieneAlgunFactor.mockImplementation(async () => {
+    tieneCredencialRegistrada.mockImplementation(async () => {
       orden.push("count");
       return true;
     });
@@ -1158,6 +1165,7 @@ describe("deleteCredential", () => {
   });
 
   it("files the loss of the last factor as its own critical line, with what was revoked", async () => {
+    tieneCredencialRegistrada.mockResolvedValue(false);
     tieneAlgunFactor.mockResolvedValue(false);
     await deleteCredential(peticionBorrado() as never, respuestaFalsa() as never);
 
@@ -1179,7 +1187,7 @@ describe("deleteCredential", () => {
   // it. Failing closed costs a re-login for somebody who still had a key;
   // failing open is permanent.
   it("revokes anyway when it cannot tell whether a factor is left, and says why", async () => {
-    tieneAlgunFactor.mockRejectedValue(new Error("la base de datos dijo que no"));
+    tieneCredencialRegistrada.mockRejectedValue(new Error("la base de datos dijo que no"));
     const res = respuestaFalsa();
     await deleteCredential(peticionBorrado() as never, res as never);
 
@@ -1201,19 +1209,20 @@ describe("deleteCredential", () => {
   // retry turns the blip into the right answer; the closed failure above is
   // the net, not the road.
   it("tries the count once more before treating it as unanswerable", async () => {
-    tieneAlgunFactor
+    tieneCredencialRegistrada
       .mockRejectedValueOnce(new Error("un parpadeo"))
       .mockResolvedValueOnce(true);
     const res = respuestaFalsa();
     await deleteCredential(peticionBorrado() as never, res as never);
 
-    expect(tieneAlgunFactor).toHaveBeenCalledTimes(2);
+    expect(tieneCredencialRegistrada).toHaveBeenCalledTimes(2);
     expect(res.statusCode).toBe(200);
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
     expect((res.body as { message: string }).message).toBe("Llave eliminada.");
   });
 
   it("tells the person to log back in when it really was the last one", async () => {
+    tieneCredencialRegistrada.mockResolvedValue(false);
     tieneAlgunFactor.mockResolvedValue(false);
     const res = respuestaFalsa();
     await deleteCredential(peticionBorrado() as never, res as never);
@@ -1225,6 +1234,7 @@ describe("deleteCredential", () => {
   // sessions are not, and the retry is a 404: the answer has to say what to
   // do instead, and `logout-all` is reachable from every state this route is.
   it("answers a failed revocation as a failure that says what to do, and files it critical", async () => {
+    tieneCredencialRegistrada.mockResolvedValue(false);
     tieneAlgunFactor.mockResolvedValue(false);
     revokeAllSessionsOf.mockRejectedValue(new Error("la base de datos dijo que no"));
     const res = respuestaFalsa();
@@ -1255,6 +1265,7 @@ describe("deleteCredential", () => {
     await deleteCredential(peticionBorrado() as never, respuestaFalsa() as never);
 
     expect(logAction).not.toHaveBeenCalled();
+    expect(tieneCredencialRegistrada).not.toHaveBeenCalled();
     expect(tieneAlgunFactor).not.toHaveBeenCalled();
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
   });
@@ -1283,5 +1294,70 @@ describe("registerVerify — the recovery-codes line", () => {
         metadata: expect.objectContaining({ cantidad: 2 }),
       }),
     );
+  });
+});
+
+// Plan 4E: the last key goes, the verified address stays. The account still
+// has a factor, so nothing is logged out; the remembered devices go anyway.
+describe("deleteCredential — the last key goes but the verified email stays (plan 4E)", () => {
+  const peticionBorrado = (id = "7") => ({ user: CALLER, body: {}, params: { id }, ip: "10.0.0.1" });
+  const ultimaLlaveConCorreo = () => {
+    tieneCredencialRegistrada.mockResolvedValue(false);
+    tieneAlgunFactor.mockResolvedValue(true);
+  };
+  const lineaDe = (accion: string) =>
+    logAction.mock.calls
+      .map((c) => c[0] as { action: string; severity?: string; metadata?: Record<string, unknown> })
+      .find((l) => l.action === accion);
+
+  it("keeps the session open and says the next login asks for a code by email", async () => {
+    ultimaLlaveConCorreo();
+    const res = respuestaFalsa();
+    await deleteCredential(peticionBorrado() as never, res as never);
+    expect(res.statusCode).toBe(200);
+    expect((res.body as { message: string }).message).toContain("código enviado a tu correo");
+    expect((res.body as { sesion_cerrada: boolean }).sesion_cerrada).toBe(false);
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+    expect(clearSessionCookie).not.toHaveBeenCalled();
+  });
+
+  it("revokes the remembered devices all the same", async () => {
+    ultimaLlaveConCorreo();
+    await deleteCredential(peticionBorrado() as never, respuestaFalsa() as never);
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(42);
+  });
+
+  it("files LAST_CREDENTIAL_REMOVED as a warning, never LAST_FACTOR_REMOVED", async () => {
+    ultimaLlaveConCorreo();
+    await deleteCredential(peticionBorrado() as never, respuestaFalsa() as never);
+    expect(lineaDe("LAST_CREDENTIAL_REMOVED")).toMatchObject({
+      severity: "warning",
+      metadata: expect.objectContaining({ factor: "passkey", id_credencial: 7, queda_correo: true, dispositivos_revocados: 2 }),
+    });
+    expect(lineaDe("LAST_FACTOR_REMOVED")).toBeUndefined();
+  });
+
+  it("asks the factor question only after the credential question said no", async () => {
+    tieneCredencialRegistrada.mockResolvedValue(true);
+    await deleteCredential(peticionBorrado() as never, respuestaFalsa() as never);
+    expect(tieneAlgunFactor).not.toHaveBeenCalled();
+  });
+
+  it("answers a failed device revocation as a failure about the devices — not the sessions, which were never at risk", async () => {
+    ultimaLlaveConCorreo();
+    revokeAllRememberedDevicesOf.mockRejectedValue(new Error("la base de datos dijo que no"));
+    const res = respuestaFalsa();
+    await deleteCredential(peticionBorrado() as never, res as never);
+    expect(res.statusCode).toBe(500);
+    expect((res.body as { code: string }).code).toBe("REVOCACION_FALLIDA");
+    expect((res.body as { message: string }).message).toContain("equipos recordados");
+    expect((res.body as { message: string }).message).not.toContain("cerrar tus sesiones");
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+    expect(lineaDe("LAST_CREDENTIAL_REVOCATION_FAILED")).toMatchObject({
+      severity: "warning",
+      metadata: expect.objectContaining({ queda_correo: true, dispositivos_revocados: null }),
+    });
+    expect(lineaDe("LAST_FACTOR_REVOCATION_FAILED")).toBeUndefined();
+    expect(lineaDe("LAST_CREDENTIAL_REMOVED")).toBeUndefined();
   });
 });

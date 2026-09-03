@@ -337,6 +337,15 @@ const GATE_NOT_APPLICABLE = [
   "POST /api/auth/password/forgot",
   "POST /api/auth/password/reset",
 
+  // ── El código por correo (plan 4E) ──────────────────────────────────────
+  // Envía un código a la dirección verificada de la propia cuenta de quien
+  // llama, y a ninguna otra: la dirección sale de `req.user.id`, nunca del
+  // cuerpo. Sin permiso que pedir por el mismo argumento que `/mfa/verify`
+  // — es la puerta, no lo que hay detrás — y sin `requireStepUp` por
+  // construcción: es un medio para satisfacerlo. Sus topes viven en la base,
+  // por cuenta (`auth/emailCodeStore.ts`), no en un cubo.
+  "POST /api/auth/mfa/email-code",
+
   // ── El segundo factor (plan 4B) ─────────────────────────────────────────
   // Los cinco que escriben, y el argumento es el mismo de los endpoints de
   // sesión de arriba: cada uno actúa sobre la propia cuenta de quien llama y

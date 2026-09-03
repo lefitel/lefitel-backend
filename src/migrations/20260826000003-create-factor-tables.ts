@@ -8,10 +8,11 @@ import { QueryInterface, DataTypes, QueryTypes } from "sequelize";
 // tasks later, inside this same plan. Whoever deploys reads this comment and
 // not `factorInventory.ts`, so the correction belongs here:
 //
-// `tieneAlgunFactor` (`auth/factorInventory.ts`) runs one COUNT against
-// `credencial_webauthn` and another against `factor_totp`.
-// `estadoInicialDeSesion` calls it to decide which state a session opens in,
-// and `POST /api/auth/login` calls that on every login.
+// `tieneCredencialRegistrada` (`auth/factorInventory.ts`; until plan 4E it
+// was `tieneAlgunFactor`) runs one COUNT against `credencial_webauthn` and
+// another against `factor_totp`. `estadoInicialDeSesion` calls it to decide
+// which state a session opens in, and `POST /api/auth/login` calls that on
+// every login.
 //
 // **So undoing this migration on its own takes the whole ERP down.** `umzug
 // down` with no arguments reverts exactly one migration, and this is the later

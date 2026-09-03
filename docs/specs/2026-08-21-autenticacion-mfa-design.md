@@ -168,6 +168,11 @@ acepta a cambio de la reducción de superficie. Si algún día la web se mueve d
 
 ## 3. Esquema
 
+> **Plan 4E (2026-09-03).** El correo verificado es un segundo factor por sí mismo, y el correo
+> sale por cinco proveedores con relevo. Lo que este apartado dice sobre las tablas de factor se lee junto
+> con [`2026-09-03-correo-como-factor-y-relevo-de-correo-design.md`](2026-09-03-correo-como-factor-y-relevo-de-correo-design.md)
+> §5 (la tabla `codigo_correo`, y `sesiones_mfa_source_chk` admite `'correo'`).
+
 **Ocho migraciones** con Umzug. Reglas que aplican a todas, porque el directorio
 [`src/migrations/`](../../src/migrations/) contiene hoy dos patrones que se
 contradicen:
@@ -625,6 +630,11 @@ códigos, romperlo se lleva las dos cosas.
 Aviso por correo cuando queden menos de tres sin usar.
 
 ## 5. Endpoints
+
+> **Plan 4E (2026-09-03).** El correo verificado es un segundo factor por sí mismo, y el correo
+> sale por cinco proveedores con relevo. Lo que este apartado dice sobre las rutas del segundo factor se lee junto
+> con [`2026-09-03-correo-como-factor-y-relevo-de-correo-design.md`](2026-09-03-correo-como-factor-y-relevo-de-correo-design.md)
+> §3.4–3.5 y §7 (`POST /api/auth/mfa/email-code`; `metodo` en `verify` y `stepup`).
 
 Todo cuelga de `/api/auth`. Las rutas `POST /api/login` y `GET /api/login`
 **se mantienen como alias una versión más**, para que el orden de despliegue
@@ -1122,6 +1132,11 @@ No basta con añadir; estos fallan el día del despliegue:
   `token: "t0"` y comprueba que no refetchea al renovar el token.
 
 ## 11. Despliegue y vuelta atrás
+
+> **Plan 4E (2026-09-03).** El correo verificado es un segundo factor por sí mismo, y el correo
+> sale por cinco proveedores con relevo. Lo que este apartado dice sobre el despliegue se lee junto
+> con [`2026-09-03-correo-como-factor-y-relevo-de-correo-design.md`](2026-09-03-correo-como-factor-y-relevo-de-correo-design.md)
+> §9 (el runbook: las cuatro cuentas nuevas, sus DNS, las variables `MAIL_*`).
 
 **El rollback real no es `down`, es el dump.** Todas las migraciones tienen
 `down`, pero `runMigrations()` solo llama a `up()` y **no hay ningún

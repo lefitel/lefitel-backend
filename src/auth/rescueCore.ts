@@ -388,6 +388,13 @@ async function ejecutarRescate<T>(input: {
    *  by every call site below, none of which interpolates anything long. */
   detalle: string;
   mutar: (transaction: Transaction) => Promise<T>;
+  /**
+   * What of the outcome belongs in the bitácora row's metadata — the facts
+   * `detalle` cannot know before the mutation ran. Optional: most rescues
+   * have nothing to add. `restablecerSegundoFactor` passes whether the
+   * account came out of it with a factor (its verified address) or without.
+   */
+  metadatosDe?: (datos: T) => Record<string, unknown>;
 }): Promise<ResultadoRescate<T>> {
   const resolucion = await cuentaActivaOrNull(input.id_usuario);
   // `resolucion.ok === true` first, not `if (!resolucion.ok)`: with
@@ -417,6 +424,7 @@ async function ejecutarRescate<T>(input: {
         ip: input.actor.ip,
         resultado: "ok",
         avisoEnviado: enviado,
+        ...(input.metadatosDe ? { extra: input.metadatosDe(datos) } : {}),
       });
       return { ok: true, cuenta, avisoEnviado: enviado, datos };
     } catch (err) {
@@ -445,6 +453,15 @@ export interface DatosResetMfa {
   factoresBorrados: { passkeys: number; totp: number; codigos: number };
   sesionesRevocadas: number;
   dispositivosRevocados: number;
+  /**
+   * Whether the account keeps a verified address — which, since plan 4E, is
+   * a second factor the reset deliberately does **not** remove. A caller
+   * telling a human "ya puede entrar solo con su contraseña" has to check
+   * this first: for a verified account the next login asks for a code by
+   * email, and if the *mailbox* is what was lost, the remedy is
+   * `establecerEmailDeRescate` / `limpiarEmailDeRescate`, not this reset.
+   */
+  correoVerificado: boolean;
   /**
    * `null` when the account's grace clock had never started —
    * `proximaGraciaDeRescate` said so, and `usuarios.mfa_grace_until` was
@@ -507,9 +524,13 @@ export async function restablecerSegundoFactor(
     actor,
     accion: "RESCUE_MFA_RESET",
     detalle:
-      "Se borraron todos sus factores de segundo paso, se revocaron sus sesiones y dispositivos " +
-      "recordados, se levantó cualquier bloqueo por intentos fallidos y se concedió una gracia de " +
-      `${RESCUE_GRACE_HOURS} horas (nunca menor que la que ya tuviera).`,
+      "Se borraron sus llaves, su aplicación y sus códigos de recuperación, se revocaron sus sesiones y " +
+      "dispositivos recordados, se levantó cualquier bloqueo por intentos fallidos y se concedió una gracia " +
+      `de ${RESCUE_GRACE_HOURS} horas (nunca menor que la que ya tuviera). Su correo verificado, si lo ` +
+      "tiene, no se toca: sigue siendo su segundo factor.",
+    // The one fact the row is most often read for: did the account come out of
+    // this with a factor (its verified address) or with nothing.
+    metadatosDe: (datos) => ({ correo_es_factor: datos.correoVerificado }),
     mutar: async (transaction) => {
       const [passkeys, totp, codigos] = await Promise.all([
         CredencialWebauthnModel.destroy({ where: { id_usuario }, transaction }),
@@ -520,11 +541,18 @@ export async function restablecerSegundoFactor(
       const sesionesRevocadas = await revokeAllSessionsOf(id_usuario, { transaction });
       const dispositivosRevocados = await revokeAllRememberedDevicesOf(id_usuario, { transaction });
 
+      // `email_verified_at` read alongside the deadline: plan 4E made the
+      // verified address a factor, and this reset leaves it in place — the
+      // address is the account's recovery channel, not a lost device. The
+      // caller has to report that honestly (see `DatosResetMfa`), and for a
+      // verified account the grace computed below is moot: its next login
+      // opens `parcial` and asks for a code by email, deadline or no deadline.
       const filaActual = await UsuarioModel.findOne({
         where: { id: id_usuario },
-        attributes: ["mfa_grace_until"],
+        attributes: ["mfa_grace_until", "email_verified_at"],
         transaction,
       });
+      const correoVerificado = filaActual?.dataValues.email_verified_at != null;
       const graceUntil = proximaGraciaDeRescate(filaActual?.dataValues.mfa_grace_until ?? null, new Date());
 
       // `graceUntil === null` means "leave the column alone", not "write
@@ -543,6 +571,7 @@ export async function restablecerSegundoFactor(
         sesionesRevocadas,
         dispositivosRevocados,
         graceUntil,
+        correoVerificado,
       };
     },
   });
@@ -669,6 +698,21 @@ function esConflictoDeEmailUnico(error: unknown): boolean {
  * alone two. That refusal belongs to the console script (the next plan) and
  * has to be enforced there, in front of both calls, not delegated here on
  * the hope that the two calls happen to run one after the other.
+ *
+ * **Plan 4E made this one flag a complete takeover on its own, and that is
+ * accepted with its eyes open (design §1.2.2).** A verified address is now a
+ * second factor, so the chain above no longer stops at the victim's TOTP or
+ * passkey: `--set-email` → `/password/forgot` → reset → login `parcial` → a
+ * code to the attacker's mailbox → `completa`. Two invocations used to be
+ * needed; now one. What has not changed is where the control actually sits:
+ * whoever runs this has the container, and the container has the database,
+ * so the barrier was never the flag pair — it was the trace. `avisarRescate`
+ * still fires **before** the write and `RESCUE_EMAIL_SET` still lands in the
+ * bitácora, and the console now says out loud that the address it just set
+ * is a login factor. Isaias chose that over the alternatives (leaving the
+ * address unverified, which would break `/password/forgot` for the very
+ * person being rescued; or a 24-hour quarantine on `'correo'` after a
+ * rescue), 2026-09-03.
  *
  * **H8: the address may already belong, verified, to somebody else.** The
  * partial unique index `usuarios_email_verificado_uniq` catches that at

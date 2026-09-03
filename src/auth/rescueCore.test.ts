@@ -562,3 +562,41 @@ describe("desarchivarCuentaDeRescate — A1: the one door Task 1 leaves open", (
     );
   });
 });
+
+// Plan 4E: the reset deletes credentials and leaves the verified address,
+// which is a factor on its own — so the caller has to be told whether one is
+// there, or it will tell the person "ya puede entrar solo con su contraseña"
+// to somebody whose next login asks for a code by email.
+describe("restablecerSegundoFactor — reports whether the verified email remains (plan 4E)", () => {
+  it("says the address is a factor when it is verified, reading it beside the deadline", async () => {
+    findOne
+      .mockResolvedValueOnce(filaActiva())
+      .mockResolvedValueOnce({ dataValues: { mfa_grace_until: null, email_verified_at: new Date("2026-09-01T00:00:00Z") } });
+    const resultado = await restablecerSegundoFactor(OBJETIVO, ACTOR_CONSOLA);
+    expect(resultado.ok).toBe(true);
+    if (resultado.ok) expect(resultado.datos.correoVerificado).toBe(true);
+    const lectura = findOne.mock.calls[1][0] as { attributes?: string[] };
+    expect(lectura.attributes).toContain("email_verified_at");
+  });
+
+  it("says it is not when the address is unverified or absent", async () => {
+    findOne
+      .mockResolvedValueOnce(filaActiva())
+      .mockResolvedValueOnce({ dataValues: { mfa_grace_until: null, email_verified_at: null } });
+    const resultado = await restablecerSegundoFactor(OBJETIVO, ACTOR_CONSOLA);
+    expect(resultado.ok).toBe(true);
+    if (resultado.ok) expect(resultado.datos.correoVerificado).toBe(false);
+  });
+
+  it("does not touch the address: the reset is about devices, and the mailbox is the recovery channel", async () => {
+    findOne
+      .mockResolvedValueOnce(filaActiva())
+      .mockResolvedValueOnce({ dataValues: { mfa_grace_until: null, email_verified_at: new Date() } });
+    await restablecerSegundoFactor(OBJETIVO, ACTOR_CONSOLA);
+    const escrituras = update.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    for (const e of escrituras) {
+      expect(e).not.toHaveProperty("email");
+      expect(e).not.toHaveProperty("email_verified_at");
+    }
+  });
+});

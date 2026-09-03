@@ -119,6 +119,28 @@ describe("requireStepUp", () => {
     );
   });
 
+  // Plan 4E: a verified email is a factor. The account that has verified its
+  // address and registered nothing else used to take the "nothing to prove"
+  // skip below; now it is refused like any other account with a factor, and
+  // the refusal names the one method it has. On an `exigeContrasena` route
+  // that means the email code *and* the password — the double ceremony the
+  // design's §1.2.1 spells out.
+  it("refuses an account whose only factor is its verified email, naming the email as the method", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    metodosDeReautenticacion.mockResolvedValue(["correo"]);
+    const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null });
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        motivo: MOTIVO_SIN_FACTOR_RECIENTE,
+        metodos: ["correo"],
+        exigeContrasena: true,
+      }),
+    );
+  });
+
   it("refuses a mark in the future, instead of treating it as freshly proved", async () => {
     // The window had no lower bound: it measured "no more than ten minutes
     // old" and nothing else, so a stamp *ahead* of now satisfied it for as

@@ -366,6 +366,32 @@ export interface ICodigoRecuperacion {
   created_at: Date;
 }
 
+/**
+ * One login code sent by email, backed by the `codigo_correo` table.
+ *
+ * Six digits, bcrypt-hashed, ten minutes, one pending per account. The row is
+ * the whole state of the code: `intentos` is charged **before** the compare by
+ * the statement that reads `codigo_hash`, and at the cap that same statement
+ * sets `used_at` — see `auth/emailCodeStore.ts`.
+ */
+export interface ICodigoCorreo {
+  id: number;
+  id_usuario: number;
+  /**
+   * Where the code went. Compared with `usuarios.email` when spent, so a code
+   * minted for an address the account has since left is worth nothing — the
+   * rule `ITokenUsoUnico.email_destino` carries for the verification link.
+   */
+  email_destino: string;
+  /** bcrypt: six digits under a fast hash are an offline break in milliseconds. */
+  codigo_hash: string;
+  /** Wrong guesses so far; `EMAIL_CODE_MAX_ATTEMPTS` burns the code. */
+  intentos: number;
+  expires_at: Date;
+  used_at: Date | null;
+  created_at: Date;
+}
+
 /** One browser that has already proved a factor, backed by the `dispositivo_recordado` table. */
 export interface IDispositivoRecordado {
   id: string;

@@ -6,8 +6,9 @@
 // registers it.** `factorInventory.ts` already wrote that down for the 4B
 // plan, and with passkeys it is worse than it was with TOTP, because the
 // escape hatch is behind the same door. One row in `credencial_webauthn` makes
-// `tieneAlgunFactor` answer true, which makes every later login open
-// `parcial`, and `parcial` is left only by proving a factor. Ship registration
+// `tieneCredencialRegistrada` (and with it `tieneAlgunFactor`) answer true,
+// which makes every later login open `parcial`, and `parcial` is left only by
+// proving a factor. Ship registration
 // without verification and the first person to try it — which is whoever is
 // testing — cannot get back in at all, and the ten recovery codes that would
 // have rescued them are themselves behind a gate that asks for the factor they
@@ -31,7 +32,7 @@ import {
   marcarCredencialUsada,
 } from "../auth/passkeyStore.js";
 import { promoverSesion, sellarPruebaDeFactor, apagarLaMecha } from "../auth/sessionPromotion.js";
-import { tieneAlgunFactor } from "../auth/factorInventory.js";
+import { tieneAlgunFactor, tieneCredencialRegistrada } from "../auth/factorInventory.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { clearSessionCookie } from "../auth/sessionCookie.js";
@@ -706,6 +707,16 @@ const MENSAJE_LLAVE_NO_ENCONTRADA = "Esa llave no existe.";
 const MENSAJE_LLAVE_ELIMINADA = "Llave eliminada.";
 const MENSAJE_ULTIMA_LLAVE_ELIMINADA =
   "Llave eliminada. Era tu último factor: se han cerrado todas tus sesiones y entrarás sólo con tu contraseña. Vuelve a iniciar sesión.";
+// Plan 4E's case: the last *credential* went, but the verified address is a
+// factor on its own, so nothing is logged out. The remembered devices are
+// revoked all the same — they were trusted on the strength of the key.
+const MENSAJE_ULTIMA_LLAVE_QUEDA_CORREO =
+  "Llave eliminada. Era tu última llave o aplicación: a partir de ahora entrarás con un código enviado a tu correo. Hemos olvidado los equipos recordados; tus sesiones siguen abiertas.";
+// The failure twin of the sentence above, plan 4E: only the remembered
+// devices were at stake, so the person is not told their sessions are open
+// with nothing behind them. `logout-all` from the profile revokes both.
+const MENSAJE_EQUIPOS_NO_OLVIDADOS =
+  "Llave eliminada, pero no pudimos olvidar tus equipos recordados. Cierra sesión en todos tus dispositivos desde tu perfil para que ninguno siga entrando sin pedirte el código.";
 // The third outcome, and it may not borrow the sentence above: telling
 // somebody with two keys left that they just deleted their *last* factor
 // leaves them concluding the ERP ate the other two.
@@ -782,9 +793,10 @@ export const listCredentials = handler("listCredentials", async (req: Request, r
  * around either — which is the opposite of the instinct and is what makes it
  * correct.** With N passkeys the question is not "did I have a factor" but "is
  * there one left", so it can only be asked afterwards. And it must be asked of
- * *committed* state: `tieneAlgunFactor` is called here without a transaction,
- * on purpose — wrapping the delete in one and passing it along would have it
- * count the row this request is in the middle of removing, find it, and never
+ * *committed* state: `tieneCredencialRegistrada` (and, when that says no,
+ * `tieneAlgunFactor` — plan 4E's two questions) is called here without a
+ * transaction, on purpose — wrapping the delete in one and passing it along
+ * would have it count the row this request is in the middle of removing, find it, and never
  * revoke anything. Two tabs deleting two
  * different keys at once cannot both miss, either, precisely because each
  * counts only after its own delete has committed — the later count sees an
@@ -863,56 +875,108 @@ export const deleteCredential = handler("deleteCredential", async (req: Request,
   // the `destroy` that just succeeded says the database was alive a
   // millisecond ago. A second attempt turns most blips into the right answer
   // and leaves the closed failure as the net, not the road.
+  // Two questions since plan 4E, and the header of `factorInventory.ts` says
+  // why they split: "is there a *credential* left" (another key, or an app)
+  // decides whether anything happens at all and whether the remembered
+  // devices go — they were trusted on the strength of a credential; "is there
+  // a *factor* left" (which a verified address now is) decides whether the
+  // sessions go too. An unanswerable count is treated as "nothing left" on
+  // both, for the reason above.
+  let quedaCredencial: boolean;
   let quedaAlgunFactor: boolean;
   let recuentoFallido = false;
   try {
-    quedaAlgunFactor = await contarConUnReintento(caller.id);
+    ({ credencial: quedaCredencial, factor: quedaAlgunFactor } = await contarConUnReintento(caller.id));
   } catch (err) {
     webauthnLog.error(
       { err, id_usuario: caller.id },
       "no se pudo saber si queda algún factor tras borrar la llave: se revoca como si no quedara",
     );
+    quedaCredencial = false;
     quedaAlgunFactor = false;
     recuentoFallido = true;
   }
-  if (quedaAlgunFactor) {
+  if (quedaCredencial) {
     return res.status(200).json({ message: MENSAJE_LLAVE_ELIMINADA, sesion_cerrada: false });
   }
 
   // `null` until each half has run, so the failure line below can say which
   // of the two got done — whoever reads it afterwards has to know whether the
-  // remembered devices are gone or still waiting to skip the factor.
+  // remembered devices are gone or still waiting to skip the factor. The
+  // sessions half runs only when no factor at all remains: an account that
+  // can still prove itself by email keeps them.
   let dispositivosRevocados: number | null = null;
-  let sesionesRevocadas: number;
+  let sesionesRevocadas: number | null = null;
   try {
     dispositivosRevocados = await revokeAllRememberedDevicesOf(caller.id);
-    sesionesRevocadas = await revokeAllSessionsOf(caller.id);
+    if (!quedaAlgunFactor) sesionesRevocadas = await revokeAllSessionsOf(caller.id);
   } catch (err) {
     // The one outcome that must not look like success. The key is gone, the
-    // sessions are not, and the retry is a 404: the answer has to say what
-    // to do instead, and `logout-all` is reachable from every state this
-    // route is.
-    webauthnLog.error({ err, id_usuario: caller.id }, "no se pudieron revocar las sesiones tras borrar la última llave");
+    // revocation did not happen, and the retry is a 404: the answer has to
+    // say what to do instead, and `logout-all` — which revokes both sessions
+    // and devices — is reachable from every state this route is.
+    //
+    // Two shapes, plan 4E: with a verified address left, what failed was the
+    // remembered-device revocation and the sessions were never at risk — a
+    // `warning` with its own verb and a sentence that does not tell the
+    // person their sessions are open with no factor behind them, because
+    // they are not. Without one, it is the last factor and the original
+    // `critical` line.
+    webauthnLog.error(
+      { err, id_usuario: caller.id, queda_correo: quedaAlgunFactor },
+      quedaAlgunFactor
+        ? "no se pudieron revocar los equipos recordados tras borrar la última llave"
+        : "no se pudieron revocar las sesiones tras borrar la última llave",
+    );
     await logAction({
       id_usuario: caller.id,
-      action: "LAST_FACTOR_REVOCATION_FAILED",
+      action: quedaAlgunFactor ? "LAST_CREDENTIAL_REVOCATION_FAILED" : "LAST_FACTOR_REVOCATION_FAILED",
       entity: "Usuario",
       entity_id: caller.id,
-      detail: "Se eliminó el último factor y NO se pudieron revocar las sesiones: la cuenta sigue abierta sin factor",
+      detail: quedaAlgunFactor
+        ? "Se eliminó la última llave y NO se pudieron revocar los equipos recordados; le queda el correo verificado como factor"
+        : "Se eliminó el último factor y NO se pudieron revocar las sesiones: la cuenta sigue abierta sin factor",
       metadata: {
         id_sesion: caller.id_sesion,
         factor: "passkey",
         id_credencial: fila.dataValues.id,
+        queda_correo: quedaAlgunFactor,
         // Which half ran. `null` means the devices were never reached either.
         dispositivos_revocados: dispositivosRevocados,
       },
-      severity: "critical",
+      severity: quedaAlgunFactor ? "warning" : "critical",
       ip_address: req.ip ?? null,
     });
     // `code`, the way every refusal of this API carries one: the screen must
     // tell "the revocation failed, use logout-all" from an ordinary 500
     // without matching a Spanish sentence.
-    return res.status(500).json({ message: MENSAJE_REVOCACION_FALLIDA, code: CODIGO_REVOCACION_FALLIDA });
+    return res.status(500).json({
+      message: quedaAlgunFactor ? MENSAJE_EQUIPOS_NO_OLVIDADOS : MENSAJE_REVOCACION_FALLIDA,
+      code: CODIGO_REVOCACION_FALLIDA,
+    });
+  }
+
+  if (quedaAlgunFactor) {
+    // Plan 4E: the verified address remains, so this is not the loss of the
+    // last factor and must not be counted as one — its own verb, with what
+    // was and was not revoked.
+    await logAction({
+      id_usuario: caller.id,
+      action: "LAST_CREDENTIAL_REMOVED",
+      entity: "Usuario",
+      entity_id: caller.id,
+      detail: "Eliminó su última llave; le queda el correo verificado como segundo factor. Equipos recordados revocados, sesiones intactas",
+      metadata: {
+        id_sesion: caller.id_sesion,
+        factor: "passkey",
+        id_credencial: fila.dataValues.id,
+        queda_correo: true,
+        dispositivos_revocados: dispositivosRevocados,
+      },
+      severity: "warning",
+      ip_address: req.ip ?? null,
+    });
+    return res.status(200).json({ message: MENSAJE_ULTIMA_LLAVE_QUEDA_CORREO, sesion_cerrada: false });
   }
 
   // Two verbs, because a count is done by `action` and nobody reads the
@@ -954,14 +1018,24 @@ export const deleteCredential = handler("deleteCredential", async (req: Request,
 });
 
 /**
- * `tieneAlgunFactor`, tried twice. See the call site for why once is not
+ * The two questions of `factorInventory.ts`, asked in order: a credential
+ * left answers both, so the second read runs only when the first said no.
+ */
+async function contarLoQueQueda(id_usuario: number): Promise<{ credencial: boolean; factor: boolean }> {
+  const credencial = await tieneCredencialRegistrada(id_usuario);
+  const factor = credencial || (await tieneAlgunFactor(id_usuario));
+  return { credencial, factor };
+}
+
+/**
+ * `contarLoQueQueda`, tried twice. See the call site for why once is not
  * enough and why three would be theatre: the second attempt catches the blip,
  * and what survives two is not a blip.
  */
-async function contarConUnReintento(id_usuario: number): Promise<boolean> {
+async function contarConUnReintento(id_usuario: number): Promise<{ credencial: boolean; factor: boolean }> {
   try {
-    return await tieneAlgunFactor(id_usuario);
+    return await contarLoQueQueda(id_usuario);
   } catch {
-    return await tieneAlgunFactor(id_usuario);
+    return await contarLoQueQueda(id_usuario);
   }
 }

@@ -169,8 +169,9 @@ router.patch(
 // 🔴 **`exigeContrasena: true` — added by the 2026-09-02 closure audit,
 // hallazgo F8 (auditor B-6).** The paragraph above stopped short: it is true
 // that "every route above answers 403 to a session that has not proved one",
-// but only once that account *has* a factor to prove. Today, with zero of
-// nine accounts registered, `tieneAlgunFactor` is `false` for everybody,
+// but only once that account *has* a factor to prove. On deploy day, with
+// zero of nine accounts registered and none verified (plan 4E made a
+// verified address a factor), `tieneAlgunFactor` is `false` for everybody,
 // including whichever administrator's cookie gets stolen — so without this
 // option, this route sat in exactly the gap the paragraph above thought it
 // had closed: a factor-less cookie, no `stepup_password`, and

@@ -206,6 +206,66 @@ export const WEBAUTHN_PASSWORDLESS_VERIFY_LIMIT = 50;
  */
 export const WEBAUTHN_FAILED_ASSERTION_LINES_PER_ACCOUNT = 10;
 
+/*
+ * ── The login code by email (plan 4E) ──────────────────────────────────────
+ *
+ * Six digits sent to a verified address, a second factor on its own since
+ * 2026-09-03. Every number below is an argument, not a knob; the design
+ * (`docs/specs/2026-09-03-correo-como-factor-y-relevo-de-correo-design.md`,
+ * §3.3) has the table.
+ */
+
+/**
+ * How long a code stays redeemable. Ten minutes: mail takes a while to
+ * arrive, and anything longer only widens the window a guesser has for a
+ * space of a million values.
+ */
+export const EMAIL_CODE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Wrong guesses a code survives. Five, charged **before** the compare by the
+ * same statement that reads the hash (`auth/emailCodeStore.ts`), so that
+ * five requests arriving in the same tick are still five and not N. Five of
+ * a million is 0.0005 % per code, and every wrong guess also charges the
+ * account lockout the way a wrong TOTP does.
+ */
+export const EMAIL_CODE_MAX_ATTEMPTS = 5;
+
+/**
+ * Seconds between two codes for the same account. A nervous second click
+ * should not spend the company's mail quota; sixty is under the point where
+ * somebody honestly gives up waiting for the first one.
+ */
+export const EMAIL_CODE_RESEND_SECONDS = 60;
+
+/**
+ * Codes per account per hour, and per day. Both live in the database
+ * (`codigo_correo.created_at`), not in a process bucket: a restart forgets
+ * nothing, and a second process would see the same numbers.
+ *
+ * The hourly cap alone does not bound the day — five an hour is 120 a day,
+ * a quarter of the whole mail chain's budget for one account — which is what
+ * the daily cap is for. Twelve a day is more than anybody logging in from
+ * three devices with a slow mailbox needs, and a tenth of what one account
+ * could otherwise burn.
+ */
+export const EMAIL_CODE_HOURLY_LIMIT = 5;
+export const EMAIL_CODE_DAILY_LIMIT = 12;
+
+/**
+ * Verification attempts per account per quarter hour, on `/mfa/verify` and
+ * `/stepup` with `metodo: "correo"`, checked **before** anything touches the
+ * database. Per-code attempts are charged atomically in the row; this bucket
+ * bounds what those attempts cost the *server*: each one is a `bcrypt.compare`
+ * at `BCRYPT_COST` — also on the "no code pending" path, against
+ * `fillerHash()`, so that timing does not say whether a code exists — and a
+ * session that holds the password could otherwise queue hundreds of them.
+ * In memory and per process, like the login buckets: it bounds CPU, not
+ * quota, and a restart that forgets it gives away nothing the row does not
+ * still count.
+ */
+export const EMAIL_CODE_VERIFY_LIMIT = 20;
+
 /**
  * How long a proved factor keeps opening the sensitive operations.
  *
@@ -309,16 +369,18 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
   // that. `index.ts` runs the value check separately, at boot, with
   // `cookieNameCarriesHostPrefix`.
   //
-  // RESEND_API_KEY and MAIL_FROM: `auth/mailer.ts` treats either one being
-  // missing as "development, spend no quota" and answers `{ ok: true }`
-  // without sending anything. That fallback is exactly wrong in production —
-  // every verification and reset email would silently no-op, and the first
-  // sign of it would be a user who never got their link. Refusing to boot
-  // is what turns that into a deploy-time failure instead of a support
-  // ticket. Unlike COOKIE_NAME, there is no further value check to run at
-  // boot: any non-empty string is a usable attempt, and whether it is the
-  // *right* key or address is Resend's problem to reject, the same way a
-  // wrong CORS_ORIGIN is the browser's problem to reject.
+  // MAIL_PROVIDERS and MAIL_FROM: with no chain configured, `auth/mailer.ts`
+  // answers `{ ok: true }` without sending anything — the development
+  // fallback. That fallback is exactly wrong in production: every
+  // verification, reset and login-code email would silently no-op, and the
+  // first sign of it would be a person who never got their link. Refusing to
+  // boot is what turns that into a deploy-time failure instead of a support
+  // ticket. **`RESEND_API_KEY` left this list with plan 4E**: demanding it
+  // would refuse a perfectly valid deployment of four SMTP providers and no
+  // Resend. Which credentials each listed provider needs is decided by
+  // `configuracionDeCorreo` below from the *value* of `MAIL_PROVIDERS`, and
+  // this list cannot do that — the same split `MFA_ENCRYPTION_KEY_ACTIVE` has
+  // two paragraphs down. `index.ts` runs that value check at boot.
   //
   // MFA_ENCRYPTION_KEY_ACTIVE: which entry of the keyring in
   // `auth/mfaKeyring.ts` encrypts. Without a usable key the TOTP secret can be
@@ -343,7 +405,7 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
         "CORS_ORIGIN",
         "COOKIE_NAME",
         "COOKIE_SECURE",
-        "RESEND_API_KEY",
+        "MAIL_PROVIDERS",
         "MAIL_FROM",
         "MFA_ENCRYPTION_KEY_ACTIVE",
         // 🔴 The two passkey values, and they are on this list for a reason
@@ -804,12 +866,277 @@ export const PASSWORD_FORGOT_IP_LIMIT = 20;
  * recuperación veinticuatro horas, con `RateLimit-Remaining` llevándole la
  * cuenta al atacante.
  *
- * El techo que buscaban vive ahora en `MAIL_DAILY_BUDGET`, contado en el sitio
- * donde el correo se manda de verdad.
+ * El techo que buscaban vive ahora en el cupo de cada proveedor de correo
+ * (`configuracionDeCorreo` más abajo, `auth/mailBudget.ts`), contado en el
+ * sitio donde el correo se manda de verdad. Plan 4E lo volvió a discutir —la
+ * recuperación sin credencial podía vaciar la cadena entera y dejar sin
+ * login a quien solo tiene correo— y la respuesta fue la **reserva** por
+ * proveedor (`MAIL_RESERVA_FRACCION`), no otro cubo de peticiones.
  */
-export const MAIL_DAILY_BUDGET = 80;
 export const MAIL_DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;
-export const PASSWORD_FORGOT_DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/*
+ * ── The mail chain (plan 4E) ───────────────────────────────────────────────
+ *
+ * Five providers with relay: Resend by its API and four more by SMTP through
+ * one adapter. The design (`docs/specs/2026-09-03-correo-como-factor-y-relevo-de-correo-design.md`
+ * §4) argues every number below; `auth/mailRelay.ts` and
+ * `auth/mailProviders.ts` read them.
+ */
+
+/**
+ * The share of each provider's daily ceiling that only the reserved flows
+ * may spend — the login code and the security notices (`FLUJOS_RESERVADOS`
+ * in `auth/mailBudget.ts`). A quarter: the old single budget held 20 of
+ * Resend's 100 back for the takeover warnings, and since a verified address
+ * is a second factor the same headroom is what keeps `/password/forgot` —
+ * which asks for no credential — from spending the login out of existence.
+ */
+export const MAIL_RESERVA_FRACCION = 0.25;
+
+/**
+ * How long a provider is sidelined after two outage-shaped failures in a
+ * row. Fifteen minutes: long enough not to hammer a provider that is down,
+ * short enough that the next login after an outage finds it back.
+ */
+export const MAIL_PROVIDER_COOLDOWN_MS = 15 * 60 * 1000;
+
+/**
+ * Deadlines. `MAIL_PLAZO_INTERACTIVO_MS` bounds the whole walk of the chain
+ * when a person is waiting on the screen — the login code, the verification
+ * link, the rescue notice that runs before the rescue itself. Twelve seconds
+ * is under the point where somebody clicks again. `MAIL_PLAZO_DIFERIDO_MS` is
+ * for the flows nobody waits on (`/password/forgot`, notices after the
+ * response). `MAIL_PLAZO_POR_INTENTO_MS` bounds one provider: nodemailer's
+ * own timers are per phase and a server that answers each step just under
+ * its limit would otherwise hold the login for their sum. Eight and not ten
+ * (audit of Task 7): with twelve for the whole walk, ten left the second
+ * provider two seconds — less than a connection takes — so it was charged an
+ * ambiguous attempt that could not have sent anything, and the third was
+ * never reached. `MAIL_PLAZO_MINIMO_INTENTO_MS` is the floor under which the
+ * walk stops instead of starting an attempt that cannot finish: a connection
+ * and a greeting, the two phases before anything is sent.
+ */
+export const MAIL_PLAZO_INTERACTIVO_MS = 12_000;
+export const MAIL_PLAZO_DIFERIDO_MS = 60_000;
+export const MAIL_PLAZO_POR_INTENTO_MS = 8_000;
+export const MAIL_PLAZO_MINIMO_INTENTO_MS = 4_000;
+
+/**
+ * nodemailer's per-phase timeouts, replacing its defaults of two minutes per
+ * connection, thirty seconds per greeting and ten minutes per socket.
+ */
+export const MAIL_SMTP_CONNECTION_TIMEOUT_MS = 4_000;
+export const MAIL_SMTP_GREETING_TIMEOUT_MS = 4_000;
+export const MAIL_SMTP_SOCKET_TIMEOUT_MS = 8_000;
+export const MAIL_SMTP_DNS_TIMEOUT_MS = 3_000;
+
+/**
+ * The SMTP providers this deployment knows by name: host, port, and the
+ * headers that turn their click and open tracking off **per message** —
+ * the two that have such headers. Tracking rewrites every link through the
+ * provider's domain, and the verification and reset links carry their token
+ * in the URL; a rewritten link is that token in a third party's click log.
+ * The other two (SMTP2GO, Mailtrap) only turn it off in their panel, which
+ * the runbook demands before the first real send.
+ *
+ * Verified against each provider's documentation on 2026-09-03; the
+ * credential convention each one uses is in `.env.example`.
+ */
+export const SMTP_CONOCIDOS: Readonly<Record<string, { host: string; puerto: number; cabeceras: Readonly<Record<string, string>> }>> = {
+  mailjet: {
+    host: "in-v3.mailjet.com",
+    puerto: 587,
+    cabeceras: { "X-Mailjet-TrackOpen": "0", "X-Mailjet-TrackClick": "0" },
+  },
+  smtp2go: { host: "mail.smtp2go.com", puerto: 587, cabeceras: {} },
+  mailtrap: { host: "live.smtp.mailtrap.io", puerto: 587, cabeceras: {} },
+  elastic: {
+    host: "smtp.elasticemail.com",
+    puerto: 587,
+    cabeceras: { trackopens: "false", trackclicks: "false" },
+  },
+};
+
+/**
+ * Daily ceilings outside production when `MAIL_<NAME>_DAILY` is not set —
+ * the free tiers measured on 2026-09-03 minus a margin. In production the
+ * variable is required: the ceiling is a promise to the provider, and a
+ * default nobody typed is not a promise anybody made.
+ */
+export const MAIL_CUPOS_POR_DEFECTO: Readonly<Record<string, number>> = {
+  resend: 80,
+  mailjet: 180,
+  smtp2go: 30,
+  mailtrap: 120,
+  elastic: 80,
+};
+
+export type ProveedorConfigurado =
+  | { tipo: "resend"; nombre: "resend"; claveVar: "RESEND_API_KEY"; cupoDiario: number }
+  | {
+      tipo: "smtp";
+      nombre: string;
+      host: string;
+      puerto: number;
+      usuarioVar: string;
+      passVar: string;
+      cupoDiario: number;
+      cabeceras: Readonly<Record<string, string>>;
+    };
+
+// The `?: undefined` keys are what let `if (!config.ok)` narrow under this
+// repo's `strictNullChecks: false`.
+export type ConfiguracionDeCorreo =
+  | {
+      ok: true;
+      modo: "envia" | "desarrollo";
+      from: string | null;
+      proveedores: ProveedorConfigurado[];
+      /** Providers named in `MAIL_PROVIDERS` that could not be built, and why — variable names only. */
+      descartados: { nombre: string; motivo: string }[];
+      errores?: undefined;
+    }
+  | {
+      ok: false;
+      errores: string[];
+      modo?: undefined;
+      from?: undefined;
+      proveedores?: undefined;
+      descartados?: undefined;
+    };
+
+function enteroPositivo(valor: string | undefined): number | null {
+  if (valor === undefined || valor.trim() === "") return null;
+  const n = Number(valor);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * The mail chain, read from the environment — **pure, and it never returns a
+ * secret.** Every provider is described by the *names* of the variables that
+ * hold its credentials (`usuarioVar`, `passVar`, `claveVar`), so the whole
+ * object can be written to the boot log and the adapters read the values at
+ * send time.
+ *
+ * The rules, and why each is where it is:
+ *
+ * - `MAIL_PROVIDERS` is the order of the relay. In production `requiredEnv`
+ *   already demands it; here an empty or missing list outside production is
+ *   development mode, with one convenience: `RESEND_API_KEY` plus `MAIL_FROM`
+ *   and no list means `resend`, with a note, so the `.env` this repo shipped
+ *   with keeps sending.
+ * - A listed provider with an incomplete configuration is **dropped, not
+ *   fatal**, and reported in `descartados` by variable name. `index.ts` logs
+ *   each one at `fatal` level in production — the first screen of the log —
+ *   and boots anyway, because a chain of four is a degraded chain and a
+ *   process that refuses to start over a typo is an outage for nine people
+ *   whose only second factor is now the email. Only an **empty** chain in
+ *   production is `ok: false`: that is the silent no-send `requiredEnv`
+ *   exists to turn into a deploy failure.
+ * - A name in `SMTP_CONOCIDOS` needs `USER`, `PASS` and (in production)
+ *   `DAILY`; its host, port and headers come from the table unless
+ *   overridden. Any other name is accepted with a full configuration —
+ *   `HOST`, `PORT`, `USER`, `PASS`, `DAILY` — and no headers: a provider
+ *   nobody wrote code for is variables, not code.
+ * - `requiredEnv` cannot do this check: it decides variable names from the
+ *   environment string alone, and these names depend on another variable's
+ *   value — its own docblock says so.
+ */
+export function configuracionDeCorreo(
+  env: NodeJS.ProcessEnv,
+  nodeEnv: string | undefined,
+): ConfiguracionDeCorreo {
+  const produccion = nodeEnv === "production";
+  const from = env.MAIL_FROM?.trim() || null;
+  const descartados: { nombre: string; motivo: string }[] = [];
+  let nombres = (env.MAIL_PROVIDERS ?? "")
+    .split(",")
+    .map((n) => n.trim().toLowerCase())
+    .filter((n) => n !== "");
+
+  if (nombres.length === 0) {
+    if (produccion) {
+      return { ok: false, errores: ["MAIL_PROVIDERS no está configurada o está vacía"] };
+    }
+    if (env.RESEND_API_KEY && from) {
+      nombres = ["resend"];
+      descartados.push({ nombre: "MAIL_PROVIDERS", motivo: "no está; se asume resend porque RESEND_API_KEY y MAIL_FROM sí están" });
+    } else {
+      return { ok: true, modo: "desarrollo", from, proveedores: [], descartados };
+    }
+  }
+  if (!from) {
+    if (produccion) return { ok: false, errores: ["MAIL_FROM no está configurada"] };
+    return { ok: true, modo: "desarrollo", from: null, proveedores: [], descartados: [{ nombre: "MAIL_FROM", motivo: "no está; modo desarrollo" }] };
+  }
+
+  const proveedores: ProveedorConfigurado[] = [];
+  const vistos = new Set<string>();
+  for (const nombre of nombres) {
+    if (vistos.has(nombre)) {
+      descartados.push({ nombre, motivo: "repetido en MAIL_PROVIDERS" });
+      continue;
+    }
+    vistos.add(nombre);
+
+    if (nombre === "resend") {
+      const faltan: string[] = [];
+      if (!env.RESEND_API_KEY) faltan.push("RESEND_API_KEY");
+      const cupo = enteroPositivo(env.MAIL_RESEND_DAILY) ?? (produccion ? null : MAIL_CUPOS_POR_DEFECTO.resend);
+      if (cupo === null) faltan.push("MAIL_RESEND_DAILY (entero mayor que 0)");
+      if (faltan.length > 0 || cupo === null) {
+        descartados.push({ nombre, motivo: `faltan: ${faltan.join(", ")}` });
+        continue;
+      }
+      proveedores.push({ tipo: "resend", nombre: "resend", claveVar: "RESEND_API_KEY", cupoDiario: cupo });
+      continue;
+    }
+
+    const NAME = nombre.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+    const conocido = SMTP_CONOCIDOS[nombre];
+    const hostVar = `MAIL_SMTP_${NAME}_HOST`;
+    const portVar = `MAIL_SMTP_${NAME}_PORT`;
+    const usuarioVar = `MAIL_SMTP_${NAME}_USER`;
+    const passVar = `MAIL_SMTP_${NAME}_PASS`;
+    const dailyVar = `MAIL_SMTP_${NAME}_DAILY`;
+    const faltan: string[] = [];
+    const host = env[hostVar]?.trim() || conocido?.host || null;
+    if (!host) faltan.push(hostVar);
+    const puertoCrudo = env[portVar]?.trim();
+    const puerto = puertoCrudo ? enteroPositivo(puertoCrudo) : (conocido?.puerto ?? null);
+    if (puerto === null || puerto > 65535) faltan.push(`${portVar} (entero entre 1 y 65535)`);
+    if (!env[usuarioVar]) faltan.push(usuarioVar);
+    if (!env[passVar]) faltan.push(passVar);
+    const cupo = enteroPositivo(env[dailyVar]) ?? (produccion ? null : (MAIL_CUPOS_POR_DEFECTO[nombre] ?? null));
+    if (cupo === null) faltan.push(`${dailyVar} (entero mayor que 0)`);
+    if (faltan.length > 0 || host === null || puerto === null || cupo === null) {
+      descartados.push({ nombre, motivo: `faltan: ${faltan.join(", ")}` });
+      continue;
+    }
+    proveedores.push({
+      tipo: "smtp",
+      nombre,
+      host,
+      puerto,
+      usuarioVar,
+      passVar,
+      cupoDiario: cupo,
+      cabeceras: conocido?.cabeceras ?? {},
+    });
+  }
+
+  if (proveedores.length === 0) {
+    if (produccion) {
+      return {
+        ok: false,
+        errores: descartados.map((d) => `MAIL_PROVIDERS lista "${d.nombre}", pero ${d.motivo}`),
+      };
+    }
+    return { ok: true, modo: "desarrollo", from, proveedores: [], descartados };
+  }
+  return { ok: true, modo: "envia", from, proveedores, descartados };
+}
 
 /** `/email/send`, keyed by account — there already is a session, unlike
  *  `/password/forgot`, so there is no address to rotate around it. */

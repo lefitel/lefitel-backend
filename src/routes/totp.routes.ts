@@ -28,7 +28,9 @@
 // 🔴 **`exigeContrasena: true` on all three routes — hallazgo C1.** Without
 // it, a stolen session cookie with no password registers its own factor, and
 // from that instant `tieneAlgunFactor` denies the real owner the password
-// fallback too: their next login opens `parcial`, escapable only by proving
+// fallback too (since plan 4E a verified address does the same, which is why
+// `/email/send` keeps its own `pass` check): their next login opens
+// `parcial`, escapable only by proving
 // the *attacker's* factor. Changing the password does not help and
 // `logout-all` revokes sessions, not credentials — a permanent lockout. See
 // `requireStepUp.ts`'s own docstring on `exigeContrasena` for the mechanism.

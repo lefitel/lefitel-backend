@@ -686,8 +686,11 @@ beforeEach(() => {
       "este test alcanzó sequelize.query real; si es a propósito, dale una implementación al spy",
     );
   }) as never);
+  // `email_verified_at: null` spelled out, plan 4E: a verified address is a
+  // factor, and this file's "no factor" tests must say so rather than rely on
+  // the key being absent from the fixture.
   usuarioFindByPk.mockResolvedValue({
-    dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null, pass_changed_at: PASS_CAMBIADA },
+    dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null, pass_changed_at: PASS_CAMBIADA, email_verified_at: null },
   } as never);
   usuarioFindOne.mockResolvedValue({
     dataValues: {
@@ -2003,6 +2006,29 @@ describe("requireStepUp, mounted on the real routes", () => {
     }
   });
 
+  // Plan 4E, through the real `factorInventory` module: a verified address
+  // alone is a factor, so the gate refuses and names the email as the method.
+  it("refuses the password once the account has verified its email and nothing else (plan 4E)", async () => {
+    usuarioFindByPk.mockResolvedValue({
+      dataValues: { id: YO, id_rol: MI_ROL, user: "isaias", name: "Isaias", lastname: "Salas", image: null, pass_changed_at: PASS_CAMBIADA, email_verified_at: new Date("2026-09-01T00:00:00.000Z") },
+    } as never);
+    puede = true;
+    try {
+      const res = await request(app)
+        .post("/api/usuario")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "nuevo", stepup_password: "la-de-verdad" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe(CODIGO_STEP_UP);
+      expect(res.body.metodos).toEqual(["correo"]);
+      expect(res.body.exigeContrasena).toBe(true);
+    } finally {
+      puede = false;
+    }
+  });
+
   it("closes the skip on its own: the same no-password request that just succeeded is refused once a factor exists", async () => {
     // The assertion the corrected rule exists to make provable, not merely
     // arguable: nothing is flipped by hand between this test and the one
@@ -2662,11 +2688,12 @@ describe("email verification, through the real stack", () => {
   });
 
   it("verifies the token's own account for real, through the real tokenStore and the real model", async () => {
-    // The one happy path in this section that is safe to run for real:
-    // `verifyEmail` never opens a transaction (see `email.controller.ts`), so
-    // `consumirToken`'s single `TokenUsoUnicoModel.update` — spied, not the
-    // real query — is the only write this whole request makes before this
-    // test's own `usuarioUpdate` spy takes the second one.
+    // The one happy path in this section that is safe to run for real.
+    // `consumirToken`'s single `TokenUsoUnicoModel.update` is spied, not the
+    // real query; and since plan 4E `verifyEmail` opens a transaction for its
+    // three writes (the column, the session's promotion, the grace deadline),
+    // so the transaction gateway is given a pass-through and the two model
+    // writes land on this file's `usuarioUpdate` and `sesionUpdate` spies.
     tokenUsoUnicoUpdate.mockResolvedValue([
       1,
       [{ dataValues: { id_usuario: YO, email_destino: "isaias@osefi.net" } }],
@@ -2674,6 +2701,8 @@ describe("email verification, through the real stack", () => {
     usuarioFindByPk.mockResolvedValue({
       dataValues: { id: YO, id_rol: MI_ROL, email: "isaias@osefi.net", pass_changed_at: PASS_CAMBIADA },
     } as never);
+    transaction.mockImplementation((async (fn: (t: unknown) => Promise<unknown>) => fn({ id: "tx" })) as never);
+    sesionUpdate.mockResolvedValue([1] as never);
 
     const res = await request(app)
       .post("/api/auth/email/verify")
@@ -2684,10 +2713,16 @@ describe("email verification, through the real stack", () => {
     expect(res.status).toBe(200);
     const [values, options] = usuarioUpdate.mock.calls[0] as [
       Record<string, unknown>,
-      { where: Record<string, unknown> },
+      { where: Record<string, unknown>; transaction?: unknown },
     ];
     expect(values.email_verified_at).toBeInstanceOf(Date);
     expect(options.where).toEqual({ id: YO });
+    expect(options.transaction).toEqual({ id: "tx" });
+    // Plan 4E: the session that verified is promoted as `correo`, on the same transaction.
+    expect(sesionUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ estado: "completa", mfa_source: "correo" }),
+      expect.objectContaining({ transaction: { id: "tx" } }),
+    );
   });
 });
 
@@ -3004,9 +3039,10 @@ describe("the fourteen-day deadline, against a session that was already open", (
       expect(res.status).toBe(403);
     });
 
-    it("still keeps the ERP for the three sources that do mean a factor was shown", async () => {
+    it("still keeps the ERP for the four sources that do mean a factor was shown", async () => {
       // The guard against the fix above swallowing the rule it belongs to.
-      for (const fuente of ["passkey", "totp", "codigo"]) {
+      // `correo` since plan 4E: a code by email is a factor shown.
+      for (const fuente of ["passkey", "totp", "codigo", "correo"]) {
         sesionAbierta({ mfa_source: fuente });
         const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
         expect(res.status, fuente).toBe(200);
@@ -3157,5 +3193,74 @@ describe("the passwordless door, through the real stack", () => {
     expect(res.status).toBe(400);
     expect(sesionUpdate).not.toHaveBeenCalled();
     expect(sesionCreate).not.toHaveBeenCalled();
+  });
+});
+
+// Plan 4E: `POST /api/auth/mfa/email-code`, through the real router and the
+// real gates. What the unit test cannot say: that the route is mounted, that
+// a `parcial` session reaches it (it sits under the `/api/auth/mfa` prefix
+// the `PARCIAL` list opens), and that the state gate lets `onboarding` in
+// too. Neither test reaches the store: the account is locked, which the
+// controller refuses before minting anything — the one early exit that
+// needs no database behind it.
+describe("POST /api/auth/mfa/email-code — reachable from the second step of a login (plan 4E)", () => {
+  const sesionEn = (estado: "parcial" | "onboarding") =>
+    sesionFindOne.mockResolvedValue({
+      dataValues: {
+        id: MI_SESION,
+        id_usuario: YO,
+        created_at: SESION_CREADA,
+        expires_at: SESION_EXPIRA_FILA,
+        last_used_at: new Date(),
+        estado,
+        mfa_satisfied_at: null,
+        mfa_source: null,
+      },
+    } as never);
+  const cuentaBloqueada = () =>
+    usuarioFindByPk.mockResolvedValue({
+      dataValues: {
+        id: YO,
+        id_rol: MI_ROL,
+        user: "isaias",
+        name: "Isaias",
+        lastname: "Salas",
+        image: null,
+        pass_changed_at: PASS_CAMBIADA,
+        email: "isaias@osefi.net",
+        email_verified_at: new Date("2026-09-01T00:00:00.000Z"),
+        failed_attempts: 5,
+        locked_until: new Date(Date.now() + 60_000),
+      },
+    } as never);
+
+  it("answers 401 with no cookie, before touching the account", async () => {
+    const res = await request(app).post("/api/auth/mfa/email-code").set(DEL_FRONTEND).send({});
+    expect(res.status).toBe(401);
+    expect(usuarioFindByPk).not.toHaveBeenCalled();
+  });
+
+  it("lets a parcial session through the state gate — and refuses a locked account before spending anything", async () => {
+    sesionEn("parcial");
+    cuentaBloqueada();
+    const res = await request(app)
+      .post("/api/auth/mfa/email-code")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ intentosRestantes: 0 });
+  });
+
+  it("lets an onboarding session through as well: the prefix is the same", async () => {
+    sesionEn("onboarding");
+    cuentaBloqueada();
+    const res = await request(app)
+      .post("/api/auth/mfa/email-code")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ intentosRestantes: 0 });
   });
 });

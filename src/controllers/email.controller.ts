@@ -45,13 +45,17 @@ import { TokenUsoUnicoModel } from "../models/tokenUsoUnico.model.js";
 import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
-import { hayPresupuestoDeCorreo } from "../auth/mailBudget.js";
+import { hayProveedorDisponible } from "../auth/mailRelay.js";
 import { avisarCorreoCambiado, maskEmail } from "../auth/securityNotice.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
+import { promoverSesion, sellarPruebaDeFactor, apagarLaMecha } from "../auth/sessionPromotion.js";
+import { tieneCredencialRegistrada } from "../auth/factorInventory.js";
+import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
+import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
-import { allowedOrigins, DEV_FRONTEND_ORIGIN } from "../config/security.js";
+import { allowedOrigins, DEV_FRONTEND_ORIGIN, MAIL_PLAZO_INTERACTIVO_MS } from "../config/security.js";
 
 const emailLog = log("email");
 const handler = makeHandler(emailLog);
@@ -111,7 +115,11 @@ export const TOKEN_INVALIDO = "Este enlace ya no es válido. Solicite uno nuevo.
 const EMAIL_VERIFICADO_MENSAJE = "Correo verificado.";
 
 /** A loose, deliberately non-RFC shape check — see the report for why. */
-const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// No comma or semicolon anywhere: nodemailer parses `to` as an address list
+// and would split `a,b@evil.com` into two envelope recipients — N deliveries
+// charged as one, and "at most two copies" gone for that address (audit of
+// plan 4E, Task 7). Resend answered such a value 422; SMTP does not.
+const EMAIL_SHAPE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
 
 /** `usuarios.email` is VARCHAR(255); refusing here is cheaper than a DB error. */
 const EMAIL_MAX_LENGTH = 255;
@@ -299,6 +307,18 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
   // Not a string is not a password, and an empty one is not a confirmation —
   // refused before the round trip, the same way `verifyOwnPassword` refuses
   // them, so the two cannot disagree about what counts as "sent nothing".
+  //
+  // 🔴 **This field is the defence, and `requireStepUp` is not** (plan 4E,
+  // S6). The route mounts `requireStepUp({ permiteOnboarding: true })`
+  // without `exigeContrasena`, so for an account with no factor — every one
+  // of the nine on deploy day, and any account that has not verified its
+  // address — the gate takes its "nothing to prove" skip and lets a bare
+  // cookie through. What stops a stolen session from setting the attacker's
+  // address as this account's recovery channel (and, since plan 4E, as its
+  // second factor) is this check and nothing else. Once the address is
+  // verified the gate does refuse, and asks for a code to the *old* mailbox;
+  // before that, this is all there is. Do not "simplify" it away because the
+  // gate looks like it covers it.
   if (typeof pass !== "string" || pass === "") {
     return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
   }
@@ -341,17 +361,22 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
   // the address and the tokens it already had, the same property
   // `/password/forgot` already has for the same reason.
   //
-  // `hayPresupuestoDeCorreo()` only looks — it commits nothing. The actual
+  // `hayProveedorDisponible()` only looks — quota **and** breaker, per provider (plan 4E) — it commits nothing. The actual
   // charge happens once per real message, inside `enviarCorreo`, further
   // below — see Decision 2 in
   // `docs/plans/2026-09-01-defectos-previos-al-4b.md`. The response stays
   // the uniform one — a caller who could tell "the budget ran out" apart
   // from "sent" learns nothing useful, and Constraint #1 says the answer
   // does not move for anything.
-  if (!hayPresupuestoDeCorreo()) {
+  if (!hayProveedorDisponible("email/verificar")) {
     return res.status(200).json({ message: EMAIL_ENVIO_RESPUESTA });
   }
 
+  // `null` until the branch below runs, so the bitácora line can say whether
+  // any device or session lost its standing — the same convention
+  // `deleteCredential` uses for the same numbers.
+  let dispositivosRevocados: number | null = null;
+  let sesionesRevocadas: number | null = null;
   await sequelize.transaction(async (transaction) => {
     await UsuarioModel.update(
       { email: destino, email_verified_at: null },
@@ -361,6 +386,26 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
       { used_at: new Date() },
       { where: { id_usuario: caller.id, used_at: null }, transaction },
     );
+    // Plan 4E: a verified address is a factor, so the line above may have
+    // just removed the account's last one. Then everything that was trusted
+    // on the strength of a factor goes, the way `deleteTotp` and
+    // `deleteCredential` do it: the remembered devices, and every other
+    // session — a session stored `completa` is never narrowed by anything
+    // (`estadoEfectivo` only ever reads the row), so a cookie on another
+    // machine would keep the gated writes that carry no `exigeContrasena`
+    // for the rest of its life on an account with nothing behind it. Only
+    // when the old address *was* verified (otherwise nothing changed) and
+    // only when no credential remains (a passkey or an app still vouches).
+    //
+    // **`except` this session**, because verifying the new address needs the
+    // session this request runs on; the one machine that just typed the
+    // password keeps its seat. Both reads and both writes on this
+    // transaction so that none of them borrows a second pool connection
+    // while this one holds its locks.
+    if (eraVerificada && !(await tieneCredencialRegistrada(caller.id, { transaction }))) {
+      dispositivosRevocados = await revokeAllRememberedDevicesOf(caller.id, { transaction });
+      sesionesRevocadas = await revokeAllSessionsOf(caller.id, { except: caller.id_sesion, transaction });
+    }
   });
 
   logAction({
@@ -369,7 +414,14 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     entity: "Usuario",
     entity_id: caller.id,
     detail: "Solicitó verificar una dirección de correo",
-    metadata: { email_destino: destino },
+    // Plan 4E: `null` when nothing was revoked because nothing had to be —
+    // the old address was unverified, or a credential still vouches. A
+    // number, possibly zero, when the last factor went with the address.
+    metadata: {
+      email_destino: destino,
+      dispositivos_revocados: dispositivosRevocados,
+      sesiones_revocadas: sesionesRevocadas,
+    },
     severity: "info",
     ip_address: req.ip ?? null,
   });
@@ -403,13 +455,17 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
   // one email it is for.
   const token = await crearToken({ id_usuario: caller.id, email_destino: destino, proposito: "verify_email" });
   const cuerpo = verificationEmailBody(verificationLinkFor(token));
-  await enviarCorreo({
-    para: destino,
-    flujo: "email/verificar",
-    asunto: "Verifica tu correo — Osefi",
-    html: cuerpo.html,
-    texto: cuerpo.texto,
-  });
+  // Bounded: a person is waiting on the profile screen (plan 4E, design §4.1).
+  await enviarCorreo(
+    {
+      para: destino,
+      flujo: "email/verificar",
+      asunto: "Verifica tu correo — Osefi",
+      html: cuerpo.html,
+      texto: cuerpo.texto,
+    },
+    { plazo_ms: MAIL_PLAZO_INTERACTIVO_MS },
+  );
 
   if (eraVerificada && direccionAnterior) {
     // The real defence in this whole flow — see the handler's own comment.
@@ -417,13 +473,16 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     // and never blocking or altering the response: same contract as the
     // verification mail above.
     const aviso = previousAddressNoticeBody(maskEmail(destino));
-    await enviarCorreo({
-      para: direccionAnterior,
-      flujo: "email/aviso-direccion-anterior",
-      asunto: "Tu dirección de recuperación cambió — Osefi",
-      html: aviso.html,
-      texto: aviso.texto,
-    });
+    await enviarCorreo(
+      {
+        para: direccionAnterior,
+        flujo: "email/aviso-direccion-anterior",
+        asunto: "Tu dirección de recuperación cambió — Osefi",
+        html: aviso.html,
+        texto: aviso.texto,
+      },
+      { plazo_ms: MAIL_PLAZO_INTERACTIVO_MS },
+    );
   }
   // Neither `enviarCorreo` call's `{ ok }` is read here — branching the
   // response on it is exactly the oracle Global Constraint #1 forbids.
@@ -493,16 +552,45 @@ export const verifyEmail = handler("verifyEmail", async (req: Request, res: Resp
     return res.status(400).json({ message: TOKEN_INVALIDO });
   }
 
+  // Plan 4E: a verified address is a second factor, so confirming it is
+  // registering one, and this does what `confirmTotp` and `registerVerify`
+  // do at the same moment — three writes, one transaction:
+  //
+  // 1. the column;
+  // 2. **this session promoted** (`parcial`/`onboarding` → `completa`), or,
+  //    when `promoverSesion` matched nothing — a session that opened
+  //    `completa` under the grace clock, hallazgo F2/B-1 — **sealed**, so the
+  //    ten-minute step-up window opens now rather than refusing the very next
+  //    gated write on an account that just proved a factor;
+  // 3. the grace deadline cleared, because there is nothing left to chase.
+  //
+  // An earlier draft did only the third. The audit traced what that left: a
+  // session stored `onboarding` — everybody who logged in after their own
+  // deadline, which is the population this plan exists for — stays
+  // `onboarding` for its whole life, because `estadoEfectivo` only ever
+  // narrows; every route answers 403 `FACTOR_PENDIENTE`, and the one screen
+  // that code points to still asks for an app or a key.
+  //
+  // `caller.id_sesion` and `redeemed.id_usuario` name the same account:
+  // `consumirToken` above was scoped with `soloDelUsuario: caller.id`.
   try {
-    await UsuarioModel.update(
-      { email_verified_at: new Date() },
-      { where: { id: redeemed.id_usuario } },
-    );
+    await sequelize.transaction(async (transaction) => {
+      await UsuarioModel.update(
+        { email_verified_at: new Date() },
+        { where: { id: redeemed.id_usuario }, transaction },
+      );
+      const promovida = await promoverSesion(caller.id_sesion, "correo", { transaction });
+      if (!promovida) {
+        await sellarPruebaDeFactor(caller.id_sesion, "correo", { transaction });
+      }
+      await apagarLaMecha(redeemed.id_usuario, { transaction });
+    });
   } catch (err) {
     if (isEmailUniqueViolation(err)) {
       // Somebody else verified this exact address between the check above
       // and this write. The token stays burned — see the module comment on
-      // why retrying it is not the fix.
+      // why retrying it is not the fix. The transaction rolled the session
+      // writes back with it: nothing was promoted for an address nobody got.
       return res.status(400).json({ message: TOKEN_INVALIDO });
     }
     throw err;
@@ -513,9 +601,12 @@ export const verifyEmail = handler("verifyEmail", async (req: Request, res: Resp
     action: "EMAIL_VERIFIED",
     entity: "Usuario",
     entity_id: redeemed.id_usuario,
-    detail: "Confirmó su dirección de correo",
-    metadata: { email_destino: redeemed.email_destino },
-    severity: "info",
+    detail: "Confirmó su dirección de correo; desde ahora es su segundo factor",
+    metadata: { email_destino: redeemed.email_destino, id_sesion: caller.id_sesion, fuente: "correo" },
+    // `critical`, matching `TOTP_CONFIRMED` and `WEBAUTHN_REGISTERED`: since
+    // plan 4E this line *is* a factor registration, and the one most accounts
+    // will ever have. `EMAIL_CHANGED`, its removal, was already critical.
+    severity: "critical",
     ip_address: req.ip ?? null,
   });
 

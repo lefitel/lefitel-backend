@@ -90,6 +90,11 @@ import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js"
 import { acunarDispositivo, setRememberedDeviceCookie } from "../auth/rememberedDeviceIssue.js";
 import { REMEMBER_DEVICE_FIELD, LOCKOUT_AFTER_FAILURES } from "../config/security.js";
 import { permissionsFor } from "../permissions/store.js";
+import bcryptjs from "bcryptjs";
+import type { Transaction } from "sequelize";
+import { fillerHash } from "../config/security.js";
+import { cobrarIntento, liquidarCodigo } from "../auth/emailCodeStore.js";
+import { admitirIntentoDeCorreo } from "../auth/emailCodeVerifyBudget.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -97,9 +102,23 @@ import { makeHandler } from "../utils/handler.js";
 const mfaLog = log("mfa");
 const handler = makeHandler(mfaLog);
 
-/** The one body field both endpoints read a code from — a TOTP digit string
- *  or a recovery code, told apart below by shape alone. */
+/** The one body field both endpoints read a code from — a TOTP digit string,
+ *  a recovery code or, since plan 4E, the six digits sent by email. */
 const CAMPO_CODIGO = "codigo";
+
+/**
+ * Which kind of code the body carries — plan 4E. Optional: **absent means
+ * what it always meant**, six digits are a TOTP and anything else a recovery
+ * code, so no client in flight changes behaviour. Present, it picks the arm
+ * whatever the shape says, which is the only way an email code (six digits,
+ * like a TOTP) can reach its own check. `"passkey"` is a method the step-up
+ * window may *offer* (`MetodoReautenticacion`) but not one these two routes
+ * take — the ceremony has its own endpoints — so it is refused here like any
+ * unknown value, before anything is spent.
+ */
+const CAMPO_METODO = "metodo";
+type Metodo = "totp" | "codigo" | "correo";
+const METODOS = new Set<string>(["totp", "codigo", "correo"]);
 
 /** Exactly six ASCII digits: what `otpauth`'s default `digits: 6` produces
  *  and the only shape that is ever attempted as a TOTP code. Anything else —
@@ -126,7 +145,11 @@ const VENTANA_DIAGNOSTICO = 10;
  */
 export const CODIGO_MFA_INVALIDO = "Código incorrecto o ya utilizado.";
 export const CODIGO_REQUERIDO =
-  "Introduce el código de tu aplicación de autenticación o uno de tus códigos de recuperación.";
+  "Introduce el código de tu aplicación de autenticación, el código que te enviamos por correo " +
+  "o uno de tus códigos de recuperación.";
+export const METODO_DESCONOCIDO = "Método de verificación desconocido.";
+export const DEMASIADOS_INTENTOS_CORREO =
+  "Demasiados intentos con el código por correo. Espera unos minutos o usa otro método.";
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
 
 /**
@@ -142,6 +165,79 @@ class NadaQueSellar extends Error {}
 /** Who the caller is, per `authenticate` — never trusted from the body. */
 function callerOf(req: Request): NonNullable<Request["user"]> | null {
   return req.user ?? null;
+}
+
+/**
+ * The `metodo` field, validated: `undefined` when absent, the value when it is
+ * one of the three, `null` when it is anything else.
+ */
+function metodoDe(body: unknown): Metodo | undefined | null {
+  const crudo = (body as Record<string, unknown> | undefined)?.[CAMPO_METODO];
+  if (crudo === undefined) return undefined;
+  return typeof crudo === "string" && METODOS.has(crudo) ? (crudo as Metodo) : null;
+}
+
+/**
+ * The email-code arm, shared by `verify` and `stepup` — plan 4E, design §3.5.
+ * What differs between the two is only how the session is sealed, and the
+ * caller passes that in.
+ *
+ * The order is the design:
+ *
+ * 1. **Shape, then the bucket, before any database work.** Six digits or
+ *    nothing — a recovery code sent with `metodo: "correo"` costs no bcrypt.
+ *    `admitirIntentoDeCorreo` bounds what one account can make the server
+ *    compute per quarter hour; see `emailCodeVerifyBudget.ts`.
+ * 2. **Charge the attempt, then compare.** `cobrarIntento` is one row-locked
+ *    `UPDATE … RETURNING`: the increment, the burn at the cap and the read of
+ *    the hash are a single statement, so N concurrent guesses are N charged
+ *    attempts and from the fifth on none of them sees the hash. Outside any
+ *    transaction, because what follows is bcrypt.
+ * 3. **Compare, uniformly.** With no live code — none, expired, spent, burned,
+ *    address changed — the compare runs against `fillerHash()`, so "there is
+ *    no code" takes as long as "wrong code". The repo measured that gap in the
+ *    login and closes it the same way (`credentials.ts`).
+ * 4. **Spend and seal together.** `liquidarCodigo` marks the row by id while
+ *    it is still unspent — a concurrent request with the same correct code
+ *    loses here, not at the compare — and the seal runs in the same
+ *    transaction; when the seal finds no session (`NadaQueSellar`, the shape
+ *    the recovery-code arm already has) the spend rolls back with it and the
+ *    code stays usable. **The last allowed attempt is the exception**: the
+ *    charge that reaches the cap burns the row in the statement that read
+ *    the hash (`agotado`), so a correct last code seals without spending —
+ *    spending would find that burn and call it a loss. An audit caught the
+ *    first draft answering the correct fifth code as wrong, and locking the
+ *    account on it. The charged attempt itself is never rolled back: a
+ *    correct code that finds no session to seal costs one attempt, as the
+ *    recovery-code arm's does.
+ *
+ * Returns which of the four outcomes happened; the caller maps them to the
+ * one uniform 400 (`"forma"`, `"invalido"`), the 429 (`"cubo"`), or success.
+ */
+async function probarCodigoDeCorreo(
+  id_usuario: number,
+  crudo: string,
+  sellar: (transaction: Transaction) => Promise<boolean>,
+): Promise<"ok" | "forma" | "cubo" | "invalido"> {
+  if (!FORMA_TOTP.test(crudo)) return "forma";
+  if (!admitirIntentoDeCorreo(id_usuario)) return "cubo";
+
+  const cobrado = await cobrarIntento(id_usuario);
+  const coincide = await bcryptjs.compare(crudo, cobrado ? cobrado.codigo_hash : await fillerHash());
+  if (!cobrado || !coincide) return "invalido";
+
+  try {
+    await sequelize.transaction(async (transaction) => {
+      // Burned by the charge itself on the last allowed attempt: nothing
+      // left to spend, and spending would report its own burn as a loss.
+      if (!cobrado.agotado && !(await liquidarCodigo(cobrado.id, { transaction }))) throw new NadaQueSellar();
+      if (!(await sellar(transaction))) throw new NadaQueSellar();
+    });
+  } catch (err) {
+    if (!(err instanceof NadaQueSellar)) throw err;
+    return "invalido";
+  }
+  return "ok";
 }
 
 interface FilaFactorTotp {
@@ -401,12 +497,33 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
     return res.status(400).json({ message: CODIGO_REQUERIDO });
   }
 
+  // Plan 4E: an explicit `metodo` picks the arm; absent, the shape does, as
+  // it always did. An unknown value is refused before anything is spent.
+  const metodo = metodoDe(req.body);
+  if (metodo === null) {
+    return res.status(400).json({ message: METODO_DESCONOCIDO });
+  }
+  const rama: Metodo = metodo ?? (FORMA_TOTP.test(crudo) ? "totp" : "codigo");
+
   const ip = req.ip ?? null;
   let fuente: FuenteMfa | null = null;
   let fallaCriptografica = false;
   let sinFactorConfirmado = false;
+  let detalleDeFallo: string | null = null;
 
-  if (FORMA_TOTP.test(crudo)) {
+  if (rama === "correo") {
+    const resultado = await probarCodigoDeCorreo(caller.id, crudo, async (transaction) => {
+      // Same row, same two halves as the other arms: promote what is
+      // `parcial`/`onboarding`, seal what is already `completa`.
+      if (await promoverSesion(caller.id_sesion, "correo", { transaction })) return true;
+      return sellarPruebaDeFactor(caller.id_sesion, "correo", { transaction });
+    });
+    if (resultado === "cubo") {
+      return res.status(429).json({ message: DEMASIADOS_INTENTOS_CORREO });
+    }
+    if (resultado === "ok") fuente = "correo";
+    else detalleDeFallo = "Código por correo incorrecto, caducado o ya utilizado";
+  } else if (rama === "totp") {
     const resultado = await verificarTotp(caller.id, crudo, ip);
     if (resultado.valido) {
       // `promoverSesion` is not composed transactionally with `sellarPaso`
@@ -513,9 +630,10 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
         caller.id,
         ip,
         "MFA_VERIFY_FAILED",
-        sinFactorConfirmado
-          ? "Se intentó un código de recuperación sin ningún factor confirmado en la cuenta: nada que rescatar"
-          : "Código de segundo factor incorrecto, repetido o ya utilizado",
+        detalleDeFallo ??
+          (sinFactorConfirmado
+            ? "Se intentó un código de recuperación sin ningún factor confirmado en la cuenta: nada que rescatar"
+            : "Código de segundo factor incorrecto, repetido o ya utilizado"),
       );
       // Ver la nota gemela en `stepup`: `null` es «no se pudo establecer».
       if (cargado !== null) intentosRestantes = cargado;
@@ -641,11 +759,36 @@ export const stepup = handler("stepup", async (req: Request, res: Response) => {
     return res.status(400).json({ message: CODIGO_REQUERIDO });
   }
 
+  const metodo = metodoDe(req.body);
+  if (metodo === null) {
+    return res.status(400).json({ message: METODO_DESCONOCIDO });
+  }
+  const rama: Metodo = metodo ?? (FORMA_TOTP.test(crudo) ? "totp" : "codigo");
+
   const ip = req.ip ?? null;
   let fuente: FuenteMfa | null = null;
   let fallaCriptografica = false;
+  let sinFactorConfirmado = false;
+  let detalleDeFallo: string | null = null;
 
-  if (FORMA_TOTP.test(crudo)) {
+  if (rama === "correo") {
+    // The seal is the direct `UPDATE` with `estado: "completa"` this endpoint
+    // uses for the other two arms — not `sellarPruebaDeFactor`, which has no
+    // state filter and would let a `parcial` session seal itself through the
+    // step-up door.
+    const resultado = await probarCodigoDeCorreo(caller.id, crudo, async (transaction) => {
+      const [count] = await SesionModel.update(
+        { mfa_satisfied_at: new Date(), mfa_source: "correo" },
+        { where: { id: caller.id_sesion, id_usuario: caller.id, estado: "completa" }, transaction },
+      );
+      return count > 0;
+    });
+    if (resultado === "cubo") {
+      return res.status(429).json({ message: DEMASIADOS_INTENTOS_CORREO });
+    }
+    if (resultado === "ok") fuente = "correo";
+    else detalleDeFallo = "Reautenticación de step-up por correo incorrecta, caducada o ya utilizada";
+  } else if (rama === "totp") {
     const resultado = await verificarTotp(caller.id, crudo, ip);
     if (resultado.valido) {
       const [count] = await SesionModel.update(
@@ -655,6 +798,16 @@ export const stepup = handler("stepup", async (req: Request, res: Response) => {
       if (count > 0) fuente = "totp";
     }
     fallaCriptografica = resultado.fallaCriptografica;
+  } else if (!(await tieneAlgunFactor(caller.id))) {
+    // Hallazgo F1's guard, which `verify` above has carried since plan 4B
+    // and this endpoint did not — plan 4E's audit (S11). It mattered little
+    // while nothing but an app or a key could have minted codes; it matters
+    // now that an account whose only factor is its verified address may hold
+    // a sheet of them, then change its address and have no factor at all,
+    // and still be `completa` under a fresh grace clock. A code re-sealing
+    // that session would open every gated write short of the D6 routes to a
+    // sheet plus a cookie. Same rule, same sentence, same charge as `verify`.
+    sinFactorConfirmado = true;
   } else {
     try {
       const promovido = await sequelize.transaction(async (transaction) => {
@@ -693,7 +846,10 @@ export const stepup = handler("stepup", async (req: Request, res: Response) => {
         caller.id,
         ip,
         "MFA_VERIFY_FAILED",
-        "Reautenticación de step-up incorrecta, repetida o ya utilizada",
+        detalleDeFallo ??
+          (sinFactorConfirmado
+            ? "Se intentó un código de recuperación en el step-up sin ningún factor confirmado en la cuenta: nada que rescatar"
+            : "Reautenticación de step-up incorrecta, repetida o ya utilizada"),
       );
       // `null` significa «no se pudo establecer», no «cero»: sobrescribir con
       // él descartaría el valor honrado que ya se leyó de la fila y, además,

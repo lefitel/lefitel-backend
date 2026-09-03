@@ -46,9 +46,14 @@ import type { Request, Response } from "express";
 const findOne = vi.fn();
 const update = vi.fn();
 const increment = vi.fn().mockResolvedValue(undefined);
+// Plan 4E: `tieneAlgunFactor` reads `email_verified_at` by primary key on
+// every login. Unverified by default, so every fixture in this file keeps
+// modelling the account it always did — one with no factor.
+const findByPk = vi.fn().mockResolvedValue({ dataValues: { email_verified_at: null } });
 vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: {
     findOne: (...a: unknown[]) => findOne(...a),
+    findByPk: (...a: unknown[]) => findByPk(...a),
     update: (...a: unknown[]) => update(...a),
     increment: (...a: unknown[]) => increment(...a),
   },

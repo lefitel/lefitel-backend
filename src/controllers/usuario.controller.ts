@@ -1019,8 +1019,19 @@ export const rescatarMfaDeUsuario = handler("rescatarMfaDeUsuario", async (req: 
     });
   }
 
+  // Plan 4E: the reset deletes credentials and leaves the verified address,
+  // which is a factor on its own — so for that account the sentence "ya puede
+  // entrar solo con su contraseña" would be false, and the person reading
+  // this has to know what to do if the *mailbox* is what was lost.
+  const { correoVerificado } = resultado.datos;
   return res.status(200).json({
-    message: `Segundo factor restablecido para @${resultado.cuenta.user}.`,
+    message: correoVerificado
+      ? `Segundo factor restablecido para @${resultado.cuenta.user}: se borraron sus aplicaciones, llaves ` +
+        "y códigos. Su correo verificado sigue siendo su segundo factor, así que al entrar se le pedirá " +
+        "un código por correo. Si lo que perdió es el acceso a ese buzón, hay que cambiarle la " +
+        "dirección desde la consola de rescate (--set-email) o borrársela (--clear-email)."
+      : `Segundo factor restablecido para @${resultado.cuenta.user}.`,
+    correo_es_factor: correoVerificado,
     sesiones_revocadas: resultado.datos.sesionesRevocadas,
     dispositivos_revocados: resultado.datos.dispositivosRevocados,
     gracia_hasta: resultado.datos.graceUntil,

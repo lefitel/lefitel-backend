@@ -106,10 +106,36 @@ vi.mock("../models/codigoRecuperacion.model.js", () => ({
   CodigoRecuperacionModel: { count: (...args: unknown[]) => codigoCount(...args) },
 }));
 
+/**
+ * The fourth fake table, plan 4E: `usuarios`, read by primary key for one
+ * column. Without it the real model would be imported, and the first
+ * `findByPk` would be a genuine SELECT against whatever database `.env`
+ * names — which `app.auth.test.ts` warns is a copy of production.
+ *
+ * It answers the way the real model does: an instance-shaped object whose
+ * `dataValues` carries only the attributes asked for, or `null` when the row
+ * does not exist. Asking for the whole row is a mistake the fake surfaces:
+ * a `findByPk` with no `attributes` returns `dataValues` with nothing in it.
+ */
+let usuarios: Fila[] = [];
+const usuarioFindByPk = vi.fn(async (...args: unknown[]) => {
+  const id = args[0] as number;
+  const attributes = (args[1] as { attributes?: string[] } | undefined)?.attributes ?? [];
+  const fila = usuarios.find((u) => u.id === id);
+  if (!fila) return null;
+  const dataValues: Fila = {};
+  for (const columna of attributes) dataValues[columna] = fila[columna];
+  return { dataValues };
+});
+vi.mock("../models/usuario.model.js", () => ({
+  UsuarioModel: { findByPk: (...args: unknown[]) => usuarioFindByPk(...args) },
+}));
+
 const {
   factoresDe,
   metodosDeReautenticacion,
   tieneAlgunFactor,
+  tieneCredencialRegistrada,
   hayFactorVerificable,
   estadoInicialDeSesion,
 } = await import("./factorInventory.js");
@@ -142,6 +168,13 @@ const CODIGO_USADO: Fila = {
   used_at: new Date("2026-08-21T09:00:00.000Z"),
 };
 
+/** The account under test, with its address verified. A factor since plan 4E. */
+const CORREO_VERIFICADO: Fila = { id: YO, email_verified_at: new Date("2026-08-22T09:00:00.000Z") };
+/** The same account before it clicked the link — or after changing its address. Not a factor. */
+const CORREO_SIN_VERIFICAR: Fila = { id: YO, email_verified_at: null };
+/** Somebody else's verified address, to prove the read is scoped to one account. */
+const CORREO_AJENO: Fila = { id: OTRA_CUENTA, email_verified_at: new Date("2026-08-22T09:00:00.000Z") };
+
 /** The `where` of the last call this fake received. */
 const whereDe = (mock: { mock: { calls: unknown[][] } }): Fila =>
   (mock.mock.calls.at(-1)?.[0] as { where?: Fila } | undefined)?.where ?? {};
@@ -165,15 +198,24 @@ beforeEach(() => {
   passkeyCount.mockClear();
   totpCount.mockClear();
   codigoCount.mockClear();
+  usuarioFindByPk.mockClear();
   passkeys = [];
   secretosTotp = [];
   codigos = [];
+  usuarios = [];
 });
 
 describe("factoresDe", () => {
   it("returns zero for every kind on an account with nothing registered", async () => {
     // The tables are empty today — this is the true answer, not a stub.
-    expect(await factoresDe(YO)).toEqual({ passkeys: 0, totp: 0, codigos: 0 });
+    expect(await factoresDe(YO)).toStrictEqual({ passkeys: 0, totp: 0, codigos: 0, correo: 0 });
+  });
+
+  it("counts the verified address as one, and an unverified one as zero", async () => {
+    usuarios = [CORREO_VERIFICADO];
+    expect((await factoresDe(YO)).correo).toBe(1);
+    usuarios = [CORREO_SIN_VERIFICAR];
+    expect((await factoresDe(YO)).correo).toBe(0);
   });
 
   it("counts every passkey the account has registered, scoped to that account", async () => {
@@ -399,17 +441,17 @@ describe("metodosDeReautenticacion", () => {
   });
 
   it("is empty for an account with nothing registered", async () => {
-    expect(await metodosDeReautenticacion(YO)).toEqual([]);
+    expect(await metodosDeReautenticacion(YO)).toStrictEqual([]);
   });
 
   it("names the passkey when that is all the account has", async () => {
     passkeys = [PASSKEY];
-    expect(await metodosDeReautenticacion(YO)).toEqual(["passkey"]);
+    expect(await metodosDeReautenticacion(YO)).toStrictEqual(["passkey"]);
   });
 
   it("names TOTP when the secret is confirmed and this server can read it", async () => {
     secretosTotp = [TOTP_CONFIRMADO];
-    expect(await metodosDeReautenticacion(YO)).toEqual(["totp"]);
+    expect(await metodosDeReautenticacion(YO)).toStrictEqual(["totp"]);
   });
 
   // 🔴 The window would otherwise send somebody to type six digits into a
@@ -418,7 +460,7 @@ describe("metodosDeReautenticacion", () => {
   it("leaves TOTP out when this server cannot read the secrets", async () => {
     secretosTotp = [TOTP_CONFIRMADO];
     totpEstaDisponible.mockReturnValue(false);
-    expect(await metodosDeReautenticacion(YO)).toEqual([]);
+    expect(await metodosDeReautenticacion(YO)).toStrictEqual([]);
   });
 
   // The same broken keyring, and the passkey is untouched by it: nothing about
@@ -428,12 +470,12 @@ describe("metodosDeReautenticacion", () => {
     passkeys = [PASSKEY];
     secretosTotp = [TOTP_CONFIRMADO];
     totpEstaDisponible.mockReturnValue(false);
-    expect(await metodosDeReautenticacion(YO)).toEqual(["passkey"]);
+    expect(await metodosDeReautenticacion(YO)).toStrictEqual(["passkey"]);
   });
 
   it("does not name a TOTP secret that was never confirmed", async () => {
     secretosTotp = [TOTP_SIN_CONFIRMAR];
-    expect(await metodosDeReautenticacion(YO)).toEqual([]);
+    expect(await metodosDeReautenticacion(YO)).toStrictEqual([]);
   });
 
   // The difference from `tieneAlgunFactor`, which excludes recovery codes on
@@ -460,15 +502,15 @@ describe("metodosDeReautenticacion", () => {
     passkeys = [PASSKEY];
     secretosTotp = [TOTP_CONFIRMADO];
     codigos = [CODIGO_SIN_USAR];
-    expect(await metodosDeReautenticacion(YO)).toEqual(["passkey", "totp", "codigo"]);
+    expect(await metodosDeReautenticacion(YO)).toStrictEqual(["passkey", "totp", "codigo"]);
   });
 
   it("never names another account's factors", async () => {
     passkeys = [PASSKEY_AJENA];
     secretosTotp = [];
-    expect(await metodosDeReautenticacion(YO)).toEqual([]);
+    expect(await metodosDeReautenticacion(YO)).toStrictEqual([]);
     // And the same rows, asked about from the account that owns them.
-    expect(await metodosDeReautenticacion(OTRA_CUENTA)).toEqual(["passkey"]);
+    expect(await metodosDeReautenticacion(OTRA_CUENTA)).toStrictEqual(["passkey"]);
   });
 });
 
@@ -714,7 +756,7 @@ describe("estadoInicialDeSesion", () => {
     it("opens completa directly, with no grace clock, and says a factor was found", async () => {
       passkeys = [PASSKEY];
       const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "passkey");
-      expect(r).toEqual({ estado: "completa", graceUntil: null, conFactor: true });
+      expect(r).toStrictEqual({ estado: "completa", graceUntil: null, conFactor: true, conCredencial: true });
     });
 
     // The two branches that agree on the state and disagree on the truth: the
@@ -725,7 +767,7 @@ describe("estadoInicialDeSesion", () => {
         ahora,
         "passkey",
       );
-      expect(r).toEqual({ estado: "completa", graceUntil: null, conFactor: false });
+      expect(r).toStrictEqual({ estado: "completa", graceUntil: null, conFactor: false, conCredencial: false });
     });
 
     it("runs its counts on the caller's transaction when given one", async () => {
@@ -770,5 +812,164 @@ describe("estadoInicialDeSesion", () => {
     );
     expect(r.estado).toBe("onboarding");
     expect(passkeyCount).toHaveBeenCalledWith({ where: { id_usuario: OTRA_CUENTA } });
+  });
+});
+
+// Plan 4E: a verified email address is a factor, and it is not a credential.
+// The two questions this file's header describes, answered side by side for
+// the one account where they differ — the one that verified its address and
+// registered nothing else.
+describe("the verified email — a factor, and not a credential (plan 4E)", () => {
+  const ahora = new Date("2026-09-03T10:00:00.000Z");
+
+  describe("tieneAlgunFactor", () => {
+    it("is true for an account whose only factor is its verified address", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      expect(await tieneAlgunFactor(YO)).toBe(true);
+    });
+
+    it("is false while the address is not verified — the link was never clicked, or the address changed", async () => {
+      usuarios = [CORREO_SIN_VERIFICAR];
+      expect(await tieneAlgunFactor(YO)).toBe(false);
+    });
+
+    it("is false for an account the table does not know — archived, paranoid — and does not throw", async () => {
+      usuarios = [];
+      expect(await tieneAlgunFactor(YO)).toBe(false);
+    });
+
+    it("does not count another account's verified address", async () => {
+      usuarios = [CORREO_AJENO];
+      expect(await tieneAlgunFactor(YO)).toBe(false);
+    });
+
+    it("reads one column by primary key, and forwards the caller's transaction", async () => {
+      // `findByPk` with `attributes`, and not `count`: `app.auth.test.ts`
+      // spies `UsuarioModel.count` once for `deleteRol`'s "role in use" check,
+      // and a second question riding that spy passes for the wrong reason.
+      const transaction = { id: "una-transaccion" };
+      usuarios = [CORREO_VERIFICADO];
+      await tieneAlgunFactor(YO, { transaction: transaction as never });
+      expect(usuarioFindByPk).toHaveBeenCalledWith(YO, {
+        attributes: ["email_verified_at"],
+        transaction,
+      });
+    });
+  });
+
+  describe("tieneCredencialRegistrada", () => {
+    it("is false for that same account: an address is not a credential", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      expect(await tieneCredencialRegistrada(YO)).toBe(false);
+    });
+
+    it("never reads the usuarios table at all", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      await tieneCredencialRegistrada(YO);
+      expect(usuarioFindByPk).not.toHaveBeenCalled();
+    });
+
+    it("is true with a passkey, exactly as tieneAlgunFactor was before the split", async () => {
+      passkeys = [PASSKEY];
+      expect(await tieneCredencialRegistrada(YO)).toBe(true);
+    });
+
+    it("and the two disagree only on the address, never on a credential", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      secretosTotp = [TOTP_CONFIRMADO];
+      expect(await tieneCredencialRegistrada(YO)).toBe(true);
+      expect(await tieneAlgunFactor(YO)).toBe(true);
+    });
+  });
+
+  describe("hayFactorVerificable", () => {
+    it("says yes for a verified address even when the keyring is broken — the code goes by email", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      secretosTotp = [TOTP_CONFIRMADO];
+      totpEstaDisponible.mockReturnValue(false);
+      expect(await hayFactorVerificable(YO)).toBe(true);
+    });
+
+    it("still says no for an unreadable TOTP when the address is not verified", async () => {
+      usuarios = [CORREO_SIN_VERIFICAR];
+      secretosTotp = [TOTP_CONFIRMADO];
+      totpEstaDisponible.mockReturnValue(false);
+      expect(await hayFactorVerificable(YO)).toBe(false);
+    });
+  });
+
+  describe("metodosDeReautenticacion", () => {
+    beforeEach(() => {
+      totpEstaDisponible.mockReturnValue(true);
+    });
+
+    it("names the email when the address is verified, and nothing else for an email-only account", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      expect(await metodosDeReautenticacion(YO)).toStrictEqual(["correo"]);
+    });
+
+    it("does not name it while the address is unverified", async () => {
+      usuarios = [CORREO_SIN_VERIFICAR];
+      passkeys = [PASSKEY];
+      expect(await metodosDeReautenticacion(YO)).toStrictEqual(["passkey"]);
+    });
+
+    it("offers it after the app and before the recovery code — a code that has to be requested and waited for", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      passkeys = [PASSKEY];
+      secretosTotp = [TOTP_CONFIRMADO];
+      codigos = [CODIGO_SIN_USAR];
+      expect(await metodosDeReautenticacion(YO)).toStrictEqual(["passkey", "totp", "correo", "codigo"]);
+    });
+
+    it("keeps offering it beside a passkey — on a par, by decision", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      passkeys = [PASSKEY];
+      expect(await metodosDeReautenticacion(YO)).toStrictEqual(["passkey", "correo"]);
+    });
+  });
+
+  describe("estadoInicialDeSesion", () => {
+    it("opens parcial for an email-only account, and says it found a factor and no credential", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+      expect(r).toStrictEqual({ estado: "parcial", graceUntil: null, conFactor: true, conCredencial: false });
+    });
+
+    it("stamps no deadline on that account: it has nothing left to be given fourteen days for", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+      expect(r.graceUntil).toBeNull();
+    });
+
+    it("opens completa for it on a remembered device, like any other factor", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "dispositivo");
+      expect(r).toStrictEqual({ estado: "completa", graceUntil: null, conFactor: true, conCredencial: false });
+    });
+
+    it("starts the grace clock as before while the address is unverified", async () => {
+      usuarios = [CORREO_SIN_VERIFICAR];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+      expect(r.estado).toBe("completa");
+      expect(r.graceUntil?.getTime()).toBe(ahora.getTime() + MFA_GRACE_DAYS * DIA);
+      expect(r.conFactor).toBe(false);
+    });
+
+    it("says conCredencial: true only when a credential is there, address or no address", async () => {
+      usuarios = [CORREO_VERIFICADO];
+      passkeys = [PASSKEY];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "passkey");
+      expect(r).toStrictEqual({ estado: "completa", graceUntil: null, conFactor: true, conCredencial: true });
+    });
+
+    it("reads the address on the caller's transaction too", async () => {
+      const transaction = { id: "una-transaccion" };
+      usuarios = [CORREO_VERIFICADO];
+      await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, undefined, {
+        transaction: transaction as never,
+      });
+      expect(usuarioFindByPk.mock.calls[0][1]).toMatchObject({ transaction });
+    });
   });
 });

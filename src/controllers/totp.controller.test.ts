@@ -55,9 +55,15 @@ vi.mock("../auth/sessionPromotion.js", () => ({
   apagarLaMecha: (...a: unknown[]) => apagarLaMecha(...a),
 }));
 
+// Plan 4E: two questions. `tieneCredencialRegistrada` (a passkey or an app
+// left) decides the remembered devices and the verb; `tieneAlgunFactor`
+// (which a verified address now satisfies) decides the sessions. Mocked
+// separately, so a tail keyed on the wrong one goes red.
 const tieneAlgunFactor = vi.fn();
+const tieneCredencialRegistrada = vi.fn();
 vi.mock("../auth/factorInventory.js", () => ({
   tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
+  tieneCredencialRegistrada: (...a: unknown[]) => tieneCredencialRegistrada(...a),
 }));
 
 const contarCodigosRestantes = vi.fn();
@@ -114,6 +120,7 @@ const {
   MENSAJE_SIN_FACTOR,
   MENSAJE_FACTOR_ELIMINADO,
   MENSAJE_ULTIMO_FACTOR_ELIMINADO,
+  MENSAJE_ULTIMA_CREDENCIAL_QUEDA_CORREO,
 } = await import("./totp.controller.js");
 
 const CALLER = {
@@ -182,6 +189,7 @@ beforeEach(() => {
   sellarPruebaDeFactor.mockReset().mockResolvedValue(undefined);
   apagarLaMecha.mockReset().mockResolvedValue(undefined);
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
+  tieneCredencialRegistrada.mockReset().mockResolvedValue(false);
   revokeAllRememberedDevicesOf.mockReset().mockResolvedValue(0);
   revokeAllSessionsOf.mockReset().mockResolvedValue(0);
   // Default: nothing outstanding yet, so `confirmTotp` takes the "issue the
@@ -578,6 +586,7 @@ describe("deleteTotp", () => {
     // revoked and nobody is about to be thrown out, so promising it would be a
     // second, opposite kind of lie.
     factorFindOne.mockResolvedValue({ dataValues: { id: 10, confirmed_at: new Date() } });
+    tieneCredencialRegistrada.mockResolvedValue(true);
     tieneAlgunFactor.mockResolvedValue(true);
     const c = call(CALLER);
 
@@ -626,6 +635,7 @@ describe("deleteTotp", () => {
 
   it("does not revoke devices or log critical when another factor remains on the account", async () => {
     factorFindOne.mockResolvedValue({ dataValues: { id: 12, confirmed_at: new Date() } });
+    tieneCredencialRegistrada.mockResolvedValue(true);
     tieneAlgunFactor.mockResolvedValue(true);
     const c = call(CALLER);
 
@@ -693,6 +703,7 @@ describe("deleteTotp", () => {
 
     it("does not revoke any session when another factor remains on the account", async () => {
       factorFindOne.mockResolvedValue({ dataValues: { id: 15, confirmed_at: new Date() } });
+      tieneCredencialRegistrada.mockResolvedValue(true);
       tieneAlgunFactor.mockResolvedValue(true);
       const c = call(CALLER);
 
@@ -712,5 +723,68 @@ describe("deleteTotp", () => {
       expect(tieneAlgunFactor).not.toHaveBeenCalled();
       expect(revokeAllSessionsOf).not.toHaveBeenCalled();
     });
+  });
+});
+
+// Plan 4E: the third tail. The last credential goes, the verified address
+// stays — so the account still has a factor. Sessions survive; the remembered
+// devices do not, because they were trusted on the strength of the app.
+describe("deleteTotp — the last credential goes but the verified email stays (plan 4E)", () => {
+  const ultimaAppConCorreo = () => {
+    factorFindOne.mockResolvedValue({ dataValues: { id: 20, confirmed_at: new Date() } });
+    tieneCredencialRegistrada.mockResolvedValue(false);
+    tieneAlgunFactor.mockResolvedValue(true);
+  };
+
+  it("says the next login will ask for a code by email, and keeps the session", async () => {
+    ultimaAppConCorreo();
+    const c = call(CALLER);
+    await deleteTotp(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(c.payload.message).toBe(MENSAJE_ULTIMA_CREDENCIAL_QUEDA_CORREO);
+    expect(clearSessionCookie).not.toHaveBeenCalled();
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+  });
+
+  it("revokes the remembered devices all the same: they were trusted on the strength of the app", async () => {
+    ultimaAppConCorreo();
+    const c = call(CALLER);
+    await deleteTotp(c.req, c.res);
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(CALLER.id);
+  });
+
+  it("files a warning that names what remains, not a critical last-factor line", async () => {
+    ultimaAppConCorreo();
+    const c = call(CALLER);
+    await deleteTotp(c.req, c.res);
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "TOTP_DELETED",
+        severity: "warning",
+        metadata: expect.objectContaining({ ultimo_factor: false, ultima_credencial: true, queda_correo: true }),
+      }),
+    );
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ severity: "critical" }));
+  });
+
+  it("asks the factor question only when no credential is left", async () => {
+    factorFindOne.mockResolvedValue({ dataValues: { id: 21, confirmed_at: new Date() } });
+    tieneCredencialRegistrada.mockResolvedValue(true);
+    const c = call(CALLER);
+    await deleteTotp(c.req, c.res);
+    expect(tieneAlgunFactor).not.toHaveBeenCalled();
+    expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
+  });
+
+  it("still revokes everything when neither a credential nor a verified address remains", async () => {
+    factorFindOne.mockResolvedValue({ dataValues: { id: 22, confirmed_at: new Date() } });
+    tieneCredencialRegistrada.mockResolvedValue(false);
+    tieneAlgunFactor.mockResolvedValue(false);
+    const c = call(CALLER);
+    await deleteTotp(c.req, c.res);
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(CALLER.id);
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(CALLER.id);
+    expect(clearSessionCookie).toHaveBeenCalled();
+    expect(c.payload.message).toBe(MENSAJE_ULTIMO_FACTOR_ELIMINADO);
   });
 });

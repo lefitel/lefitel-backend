@@ -5,6 +5,7 @@ import { sequelize } from "./database/sequelize.js";
 import { log } from "./utils/logger.js";
 import {
   requiredEnv,
+  configuracionDeCorreo,
   fillerHash,
   SESSION_PURGE_INTERVAL_MS,
   REMEMBERED_DEVICE_PURGE_INTERVAL_MS,
@@ -17,6 +18,7 @@ import { schedulePurge } from "./auth/purgeJob.js";
 import { purgeExpiredSessions } from "./auth/sessionStore.js";
 import { purgeExpiredRememberedDevices } from "./auth/rememberedDeviceStore.js";
 import { comprobarLlaveAlArrancar } from "./auth/mfaKeyCheck.js";
+import { configurarRelevo } from "./auth/mailRelay.js";
 
 // `quiet` because dotenv 17 prints a line of its own on every load — an
 // "injected env (13) from .env" with a tip appended. Everything else this
@@ -60,6 +62,50 @@ if (missing.length > 0) {
   );
   process.exit(1);
 }
+
+/**
+ * The mail chain (plan 4E), checked here for the same reason and in the same
+ * place as `requiredEnv`: before anything is queued, so that an exit is an
+ * exit. `requiredEnv` proved `MAIL_PROVIDERS` is *set*; this reads its value
+ * and finds out whether each provider it names has its credentials.
+ *
+ * **What exits and what does not, and why the line is where it is.** A
+ * provider with an incomplete configuration is dropped from the chain and
+ * logged at `fatal` — the first screen of the log, by name of the variable
+ * that is missing, never its value — and the process boots with the rest. A
+ * chain of four is a degraded chain; a process that refuses to start over a
+ * typo is an outage for nine people whose only second factor is now the
+ * email, which is the rule `comprobarLlaveAlArrancar` below already applies
+ * to the TOTP key. What does exit is an **empty** chain in production: that
+ * is the silent no-send `requiredEnv` exists to turn into a deploy failure,
+ * and with the code by email on the login path it would close the ERP to
+ * everybody by the second login.
+ *
+ * The configuration object carries variable names, never secrets, so it is
+ * logged whole.
+ */
+const correo = configuracionDeCorreo(process.env, process.env.NODE_ENV);
+if (!correo.ok) {
+  bootLog.fatal(
+    { errores: correo.errores },
+    "la cadena de correo está vacía: ningún proveedor de MAIL_PROVIDERS tiene su configuración completa. El servidor no puede arrancar.",
+  );
+  process.exit(1);
+}
+for (const descartado of correo.descartados) {
+  const linea = process.env.NODE_ENV === "production" ? bootLog.fatal.bind(bootLog) : bootLog.warn.bind(bootLog);
+  linea(
+    { proveedor: descartado.nombre, motivo: descartado.motivo },
+    `proveedor de correo DESCARTADO de la cadena: ${descartado.nombre} — ${descartado.motivo}`,
+  );
+}
+configurarRelevo(correo);
+bootLog.info(
+  { modo: correo.modo, cadena: correo.proveedores.map((p) => `${p.nombre}(${p.cupoDiario}/día)`) },
+  correo.modo === "envia"
+    ? `cadena de correo: ${correo.proveedores.map((p) => p.nombre).join(" → ")}`
+    : "correo en modo desarrollo: no se envía nada",
+);
 
 /**
  * `requiredEnv` only proves `COOKIE_NAME` was set, not that it can deliver

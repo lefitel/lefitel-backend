@@ -410,14 +410,15 @@ export function requireStepUp({
           // same gate. See `metodosDeReautenticacion` for what goes in the list and
           // what is deliberately left out of it.
           //
-          // **Three COUNTs, and two of them repeat what `tieneAlgunFactor`
-          // just asked.** Bought knowingly. This refusal is not the hot path
-          // it looks like: `mfa_satisfied_at` is good for
+          // **Four reads, and three of them repeat what `tieneAlgunFactor`
+          // just asked** (two COUNTs and the verified address; the fourth is
+          // the recovery-code count). Bought knowingly. This refusal is not
+          // the hot path it looks like: `mfa_satisfied_at` is good for
           // `STEP_UP_WINDOW_MINUTES`, so a session lands here at most once
           // every ten minutes, and what follows is a human running a WebAuthn
           // ceremony or reading six digits off a phone. The alternative was
-          // one function returning both answers, which saves two indexed
-          // COUNTs and costs a nullable local here to keep the `&&` from
+          // one function returning both answers, which saves three indexed
+          // reads and costs a nullable local here to keep the `&&` from
           // short-circuiting — a worse trade at this volume.
           //
           // 🔴 And the two answers are **not** the same question, which is the
@@ -489,12 +490,24 @@ export function requireStepUp({
        * not a gate, it is an outage.
        *
        * **It closes itself, with nothing to remember.** The moment this
-       * account registers a factor, `tieneAlgunFactor` above starts answering
-       * `true` and this branch stops being reached for it at all — the block
-       * above already refuses outright rather than falling here. Until then,
-       * the bitácora line below is the whole of what this skip costs: a record
-       * that a sensitive write ran without the extra proof, on an account that
-       * had no extra proof to give.
+       * account registers a factor — or, since plan 4E, verifies its email
+       * address, which is a factor on its own — `tieneAlgunFactor` above
+       * starts answering `true` and this branch stops being reached for it at
+       * all — the block above already refuses outright rather than falling
+       * here. Until then, the bitácora line below is the whole of what this
+       * skip costs: a record that a sensitive write ran without the extra
+       * proof, on an account that had no extra proof to give.
+       *
+       * **What that means on the `exigeContrasena` routes, said once so nobody
+       * is surprised on deploy day (plan 4E, §1.2.1 of its design):** an
+       * account whose only factor is its verified address is refused above
+       * with `metodos: ["correo"]` and `exigeContrasena: true`, so editing a
+       * user, a role or the permission matrix costs it an email code *and* the
+       * password, once per `STEP_UP_WINDOW_MINUTES`. Isaias chose that over the
+       * alternative — letting the password alone through when the only factor
+       * is the email — because the alternative leaves a stolen session plus the
+       * password one step from the matrix, which is what `exigeContrasena`
+       * exists to prevent.
        *
        * **And that self-closing property is the attack, not the reassurance.**
        * The window in which this branch is still open is exactly the window in

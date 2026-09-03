@@ -46,7 +46,7 @@ const llamar = (fuente?: "dispositivo" | "passkey", opciones?: { transaction?: u
 
 beforeEach(() => {
   vi.clearAllMocks();
-  estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: null, conFactor: true });
+  estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: null, conFactor: true, conCredencial: true });
   issueSession.mockResolvedValue({ id: "sesion-nueva" });
   update.mockResolvedValue([1]);
   permissionsFor.mockResolvedValue(PERMISOS);
@@ -54,7 +54,7 @@ beforeEach(() => {
 
 describe("the state is decided by estadoInicialDeSesion, and by nothing else", () => {
   it("hands it the account and the source, and passes whatever it answers to the session", async () => {
-    estadoInicialDeSesion.mockResolvedValue({ estado: "onboarding", graceUntil: null, conFactor: false });
+    estadoInicialDeSesion.mockResolvedValue({ estado: "onboarding", graceUntil: null, conFactor: false, conCredencial: false });
     const r = await llamar("dispositivo");
     expect(estadoInicialDeSesion).toHaveBeenCalledWith(
       { id: 7, mfa_grace_until: null },
@@ -69,7 +69,7 @@ describe("the state is decided by estadoInicialDeSesion, and by nothing else", (
 
   it("forwards the caller's transaction to the counts and the session, and not to the grace stamp", async () => {
     const transaction = { id: "una-transaccion" };
-    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: new Date(), conFactor: false });
+    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: new Date(), conFactor: false, conCredencial: false });
     await llamar(undefined, { transaction });
     expect(estadoInicialDeSesion.mock.calls[0][3]).toEqual({ transaction });
     expect(issueSession).toHaveBeenCalledWith(req, res, 7, "completa", undefined, { transaction });
@@ -85,27 +85,39 @@ describe("the passkey guard: no factor found is a refusal", () => {
   // inserted after that revocation and survive it. Drop the guard and this
   // opens `completa` with a fresh fourteen days on an account with nothing
   // registered.
-  it("refuses when the account turned out to have no factor, whatever state the clock gave it", async () => {
-    // Three answers the no-factor branches can give, one of them identical to
-    // the factor branch's own — which is why the guard reads `conFactor` and
-    // not the state.
+  it("refuses when the account turned out to have no credential, whatever state the clock gave it", async () => {
+    // Four answers the no-credential branches can give. Two are identical to
+    // the credential branch's own on `estado` and `graceUntil` — which is why
+    // the guard reads neither — and the fourth is plan 4E's: an account whose
+    // verified email is a factor (`conFactor: true`, so the session would open
+    // `parcial`) but whose passkey was deleted under the ceremony
+    // (`conCredencial: false`). A guard on `conFactor` waves that one through.
     for (const respuesta of [
-      { estado: "completa", graceUntil: new Date(), conFactor: false },
-      { estado: "completa", graceUntil: null, conFactor: false },
-      { estado: "onboarding", graceUntil: null, conFactor: false },
+      { estado: "completa", graceUntil: new Date(), conFactor: false, conCredencial: false },
+      { estado: "completa", graceUntil: null, conFactor: false, conCredencial: false },
+      { estado: "onboarding", graceUntil: null, conFactor: false, conCredencial: false },
+      { estado: "completa", graceUntil: null, conFactor: true, conCredencial: false },
     ]) {
       vi.clearAllMocks();
       estadoInicialDeSesion.mockResolvedValue(respuesta);
       const r = await llamar("passkey");
-      expect(r, respuesta.estado).toEqual({ ok: false, motivo: "factor-desaparecido" });
-      expect(issueSession, respuesta.estado).not.toHaveBeenCalled();
-      expect(update, respuesta.estado).not.toHaveBeenCalled();
-      expect(warn, respuesta.estado).toHaveBeenCalled();
+      const caso = `${respuesta.estado}/conFactor=${respuesta.conFactor}`;
+      expect(r, caso).toEqual({ ok: false, motivo: "factor-desaparecido" });
+      expect(issueSession, caso).not.toHaveBeenCalled();
+      expect(update, caso).not.toHaveBeenCalled();
+      expect(warn, caso).toHaveBeenCalled();
     }
   });
 
+  it("lets the passkey login through when the credential is still there, verified email or not", async () => {
+    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: null, conFactor: true, conCredencial: true });
+    const r = await llamar("passkey");
+    expect(r).toMatchObject({ ok: true, estado: "completa" });
+    expect(issueSession).toHaveBeenCalled();
+  });
+
   it("applies only to the passkey source: a password login with no factor is the ordinary case", async () => {
-    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: new Date(), conFactor: false });
+    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: new Date(), conFactor: false, conCredencial: false });
     const r = await llamar(undefined);
     expect(r).toMatchObject({ ok: true, estado: "completa" });
     expect(issueSession).toHaveBeenCalled();
@@ -114,7 +126,7 @@ describe("the passkey guard: no factor found is a refusal", () => {
   it("applies only to the passkey source: a remembered device opening parcial is not refused", async () => {
     // `parcial` from a device login is an invalid cookie on an account with a
     // factor — the ordinary case, and the password door's business.
-    estadoInicialDeSesion.mockResolvedValue({ estado: "parcial", graceUntil: null, conFactor: true });
+    estadoInicialDeSesion.mockResolvedValue({ estado: "parcial", graceUntil: null, conFactor: true, conCredencial: true });
     const r = await llamar("dispositivo");
     expect(r).toMatchObject({ ok: true, estado: "parcial" });
     expect(issueSession).toHaveBeenCalled();
@@ -123,7 +135,7 @@ describe("the passkey guard: no factor found is a refusal", () => {
 
 describe("a session that cannot be opened is a login that cannot be granted", () => {
   it("answers the 503 verdict, writes nothing else, and says so at error level", async () => {
-    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: new Date(), conFactor: false });
+    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: new Date(), conFactor: false, conCredencial: false });
     issueSession.mockRejectedValue(new Error("pool agotado"));
     const r = await llamar();
     expect(r).toEqual({ ok: false, motivo: "sesion-no-disponible" });
@@ -137,7 +149,7 @@ describe("a session that cannot be opened is a login that cannot be granted", ()
 describe("the grace clock starts after the session, never before it", () => {
   it("writes the deadline it was told, after the session exists", async () => {
     const deadline = new Date("2026-09-17T00:00:00.000Z");
-    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: deadline, conFactor: false });
+    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: deadline, conFactor: false, conCredencial: false });
     await llamar();
     expect(update).toHaveBeenCalledWith({ mfa_grace_until: deadline }, { where: { id: 7 } });
     // Order, read off the mocks: the session first.
@@ -150,7 +162,7 @@ describe("the grace clock starts after the session, never before it", () => {
   });
 
   it("still finishes the login when the deadline cannot be written, and says so", async () => {
-    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: new Date(), conFactor: false });
+    estadoInicialDeSesion.mockResolvedValue({ estado: "completa", graceUntil: new Date(), conFactor: false, conCredencial: false });
     update.mockRejectedValue(new Error("la tabla está bloqueada"));
     const r = await llamar();
     expect(r.ok).toBe(true);

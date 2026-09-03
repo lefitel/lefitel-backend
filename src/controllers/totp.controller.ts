@@ -43,7 +43,7 @@ import {
 } from "../auth/totpStore.js";
 import { promoverSesion, sellarPruebaDeFactor, apagarLaMecha } from "../auth/sessionPromotion.js";
 import { sequelize } from "../database/sequelize.js";
-import { tieneAlgunFactor } from "../auth/factorInventory.js";
+import { tieneAlgunFactor, tieneCredencialRegistrada } from "../auth/factorInventory.js";
 import {
   contarCodigosRestantes,
   prepararCodigos,
@@ -130,6 +130,19 @@ export const MENSAJE_ULTIMO_FACTOR_ELIMINADO =
   "Factor de autenticación eliminado. Era el último que te quedaba, así que a partir de ahora " +
   "entrarás solo con tu contraseña, y hemos cerrado tus sesiones en todos los dispositivos. " +
   "Vuelve a iniciar sesión.";
+
+/**
+ * The third case, plan 4E: the last *credential* is gone but the account
+ * still has a factor — its verified address. Nothing is logged out (the
+ * account can still prove itself), but the remembered devices are, because
+ * they were trusted on the strength of the app that no longer exists. Said
+ * plainly, because "a partir de ahora entrarás solo con tu contraseña" would
+ * be false for this person: their next login asks for a code by email.
+ */
+export const MENSAJE_ULTIMA_CREDENCIAL_QUEDA_CORREO =
+  "Factor de autenticación eliminado. Era la última aplicación o llave que te quedaba: a partir " +
+  "de ahora entrarás con un código enviado a tu correo. Hemos olvidado los equipos recordados; " +
+  "tus sesiones siguen abiertas.";
 
 /**
  * `POST /auth/totp/setup` — start registering a TOTP factor.
@@ -554,9 +567,19 @@ export const deleteTotp = handler("deleteTotp", async (req: Request, res: Respon
     return res.status(200).json({ message: MENSAJE_FACTOR_ELIMINADO });
   }
 
-  const quedaAlgunFactor = await tieneAlgunFactor(caller.id);
+  // Two questions, plan 4E, and the tail has three shapes because of it. "Is
+  // there a *credential* left" (a passkey — this was the only TOTP) decides
+  // the remembered devices: they were trusted on the strength of a
+  // credential, so with none left they go, whatever else the account holds.
+  // "Is there a *factor* left" — which, since 4E, a verified address is —
+  // decides the sessions: an account that can still prove itself keeps them.
+  // The second read is skipped when the first already answers it.
+  const quedaCredencial = await tieneCredencialRegistrada(caller.id);
+  const quedaAlgunFactor = quedaCredencial || (await tieneAlgunFactor(caller.id));
+
+  if (!quedaCredencial) await revokeAllRememberedDevicesOf(caller.id);
+
   if (!quedaAlgunFactor) {
-    await revokeAllRememberedDevicesOf(caller.id);
     const sesionesRevocadas = await revokeAllSessionsOf(caller.id);
     logAction({
       id_usuario: caller.id,
@@ -566,6 +589,20 @@ export const deleteTotp = handler("deleteTotp", async (req: Request, res: Respon
       detail: "Eliminó su último factor de autenticación; la cuenta queda sin ningún factor registrado",
       metadata: { id_sesion: caller.id_sesion, ultimo_factor: true, sesiones_revocadas: sesionesRevocadas },
       severity: "critical",
+      ip_address: req.ip ?? null,
+    });
+  } else if (!quedaCredencial) {
+    // The verified address is what remains. `ultimo_factor: false`, because
+    // it is not the last factor; `ultima_credencial` and `queda_correo` say
+    // what actually happened, for whoever counts by metadata.
+    logAction({
+      id_usuario: caller.id,
+      action: "TOTP_DELETED",
+      entity: "FactorTotp",
+      entity_id: fila.dataValues.id,
+      detail: "Eliminó su última aplicación o llave; le queda el correo verificado como segundo factor",
+      metadata: { id_sesion: caller.id_sesion, ultimo_factor: false, ultima_credencial: true, queda_correo: true },
+      severity: "warning",
       ip_address: req.ip ?? null,
     });
   } else {
@@ -587,6 +624,10 @@ export const deleteTotp = handler("deleteTotp", async (req: Request, res: Respon
   // Found while auditing the passkey twin of this route (plan 4C, Task 9).
   if (!quedaAlgunFactor) clearSessionCookie(res);
   res.status(200).json({
-    message: quedaAlgunFactor ? MENSAJE_FACTOR_ELIMINADO : MENSAJE_ULTIMO_FACTOR_ELIMINADO,
+    message: !quedaAlgunFactor
+      ? MENSAJE_ULTIMO_FACTOR_ELIMINADO
+      : !quedaCredencial
+        ? MENSAJE_ULTIMA_CREDENCIAL_QUEDA_CORREO
+        : MENSAJE_FACTOR_ELIMINADO,
   });
 });

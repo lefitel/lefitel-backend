@@ -29,6 +29,8 @@
 
 import { UsuarioModel } from "../models/usuario.model.js";
 import { enviarCorreo } from "./mailer.js";
+import { maskEmail } from "./maskEmail.js";
+import { MAIL_PLAZO_INTERACTIVO_MS } from "../config/security.js";
 import { log } from "../utils/logger.js";
 
 const noticeLog = log("securityNotice");
@@ -66,15 +68,11 @@ function securityRecipient(): string | null {
  * domain. Merged here rather than left as a pair that agrees today: plan 4B's
  * `/auth/me` needed the same function, and two of them is how they drift.
  */
-export function maskEmail(email: string): string {
-  const at = email.lastIndexOf("@");
-  // No `@` at all, or one at either end: not an address this can reason
-  // about, so nothing is revealed rather than guessed at.
-  if (at <= 0 || at === email.length - 1) return "***";
-  const local = email.slice(0, at);
-  const domain = email.slice(at + 1);
-  return `${local[0]}***@${domain}`;
-}
+// Defined in `maskEmail.ts` since plan 4E and re-exported from here, so every
+// caller that imported it from this module keeps working: `mailRelay.ts` and
+// `mailer.ts` need it for their log lines, and this module imports `mailer.ts`
+// — importing back from here would have closed an import cycle.
+export { maskEmail };
 
 /**
  * The account's login name, for a notice that a person has to act on.
@@ -224,19 +222,20 @@ export async function avisarCorreoCambiado(input: {
  * reachable inbox to tell, and this sends exactly one message, to
  * `MAIL_SECURITY_TO`.
  *
- * **Deliberately outside `mailBudget.ts`'s daily ceiling**, matching
- * `avisarPasswordRestablecida` and `avisarCorreoCambiado` above, which never
- * called it either. That silences a real worry rather than dodging it: a
- * console invocation is its own OS process with its own copy of that
- * module's in-memory counter, so it cannot see what the running server has
- * already spent today, and the running server cannot see what the console
- * just spent. Two independent, un-reconciled budgets would either double the
- * real ceiling or make the console's rescue fail because the *server*
- * happened to be busy sending unrelated mail — both wrong, for a message
- * that is not the kind of bulk traffic that budget exists to police (verified
- * addresses, password links). Reconciling the two for real needs a
+ * **This message spends the mail budget like every other, and the paragraph
+ * that stood here said the opposite.** It claimed the three notices were
+ * "deliberately outside `mailBudget.ts`'s daily ceiling"; that stopped being
+ * true in plan 4B, when the charge moved inside `enviarCorreo`, and an audit
+ * of plan 4E caught the comment still saying it. What *is* true, and matters
+ * more since 4E: `rescate/aviso` is one of the **reserved** flows
+ * (`FLUJOS_RESERVADOS`), so a flood of verification or recovery mail cannot be
+ * the reason this trace was not sent — each provider keeps a quarter of its
+ * ceiling for exactly this. The other half of the old worry stands: a console
+ * invocation is its own OS process with its own copies of the counters, so it
+ * cannot see what the running server spent today. Reconciling that needs a
  * database-backed counter, which is more machinery than five-or-so rescues a
- * year justifies.
+ * year justifies; the reserve makes the gap harmless in the direction that
+ * counts.
  *
  * **A failed send does not stop the rescue, and that is a considered
  * trade-off, not the easy default.** `enviarCorreo` never throws — see its
@@ -285,17 +284,21 @@ export async function avisarRescate(input: {
     `Fecha: ${cuando}`,
     "Esta operación actúa sobre la cuenta indicada aunque no la haya pedido su dueño — es exactamente lo que hace un rescate legítimo. Si no reconoces esta acción, contacta a esa persona directamente y revisa la bitácora.",
   ]);
-  const { ok } = await enviarCorreo({
+  const { ok } = await enviarCorreo(
+    {
     para: to,
     flujo: "rescate/aviso",
     asunto: `[Seguridad] Rescate ejecutado — ${input.operacion}: @${usuario}`,
-    html: copia.html,
-    texto: copia.texto,
-  });
+      html: copia.html,
+      texto: copia.texto,
+    },
+    // Before the rescue touches anything, with a person at the console: bounded.
+    { plazo_ms: MAIL_PLAZO_INTERACTIVO_MS },
+  );
   if (!ok) {
     noticeLog.error(
       { usuario, operacion: input.operacion },
-      "aviso de RESCATE: enviarCorreo devolvió ok:false — Resend no lo entregó",
+      "aviso de RESCATE: enviarCorreo devolvió ok:false — ningún proveedor lo entregó",
     );
   }
   return { enviado: ok };

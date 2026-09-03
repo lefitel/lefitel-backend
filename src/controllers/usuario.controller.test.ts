@@ -281,6 +281,7 @@ beforeEach(() => {
       sesionesRevocadas: 2,
       dispositivosRevocados: 1,
       graceUntil: new Date("2027-01-01T00:00:00.000Z"),
+      correoVerificado: false,
     },
   });
 });
@@ -1112,6 +1113,7 @@ describe("resetting somebody else's second factor", () => {
         sesionesRevocadas: 3,
         dispositivosRevocados: 2,
         graceUntil,
+        correoVerificado: false,
       },
     });
 
@@ -1123,7 +1125,34 @@ describe("resetting somebody else's second factor", () => {
       sesiones_revocadas: 3,
       dispositivos_revocados: 2,
       gracia_hasta: graceUntil,
+      correo_es_factor: false,
     });
+    expect(c.message).toBe("Segundo factor restablecido para @otro.");
+  });
+
+  // Plan 4E: the reset leaves the verified address, which is a factor — the
+  // sentence has to say so, and say what to do if the mailbox is what was lost.
+  it("says the verified email is still a factor, and names the console flags for a lost mailbox", async () => {
+    restablecerSegundoFactor.mockResolvedValue({
+      ok: true,
+      cuenta: { id: OTHER, user: "otro" },
+      avisoEnviado: true,
+      datos: {
+        factoresBorrados: { passkeys: 0, totp: 1, codigos: 0 },
+        sesionesRevocadas: 1,
+        dispositivosRevocados: 0,
+        graceUntil: null,
+        correoVerificado: true,
+      },
+    });
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await rescatarMfaDeUsuario(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(c.payload).toMatchObject({ correo_es_factor: true });
+    expect(c.message).toContain("código por correo");
+    expect(c.message).toContain("--set-email");
   });
 });
 

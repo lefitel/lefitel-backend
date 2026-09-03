@@ -148,6 +148,33 @@ vi.mock("../database/sequelize.js", () => ({
   sequelize: { transaction: (...a: unknown[]) => transaction(...(a as [(t: unknown) => Promise<unknown>])) },
 }));
 
+// Plan 4E: the email-code arm. The store is mocked at the module the same way
+// `gastarCodigo` is — `emailCodeStore.test.ts` covers the SQL; this file
+// covers the composition: charge, compare, spend and seal, in that order.
+// bcrypt is a shape check (`hash(<code>)`), so a compare against the real
+// `fillerHash()` — a genuine bcrypt string — is simply false, which is what
+// the no-code path needs it to be.
+const cobrarIntento = vi.fn();
+const liquidarCodigo = vi.fn();
+vi.mock("../auth/emailCodeStore.js", () => ({
+  cobrarIntento: (...a: unknown[]) => cobrarIntento(...a),
+  liquidarCodigo: (...a: unknown[]) => liquidarCodigo(...a),
+}));
+const admitirIntentoDeCorreo = vi.fn();
+vi.mock("../auth/emailCodeVerifyBudget.js", () => ({
+  admitirIntentoDeCorreo: (...a: unknown[]) => admitirIntentoDeCorreo(...a),
+}));
+const bcryptCompare = vi.fn(async (texto: string, hash: string) => hash === `hash(${texto})`);
+vi.mock("bcryptjs", () => ({
+  default: {
+    compare: (...a: unknown[]) => bcryptCompare(...(a as [string, string])),
+    // `fillerHash()` (real, from `config/security.ts`) hashes a random string
+    // once; a bcrypt-shaped answer is all it needs, and all the no-code test
+    // asserts on.
+    hash: async () => `$2b$12$${"f".repeat(53)}`,
+  },
+}));
+
 // `sessionPromotion.ts` is real (imported transitively through
 // `mfa.controller.ts`, never mocked here): it is what Task 5 built and
 // verified, and `verify`'s whole reason for existing is to compose correctly
@@ -159,6 +186,8 @@ const {
   stepup,
   CODIGO_MFA_INVALIDO,
   CODIGO_REQUERIDO,
+  METODO_DESCONOCIDO,
+  DEMASIADOS_INTENTOS_CORREO,
 } = await import("./mfa.controller.js");
 
 const CLAVE_1 = "1".repeat(64);
@@ -266,6 +295,9 @@ beforeEach(() => {
   gastarCodigo.mockResolvedValue(false);
   sesionUpdate.mockResolvedValue([1]);
   tieneAlgunFactorMock.mockResolvedValue(true);
+  cobrarIntento.mockResolvedValue({ id: 31, codigo_hash: "hash(123456)", agotado: false });
+  liquidarCodigo.mockResolvedValue(true);
+  admitirIntentoDeCorreo.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -834,6 +866,21 @@ describe("POST /auth/stepup", () => {
     });
   });
 
+  // Plan 4E (S11): the guard `verify` has carried since F1, now here too. An
+  // email-only account can mint codes, change its address, lose its factor and
+  // still be `completa` under a fresh grace clock; a code must not re-seal it.
+  it("refuses a recovery code when the account has no factor to rescue, spending nothing", async () => {
+    tieneAlgunFactorMock.mockResolvedValue(false);
+    gastarCodigo.mockResolvedValue(true);
+    const c = callStepup({ codigo: "B".repeat(26) });
+    await stepup(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CODIGO_MFA_INVALIDO);
+    expect(gastarCodigo).not.toHaveBeenCalled();
+    expect(sesionUpdate).not.toHaveBeenCalled();
+    expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: ID_USUARIO } });
+  });
+
   it("re-seals with a recovery code", async () => {
     gastarCodigo.mockResolvedValue(true);
 
@@ -997,4 +1044,276 @@ describe("POST /auth/stepup", () => {
     });
   });
 
+});
+
+// ───────────────────────── Plan 4E: `metodo` and the email-code arm ─────────────────────────
+
+describe("the `metodo` field (plan 4E)", () => {
+  it("without it, six digits still go to the TOTP arm — no client in flight changes behaviour", async () => {
+    const secret = OTPAuth.Secret.fromBase32(SECRETO);
+    const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+    filas = [filaTotp(1, ID_USUARIO)];
+    const c = call({ codigo: OTPAuth.HOTP.generate({ secret, counter }) });
+    await verify(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(cobrarIntento).not.toHaveBeenCalled();
+    expect(gastarCodigo).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unknown value before spending anything", async () => {
+    const c = call({ codigo: "123456", metodo: "passkey" });
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(METODO_DESCONOCIDO);
+    expect(cobrarIntento).not.toHaveBeenCalled();
+    expect(gastarCodigo).not.toHaveBeenCalled();
+    expect(increment).not.toHaveBeenCalled();
+    expect(sesionUpdate).not.toHaveBeenCalled();
+  });
+
+  it("with metodo: codigo, six digits go to the recovery arm — guard first, then the shape refusal", async () => {
+    const c = call({ codigo: "123456", metodo: "codigo" });
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(tieneAlgunFactorMock).toHaveBeenCalledWith(ID_USUARIO);
+    expect(gastarCodigo).toHaveBeenCalledWith(ID_USUARIO, "123456", { transaction: { id: "tx" } });
+    expect(cobrarIntento).not.toHaveBeenCalled();
+  });
+
+  it("with metodo: codigo and no factor, the guard still refuses without spending — however the arm was reached", async () => {
+    tieneAlgunFactorMock.mockResolvedValue(false);
+    const c = call({ codigo: "123456", metodo: "codigo" });
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(gastarCodigo).not.toHaveBeenCalled();
+  });
+
+  it("with metodo: totp, a 26-character string goes to the TOTP arm and fails there, never to the recovery arm", async () => {
+    filas = [filaTotp(1, ID_USUARIO)];
+    const c = call({ codigo: "A".repeat(26), metodo: "totp" });
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(gastarCodigo).not.toHaveBeenCalled();
+    expect(cobrarIntento).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /auth/mfa/verify with metodo: correo (plan 4E)", () => {
+  const conCorreo = (codigo = "123456", extra: Record<string, unknown> = {}) =>
+    call({ codigo, metodo: "correo", ...extra });
+
+  it("charges the attempt, compares, spends and promotes — in that order, and promotes as `correo`", async () => {
+    const orden: string[] = [];
+    cobrarIntento.mockImplementation(async () => {
+      orden.push("cobrar");
+      return { id: 31, codigo_hash: "hash(123456)" };
+    });
+    bcryptCompare.mockImplementation(async (t: string, h: string) => {
+      orden.push("compare");
+      return h === `hash(${t})`;
+    });
+    liquidarCodigo.mockImplementation(async () => {
+      orden.push("liquidar");
+      return true;
+    });
+    sesionUpdate.mockImplementation(async () => {
+      orden.push("promover");
+      return [1];
+    });
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(orden).toEqual(["cobrar", "compare", "liquidar", "promover"]);
+    expect(cobrarIntento).toHaveBeenCalledWith(ID_USUARIO);
+    expect(liquidarCodigo).toHaveBeenCalledWith(31, { transaction: { id: "tx" } });
+    const [valores, opciones] = sesionUpdate.mock.calls[0] as [Record<string, unknown>, { transaction?: unknown }];
+    expect(valores).toMatchObject({ estado: "completa", mfa_source: "correo" });
+    expect(opciones.transaction).toEqual({ id: "tx" });
+    expect(logActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "MFA_VERIFIED", metadata: expect.objectContaining({ fuente: "correo" }) }),
+    );
+  });
+
+  // 🔴 An audit of the first draft: the fifth attempt is the one that burns
+  // the row, and spending it again found that burn and called it a loss —
+  // the correct fifth code answered "wrong" and locked the account on it.
+  it("seals on a correct last-allowed attempt without spending the row the charge already burned", async () => {
+    cobrarIntento.mockResolvedValue({ id: 31, codigo_hash: "hash(123456)", agotado: true });
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(liquidarCodigo).not.toHaveBeenCalled();
+    expect(sesionUpdate).toHaveBeenCalledTimes(1);
+    expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "MFA_VERIFIED" }));
+  });
+
+  it("still spends the row on every attempt before the last", async () => {
+    cobrarIntento.mockResolvedValue({ id: 31, codigo_hash: "hash(123456)", agotado: false });
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(liquidarCodigo).toHaveBeenCalledWith(31, { transaction: { id: "tx" } });
+  });
+
+  it("clears previous failures on success, like the other arms", async () => {
+    findByPk.mockResolvedValue({ dataValues: { failed_attempts: 3, locked_until: null } });
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(updateUsuario).toHaveBeenCalled();
+  });
+
+  it("seals instead when there was nothing to promote — a completa session under the grace clock", async () => {
+    sesionUpdate.mockResolvedValueOnce([0]).mockResolvedValueOnce([1]);
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(sesionUpdate).toHaveBeenCalledTimes(2);
+    const [valores] = sesionUpdate.mock.calls[1] as [Record<string, unknown>];
+    expect(valores).toMatchObject({ mfa_source: "correo" });
+    expect(valores).not.toHaveProperty("estado");
+  });
+
+  it("rolls the spend back and answers the uniform 400 when neither write finds a session", async () => {
+    sesionUpdate.mockResolvedValue([0]);
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CODIGO_MFA_INVALIDO);
+    // Spent inside the transaction that then unwound — the same shape the
+    // recovery-code arm has, so the code stays usable.
+    expect(liquidarCodigo).toHaveBeenCalledWith(31, { transaction: { id: "tx" } });
+    expect(transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers the uniform 400 and charges the lockout on a wrong code, with the countdown", async () => {
+    const c = conCorreo("654321");
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CODIGO_MFA_INVALIDO);
+    expect(c.payload).toHaveProperty("intentosRestantes");
+    expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: ID_USUARIO } });
+    expect(liquidarCodigo).not.toHaveBeenCalled();
+    expect(logActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "MFA_VERIFY_FAILED", detail: expect.stringContaining("por correo") }),
+    );
+  });
+
+  // 🔴 Uniformity in time as well as in the answer: "no code" costs a compare.
+  it("compares against the filler hash when no live code exists, so the timing does not say so", async () => {
+    cobrarIntento.mockResolvedValue(null);
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CODIGO_MFA_INVALIDO);
+    expect(bcryptCompare).toHaveBeenCalledTimes(1);
+    const [, hash] = bcryptCompare.mock.calls[0] as [string, string];
+    expect(hash).toMatch(/^\$2[aby]\$/);
+    expect(increment).toHaveBeenCalled();
+  });
+
+  it("refuses a code that is not six digits before charging or comparing", async () => {
+    const c = conCorreo("A".repeat(26));
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CODIGO_MFA_INVALIDO);
+    expect(cobrarIntento).not.toHaveBeenCalled();
+    expect(bcryptCompare).not.toHaveBeenCalled();
+  });
+
+  it("answers 429 when the account's verification bucket is full, before touching the database", async () => {
+    admitirIntentoDeCorreo.mockReturnValue(false);
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(429);
+    expect(c.message).toBe(DEMASIADOS_INTENTOS_CORREO);
+    expect(admitirIntentoDeCorreo).toHaveBeenCalledWith(ID_USUARIO);
+    expect(cobrarIntento).not.toHaveBeenCalled();
+    expect(increment).not.toHaveBeenCalled();
+  });
+
+  it("does not consult the recovery-code guard: an email code is not a recovery code", async () => {
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(gastarCodigo).not.toHaveBeenCalled();
+  });
+
+  it("still refuses a locked account first, spending nothing", async () => {
+    findByPk.mockResolvedValue({ dataValues: { failed_attempts: 5, locked_until: new Date(Date.now() + 60_000) } });
+    const c = conCorreo();
+    await verify(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.payload).toEqual({ message: CODIGO_MFA_INVALIDO, intentosRestantes: 0 });
+    expect(cobrarIntento).not.toHaveBeenCalled();
+  });
+
+  it("can remember the device, like the other arms", async () => {
+    const c = conCorreo("123456", { recordar: true });
+    await verify(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(acunarDispositivo).toHaveBeenCalled();
+  });
+});
+
+describe("POST /auth/stepup with metodo: correo (plan 4E)", () => {
+  const stepupConCorreo = (codigo = "123456", estado = "completa") =>
+    call({ codigo, metodo: "correo" }, usuarioAutenticado({ estado, mfa_satisfied_at: null }));
+
+  it("re-seals a live complete session through the state-filtered UPDATE, on the transaction", async () => {
+    const c = stepupConCorreo();
+    await stepup(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(liquidarCodigo).toHaveBeenCalledWith(31, { transaction: { id: "tx" } });
+    const [valores, opciones] = sesionUpdate.mock.calls[0] as [
+      Record<string, unknown>,
+      { where: Record<string, unknown>; transaction?: unknown },
+    ];
+    expect(valores.mfa_source).toBe("correo");
+    expect(valores).not.toHaveProperty("estado");
+    expect(opciones.where).toMatchObject({ id: ID_SESION, id_usuario: ID_USUARIO, estado: "completa" });
+    expect(opciones.transaction).toEqual({ id: "tx" });
+    expect(logActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "STEP_UP_REPROVED", metadata: expect.objectContaining({ fuente: "correo" }) }),
+    );
+  });
+
+  it("does not let a parcial session seal itself through the step-up door", async () => {
+    // The fake reads the `where`: a seal that dropped the state filter would
+    // find this parcial session, and a canned `[0]` would never notice.
+    sesionUpdate.mockImplementation(async (_valores: unknown, opciones: { where: Record<string, unknown> }) =>
+      opciones.where.estado === "completa" ? [0] : [1],
+    );
+    const c = stepupConCorreo("123456", "parcial");
+    await stepup(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CODIGO_MFA_INVALIDO);
+  });
+
+  it("answers 429 from the same bucket as verify", async () => {
+    admitirIntentoDeCorreo.mockReturnValue(false);
+    const c = stepupConCorreo();
+    await stepup(c.req, c.res);
+    expect(c.status).toBe(429);
+    expect(cobrarIntento).not.toHaveBeenCalled();
+  });
+
+  it("charges the lockout on a wrong code, with its own detail", async () => {
+    const c = stepupConCorreo("000000");
+    await stepup(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(increment).toHaveBeenCalledWith("failed_attempts", { where: { id: ID_USUARIO } });
+    expect(logActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "MFA_VERIFY_FAILED", detail: expect.stringContaining("step-up por correo") }),
+    );
+  });
+
+  it("refuses an unknown metodo before spending anything", async () => {
+    const c = call({ codigo: "123456", metodo: "sms" }, usuarioAutenticado({ estado: "completa", mfa_satisfied_at: null }));
+    await stepup(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(METODO_DESCONOCIDO);
+    expect(cobrarIntento).not.toHaveBeenCalled();
+    expect(sesionUpdate).not.toHaveBeenCalled();
+  });
 });

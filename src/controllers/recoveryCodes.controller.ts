@@ -94,8 +94,8 @@ export const MENSAJE_CODIGOS_GENERADOS =
 export const MENSAJE_SIN_FACTOR_PARA_CODIGOS =
   "Todavía no tienes ningún segundo factor configurado. Los códigos de recuperación " +
   "son la copia de repuesto de ese factor, no un sustituto suyo: configura primero tu " +
-  "segundo factor (por ejemplo, un código TOTP desde tu perfil) y, una vez confirmado, " +
-  "vuelve aquí para generar tus diez códigos.";
+  "segundo factor (verifica tu correo desde tu perfil, o registra una aplicación o una llave) " +
+  "y, una vez hecho, vuelve aquí para generar tus diez códigos.";
 
 /**
  * `POST /api/auth/recovery-codes` — issue a fresh set of ten, discarding

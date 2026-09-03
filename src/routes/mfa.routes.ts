@@ -35,13 +35,25 @@
 // pass once every 4B route file exists — see the plan's "Un fichero de rutas
 // por tarea, y el montaje al final".
 
+//
+// **`POST /mfa/email-code` (plan 4E) rides here for the same reasons.** It is
+// how a `parcial` session obtains the code it will then hand to `/mfa/verify`
+// with `metodo: "correo"`, so it can carry no `requireStepUp` either — it is
+// a means of satisfying one — and it sits under the same `/api/auth/mfa`
+// prefix `PARCIAL` already opens. It carries no bucket for the same reason
+// as the other two, and a better one: its limits are per account and in the
+// database (`auth/emailCodeStore.ts` — cooldown, hourly and daily caps), so a
+// restart forgets nothing and a second process would see the same numbers.
+
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { verify, stepup } from "../controllers/mfa.controller.js";
+import { sendEmailCode } from "../controllers/emailCode.controller.js";
 
 const router = Router();
 
 router.post("/mfa/verify", authenticate, verify);
+router.post("/mfa/email-code", authenticate, sendEmailCode);
 router.post("/stepup", authenticate, stepup);
 
 export default router;

@@ -300,7 +300,8 @@ async function runResetMfa(id: number, actor: ActorRescate): Promise<number> {
     return 1;
   }
   imprimirAviso(resultado.avisoEnviado);
-  const { factoresBorrados, sesionesRevocadas, dispositivosRevocados, graceUntil } = resultado.datos;
+  const { factoresBorrados, sesionesRevocadas, dispositivosRevocados, graceUntil, correoVerificado } =
+    resultado.datos;
   console.log(
     `Segundo factor restablecido para @${resultado.cuenta.user}: ` +
       `${factoresBorrados.passkeys} passkey(s), ${factoresBorrados.totp} TOTP y ` +
@@ -326,6 +327,23 @@ async function runResetMfa(id: number, actor: ActorRescate): Promise<number> {
   }
   console.log("");
   console.log(`Qué contarle a @${resultado.cuenta.user}:`);
+  // Plan 4E: a verified address is a second factor the reset leaves in
+  // place, so "solo con su contraseña" is only true for an account without
+  // one. For the other, the deadline lines below do not apply either — its
+  // next login opens `parcial` and asks for the email code regardless.
+  if (correoVerificado) {
+    console.log(
+      "  - Sigue teniendo su correo verificado como segundo factor: al entrar se le pedirá un código " +
+        "enviado a ese correo. No se le pedirá ninguna aplicación ni llave.",
+    );
+    console.log(
+      "  - Si lo que perdió es el acceso a ese buzón, este reset no le sirve: cámbiele la dirección " +
+        "con --set-email <dirección> (el código irá a la nueva) o bórresela con --clear-email " +
+        "(y entonces entrará solo con su contraseña).",
+    );
+    console.log("  - Sus sesiones y dispositivos recordados se cerraron: tendrá que iniciar sesión de nuevo en todos sus aparatos.");
+    return 0;
+  }
   console.log("  - Ya puede entrar solo con su contraseña, sin pedirle ningún segundo factor.");
   if (graceUntil === null) {
     console.log(
@@ -390,10 +408,17 @@ async function runSetEmail(id: number, email: string, actor: ActorRescate): Prom
     imprimirAviso(resultado.avisoEnviado);
     console.log(`Dirección de recuperación registrada y marcada como verificada para @${resultado.cuenta.user}: ${email}.`);
     console.log("Cualquier enlace de verificación o de restablecimiento pendiente para esta cuenta quedó invalidado.");
+    // Plan 4E, design §1.2.2: said out loud, because from this line on the
+    // mailbox behind that address opens the account by itself — password
+    // reset and second factor both go through it.
+    console.log(
+      "ATENCIÓN: esa dirección es ahora, además, el segundo factor de la cuenta. Quien controle ese buzón " +
+        "puede restablecer la contraseña y pasar el segundo paso. Esta operación queda en la bitácora y en el aviso de seguridad.",
+    );
     console.log("");
     console.log(
       `Qué contarle a @${resultado.cuenta.user}: ya puede usar "olvidé mi contraseña" con esa dirección ` +
-        "para volver a entrar.",
+        "para volver a entrar, y al entrar se le pedirá un código enviado a ese mismo correo.",
     );
     return 0;
   }

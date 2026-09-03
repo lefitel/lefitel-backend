@@ -70,8 +70,8 @@ vi.mock("../auth/mailer.js", () => ({
 // mocking it. Defaults to `true` in `beforeEach`; the one test in "the mail
 // budget" below is what overrides it.
 const hayPresupuestoDeCorreo = vi.fn();
-vi.mock("../auth/mailBudget.js", () => ({
-  hayPresupuestoDeCorreo: (...a: unknown[]) => hayPresupuestoDeCorreo(...a),
+vi.mock("../auth/mailRelay.js", () => ({
+  hayProveedorDisponible: (...a: unknown[]) => hayPresupuestoDeCorreo(...a),
 }));
 
 // Mocked wholesale rather than let the real `credentials.js` load: that
@@ -85,6 +85,31 @@ vi.mock("../auth/mailBudget.js", () => ({
 const verifyOwnPassword = vi.fn();
 vi.mock("../auth/credentials.js", () => ({
   verifyOwnPassword: (...a: unknown[]) => verifyOwnPassword(...a),
+}));
+
+// Plan 4E: verifying the address registers a factor, so `verifyEmail` does
+// what `confirmTotp` does — promote, seal, clear the deadline — and changing
+// the address may remove the last factor, so `sendVerificationEmail` asks
+// whether a credential remains and revokes the remembered devices if not.
+const promoverSesion = vi.fn();
+const sellarPruebaDeFactor = vi.fn();
+const apagarLaMecha = vi.fn();
+vi.mock("../auth/sessionPromotion.js", () => ({
+  promoverSesion: (...a: unknown[]) => promoverSesion(...a),
+  sellarPruebaDeFactor: (...a: unknown[]) => sellarPruebaDeFactor(...a),
+  apagarLaMecha: (...a: unknown[]) => apagarLaMecha(...a),
+}));
+const tieneCredencialRegistrada = vi.fn();
+vi.mock("../auth/factorInventory.js", () => ({
+  tieneCredencialRegistrada: (...a: unknown[]) => tieneCredencialRegistrada(...a),
+}));
+const revokeAllRememberedDevicesOf = vi.fn();
+vi.mock("../auth/rememberedDeviceStore.js", () => ({
+  revokeAllRememberedDevicesOf: (...a: unknown[]) => revokeAllRememberedDevicesOf(...a),
+}));
+const revokeAllSessionsOf = vi.fn();
+vi.mock("../auth/sessionStore.js", () => ({
+  revokeAllSessionsOf: (...a: unknown[]) => revokeAllSessionsOf(...a),
 }));
 
 const logAction = vi.fn();
@@ -189,6 +214,12 @@ beforeEach(() => {
   enviarCorreo.mockResolvedValue({ ok: true });
   verifyOwnPassword.mockResolvedValue({ ok: true });
   hayPresupuestoDeCorreo.mockReturnValue(true);
+  promoverSesion.mockResolvedValue(true);
+  sellarPruebaDeFactor.mockResolvedValue(true);
+  apagarLaMecha.mockResolvedValue(undefined);
+  tieneCredencialRegistrada.mockResolvedValue(false);
+  revokeAllRememberedDevicesOf.mockResolvedValue(0);
+  revokeAllSessionsOf.mockResolvedValue(0);
 });
 
 describe("POST /auth/email/send", () => {
@@ -216,6 +247,20 @@ describe("POST /auth/email/send", () => {
 
     expect(c.status).toBe(400);
     expect(c.message).toBe(EMAIL_INVALIDO);
+    expect(findByPk).not.toHaveBeenCalled();
+  });
+
+  // Audit of plan 4E, Task 7: nodemailer parses `to` as an address list and
+  // would split this into two envelope recipients — N deliveries charged as
+  // one, and "at most two copies" gone for that address. Resend answered such
+  // a value 422; SMTP does not.
+  it("refuses an address with a comma or a semicolon in it — nodemailer would read two recipients", async () => {
+    for (const email of ["a,b@evil.com", "isaias@osefi.net,otro@evil.com", "isaias@osefi.net;otro@evil.com"]) {
+      const c = call(YO_CON_SESION, { email, pass: "la-mia" });
+      await sendVerificationEmail(c.req, c.res);
+      expect(c.status, email).toBe(400);
+      expect(c.message, email).toBe(EMAIL_INVALIDO);
+    }
     expect(findByPk).not.toHaveBeenCalled();
   });
 
@@ -374,7 +419,7 @@ describe("POST /auth/email/send", () => {
         id_usuario: A,
         action: "EMAIL_SEND",
         severity: "info",
-        metadata: { email_destino: "a@osefi.net" },
+        metadata: expect.objectContaining({ email_destino: "a@osefi.net" }),
       }),
     );
     expect(JSON.stringify(logAction.mock.calls)).not.toContain(TOKEN_CRUDO);
@@ -618,8 +663,8 @@ describe("POST /auth/email/verify", () => {
       expect.objectContaining({
         id_usuario: A,
         action: "EMAIL_VERIFIED",
-        severity: "info",
-        metadata: { email_destino: "a@osefi.net" },
+        severity: "critical",
+        metadata: expect.objectContaining({ email_destino: "a@osefi.net", fuente: "correo" }),
       }),
     );
   });
@@ -689,8 +734,122 @@ describe("POST /auth/email/verify", () => {
       const [, options] = update.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
       expect(options.where).toEqual({ id: A });
       expect(logAction).toHaveBeenCalledWith(
-        expect.objectContaining({ id_usuario: A, metadata: { email_destino: "a@osefi.net" } }),
+        expect.objectContaining({ id_usuario: A, metadata: expect.objectContaining({ email_destino: "a@osefi.net" }) }),
       );
     });
+  });
+});
+
+// Plan 4E: a verified address is a second factor.
+describe("POST /auth/email/verify — verifying registers a factor (plan 4E)", () => {
+  const tokenBueno = () => {
+    consumirToken.mockResolvedValue({ id_usuario: A, email_destino: "a@osefi.net" });
+    findByPk.mockResolvedValue(usuarioRow({ email: "a@osefi.net" }));
+  };
+
+  it("promotes the caller's session as `correo`, in the same transaction as the column", async () => {
+    tokenBueno();
+    const c = call(YO_CON_SESION, { token: "un-token" });
+    await verifyEmail(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(update.mock.calls[0][1]).toMatchObject({ where: { id: A }, transaction: TRANSACCION });
+    expect(promoverSesion).toHaveBeenCalledWith(YO_CON_SESION.id_sesion, "correo", { transaction: TRANSACCION });
+    expect(sellarPruebaDeFactor).not.toHaveBeenCalled();
+  });
+
+  it("seals the session instead when there was nothing to promote — a completa session under the grace clock", async () => {
+    tokenBueno();
+    promoverSesion.mockResolvedValue(false);
+    const c = call(YO_CON_SESION, { token: "un-token" });
+    await verifyEmail(c.req, c.res);
+    expect(sellarPruebaDeFactor).toHaveBeenCalledWith(YO_CON_SESION.id_sesion, "correo", { transaction: TRANSACCION });
+  });
+
+  it("clears the grace deadline: there is nothing left to chase", async () => {
+    tokenBueno();
+    const c = call(YO_CON_SESION, { token: "un-token" });
+    await verifyEmail(c.req, c.res);
+    expect(apagarLaMecha).toHaveBeenCalledWith(A, { transaction: TRANSACCION });
+  });
+
+  it("promotes nothing when the column write collides with another verified account", async () => {
+    tokenBueno();
+    update.mockRejectedValue({
+      name: "SequelizeUniqueConstraintError",
+      parent: { constraint: "usuarios_email_verificado_uniq" },
+      message: "duplicate key",
+    });
+    const c = call(YO_CON_SESION, { token: "un-token" });
+    await verifyEmail(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(promoverSesion).not.toHaveBeenCalled();
+    expect(apagarLaMecha).not.toHaveBeenCalled();
+  });
+
+  it("names the session and the source in the bitácora line", async () => {
+    tokenBueno();
+    const c = call(YO_CON_SESION, { token: "un-token" });
+    await verifyEmail(c.req, c.res);
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "EMAIL_VERIFIED",
+        metadata: expect.objectContaining({ id_sesion: YO_CON_SESION.id_sesion, fuente: "correo" }),
+      }),
+    );
+  });
+});
+
+describe("POST /auth/email/send — changing the address may remove the last factor (plan 4E)", () => {
+  it("revokes the remembered devices and every other session, on the transaction, when the old address was verified and no credential remains", async () => {
+    findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
+    tieneCredencialRegistrada.mockResolvedValue(false);
+    revokeAllRememberedDevicesOf.mockResolvedValue(2);
+    revokeAllSessionsOf.mockResolvedValue(3);
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+    await sendVerificationEmail(c.req, c.res);
+    expect(c.status).toBe(200);
+    expect(tieneCredencialRegistrada).toHaveBeenCalledWith(A, { transaction: TRANSACCION });
+    expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(A, { transaction: TRANSACCION });
+    // `except` this session: verifying the new address needs it.
+    expect(revokeAllSessionsOf).toHaveBeenCalledWith(A, { except: YO_CON_SESION.id_sesion, transaction: TRANSACCION });
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "EMAIL_SEND",
+        metadata: expect.objectContaining({ dispositivos_revocados: 2, sesiones_revocadas: 3 }),
+      }),
+    );
+  });
+
+  it("leaves devices and sessions alone when a passkey or an app still vouches for them", async () => {
+    findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
+    tieneCredencialRegistrada.mockResolvedValue(true);
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+    await sendVerificationEmail(c.req, c.res);
+    expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "EMAIL_SEND",
+        metadata: expect.objectContaining({ dispositivos_revocados: null, sesiones_revocadas: null }),
+      }),
+    );
+  });
+
+  it("asks nothing when the old address was never verified: no factor was removed", async () => {
+    findByPk.mockResolvedValue(usuarioRow({ email: "sin-verificar@osefi.net", email_verified_at: null }));
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+    await sendVerificationEmail(c.req, c.res);
+    expect(tieneCredencialRegistrada).not.toHaveBeenCalled();
+    expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+  });
+
+  it("still requires the caller's password — the gate does not cover an account with no factor (S6)", async () => {
+    findByPk.mockResolvedValue(usuarioRow({ email: null, email_verified_at: null }));
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
+    await sendVerificationEmail(c.req, c.res);
+    expect(c.status).toBe(400);
+    expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
+    expect(transaction).not.toHaveBeenCalled();
   });
 });

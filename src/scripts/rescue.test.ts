@@ -469,3 +469,57 @@ describe("run — the container-facing wrapper", () => {
     expect(errors.join("\n")).toContain("la base no responde");
   });
 });
+
+// Plan 4E: the reset leaves the verified address, which is a factor, and the
+// console has to say so — and say what `--set-email` now makes an address.
+describe("main — --reset-mfa when the verified email remains (plan 4E)", () => {
+  const conCorreo = () =>
+    restablecerSegundoFactor.mockResolvedValue({
+      ok: true,
+      cuenta: { id: 42, user: "tecnico_ana" },
+      avisoEnviado: true,
+      datos: {
+        factoresBorrados: { passkeys: 1, totp: 1, codigos: 4 },
+        sesionesRevocadas: 2,
+        dispositivosRevocados: 1,
+        graceUntil: new Date("2027-01-11T00:00:00.000Z"),
+        correoVerificado: true,
+      },
+    });
+
+  it("says the next login asks for a code by email, and not 'solo con su contraseña'", async () => {
+    conCorreo();
+    const code = await main(["--user", "a", "--reset-mfa"]);
+    expect(code).toBe(0);
+    const salida = logs.join("\n");
+    expect(salida).toContain("se le pedirá un código");
+    expect(salida).not.toContain("Ya puede entrar solo con su contraseña");
+  });
+
+  it("names the two flags for a lost mailbox, and only --clear-email as the way to a password-only login", async () => {
+    conCorreo();
+    await main(["--user", "a", "--reset-mfa"]);
+    const salida = logs.join("\n");
+    // Both flags on one line, each with its own consequence in brackets: the
+    // password-only login is attached to --clear-email and to nothing else.
+    expect(salida).toContain("--set-email <dirección> (el código irá a la nueva)");
+    expect(salida).toContain("--clear-email (y entonces entrará solo con su contraseña)");
+    expect(salida).not.toMatch(/--set-email[^(\n]*solo con su contraseña/);
+  });
+
+  it("keeps the old sentence for an account with no verified address", async () => {
+    await main(["--user", "a", "--reset-mfa"]);
+    expect(logs.join("\n")).toContain("Ya puede entrar solo con su contraseña");
+  });
+});
+
+describe("main — --set-email says the address is now a factor (plan 4E)", () => {
+  it("prints the warning after registering the address", async () => {
+    const code = await main(["--user", "a", "--set-email", "nueva@osefi.net"]);
+    expect(code).toBe(0);
+    const salida = logs.join("\n");
+    expect(salida).toContain("ATENCIÓN");
+    expect(salida).toContain("segundo factor");
+    expect(salida).toContain("se le pedirá un código enviado a ese mismo correo");
+  });
+});

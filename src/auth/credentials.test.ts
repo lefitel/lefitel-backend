@@ -126,7 +126,7 @@ vi.mock("./tokenStore.js", () => ({ purgeExpiredTokens: vi.fn().mockResolvedValu
 // touching nothing, and a grace write landing in the same spy would break them
 // for a reason that has nothing to do with what they test.
 vi.mock("./factorInventory.js", () => ({
-  estadoInicialDeSesion: vi.fn().mockResolvedValue({ estado: "completa", graceUntil: null }),
+  estadoInicialDeSesion: vi.fn().mockResolvedValue({ estado: "completa", graceUntil: null, conFactor: false, conCredencial: false }),
 }));
 // And the sixth. `logoutAll` now also revokes remembered devices (see its own
 // comment), so `auth.controller.ts` imports `rememberedDeviceStore.js`, which

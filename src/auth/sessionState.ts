@@ -60,7 +60,7 @@ const ONBOARDING_EXTRA: readonly string[] = [
 ];
 /**
  * What proved the factor for a session — the whole vocabulary of
- * `sesiones.mfa_source`, `passkey` included since plan 4C.
+ * `sesiones.mfa_source`: `passkey` since plan 4C, `correo` since plan 4E.
  *
  * Lives here rather than beside the endpoint that writes it, because **two
  * modules write this column and one reads it**: `sessionPromotion.ts` on a
@@ -68,16 +68,20 @@ const ONBOARDING_EXTRA: readonly string[] = [
  * device, and `estadoEfectivo` below on every request. A type owned by one of
  * the writers would make the other import from a sibling for no reason.
  *
- * The database has its own CHECK over the same four words (migration
- * `20260826000002`), and as of the 4C plan the two lists are **identical** —
- * they used to differ, with `"passkey"` allowed by the CHECK and withheld here
- * on purpose so that writing it before anything could verify one was a
- * compile error rather than a production failure. That guard did its job and
- * is spent; what remains is the older rule, unchanged: a value here the CHECK
- * does not know fails in production in the middle of a login, so this union
- * may never gain a word the migration has not.
+ * The database has its own CHECK over the same five words (migration
+ * `20260826000002`, widened by `20260903000001`), and the two lists are
+ * **identical** — they used to differ, with `"passkey"` allowed by the CHECK
+ * and withheld here on purpose so that writing it before anything could
+ * verify one was a compile error rather than a production failure. That guard
+ * did its job and is spent; what remains is the older rule, unchanged: a value
+ * here the CHECK does not know fails in production in the middle of a login,
+ * so this union may never gain a word the migration has not.
+ *
+ * `"correo"` is evidence a factor was shown, like `"totp"` and `"codigo"`:
+ * `esPruebaDeFactor` below needs no change for it, and neither does clause 3
+ * of `estadoEfectivo` — the one value those single out is `"dispositivo"`.
  */
-export type FuenteMfa = "totp" | "codigo" | "dispositivo" | "passkey";
+export type FuenteMfa = "totp" | "codigo" | "dispositivo" | "passkey" | "correo";
 
 /**
  * The two sources a session can carry **at the moment it is created** — the
@@ -343,7 +347,8 @@ export function puedeVerArchivosEstaticos(estado: EstadoSesion): boolean {
  *
  * **What it deliberately does not ask.** Whether the *account* has a factor,
  * as opposed to whether this session shows signs of one. Answering that means
- * `tieneAlgunFactor`, which is two COUNTs against two more tables, charged to
+ * `tieneAlgunFactor`, which is three reads against three more tables (two
+ * COUNTs and, since plan 4E, the account's verified address), charged to
  * **every request in the ERP**, to catch a transition that happens at most once
  * per account. The deadline and the three clauses above cost nothing:
  * `authenticate`'s `currentUser` already reads `usuarios`, and `findLiveSession`

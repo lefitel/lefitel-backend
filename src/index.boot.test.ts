@@ -73,19 +73,23 @@ describe("required configuration", () => {
     expect(requiredEnv("production")).toContain("COOKIE_SECURE");
   });
 
-  it("names RESEND_API_KEY and MAIL_FROM as required in production", () => {
+  it("names MAIL_PROVIDERS and MAIL_FROM as required in production, and RESEND_API_KEY no longer (plan 4E)", () => {
     // Missing either is silent the same way COOKIE_NAME's absence is: the
     // process boots, and `auth/mailer.ts` quietly answers `{ ok: true }` to
-    // every verification and reset email without sending one. See
-    // `mailer.ts` for the branch this closes off.
-    expect(requiredEnv("production")).toContain("RESEND_API_KEY");
+    // every verification, reset and login-code email without sending one.
+    // Which credentials each listed provider needs is `configuracionDeCorreo`'s
+    // question, checked at boot from the *value* of MAIL_PROVIDERS — a list
+    // that demanded RESEND_API_KEY would refuse a valid deployment of four
+    // SMTP providers and no Resend.
+    expect(requiredEnv("production")).toContain("MAIL_PROVIDERS");
     expect(requiredEnv("production")).toContain("MAIL_FROM");
+    expect(requiredEnv("production")).not.toContain("RESEND_API_KEY");
   });
 
-  it("does not require RESEND_API_KEY or MAIL_FROM outside production", () => {
+  it("does not require MAIL_PROVIDERS or MAIL_FROM outside production", () => {
     // Development runs the same fallback deliberately, so the rest of the
-    // auth flow can be built without spending the shared daily quota.
-    expect(requiredEnv("development")).not.toContain("RESEND_API_KEY");
+    // auth flow can be built without spending anybody's daily quota.
+    expect(requiredEnv("development")).not.toContain("MAIL_PROVIDERS");
     expect(requiredEnv("development")).not.toContain("MAIL_FROM");
   });
 });
@@ -177,5 +181,39 @@ describe("the MFA key check at boot", () => {
     expect(bloque).toMatch(/bootLog\.fatal/);
     expect(bloque).not.toMatch(/process\.exit/);
     expect(bloque).not.toMatch(/\bdie\(/);
+  });
+});
+
+describe("the mail chain at boot (plan 4E)", () => {
+  // Read from the source the way the MFA key check above is: the block runs
+  // at module level and cannot be imported without starting the server.
+  const src = readFileSync(resolve(here, "index.ts"), "utf8");
+  const inicio = src.indexOf("const correo = configuracionDeCorreo(");
+  const fin = src.indexOf("configurarRelevo(correo);", inicio);
+  const bloque = src.slice(inicio, fin);
+
+  it("configures the chain from the environment after requiredEnv, and installs it", () => {
+    expect(inicio).toBeGreaterThan(-1);
+    expect(fin).toBeGreaterThan(inicio);
+    expect(src.indexOf("requiredEnv(")).toBeLessThan(inicio);
+  });
+
+  // The design's line: a chain of four is a degraded chain, and a process
+  // that refuses to start over one provider's typo is an outage for the nine
+  // people whose only second factor is the email.
+  it("exits only on an empty chain, never over a dropped provider", () => {
+    const rechazo = bloque.indexOf("if (!correo.ok) {");
+    expect(rechazo).toBeGreaterThan(-1);
+    const cierreRechazo = bloque.indexOf("\n}", rechazo);
+    expect(bloque.slice(rechazo, cierreRechazo)).toContain("process.exit(1)");
+    const bucle = bloque.indexOf("for (const descartado of correo.descartados)");
+    expect(bucle).toBeGreaterThan(cierreRechazo);
+    expect(bloque.slice(bucle)).not.toContain("process.exit");
+  });
+
+  it("logs a dropped provider at fatal in production and at warn elsewhere", () => {
+    const bucle = bloque.slice(bloque.indexOf("for (const descartado of correo.descartados)"));
+    expect(bucle).toMatch(/NODE_ENV === "production" \? bootLog\.fatal/);
+    expect(bucle).toContain("bootLog.warn");
   });
 });
