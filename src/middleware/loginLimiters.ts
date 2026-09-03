@@ -1,10 +1,12 @@
 // How much room somebody gets to be wrong.
 //
-// Four budgets that do different jobs: the address bucket stops a flood, the
+// Five budgets that do different jobs: the address bucket stops a flood, the
 // account bucket stops one machine grinding one name, the lockout arithmetic at
-// the bottom stops a guess spread across many addresses, and the confirmation
+// the bottom stops a guess spread across many addresses, the confirmation
 // bucket stops a caller who is already logged in from using "re-type your
-// password" as a password oracle. The arithmetic of the third is the part that
+// password" as a password oracle, and the passkey bucket stops one that is
+// already logged in from filling the bitácora — the only one here whose subject
+// is writing rather than guessing. The arithmetic of the third is the part that
 // goes wrong quietly — an escalation with no ceiling is a button for locking a
 // colleague out — and the fourth is the one whose absence would be invisible,
 // since the routes it guards deliberately charge nothing to the lockout.
@@ -26,6 +28,7 @@ import {
   LOCKOUT_BASE_MINUTES,
   LOCKOUT_MAX_MINUTES,
   PASSWORD_CONFIRM_LIMIT,
+  WEBAUTHN_CEREMONY_LIMIT,
 } from "../config/security.js";
 
 /**
@@ -198,7 +201,7 @@ export function confirmCostsNothing(_req: Request, res: Response): boolean {
  * read differently the day one of them gets improved.
  *
  * **The second half names what else this takes away, and that is the point.**
- * This bucket is shared: `requireStepUp` on nineteen routes,
+ * This bucket is shared: `requireStepUp` on every route mounted with `exigeContrasena`,
  * `chargeConfirmBudgetOnSelfChange` on rename and change-password, and
  * `/auth/email/send`. So five wrong passwords typed into a step-up window also
  * shut, for fifteen minutes, the two screens somebody would go to next —
@@ -232,6 +235,45 @@ export const PASSWORD_CONFIRM_MESSAGE =
  * answer (it would let anybody shut their own account out of the ERP by
  * mistyping while renaming themselves) so this is.
  */
+/**
+ * The key for the passkey ceremonies, and it is the **session** — not the
+ * account and not the address.
+ *
+ * The account would be wrong: a colleague on a shared office network would
+ * share a bucket with nobody, but somebody with several tabs open is still one
+ * person and one session. The address would be worse — the whole office is one
+ * NAT. The session is what a stolen cookie *is*, so it is the thing whose
+ * writing this bounds, and a legitimate person who really does need a fresh
+ * budget can get one by logging in again.
+ *
+ * Falls back to the address only for a request that somehow arrives without a
+ * session, which `authenticate` should already have refused; keyless would mean
+ * unbounded.
+ */
+export function webauthnCeremonyKey(req: Request): string {
+  const sesion = req.user?.id_sesion;
+  return typeof sesion === "string" ? `wa:${sesion}` : `wa:ip:${ipKeyGenerator(req.ip ?? "")}`;
+}
+
+/**
+ * The bucket for `/api/auth/webauthn/login/*`.
+ *
+ * **Counts every request, successes included**, unlike every other bucket in
+ * this file. Those exist to stop a *guess*, so refunding a correct answer is
+ * right there. This one exists to stop a *write*: a successful ceremony writes
+ * a `reto_webauthn` row and a bitácora line exactly like a failed one, so
+ * refunding it would leave the flood unbounded for anybody whose assertions
+ * happen to verify.
+ */
+export const webauthnCeremonyLimiter = rateLimit({
+  windowMs: LOGIN_WINDOW_MS,
+  limit: WEBAUTHN_CEREMONY_LIMIT,
+  keyGenerator: webauthnCeremonyKey,
+  message: { message: "Demasiados intentos con la llave. Espere unos minutos." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 export const passwordConfirmLimiter = rateLimit({
   windowMs: LOGIN_WINDOW_MS,
   limit: PASSWORD_CONFIRM_LIMIT,

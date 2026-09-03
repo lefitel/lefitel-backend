@@ -16,12 +16,11 @@
 //   nothing but a sheet of paper, which is the exact hole the second factor
 //   was built to close.
 //
-// The three tables this file queries are empty until a later plan starts
-// writing to them: registering a passkey, confirming a TOTP secret, issuing
-// recovery codes. So today this returns zero for everybody — that is not a
-// stub, it is the correct answer for an account that has genuinely
-// registered nothing, and the two rules above are exercised by the tests
-// beside this file rather than left for the day rows finally appear.
+// The three tables this file queries were empty when it was written, and are
+// not any more: `registerVerify` inserts a passkey, `confirmTotp` a confirmed
+// secret, `escribirCodigos` a batch of recovery codes. Everything below is
+// answering about real rows, so a change here changes who gets through a gate
+// today rather than on some future deploy day.
 
 import { Op } from "sequelize";
 import { CredencialWebauthnModel } from "../models/credencialWebauthn.model.js";
@@ -123,6 +122,79 @@ export async function hayFactorVerificable(id_usuario: number): Promise<boolean>
 }
 
 /**
+ * What somebody may actually type — or press a finger on — to satisfy a
+ * step-up refusal right now.
+ *
+ * **Why it exists.** `requireStepUp` refuses with `sin-factor-reciente`, which
+ * means "prove a factor" and names none. Until passkeys existed that was
+ * enough, because there was exactly one thing to prove and the window could
+ * hard-code a six-digit field. Now there are two, they look nothing alike on
+ * screen, and the window has no way to know which to draw. Guessing wrong is
+ * not cosmetic: an account whose only factor is a passkey gets a form asking
+ * for a code that cannot exist, five wrong tries lock the account, and the
+ * remedy is behind the very gate that is refusing.
+ *
+ * **Different question from `tieneAlgunFactor`, and the difference is
+ * `codigo`.** That function answers "does this account have a *factor*", which
+ * decides whether the gate refuses at all, and recovery codes deliberately do
+ * not count towards it — the header of this file says why. This one answers
+ * "what may this person offer to cover the refusal", and `/api/auth/stepup`
+ * accepts a recovery code, so leaving it out would hide a remedy the server
+ * already honours. The two never contradict each other in practice: an account
+ * holding nothing but codes never reaches this refusal, because
+ * `tieneAlgunFactor` sends it down the password branch instead.
+ *
+ * 🔴 **Which is exactly why this is not called `factores`.** The header of this
+ * file spends a paragraph establishing that a recovery code is *not* a factor,
+ * because counting it as one would let onboarding finish with nothing but a
+ * printed sheet. A list named `factores` with `"codigo"` inside it walks that
+ * back on the wire, and the next person to read the response would be right to
+ * conclude the rule had been dropped. `metodos` claims only what it is: the
+ * ways this person may re-prove themselves at a window that is already open.
+ *
+ * **`totp` carries the keyring rule, and that is not tidiness.** A confirmed
+ * secret this process cannot decrypt is a form that can never be completed;
+ * naming it here would send somebody to type six digits at a 503. Same
+ * condition as `hayFactorVerificable` above, in the same file, so the two
+ * cannot drift apart — and the same reason passkeys carry no such condition:
+ * nothing about them is encrypted with that keyring.
+ *
+ * **What that rule does *not* cover, said plainly.** `totpEstaDisponible` is a
+ * module-level flag set once, at boot, by `comprobarLlaveAlArrancar`. A keyring
+ * that becomes unreadable while the process is running still reports `true`, and
+ * so does one that can read most rows but not a particular `key_version`. In
+ * either case this names `"totp"`, the person types six digits, and the answer
+ * is the ordinary "código incorrecto" — no charge, no lockout, and no end.
+ * Inherited from `hayFactorVerificable` rather than introduced here, and the fix
+ * belongs there if it is ever worth making.
+ *
+ * **The order is load-bearing.** The client renders the options in the order
+ * they arrive, and a passkey is one gesture where a code is a device, an app
+ * and a transcription. Recovery codes come last on purpose: they are the way
+ * back in, not a method, and each one spent is one fewer.
+ *
+ * 🔴 **And this is `factoresDe`'s first live caller.** Its own docblock, and
+ * the note in `estadoInicialDeSesion` below, gave that function an expiry
+ * date: become somebody's query or be deleted along with its interface and
+ * tests. This is the query. What it is not is the settings screen that
+ * docblock imagined — that screen still does not exist, and the count of
+ * unspent codes it wanted is deliberately dropped here, because a refusal
+ * naming how many codes are left tells a stolen cookie how much runway it has.
+ */
+export type MetodoReautenticacion = "passkey" | "totp" | "codigo";
+
+export async function metodosDeReautenticacion(
+  id_usuario: number,
+): Promise<MetodoReautenticacion[]> {
+  const inventario = await factoresDe(id_usuario);
+  const metodos: MetodoReautenticacion[] = [];
+  if (inventario.passkeys > 0) metodos.push("passkey");
+  if (inventario.totp > 0 && totpEstaDisponible()) metodos.push("totp");
+  if (inventario.codigos > 0) metodos.push("codigo");
+  return metodos;
+}
+
+/**
  * What state a session opens in, and whether this login is the one that has to
  * start the fourteen-day clock.
  *
@@ -171,17 +243,14 @@ export async function hayFactorVerificable(id_usuario: number): Promise<boolean>
  * account is still being chased", and after registration it is not. Third line
  * of defence, not the first.
  *
- * **And a decision 4B has to take rather than inherit: `factoresDe` and
- * `InventarioFactores` above have no caller anywhere in `src/`.** Only their
- * own tests reach them; every live path goes through `tieneAlgunFactor`, which
- * is two COUNTs rather than three precisely because it refuses to pay for a
- * table it does not read. They were left in place on purpose — the docblock on
- * `factoresDe` promises it is the query behind a settings screen showing "2
- * passkeys, no TOTP, 5 recovery codes left", and 4B is what builds that screen.
- * So 4B decides one of two things and neither by default: either that function
- * becomes that screen's query, or it goes, along with the interface and the
- * tests standing on it. Dead code that describes a screen nobody has built yet
- * is a promise with an expiry date.
+ * ~~A decision 4B has to take rather than inherit: `factoresDe` and
+ * `InventarioFactores` have no caller anywhere in `src/`.~~ **Settled by plan
+ * 4C:** `metodosDeReautenticacion` above is that caller, and `requireStepUp`
+ * calls it on every `sin-factor-reciente` refusal. What it is *not* is the
+ * settings screen `factoresDe`'s own docblock imagined — that screen still
+ * does not exist. The rule that produced this note stands for the next
+ * function somebody is tempted to leave lying about: code that describes a
+ * screen nobody has built is a promise with an expiry date.
  *
  * `graceUntil` is an instruction to the caller, not a fact about the account:
  * a date means "write this into `usuarios.mfa_grace_until`", `null` means
@@ -266,21 +335,19 @@ export async function hayFactorVerificable(id_usuario: number): Promise<boolean>
  *
  * ---
  *
- * ⚠️ **`parcial` is a dead end until the plan after this one, and this is the
- * comment for whoever deploys.** Reaching it needs a row in
- * `credencial_webauthn` or a confirmed one in `factor_totp`, and as of this
- * plan nothing anywhere in `src/` inserts into either — the only statements
- * against those tables are the COUNTs in this file, and neither migration
- * seeds a row. So on deploy day `tieneAlgunFactor` is false for every account
- * and this branch cannot fire.
+ * ✅ **`parcial` was a dead end when this was written; it is not any more, and
+ * this is still the comment for whoever deploys.** Reaching it needs a row in
+ * `credencial_webauthn` or a confirmed one in `factor_totp`, and both are now
+ * written — `registerVerify` and `confirmTotp`. What made that safe is that
+ * the doors out are mounted too: `app.ts` mounts `/api/auth/mfa` and
+ * `/api/auth/webauthn`, and `sessionState.ts` opens both prefixes to
+ * `parcial`. A session that lands there can prove a TOTP code, a recovery
+ * code, or a passkey, and any of the three lifts it.
  *
- * That matters because there is nothing on the other side of it yet.
- * `sessionState.ts` allows a `parcial` session to reach `/api/auth/mfa` and
- * `/api/auth/webauthn/login`, and **neither route is mounted** — `auth.routes.ts`
- * has no `/mfa` and no `/webauthn/*`. Anybody who did land in `parcial` today
- * would hold a session that can log out and read `/me` and nothing else, with
- * no endpoint anywhere in the API able to lift them out of it, on every login,
- * permanently.
+ * 🔴 **The constraint that produced this paragraph has not gone away**, it has
+ * only been satisfied once. Anything that registers a *new* kind of factor
+ * inherits it whole: a row in one of these tables makes every later login open
+ * `parcial`, and the way out has to exist in the same deploy.
  *
  * **So the ordering is a hard constraint, not a preference: the endpoint that
  * verifies a factor has to be live before, or in the same deploy as, the first
@@ -296,12 +363,13 @@ export async function hayFactorVerificable(id_usuario: number): Promise<boolean>
  * When it does, the login still answers 200 and the cookie is still set — and
  * then `authenticate` refuses everything outside the allowlist in
  * `sessionState.ts`. The six extra doors `ONBOARDING_EXTRA` opens are the way
- * out, and **four of them are not mounted**: `auth.routes.ts` has no `/totp`,
- * no `/webauthn/register`, no `/webauthn/credentials` and no
- * `/recovery-codes`. The two that are mounted, `/email` and `/sessions`,
- * cannot register a factor, and a registered factor is the only thing that
- * changes this answer. So there is no way out of `onboarding` from inside the
- * API until plan 4B ships one.
+ * out, and as of plan 4C **only one of them is still missing**:
+ * `/webauthn/credentials`, which is that plan's Task 9 and manages passkeys
+ * rather than creating one. `/totp`, `/webauthn/register` and
+ * `/recovery-codes` are mounted (`app.ts`), and any of the first two ends
+ * `onboarding` by registering a factor. The paragraph is kept because the
+ * shape of the failure is worth remembering: an allowlist entry for a route
+ * nobody mounted is a room with a door painted on it.
  *
  * **The deadline this commit creates: 4B has to be live within
  * `MFA_GRACE_DAYS` of this deploy.** Not "soon" — fourteen days from the day

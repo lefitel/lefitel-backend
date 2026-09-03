@@ -1,6 +1,11 @@
 import type { Request, Response, NextFunction, RequestHandler } from "express";
 import { verifyOwnPassword } from "../auth/credentials.js";
-import { tieneAlgunFactor, hayFactorVerificable } from "../auth/factorInventory.js";
+import {
+  tieneAlgunFactor,
+  hayFactorVerificable,
+  metodosDeReautenticacion,
+  type MetodoReautenticacion,
+} from "../auth/factorInventory.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { passwordConfirmLimiter, passwordConfirmKey, PASSWORD_CONFIRM_MESSAGE } from "./loginLimiters.js";
@@ -209,7 +214,7 @@ export interface OpcionesStepUp {
    * below already exists to avoid.
    *
    * **Deliberately narrow, and it has to be.** Read by one route rather than
-   * applied to all nineteen, because everywhere else the honest answer to a
+   * applied to every route that carries the gate, because everywhere else the honest answer to a
    * broken key is still "prove your factor or spend a recovery code" — those
    * codes are bcrypt, never encrypted, so they survive exactly this failure.
    * Widening it would mean that during a configuration fault the password
@@ -224,6 +229,33 @@ export interface OpcionesStepUp {
    * factor is confirmed instead of waiting to be asked for.
    */
   toleraFactorIlegible?: boolean;
+}
+
+/**
+ * 🔴 **The password leaves the body on every path out of this gate — every
+ * `next()`, and both `next(err)` — not only the one that verified it.**
+ *
+ * Until Task 10 of plan 4C it left on exactly one. The fresh-window shortcut
+ * passed it through untouched, and a request can carry the field there: the
+ * client's interceptor serialises concurrent refusals onto one ceremony and
+ * injects the same password into every retried body, so a route that never
+ * asked for it receives it the moment it shares a ceremony with one that did.
+ * Downstream, `rol.controller.ts` writes `req.body` whole into the bitácora as
+ * `after` — a table rendered on a screen. An administrator's plaintext
+ * password in `bitacora.metadata` was one unlucky pair of tabs away.
+ *
+ * **Honestly: D6 itself closed that particular hole**, by putting
+ * `exigeContrasena` on every `rol` route so the shortcut is no longer reachable
+ * there. What this rule protects now is the two mounts that keep the plain
+ * gate, any mount added later, and the error handler — none of which log the
+ * body today, and the next Sentry hook or `req.body` in a log line would. A
+ * rule with no exceptions is the only one the next reader can build on.
+ *
+ * Guarded, because a body-less DELETE arrives with `req.body` undefined.
+ */
+function soltarContrasena(req: Request): void {
+  const body = req.body as Record<string, unknown> | undefined;
+  if (body) delete body[STEP_UP_PASSWORD_FIELD];
 }
 
 export function requireStepUp({
@@ -258,7 +290,7 @@ export function requireStepUp({
   // way `routeGuards.test.ts` already does for `requirePermissionGate`, and it
   // can only tell this gate apart from an ordinary handler by this name
   // surviving on the function Express actually calls.
-  return async function stepUpGate(req: Request, res: Response, next: NextFunction) {
+  const stepUpGate = async function stepUpGate(req: Request, res: Response, next: NextFunction) {
     try {
       const user = req.user;
       if (!user) {
@@ -339,6 +371,7 @@ export function requireStepUp({
        * steps, in this order: prove the factor, then type the password.
        */
       if (satisfecho && !exigeContrasena) {
+        soltarContrasena(req);
         next();
         return;
       }
@@ -367,7 +400,55 @@ export function requireStepUp({
           // second window for the password, on the two most delicate
           // operations there are. Saying it now is what lets one window ask
           // for both. Absent means false, so nothing that ignores it changes.
-          denegar(req, res, MENSAJE, MOTIVO_SIN_FACTOR_RECIENTE, { exigeContrasena });
+          // 🔴 **And `metodos` names what the window has to draw.** This
+          // refusal says "prove a factor" and, until passkeys existed, there
+          // was only one thing that could mean, so the window hard-coded a
+          // six-digit field. There are two now and they look nothing alike.
+          // Getting it wrong is not cosmetic: an account whose only factor is
+          // a passkey would be shown a form asking for a code it cannot
+          // produce, and five attempts at it lock the account — behind this
+          // same gate. See `metodosDeReautenticacion` for what goes in the list and
+          // what is deliberately left out of it.
+          //
+          // **Three COUNTs, and two of them repeat what `tieneAlgunFactor`
+          // just asked.** Bought knowingly. This refusal is not the hot path
+          // it looks like: `mfa_satisfied_at` is good for
+          // `STEP_UP_WINDOW_MINUTES`, so a session lands here at most once
+          // every ten minutes, and what follows is a human running a WebAuthn
+          // ceremony or reading six digits off a phone. The alternative was
+          // one function returning both answers, which saves two indexed
+          // COUNTs and costs a nullable local here to keep the `&&` from
+          // short-circuiting — a worse trade at this volume.
+          //
+          // 🔴 And the two answers are **not** the same question, which is the
+          // reason they stayed two calls: an account whose only TOTP secret
+          // this server cannot decrypt has a factor (`tieneAlgunFactor` is
+          // true, so the gate must refuse) and no method (`metodos` is empty,
+          // because there is nothing it could truthfully offer). That gap is
+          // the seam `toleraFactorIlegible` exists for, and collapsing it into
+          // one boolean is how it gets lost.
+          //
+          // 🔴 **And a failure to answer it may not become a 500.** Three
+          // COUNTs is three more ways a dropped connection turns a
+          // well-formed `403 STEP_UP_REQUIRED` into a bare server error — and
+          // the client's interceptor only opens the window on a 403 carrying
+          // `code`, so a 500 here does not degrade the ceremony, it removes
+          // it. Omitting the field is already defined as "this server cannot
+          // say", which is exactly true when the query failed, so that is
+          // what a failure answers with.
+          let metodos: MetodoReautenticacion[] | undefined;
+          try {
+            metodos = await metodosDeReautenticacion(user.id);
+          } catch (err) {
+            gateLog.error(
+              { err, id_usuario: user.id },
+              "no se pudo averiguar con qué puede probarse la cuenta: se rechaza sin decirlo",
+            );
+          }
+          denegar(req, res, MENSAJE, MOTIVO_SIN_FACTOR_RECIENTE, {
+            exigeContrasena,
+            ...(metodos ? { metodos } : {}),
+          });
           return;
         }
         // Falls through to the password branch below, which that one route
@@ -458,6 +539,10 @@ export function requireStepUp({
           severity: "warning",
           ip_address: req.ip ?? null,
         });
+        // Reached only with the field absent, so there is nothing to drop —
+        // called anyway, so that the rule "every `next()` drops it" has no
+        // exception for the next reader to reason about.
+        soltarContrasena(req);
         next();
         return;
       }
@@ -487,6 +572,7 @@ export function requireStepUp({
         gastados = info?.totalHits ?? 0;
         agotado = gastados >= PASSWORD_CONFIRM_LIMIT;
       } catch (err) {
+        soltarContrasena(req);
         next(err);
         return;
       }
@@ -514,7 +600,7 @@ export function requireStepUp({
          * motivo para dejar la contraseña dando vueltas por los controladores,
          * que no tienen ningún uso para ella.
          */
-        delete (req.body as Record<string, unknown>)[STEP_UP_PASSWORD_FIELD];
+        soltarContrasena(req);
         // Nothing was ever charged for this attempt — see the docstring above
         // for why that is the point, not an oversight.
         next();
@@ -574,6 +660,29 @@ export function requireStepUp({
       }
     }
   };
+
+  /**
+   * The options, readable off the function Express actually mounts — the same
+   * shape `requirePermission` gives `permission`, and for the same reader:
+   * `routeGuards.test.ts` walks the assembled app and can otherwise tell only
+   * that *a* step-up gate is on a route, never which one. Task 10 of plan 4C
+   * turned `exigeContrasena` on across eleven administrative mounts, and
+   * without this a revert of any one of them left every test green.
+   *
+   * The **resolved** locals, not the argument: `requireStepUp()` would stamp
+   * `{}` and `requireStepUp({ exigeContrasena: true })` a partial, and the
+   * table comparing against them would have to spell the defaults out twice.
+   * Stamping what the closure reads is the only thing that keeps the metadata
+   * from drifting away from the behaviour.
+   */
+  Object.defineProperty(stepUpGate, "opciones", {
+    // Frozen: the property cannot be reassigned, but the object behind it
+    // could be edited in place, and a table that compares whole objects
+    // would then read a lie that nothing in the closure shares.
+    value: Object.freeze({ permiteOnboarding, exigeContrasena, toleraFactorIlegible }),
+    enumerable: true,
+  });
+  return stepUpGate;
 }
 
 /**
@@ -599,6 +708,7 @@ async function cobrar(
   await passwordConfirmLimiter(req, res, (err?: unknown) => {
     if (err) {
       resultado = "error";
+      soltarContrasena(req);
       next(err);
       return;
     }
@@ -669,6 +779,7 @@ function denegar(
   // 🔴 `extra` last, but it can never overwrite the three above: nothing passes
   // `code`, `motivo` or `message` in it, and a future caller that tried would
   // be silently redefining the contract this whole file is about. The two
-  // fields it does carry today are `exigeContrasena` and `intentosRestantes`.
+  // three fields it does carry today are `exigeContrasena`, `metodos` and
+  // `intentosRestantes`.
   res.status(403).json({ message, code: CODIGO_STEP_UP, motivo, ...extra });
 }

@@ -84,7 +84,7 @@ import { descifrar } from "../auth/mfaCrypto.js";
 import { aadDeFactorTotp, sellarPaso, pasoYaUsado } from "../auth/totpStore.js";
 import { gastarCodigo } from "../auth/recoveryCodeStore.js";
 import { tieneAlgunFactor } from "../auth/factorInventory.js";
-import { promoverSesion } from "../auth/sessionPromotion.js";
+import { promoverSesion, sellarPruebaDeFactor } from "../auth/sessionPromotion.js";
 import type { FuenteMfa } from "../auth/sessionState.js";
 import { estaBloqueada, siguienteBloqueo } from "../middleware/loginLimiters.js";
 import { acunarDispositivo, setRememberedDeviceCookie } from "../auth/rememberedDeviceIssue.js";
@@ -412,11 +412,25 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
       // `promoverSesion` is not composed transactionally with `sellarPaso`
       // here: `totpStore.ts`'s `sellarPaso` takes no `transaction` parameter
       // (only the recovery-code path below was built to need one — Task 11
-      // Step 4). Its return value is not checked: a session that was
-      // already `completa` by the time this ran has nothing left to
-      // promote, and the code that got here was still genuinely valid and
-      // is still sealed against replay either way.
-      await promoverSesion(caller.id_sesion, "totp");
+      // Step 4).
+      //
+      // 🔴 **And its return value is checked, which it was not.** The comment
+      // that stood here said an unpromoted session "was already `completa` and
+      // has nothing left to promote". That is false for one reachable row, and
+      // the consequence is a lockout: `estadoEfectivo` answers `onboarding`
+      // for a session **stored** `completa` whose deadline has passed and
+      // which carries no `mfa_satisfied_at` — the shape of any session that
+      // was already open when its owner registered their first factor from
+      // another device. `promoverSesion` matches on the *stored* state, finds
+      // nothing, and writes nothing; this endpoint then answered "Segundo
+      // factor verificado" having sealed nothing at all, and the next request
+      // asked for the factor again. For ever.
+      //
+      // `sellarPruebaDeFactor` is the same second half `confirmTotp` and
+      // `loginVerify` already use for this exact row, and it is why that
+      // function exists.
+      const subio = await promoverSesion(caller.id_sesion, "totp");
+      if (!subio) await sellarPruebaDeFactor(caller.id_sesion, "totp");
       fuente = "totp";
     }
     fallaCriptografica = resultado.fallaCriptografica;
@@ -443,8 +457,20 @@ export const verify = handler("verify", async (req: Request, res: Response) => {
         const promovido = await sequelize.transaction(async (transaction) => {
           const gastado = await gastarCodigo(caller.id, crudo, { transaction });
           if (!gastado) return false;
+          // Same row, same reason as the TOTP branch above — and here the
+          // old behaviour failed the other way round: a perfectly valid
+          // recovery code was rolled back and answered "código incorrecto",
+          // every time, on the one session state that most needed it.
+          //
+          // `NadaQueSellar` stays, and now means what it says: **neither**
+          // write found a session. That is the case where spending one of ten
+          // printed codes buys nothing, so the transaction unwinds and the
+          // code stays unspent.
           const ok = await promoverSesion(caller.id_sesion, "codigo", { transaction });
-          if (!ok) throw new NadaQueSellar();
+          if (!ok) {
+            const sellado = await sellarPruebaDeFactor(caller.id_sesion, "codigo", { transaction });
+            if (!sellado) throw new NadaQueSellar();
+          }
           return true;
         });
         if (promovido) fuente = "codigo";

@@ -57,6 +57,11 @@ vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword: (...a: unknown[]) 
 vi.mock("../auth/factorInventory.js", () => ({
   tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
   hayFactorVerificable: (...a: unknown[]) => hayFactorVerificable(...a),
+  // Añadido por el plan 4C: `requireStepUp` lo llama al rechazar con
+  // `sin-factor-reciente`, para que el 403 diga con qué se puede cubrir.
+  // Sin él aquí, el mock deja la función a `undefined` y la puerta revienta
+  // en cuanto rechaza — ruidoso, no silencioso, que es lo que se quiere.
+  metodosDeReautenticacion: async () => ["totp"],
 }));
 vi.mock("../utils/logAction.js", () => ({ logAction: (...a: unknown[]) => logAction(...a) }));
 vi.mock("../middleware/loginLimiters.js", async (importOriginal) => {

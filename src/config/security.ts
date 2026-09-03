@@ -109,6 +109,25 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 export const PASSWORD_CONFIRM_LIMIT = 5;
 
 /**
+ * How many WebAuthn ceremony requests one session may make per
+ * `LOGIN_WINDOW_MS`.
+ *
+ * 🔴 **This bucket is not about guessing, it is about writing.** A failed
+ * assertion deliberately costs nothing against the account lockout (decision
+ * D7 of plan 4C) and, in exchange, every one of them writes a bitácora line.
+ * With no bucket, somebody holding a stolen cookie has a free, unbounded
+ * INSERT primitive into the one table nothing in `src/` ever prunes — and the
+ * flood would drown the very signal that line was added to give. Minting the
+ * challenge has the same shape: one `reto_webauthn` row per call.
+ *
+ * Thirty is deliberately generous against real use. A login is one `options`
+ * plus one `verify`; a step-up window reopens at most every
+ * `STEP_UP_WINDOW_MINUTES`, so a person working steadily for a quarter of an
+ * hour spends six or eight. Nobody reaches thirty by using the product.
+ */
+export const WEBAUTHN_CEREMONY_LIMIT = 30;
+
+/**
  * How long a proved factor keeps opening the sensitive operations.
  *
  * Ten minutes is long enough to create three users in a row without
@@ -248,6 +267,17 @@ export function requiredEnv(nodeEnv: string | undefined): string[] {
         "RESEND_API_KEY",
         "MAIL_FROM",
         "MFA_ENCRYPTION_KEY_ACTIVE",
+        // 🔴 The two passkey values, and they are on this list for a reason
+        // no other entry has: **neither can be corrected after the fact.**
+        // Every other variable here, set wrong, is fixed by setting it right
+        // and restarting. A passkey registered under the wrong Relying Party
+        // id stops existing the moment the id is corrected, and has to be
+        // enrolled again on every device by every person. Refusing to boot is
+        // the only failure mode that cannot be shipped by accident — see
+        // `webauthnRpId` for why the value is `www.osefi.net` and not the
+        // apex, and `webauthnOrigins` for why this is not the CORS list.
+        "WEBAUTHN_RP_ID",
+        "WEBAUTHN_ORIGIN",
       ]
     : [];
 }
@@ -627,6 +657,31 @@ export const EMAIL_VERIFY_TOKEN_TTL_MS = 60 * 60 * 1000;
 export const PASSWORD_RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
 
 /**
+ * How long a WebAuthn challenge stays redeemable.
+ *
+ * Two minutes, and it is short for a different reason than the two above.
+ * Those cross an inbox: somebody has to receive a mail, find it, and click.
+ * A challenge never leaves the browser that asked for it — it is minted,
+ * handed straight to `navigator.credentials`, and answered by a fingerprint
+ * within seconds. The only thing a longer window buys is a wider replay
+ * window for an assertion somebody captured.
+ *
+ * 🔴 **And for a synced passkey this window is the whole replay defence**, not
+ * a second layer. iCloud Keychain and Google Password Manager report a
+ * signature counter of 0 on every assertion, so `esContadorDeClon` in
+ * `auth/passkeyStore.ts` can never catch a clone of one. What stops a captured
+ * assertion being replayed is that its challenge was spent — see
+ * `consumirReto`.
+ *
+ * Two minutes rather than one because the ceremony is not always instant: a
+ * security key has to be found in a drawer, a phone has to be picked up and
+ * unlocked, and a person prompted for a fingerprint at the wrong moment
+ * looks away and comes back. One minute would turn those into a failure that
+ * reads like a broken passkey.
+ */
+export const WEBAUTHN_CHALLENGE_TTL_MS = 2 * 60 * 1000;
+
+/**
  * Budgets for the four routes that get somebody back into an account they
  * cannot fully use yet — Task 6 of `2026-08-25-correo-verificado-y-recuperacion`.
  * See `middleware/recoveryLimiters.ts` for how each number is spent, including
@@ -770,4 +825,99 @@ export const SESSION_COOKIE_SECURE =
  */
 export function cookieNameCarriesHostPrefix(name: string, secure: boolean): boolean {
   return !secure || name.startsWith("__Host-");
+}
+
+/**
+ * The Relying Party id the passkeys of this ERP are bound to.
+ *
+ * **What this value is.** WebAuthn ties every credential to one domain and
+ * refuses to use it anywhere else. That refusal is enforced by the browser
+ * before anything reaches this server, and it is the entire reason a passkey
+ * cannot be phished: a page on `osefi-net.com` asking for the fingerprint
+ * gets nothing, because the domain does not match. There is no fallback path
+ * for a user to override, which is exactly the point.
+ *
+ * 🔴 **Why `www.osefi.net` and not the apex `osefi.net`.** Revision 1 of the
+ * design chose the apex, arguing it "covers www.osefi.net and api.osefi.net
+ * at once". That argument is false in its premise: `api.osefi.net` serves no
+ * pages and never runs a ceremony — it only verifies assertions server-side,
+ * where the id is a parameter it is handed, not something it hosts. So the
+ * apex covered nothing extra, and in exchange it would let **any**
+ * `*.osefi.net` ask for the fingerprint under the company's own branding and
+ * relay the assertion. `middleware/csrf.ts` already documents that
+ * `evil.osefi.net` is not hypothetical here: one mis-delegated DNS record is
+ * enough, and a subdomain is same-site, so `SameSite=Lax` does not stop it.
+ *
+ * The cost of the narrow choice would be that `https://osefi.net` cannot run
+ * a ceremony at all — an id must equal the page's domain or be a registrable
+ * suffix of it, and `www.osefi.net` is not a suffix of `osefi.net`. Measured
+ * on 2026-09-02: `https://osefi.net` answers `307` to
+ * `https://www.osefi.net/`. Nobody ever executes a ceremony on the apex, so
+ * the cost is zero.
+ *
+ * 🔴 **This value cannot be changed later.** Every passkey already registered
+ * under the old id stops existing as far as the server is concerned, and each
+ * one has to be enrolled again by hand. That is why there is no default for
+ * production: `requiredEnv` makes the process refuse to boot without it,
+ * which is the only failure mode that cannot be shipped by accident.
+ *
+ * Development gets `localhost` — the one host browsers exempt from the
+ * secure-context requirement. `127.0.0.1` is **not** exempt and does not
+ * work, which is why the dev origin is written as a host name everywhere.
+ */
+export const DEV_WEBAUTHN_RP_ID = "localhost";
+
+/**
+ * The name the browser shows in its own passkey dialog: "Save a passkey for
+ * **Osefi**?".
+ *
+ * A constant and not an environment variable, unlike the two values below it,
+ * and the difference is worth stating because they look like a set of three.
+ * Those two are security parameters whose mistakes are permanent. This one is
+ * a label: getting it wrong shows the wrong word in a dialog and is fixed by
+ * changing it. Making it configurable would add a third thing a deployment can
+ * forget, in exchange for nothing anybody wants to vary per environment.
+ */
+export const WEBAUTHN_RP_NAME = "Osefi";
+
+export function webauthnRpId(raw: string | undefined, nodeEnv: string | undefined): string {
+  const configured = raw !== undefined && raw.trim() !== "";
+  if (configured) return raw.trim();
+  return nodeEnv === "development" ? DEV_WEBAUTHN_RP_ID : "";
+}
+
+/**
+ * The origins allowed to run a passkey ceremony for this Relying Party.
+ *
+ * **A `Set`, and membership — never a prefix, never a suffix.** The same
+ * discipline `requireSameOrigin` is built on, and for the same measured
+ * reason written there: suffix matching is how `https://evil-osefi.net`
+ * passes a check written for `osefi.net`. Here the stakes are higher than a
+ * CSRF refusal, because the value this guards is an authentication decision.
+ *
+ * 🔴 **Deliberately not `allowedOrigins`, even though the lists will look
+ * identical in production.** They answer different questions: that one says
+ * which origins this API replies to, this one says which pages may execute a
+ * ceremony for these credentials. The day `CORS_ORIGIN` gains a staging or
+ * preview host — an ordinary, uncontroversial edit nobody would route past
+ * this file — that host would silently become a valid origin for everybody's
+ * passkeys. Two lists that happen to agree are not one list.
+ *
+ * A trailing slash is trimmed because it is a configuration typo, not a
+ * relaxation: a browser never reports an origin with one, so a value written
+ * `https://www.osefi.net/` would match nothing and every ceremony would fail
+ * with no explanation. Trimming the input is not the same thing as loosening
+ * the comparison, which stays exact.
+ */
+export function webauthnOrigins(raw: string | undefined, nodeEnv: string | undefined): Set<string> {
+  const configured = raw !== undefined && raw.trim() !== "";
+  if (!configured) {
+    return nodeEnv === "development" ? new Set([DEV_FRONTEND_ORIGIN]) : new Set();
+  }
+  return new Set(
+    raw
+      .split(",")
+      .map((origin) => origin.trim().replace(/\/+$/, ""))
+      .filter((origin) => origin !== "" && origin !== "*"),
+  );
 }

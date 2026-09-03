@@ -61,8 +61,11 @@ const router = Router();
  * confirms a password, decided by `requiresOwnPassword` — the very function both
  * handlers branch on, so the limit and the checks cannot drift apart. Three
  * things follow. An administrator renaming or resetting *other people's*
- * accounts sends no password and pays nothing: billing those would answer 429 to
- * the sixth piece of legitimate work in a quarter of an hour. Nobody can dodge
+ * accounts sends no `oldPass` and pays nothing **here** — since decision D6
+ * they do send `stepup_password` to the gate ahead of this, which charges only
+ * a wrong one; a right one is free, so legitimate administrative work still
+ * costs nothing: billing it would answer 429 to the sixth piece of it in a
+ * quarter of an hour. Nobody can dodge
  * the budget by mis-spelling the password field, because what is measured is
  * *whose* account is being changed, not what the body happens to carry. And a
  * caller reaching for an account that is not theirs charges nothing at all — not
@@ -96,16 +99,45 @@ function chargeConfirmBudgetOnSelfChange(req: Request, res: Response, next: Next
 // Everything here belongs to the Seguridad module, and which action a route
 // needs is the point: creating an account and reading one are not the same
 // permission even though they live behind the same screen.
-// `requireStepUp()` sits behind every permission check below, never in
-// front: somebody without the permission gets 403 from the permission,
-// spends no bcrypt comparison, and learns nothing about the route existing.
-// See `middleware/requireStepUp.ts` for what it asks of the caller.
-router.post("/", requirePermission("seguridad", "crear"), requireStepUp(), createUsuario);
-router.delete("/:id", requirePermission("seguridad", "archivar"), requireStepUp(), deleteUsuario);
+// The gate sits behind every permission check below, never in front: somebody
+// without the permission gets 403 from the permission, spends no bcrypt
+// comparison, and learns nothing about the route existing. See
+// `middleware/requireStepUp.ts` for what it asks of the caller.
+//
+// 🔴 **`exigeContrasena: true` on every write here — decision D6 of plan 4C
+// (Isaias, 2026-09-02).** Permissions, roles and user accounts demand the
+// caller's password however they logged in, because the password is the one
+// thing that lives neither in an Apple or Google keychain nor on a phone: it
+// is what is missing from whoever has taken those. Before 4C these mounts
+// were content with a factor proved in the last ten minutes.
+//
+// **And it has no window.** The factor is asked once per ten minutes; the
+// password, on every request this option is on — there is no "password proved
+// recently" equivalent. Five wrong ones in a quarter of an hour shut the
+// shared confirmation budget. Correct ones cost nothing. That is the property
+// people will be surprised by, so it is written here rather than discovered.
+//
+// Thirteen mounts across this router, `rol.routes.ts` and `permiso.routes.ts`
+// carry it; D6 added eleven — the plan counted nine and missed the three at the
+// bottom of this file, which are the ones that rename an account and change its
+// password: precisely the primitives a stolen cookie would reach for. The other
+// two, `desbloquear` and `mfa/reset`, had it since hallazgo F8.
+router.post(
+  "/",
+  requirePermission("seguridad", "crear"),
+  requireStepUp({ exigeContrasena: true }),
+  createUsuario,
+);
+router.delete(
+  "/:id",
+  requirePermission("seguridad", "archivar"),
+  requireStepUp({ exigeContrasena: true }),
+  deleteUsuario,
+);
 router.patch(
   "/:id/desarchivar",
   requirePermission("seguridad", "archivar"),
-  requireStepUp(),
+  requireStepUp({ exigeContrasena: true }),
   desarchivarUsuario,
 );
 // `editar` and not `archivar`: lifting a lockout is the same kind of act as
@@ -190,18 +222,33 @@ router.get("/", requirePermission("seguridad", "ver"), getUsuario);
 // stop people changing their own password. Ownership is not a role permission
 // and has no checkbox — see requirePermission.ts.
 router.get("/:id", requireSelfOrPermission("seguridad", "ver"), searchUsuario);
-router.put("/:id", requireSelfOrPermission("seguridad", "editar"), requireStepUp(), updateUsuario);
+//
+// 🔴 **D6 reaches these three too, and the plan had left them off.** Editing an
+// account, renaming it, changing its password: for somebody *else's* account
+// these are exactly how a stolen administrator cookie takes the account over,
+// which is the case D6 exists for. For your *own* account the cost is real
+// and named here rather than hidden: the rename and password forms already
+// carry `oldPass`, so the person types their current password twice — once in
+// the form, once in the step-up window. The gate cannot tell target from self
+// and must not learn to; a smaller wart than a password-reset door with no
+// password on it.
+router.put(
+  "/:id",
+  requireSelfOrPermission("seguridad", "editar"),
+  requireStepUp({ exigeContrasena: true }),
+  updateUsuario,
+);
 router.put(
   "/username/:id",
   requireSelfOrPermission("seguridad", "editar"),
-  requireStepUp(),
+  requireStepUp({ exigeContrasena: true }),
   chargeConfirmBudgetOnSelfChange,
   updateUserName,
 );
 router.put(
   "/userpass/:id",
   requireSelfOrPermission("seguridad", "editar"),
-  requireStepUp(),
+  requireStepUp({ exigeContrasena: true }),
   chargeConfirmBudgetOnSelfChange,
   updateUserPass,
 );

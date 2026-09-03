@@ -227,13 +227,86 @@ export interface ITokenUsoUnico {
   created_at: Date;
 }
 
+/**
+ * One WebAuthn ceremony in flight, backed by the `reto_webauthn` table.
+ *
+ * **`proposito` is a security control, not a label.** It goes inside the same
+ * `WHERE` that spends the challenge, so a value minted to register a
+ * credential cannot be redeemed completing an authentication — the same job
+ * `ITokenUsoUnico.proposito` does, put there by the same finding.
+ *
+ * **`id_usuario` is nullable and `id_sesion` is nullable, and between them
+ * they are the reason this is a table and not two columns on `sesiones`.**
+ * A null owner is the passwordless ceremony, where the credential *is* the
+ * identity and nobody is named until the assertion verifies. A null session
+ * is the same ceremony seen from the other side: there is no session yet.
+ * Both nulls are free here and ruinous on `sesiones`, whose `id_usuario` is
+ * NOT NULL in two layers and whose null owner makes `authenticate` answer
+ * 401 to everything.
+ */
+export interface IRetoWebauthn {
+  id: string;
+  reto_hash: string;
+  /**
+   * 🔴 **Three words, and `"stepup"` is deliberately not among them.** The
+   * plan reserved a fourth for re-proving a factor mid-session, on the
+   * assumption that step-up would grow its own passkey branch inside
+   * `/api/auth/stepup`. It did not need one: `/api/auth/webauthn/login/*`
+   * already serves both ceremonies — `loginVerify` promotes a session that
+   * was still `parcial` and re-seals one that was already `completa` — and
+   * that route is reachable from all three session states where
+   * `/api/auth/stepup` is reachable from none of the restricted ones. A
+   * purpose nothing ever mints is not a spare part; it is a value the `WHERE`
+   * that spends a challenge can never match, waiting for somebody to write it
+   * on one side only.
+   *
+   * `"login"` is different and stays: phase 2 of the same plan mints it for
+   * the passwordless ceremony, where there is no session to scope by. If that
+   * phase is dropped, this word goes with it.
+   */
+  proposito: "registro" | "segundo_factor" | "login";
+  id_usuario: number | null;
+  id_sesion: string | null;
+  expires_at: Date;
+  used_at: Date | null;
+  created_at: Date;
+}
+
 /** One registered passkey/security key, backed by the `credencial_webauthn` table. */
 export interface ICredencialWebauthn {
   id: number;
   id_usuario: number;
   credential_id: string;
   public_key: Buffer;
-  counter: number;
+  /**
+   * The authenticator's signature counter — **typed as the string it really
+   * is**, exactly like `IFactorTotp.ultimo_paso` below and for the same
+   * reason: `pg` hands a `BIGINT` column back as a string, always.
+   *
+   * This one matters more than `ultimo_paso` did, because it is not an
+   * implementation detail: **it is the whole clone-detection mechanism.** A
+   * cloned passkey is caught by the counter of an assertion failing to
+   * exceed the stored one, and every obvious way to write that with a
+   * `number` declaration is a hole — `recibido === guardado` is **false for
+   * every value** (`===` never coerces across types), `guardado !== 0` is
+   * **true for every value**, and `guardado + 1` concatenates: `"5" + 1` is
+   * `"51"`, which rejects every later assertion and bricks the passkey.
+   * Only the relational operators (`>`, `<=`) coerce the way the reader
+   * expects.
+   *
+   * 🔴 And there is a second half `ultimo_paso` never had. **Synced passkeys
+   * — iCloud Keychain, Google Password Manager, which is exactly what a
+   * phone will offer — report a counter of 0 on every assertion, forever.**
+   * A rule written as a bare `recibido > guardado` reads `0 > 0`, refuses,
+   * and the passkey works once and never again. What protects those
+   * credentials against a replayed assertion is the single-use challenge in
+   * `auth/retoStore.ts`, not this column.
+   *
+   * Compare through `esContadorDeClon` in `auth/passkeyStore.ts`, never by
+   * hand, and write it back with `GREATEST` so a reported 0 cannot erase a
+   * real count.
+   */
+  counter: string;
   transports: string | null;
   nombre: string;
   created_at: Date;

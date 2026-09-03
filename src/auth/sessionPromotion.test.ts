@@ -113,6 +113,19 @@ describe("sellarPruebaDeFactor", () => {
     expect(options.where).toEqual({ id: "s1" });
   });
 
+  // 🔴 The return value exists for one caller and it is load-bearing there:
+  // the recovery-code path spends one of ten printed codes in the same
+  // transaction, and has to unwind that if there turned out to be no session.
+  // With `void` that was inexpressible, and the branch instead rolled back a
+  // perfectly valid code every time the row was stored `completa`.
+  it("says whether a row was actually sealed", async () => {
+    sesionUpdate.mockResolvedValue([1]);
+    expect(await sellarPruebaDeFactor("s1", "totp")).toBe(true);
+
+    sesionUpdate.mockResolvedValue([0]);
+    expect(await sellarPruebaDeFactor("s1", "totp")).toBe(false);
+  });
+
   it("does not write estado — the row is already completa by the time this is ever called", async () => {
     await sellarPruebaDeFactor("s1", "totp");
     const [values] = sesionUpdate.mock.calls[0] as [Record<string, unknown>];

@@ -106,9 +106,13 @@ vi.mock("../models/codigoRecuperacion.model.js", () => ({
   CodigoRecuperacionModel: { count: (...args: unknown[]) => codigoCount(...args) },
 }));
 
-const { factoresDe, tieneAlgunFactor, hayFactorVerificable, estadoInicialDeSesion } = await import(
-  "./factorInventory.js"
-);
+const {
+  factoresDe,
+  metodosDeReautenticacion,
+  tieneAlgunFactor,
+  hayFactorVerificable,
+  estadoInicialDeSesion,
+} = await import("./factorInventory.js");
 const { MFA_GRACE_DAYS } = await import("../config/security.js");
 
 const YO = 1;
@@ -382,6 +386,89 @@ describe("hayFactorVerificable", () => {
     );
 
     expect(estado).toBe("parcial");
+  });
+});
+
+describe("metodosDeReautenticacion", () => {
+  // Every test here sets the keyring explicitly. It is module state shared
+  // with `hayFactorVerificable`'s block above, which leaves it however its
+  // last test found it, and a list that silently loses `totp` because of a
+  // neighbour is the failure this whole function exists to prevent.
+  beforeEach(() => {
+    totpEstaDisponible.mockReturnValue(true);
+  });
+
+  it("is empty for an account with nothing registered", async () => {
+    expect(await metodosDeReautenticacion(YO)).toEqual([]);
+  });
+
+  it("names the passkey when that is all the account has", async () => {
+    passkeys = [PASSKEY];
+    expect(await metodosDeReautenticacion(YO)).toEqual(["passkey"]);
+  });
+
+  it("names TOTP when the secret is confirmed and this server can read it", async () => {
+    secretosTotp = [TOTP_CONFIRMADO];
+    expect(await metodosDeReautenticacion(YO)).toEqual(["totp"]);
+  });
+
+  // 🔴 The window would otherwise send somebody to type six digits into a
+  // route answering 503, and every attempt at it looks to them like a code
+  // they mistyped.
+  it("leaves TOTP out when this server cannot read the secrets", async () => {
+    secretosTotp = [TOTP_CONFIRMADO];
+    totpEstaDisponible.mockReturnValue(false);
+    expect(await metodosDeReautenticacion(YO)).toEqual([]);
+  });
+
+  // The same broken keyring, and the passkey is untouched by it: nothing about
+  // a passkey is encrypted with that key. This is the case that makes the
+  // answer more than `!totpEstaDisponible()`.
+  it("still names the passkey when the keyring is broken", async () => {
+    passkeys = [PASSKEY];
+    secretosTotp = [TOTP_CONFIRMADO];
+    totpEstaDisponible.mockReturnValue(false);
+    expect(await metodosDeReautenticacion(YO)).toEqual(["passkey"]);
+  });
+
+  it("does not name a TOTP secret that was never confirmed", async () => {
+    secretosTotp = [TOTP_SIN_CONFIRMAR];
+    expect(await metodosDeReautenticacion(YO)).toEqual([]);
+  });
+
+  // The difference from `tieneAlgunFactor`, which excludes recovery codes on
+  // purpose: this answers what may be *offered*, and `/api/auth/stepup`
+  // honours a recovery code.
+  it("names recovery codes that have not been spent", async () => {
+    passkeys = [PASSKEY];
+    codigos = [CODIGO_SIN_USAR];
+    expect(await metodosDeReautenticacion(YO)).toContain("codigo");
+  });
+
+  it("does not name recovery codes once they are all spent", async () => {
+    passkeys = [PASSKEY];
+    codigos = [CODIGO_USADO];
+    expect(await metodosDeReautenticacion(YO)).not.toContain("codigo");
+  });
+
+  // 🔴 Order, not membership. The client renders these in the order they
+  // arrive: a passkey is one gesture, a code is a device plus a
+  // transcription, and a recovery code is the way back in rather than a
+  // method. An assertion on a set would let the order drift with nothing
+  // going red.
+  it("offers the passkey first, then TOTP, and the recovery code last", async () => {
+    passkeys = [PASSKEY];
+    secretosTotp = [TOTP_CONFIRMADO];
+    codigos = [CODIGO_SIN_USAR];
+    expect(await metodosDeReautenticacion(YO)).toEqual(["passkey", "totp", "codigo"]);
+  });
+
+  it("never names another account's factors", async () => {
+    passkeys = [PASSKEY_AJENA];
+    secretosTotp = [];
+    expect(await metodosDeReautenticacion(YO)).toEqual([]);
+    // And the same rows, asked about from the account that owns them.
+    expect(await metodosDeReautenticacion(OTRA_CUENTA)).toEqual(["passkey"]);
   });
 });
 

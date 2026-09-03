@@ -54,6 +54,8 @@ const realUse = express.application.use;
   return (realUse as unknown as (...a: unknown[]) => unknown).apply(this, args);
 };
 const app = (await import("../app.js")).default;
+const { webauthnCeremonyLimiter } = await import("../middleware/loginLimiters.js");
+const { puedeAlcanzar } = await import("../auth/sessionState.js");
 (express.application as unknown as { use: unknown }).use = realUse;
 
 /** The next path this handler was mounted on, in declaration order. */
@@ -78,7 +80,7 @@ interface Layer {
   route?: {
     path: string;
     methods: Record<string, boolean>;
-    stack: { handle: { name: string; permission?: string } }[];
+    stack: { handle: { name: string; permission?: string; opciones?: OpcionesGate } }[];
   };
 }
 
@@ -96,6 +98,8 @@ interface MountedRoute {
    * the wrong pair — the likeliest mistake of all — passed unnoticed.
    */
   permissions: string[];
+  /** The options the step-up gate on this route was mounted with, if any. */
+  stepUp?: OpcionesGate;
 }
 
 function mountedRoutes(): MountedRoute[] {
@@ -133,9 +137,10 @@ function mountedRoutes(): MountedRoute[] {
       const permissions = layer.route.stack
         .map((s) => s.handle.permission)
         .filter((p): p is string => typeof p === "string");
+      const stepUp = layer.route.stack.map((s) => s.handle.opciones).find((o) => o !== undefined);
       for (const method of Object.keys(layer.route.methods)) {
         routes.push({
-          method: method.toUpperCase(), path: layer.route.path, chain, permissions,
+          method: method.toUpperCase(), path: layer.route.path, chain, permissions, stepUp,
         });
       }
       continue;
@@ -163,9 +168,10 @@ function mountedRoutes(): MountedRoute[] {
         const permissions = inner.route.stack
           .map((s) => s.handle.permission)
           .filter((p): p is string => typeof p === "string");
+        const stepUp = inner.route.stack.map((s) => s.handle.opciones).find((o) => o !== undefined);
         for (const method of Object.keys(inner.route.methods)) {
           routes.push({
-            method: method.toUpperCase(), path: prefix + inner.route.path, chain, permissions,
+            method: method.toUpperCase(), path: prefix + inner.route.path, chain, permissions, stepUp,
           });
         }
       }
@@ -337,6 +343,39 @@ const GATE_NOT_APPLICABLE = [
   "POST /api/auth/totp/confirm",
   "DELETE /api/auth/totp/",
   "POST /api/auth/recovery-codes/",
+
+  // ── Las passkeys (plan 4C) ──────────────────────────────────────────────
+  // Mismo argumento, palabra por palabra, que los cinco de arriba: las dos
+  // actúan sobre la cuenta de quien llama y sobre ninguna otra. La credencial
+  // se crea con `req.user.id`, la sesión que asciende es `req.user.id_sesion`,
+  // y el reto se canjea con ese mismo `id_sesion` dentro del `WHERE` — nunca
+  // con nada que venga del cuerpo. No hay rol que pueda o no pueda tener una
+  // passkey, así que no hay casilla que pedir.
+  //
+  // 🔴 Y hay una comprobación más que el camino del TOTP no necesita, porque
+  // allí no hay reto: `registerVerify` compara el dueño del reto consumido con
+  // `req.user.id` antes de escribir nada. Sin ella, una ceremonia empezada por
+  // una cuenta podría terminarse contra otra.
+  //
+  // Las dos sí piden contraseña, y eso está en `STEP_UP_GATED` — el otro eje.
+  "POST /api/auth/webauthn/register/options",
+  "POST /api/auth/webauthn/register/verify",
+  // Y las dos de probar una passkey ya registrada. Mismo argumento que las de
+  // arriba en cuanto al permiso —actúan sobre la propia cuenta—, pero éstas
+  // **tampoco** llevan puerta de step-up, y eso no es un olvido: las llama una
+  // sesión `parcial`, que por definición aún no ha probado nada.
+  // `requireStepUp` rechaza `parcial` de plano, así que montarla aquí cerraría
+  // la única salida de ese estado. Es exactamente el caso de
+  // `POST /api/auth/mfa/verify`, unas líneas más arriba.
+  "POST /api/auth/webauthn/login/options",
+  "POST /api/auth/webauthn/login/verify",
+  // Y borrar una llave propia, por el mismo motivo que registrarla: el `WHERE`
+  // lleva `id_usuario: req.user.id` junto al `:id` de la URL, así que la ruta
+  // no puede tocar la credencial de otra persona haya el rol que haya. No hay
+  // permiso que pedir porque no hay nadie más a quien afectar.
+  //
+  // Sí lleva step-up **con contraseña**, y eso está en `STEP_UP_GATED`.
+  "DELETE /api/auth/webauthn/credentials/:id",
 ];
 
 describe("who may change data", () => {
@@ -373,7 +412,7 @@ describe("who may change data", () => {
  * `requireStepUp` (`middleware/requireStepUp.ts`) asks a second question after
  * the permission has already said yes: was a factor proved in the last ten
  * minutes — or, while the account has no factor to prove at all, is the
- * caller's own password supplied. Fifteen routes ask it: creating, editing and
+ * caller's own password supplied. `STEP_UP_GATED` below is the list: creating, editing and
  * unlocking accounts, resetting somebody else's second factor, everything that
  * touches roles or the permission matrix, closing one of your own other
  * sessions, and registering the address your password can be reset through.
@@ -395,13 +434,13 @@ describe("who may change data", () => {
  * not hypothetical here: three tests used to cover `DELETE /api/usuario/:id`'s
  * mount as a side effect, a fix round moved them to `DELETE /api/rol/:id` for
  * an unrelated and correct reason, and from then on `requireStepUp()` could be
- * deleted from that route with the whole suite still green. Eleven mounts held
+ * deleted from that route with the whole suite still green. Mounts held
  * up by side effects of tests about something else is how one of them goes
  * missing without anybody noticing.
  *
  * **Written out rather than derived**, for the same reason `GENERADOR_GATES`
  * below is: a list computed from the routers would only assert that the code
- * agrees with itself. These fifteen are the intent, and the comparison runs both
+ * agrees with itself. This list is the intent, and the comparison runs both
  * ways — a mount that disappears fails, and so does one that appears.
  *
  * **The second direction is load-bearing, not symmetry for its own sake, and
@@ -428,7 +467,7 @@ describe("who may change data", () => {
  * Live here and not in `app.auth.test.ts`, which pins the gate's *behaviour*
  * through real requests: this file already walks the app as Express assembled
  * it, across all three routers at once, and already owns the question "is the
- * right gate on the right route". Splitting the fifteen between two files would
+ * right gate on the right route". Splitting the list between two files would
  * mean two half-tables, which is the shape the gap above came in.
  */
 const STEP_UP_GATED = [
@@ -478,9 +517,9 @@ const STEP_UP_GATED = [
   // second branch exists to stop.
   "POST /api/auth/email/send",
   // ── El segundo factor (plan 4B) — cuatro, y dos más arriba ──────────────
-  // Seis rutas en total llevan `exigeContrasena: true`, no cuatro: las dos
-  // señaladas arriba en `usuario.routes.ts` — `desbloquear` y `mfa/reset`,
-  // hallazgo F8 del cierre del 2026-09-02 — y estas cuatro. En esta puerta
+  // Cuántas llevan `exigeContrasena: true` lo dice `STEP_UP_OPTIONS`, al final
+  // de este fichero, y no un número aquí: éste decía «seis, no cuatro» cuando
+  // ya eran nueve, y desde la decisión D6 del plan 4C son veinte. En esta puerta
   // la opción significa que piden la contraseña **siempre**, también a
   // quien acaba de probar su factor. Para las cuatro de aquí abajo, no es
   // celo: un código de recuperación sella esa misma ventana, así que sin el
@@ -502,6 +541,44 @@ const STEP_UP_GATED = [
   "POST /api/auth/totp/confirm",
   "DELETE /api/auth/totp/",
   "POST /api/auth/recovery-codes/",
+
+  // ── Las passkeys (plan 4C) ──────────────────────────────────────────────
+  // Las dos con `exigeContrasena: true` y `permiteOnboarding: true`, por las
+  // dos razones que el bloque de arriba ya da para el alta de TOTP, y ninguna
+  // de las dos es nueva:
+  //
+  // 🔴 **La contraseña, siempre.** Sin ella, una cookie robada da de alta su
+  // propia passkey, y desde ese instante `tieneAlgunFactor` le quita al dueño
+  // real hasta el respaldo de la contraseña: su siguiente login abre `parcial`
+  // y sólo se sale probando la credencial **del atacante**. Cambiar la
+  // contraseña no sirve y `logout-all` revoca sesiones, no credenciales. Es el
+  // hallazgo C1, y `totp.routes.ts` lleva el mismo aviso escrito.
+  //
+  // Y con passkeys hay un motivo añadido que el TOTP no tenía: la credencial
+  // se sincroniza con la cuenta de Apple o de Google de cada persona, así que
+  // la contraseña pasa a ser lo único que **no** vive ahí.
+  //
+  // **`permiteOnboarding`, que no es una relajación sino lo contrario de una
+  // caída**: es la pantalla a la que alguien en `onboarding` tiene que llegar
+  // para dejar de estar en `onboarding`. `parcial` sigue rechazado pase lo que
+  // pase — y eso importa aquí más que en el TOTP, porque `PARCIAL` sí abre
+  // `/api/auth/webauthn/login`: la puerta que **prueba** una passkey, nunca la
+  // que la **crea**.
+  "POST /api/auth/webauthn/register/options",
+  "POST /api/auth/webauthn/register/verify",
+  // Y el borrado, que es el espejo exacto del registro: cambia con qué puede
+  // probarse la cuenta. Sin contraseña, quien tenga la cookie puede quitarle a
+  // alguien su segundo factor y quedarse con la cuenta a base de contraseña
+  // sola — y con passkeys hay un motivo más, porque borrar la última revoca
+  // todas las sesiones, que es una operación sobre la cuenta entera.
+  //
+  // 🔴 **No encierra a nadie**, que es la pregunta que hay que hacerle a este
+  // montaje: una cuenta cuya única llave es la que quiere borrar recibe
+  // `sin-factor-reciente` con `exigeContrasena` y, desde la Tarea 8, con
+  // `metodos: ["passkey", …]`. La ventana sabe ofrecer la huella, la persona
+  // la prueba en `/webauthn/login/verify`, teclea la contraseña y pasa. Sin
+  // ese campo la ventana habría pintado un hueco de seis dígitos imposible.
+  "DELETE /api/auth/webauthn/credentials/:id",
 ];
 
 describe("which writes also demand a recently proved factor", () => {
@@ -510,7 +587,12 @@ describe("which writes also demand a recently proved factor", () => {
     .map((r) => `${r.method} ${r.path}`)
     .sort();
 
-  it("mounts requireStepUp on exactly those nineteen routes and on no others", () => {
+  // The name used to say "those nineteen routes", and the number went stale the
+  // first time a plan added one — which is the same failure this file already
+  // warns about beside `GATE_NOT_APPLICABLE` ("the count said two while the
+  // list held six"). The list is the count; a number written out beside it is
+  // a second copy that nothing keeps honest.
+  it("mounts requireStepUp on exactly the routes in that list and on no others", () => {
     // `stepUpGate` is the name `requireStepUp()` gives the function it returns,
     // for exactly this — see the comment above the `return` in
     // `requireStepUp.ts`. An anonymous handler there would make this assertion
@@ -592,6 +674,12 @@ const READ_GATE_NOT_APPLICABLE = [
   // `req.user`, never from the request, so there is no other person's list this
   // could return.
   "GET /api/auth/sessions",
+  // Las llaves *tuyas*. Mismo argumento que la línea de arriba: el `where`
+  // toma el id de `req.user`, así que no hay lista de otra persona que esto
+  // pueda devolver. Y no lleva step-up a propósito: es la pantalla que te
+  // enseña **con qué** puedes probarte, así que ponerle una ceremonia delante
+  // sería pedirte que demuestres algo antes de dejarte ver qué tienes.
+  "GET /api/auth/webauthn/credentials",
 
   // ── Everything below is the debt ────────────────────────────────────────
   // Reads that any logged-in account may call, whatever its role. The count is
@@ -887,5 +975,236 @@ describe("which permission each gate asks for", () => {
 
     expect(gated.length).toBeGreaterThan(20);
     expect(mute.map((r) => `${r.method} ${r.path}`), "puertas sin permiso legible").toEqual([]);
+  });
+});
+
+/**
+ * El presupuesto de la ceremonia de passkey — plan 4C, Tarea 8.
+ *
+ * 🔴 Se comprueba por **identidad de la función**, no por su nombre.
+ * `express-rate-limit` devuelve una función anónima (`fn.name === ""`), así
+ * que la maquinaria de nombres que usa el resto de este fichero no puede ver
+ * ni un limitador ni la diferencia entre dos. Comparar la referencia es lo
+ * único que distingue «está montado el bucket correcto» de «hay algo ahí».
+ */
+describe("el presupuesto de las ceremonias de passkey", () => {
+  /** Cada ruta del árbol entero donde aparece ese manejador exacto. */
+  function rutasCon(handler: unknown): string[] {
+    const encontradas: string[] = [];
+    const recorrer = (capas: Layer[] | undefined): void => {
+      for (const capa of capas ?? []) {
+        if (capa.route) {
+          const suyo = (capa.route.stack as unknown as { handle: unknown }[]).some(
+            (s) => s.handle === handler,
+          );
+          if (suyo) encontradas.push(capa.route.path);
+        }
+        recorrer(capa.handle.stack);
+      }
+    };
+    const held = app as unknown as { router?: { stack: Layer[] }; _router?: { stack: Layer[] } };
+    recorrer((held.router ?? held._router)?.stack);
+    return encontradas;
+  }
+
+  // Sin este bucket, las dos rutas son un INSERT gratis e ilimitado en la
+  // bitácora para quien tenga una cookie robada: un fallo de firma no carga
+  // nada contra el bloqueo de la cuenta —decisión D7— y a cambio escribe una
+  // línea. Y la tabla no la poda nadie.
+  it("cuenta las dos ceremonias de login, y sólo esas dos", () => {
+    expect(rutasCon(webauthnCeremonyLimiter).sort()).toEqual([
+      "/login/options",
+      "/login/verify",
+    ]);
+  });
+
+  // La comprobación de arriba sólo vale si el recorrido encuentra algo: un
+  // walker roto devolvería [] y ninguna de las dos afirmaciones se enteraría.
+  it("el recorrido del árbol encuentra rutas de verdad", () => {
+    expect(rutasCon(webauthnCeremonyLimiter).length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Que cada ruta de passkey caiga dentro del prefijo que le reservó
+ * `sessionState.ts` — y que NO caiga dentro de los otros.
+ *
+ * 🔴 **Es el hueco que el propio plan 4C llama «los tests que se quedan
+ * obsoletos en silencio».** `sessionState.test.ts` prueba la **tabla** de
+ * prefijos; no prueba que las rutas montadas encajen en ella. Nombrar una ruta
+ * `/webauthn/register-options` con guion en vez de barra no da ningún error:
+ * `coincide` deja de casarla, la sesión en `onboarding` recibe 403
+ * `FACTOR_PENDIENTE`, el cliente enseña un aviso que apunta a la pantalla en la
+ * que ya está, y no hay puerta que abra. Un bucle, no un fallo.
+ *
+ * Y en el sentido contrario es peor: ensanchar la entrada de `PARCIAL` a todo
+ * `/api/auth/webauthn` —la «simplificación» obvia— abriría el **registro** a
+ * quien sólo ha dado una contraseña, que es como alguien se registra su propia
+ * llave en la cuenta de otro.
+ *
+ * Se comprueba con `puedeAlcanzar` de verdad, no con una copia de la tabla, y
+ * sobre rutas concretas (con el `:id` sustituido) porque es lo que
+ * `authenticate` recibe en producción.
+ */
+describe("las rutas de passkey caen donde su prefijo dice", () => {
+  const ESPERADO: Record<string, { parcial: boolean; onboarding: boolean }> = {
+    // Probar una llave que ya existe: la salida de `parcial`, así que abierta
+    // en los tres estados.
+    "/api/auth/webauthn/login/options": { parcial: true, onboarding: true },
+    "/api/auth/webauthn/login/verify": { parcial: true, onboarding: true },
+    // Crear una llave: cerrada a `parcial` —quien sólo tiene la contraseña no
+    // se registra un factor— y abierta a `onboarding`, que es quien tiene que
+    // llegar para dejar de estarlo.
+    "/api/auth/webauthn/register/options": { parcial: false, onboarding: true },
+    "/api/auth/webauthn/register/verify": { parcial: false, onboarding: true },
+    // Gestionarlas: lo mismo. Ver la lista es inofensivo para quien ya está
+    // dentro de su cuenta, y enumerable por una contraseña sola no debe ser.
+    "/api/auth/webauthn/credentials": { parcial: false, onboarding: true },
+    "/api/auth/webauthn/credentials/7": { parcial: false, onboarding: true },
+  };
+
+  const montadas = routes
+    .filter((r) => r.path.startsWith("/api/auth/webauthn"))
+    .map((r) => r.path.replace(":id", "7"));
+
+  it("cubre todas las rutas de passkey que hay montadas, sin sobrar ninguna", () => {
+    // Las dos direcciones, como el resto de este fichero: una ruta nueva sin
+    // entrada aquí no se comprueba, y una entrada que ya no corresponde a
+    // ninguna ruta afirma sobre algo que no existe.
+    expect([...new Set(montadas)].sort()).toEqual(Object.keys(ESPERADO).sort());
+  });
+
+  it("abre a `parcial` lo que prueba una llave, y sólo eso", () => {
+    for (const [ruta, esperado] of Object.entries(ESPERADO)) {
+      expect(puedeAlcanzar("parcial", ruta), ruta).toBe(esperado.parcial);
+    }
+  });
+
+  it("abre a `onboarding` todo lo que hace falta para dejar de estarlo", () => {
+    for (const [ruta, esperado] of Object.entries(ESPERADO)) {
+      expect(puedeAlcanzar("onboarding", ruta), ruta).toBe(esperado.onboarding);
+    }
+  });
+
+  it("no le cierra ninguna a una sesión completa", () => {
+    for (const ruta of Object.keys(ESPERADO)) {
+      expect(puedeAlcanzar("completa", ruta), ruta).toBe(true);
+    }
+  });
+});
+
+/**
+ * Which options each step-up gate was mounted with — Task 10 of plan 4C.
+ *
+ * 🔴 `STEP_UP_GATED` above says a gate is *there*; it cannot say which one.
+ * `requireStepUp()` and `requireStepUp({ exigeContrasena: true })` both mount
+ * a function called `stepUpGate`, so turning the password off on the
+ * permission matrix left every test in this file green — the plan's own words
+ * for it were "structurally blind to which options reach `requireStepUp()`".
+ * The gate now stamps its resolved options on the function Express mounts,
+ * the way `requirePermission` stamps `permission`, and this table reads them.
+ *
+ * Written out rather than derived, and compared **in both directions**, for
+ * the reason `STEP_UP_GATED` gives: a new gated route cannot appear without a
+ * declared option set, and an entry cannot outlive its route. Compared as a
+ * **whole object**, never one field: a per-field check on `exigeContrasena`
+ * would pass if somebody also turned on `toleraFactorIlegible`, which is legal
+ * at mount time once the password is on and would let the password alone
+ * reach the permission matrix during a keyring fault.
+ */
+type OpcionesGate = {
+  permiteOnboarding: boolean;
+  exigeContrasena: boolean;
+  toleraFactorIlegible: boolean;
+};
+
+const SOLO_FACTOR: OpcionesGate = {
+  permiteOnboarding: false, exigeContrasena: false, toleraFactorIlegible: false,
+};
+const FACTOR_Y_CONTRASENA: OpcionesGate = {
+  permiteOnboarding: false, exigeContrasena: true, toleraFactorIlegible: false,
+};
+const CONTRASENA_Y_ONBOARDING: OpcionesGate = {
+  permiteOnboarding: true, exigeContrasena: true, toleraFactorIlegible: false,
+};
+
+const STEP_UP_OPTIONS: Record<string, OpcionesGate> = {
+  // ── Decisión D6 (plan 4C): permisos, roles y usuarios piden la contraseña
+  // siempre, se haya entrado como se haya entrado. Once monturas.
+  "POST /api/usuario/": FACTOR_Y_CONTRASENA,
+  "DELETE /api/usuario/:id": FACTOR_Y_CONTRASENA,
+  "PATCH /api/usuario/:id/desarchivar": FACTOR_Y_CONTRASENA,
+  "PATCH /api/usuario/:id/desbloquear": FACTOR_Y_CONTRASENA,
+  "PUT /api/usuario/:id": FACTOR_Y_CONTRASENA,
+  "PUT /api/usuario/username/:id": FACTOR_Y_CONTRASENA,
+  "PUT /api/usuario/userpass/:id": FACTOR_Y_CONTRASENA,
+  "POST /api/usuario/:id/mfa/reset": FACTOR_Y_CONTRASENA,
+  "POST /api/rol/": FACTOR_Y_CONTRASENA,
+  "PUT /api/rol/:id": FACTOR_Y_CONTRASENA,
+  "DELETE /api/rol/:id": FACTOR_Y_CONTRASENA,
+  "PATCH /api/rol/:id/desarchivar": FACTOR_Y_CONTRASENA,
+  "PUT /api/permisos/:id_rol": FACTOR_Y_CONTRASENA,
+  // ── Las dos que se quedan sólo con el factor, y por qué. Cerrar otra sesión
+  // propia es una operación sobre la sesión, no sobre la cuenta; y el correo
+  // es la puerta por la que `onboarding` sale de `onboarding`.
+  "DELETE /api/auth/sessions/:id": SOLO_FACTOR,
+  "POST /api/auth/email/send": {
+    permiteOnboarding: true, exigeContrasena: false, toleraFactorIlegible: false,
+  },
+  // ── Credenciales: contraseña siempre, y `onboarding` puede llegar porque es
+  // la pantalla a la que tiene que llegar para dejar de estarlo.
+  "POST /api/auth/totp/setup": CONTRASENA_Y_ONBOARDING,
+  "POST /api/auth/totp/confirm": CONTRASENA_Y_ONBOARDING,
+  // La única con `toleraFactorIlegible`: deshacer un TOTP que este servidor no
+  // puede leer. Ver `requireStepUp.ts` para por qué no se ensancha a nadie más.
+  "DELETE /api/auth/totp/": {
+    permiteOnboarding: true, exigeContrasena: true, toleraFactorIlegible: true,
+  },
+  "POST /api/auth/recovery-codes/": FACTOR_Y_CONTRASENA,
+  "POST /api/auth/webauthn/register/options": CONTRASENA_Y_ONBOARDING,
+  "POST /api/auth/webauthn/register/verify": CONTRASENA_Y_ONBOARDING,
+  "DELETE /api/auth/webauthn/credentials/:id": CONTRASENA_Y_ONBOARDING,
+};
+
+describe("which options each step-up gate was mounted with", () => {
+  const gated = routes.filter((r) => r.chain.includes("stepUpGate"));
+  const nombre = (r: MountedRoute) => `${r.method} ${r.path}`;
+
+  // The stamp is what everything below reads. If it stops arriving, every
+  // comparison below would fail loudly — unless somebody "fixes" that with a
+  // default. Pinned explicitly so that the failure names its own cause.
+  it("reads the options off every gate it finds", () => {
+    expect(gated.filter((r) => r.stepUp === undefined).map(nombre)).toEqual([]);
+    expect(gated.length).toBeGreaterThan(20);
+  });
+
+  it("declares an option set for exactly the gated routes, in both directions", () => {
+    expect(Object.keys(STEP_UP_OPTIONS).sort()).toEqual(gated.map(nombre).sort());
+  });
+
+  it("mounts every gate with exactly the options the table says — whole object", () => {
+    for (const r of gated) {
+      expect(r.stepUp, nombre(r)).toEqual(STEP_UP_OPTIONS[nombre(r)]);
+    }
+  });
+
+  // 🔴 The assertion D6 is about. Stated on its own so that a revert of the
+  // decision — "let's drop the password from the permission matrix, it is
+  // annoying" — fails with this sentence and not with a table diff.
+  //
+  // Over **every write** on the three routers, not over the routes that
+  // already carry the gate: filtered from `gated`, a new administrative write
+  // mounted with no gate at all would never enter the set and the loop would
+  // never see it — the one direction D6 most needs to be caught in. Filtered
+  // from `routes`, it fails here by name.
+  it("demands the password on every write to permissions, roles and accounts", () => {
+    const escrituras = routes.filter(
+      (r) => WRITES.includes(r.method) && MODULOS_TABULADOS.test(r.path),
+    );
+    expect(escrituras.length).toBeGreaterThan(10);
+    for (const r of escrituras) {
+      expect(r.chain, nombre(r)).toContain("stepUpGate");
+      expect(r.stepUp?.exigeContrasena, nombre(r)).toBe(true);
+    }
   });
 });

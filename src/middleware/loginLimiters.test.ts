@@ -24,6 +24,7 @@ import {
   loginAccountIpLimiter,
   loginIpLimiter,
   passwordConfirmKey,
+  webauthnCeremonyKey,
   passwordConfirmLimiter,
   siguienteBloqueo,
 } from "./loginLimiters.js";
@@ -753,5 +754,42 @@ describe("the chain the real login endpoint is mounted behind", () => {
     await settled();
 
     expect(await loginIpLimiter.getKey(CLAVE_IP)).toBeUndefined();
+  });
+});
+
+describe("the key the passkey bucket counts against", () => {
+  const conSesion = (id_sesion: unknown) =>
+    ({
+      ip: DESDE,
+      body: {},
+      user: {
+        id: 7,
+        id_rol: 3,
+        id_sesion,
+        expires_at: new Date(),
+        estado: "parcial",
+        mfa_satisfied_at: null,
+      },
+    }) as unknown as Request;
+
+  // 🔴 The session and **not** the account. What this bucket bounds is the
+  // writing one stolen cookie can cause — a bitácora row and a challenge row
+  // per request, on a table nothing here prunes. A cookie *is* a session, so
+  // that is the thing to budget; keying by account would let somebody with two
+  // stolen cookies spend twice, and would let one person's flood exhaust their
+  // own legitimate second device.
+  it("names the session, and keeps two sessions of the same person apart", () => {
+    expect(webauthnCeremonyKey(conSesion("s-1"))).toBe("wa:s-1");
+    expect(webauthnCeremonyKey(conSesion("s-1"))).not.toBe(webauthnCeremonyKey(conSesion("s-2")));
+  });
+
+  // Unreachable through the mount, where `authenticate` answers 401 first.
+  // What it guards is somebody mounting this without authentication: a key
+  // generator returning the same thing for everybody is one shared bucket, and
+  // the whole endpoint locks for the company the moment one caller floods it.
+  it("falls back to the address rather than putting everybody in one bucket", () => {
+    const clave = webauthnCeremonyKey(conSesion(undefined));
+    expect(clave).toContain("wa:ip:");
+    expect(clave).not.toBe("wa:undefined");
   });
 });

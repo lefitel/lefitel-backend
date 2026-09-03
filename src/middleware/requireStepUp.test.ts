@@ -21,12 +21,13 @@ import type { Response } from "express";
 
 const verifyOwnPassword = vi.fn();
 const tieneAlgunFactor = vi.fn();
+const metodosDeReautenticacion = vi.fn();
 const logAction = vi.fn();
 const passwordConfirmLimiter = vi.fn() as ReturnType<typeof vi.fn> & { getKey: ReturnType<typeof vi.fn> };
 passwordConfirmLimiter.getKey = vi.fn();
 const passwordConfirmKey = vi.fn();
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword }));
-vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor }));
+vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor, metodosDeReautenticacion }));
 vi.mock("../utils/logAction.js", () => ({ logAction }));
 // `importOriginal` pulls the real `PASSWORD_CONFIRM_MESSAGE` through rather
 // than retyping the sentence a third time (`loginLimiters.ts` names it once,
@@ -75,6 +76,7 @@ function contexto(user: Record<string, unknown> | undefined, body: unknown = {})
 beforeEach(() => {
   verifyOwnPassword.mockReset();
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
+  metodosDeReautenticacion.mockReset().mockResolvedValue(["totp"]);
   logAction.mockReset();
   passwordConfirmKey.mockReset().mockReturnValue("pc:1");
   // The default: nothing spent yet, so the read-only pre-check lets the
@@ -588,9 +590,9 @@ describe("requireStepUp", () => {
     const cuentaSinFactor = { id: 1, estado: "completa" as const, mfa_satisfied_at: null };
 
     it("still lets a factor-less account through when the route does not demand a password", async () => {
-      // The guard on every route mounted with this gate — fifteen when this was
-      // written, nineteen once plan 4B mounted its own. If this goes red, the
-      // default flipped and the ERP just lost its permission matrix.
+      // The guard on every route mounted with this gate and no option. If
+      // this goes red, the default flipped and every such route just refused
+      // every factor-less account.
       const { req, res, next } = contexto(cuentaSinFactor, {});
       await requireStepUp()(req, res, next);
 
@@ -969,5 +971,225 @@ describe("what the refusal tells the client (plan 4D, tarea 2)", () => {
     const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
     expect(cuerpo.motivo).toBe(MOTIVO_CONTRASENA_REQUERIDA);
     expect(cuerpo).not.toHaveProperty("intentosRestantes");
+  });
+});
+
+/**
+ * Tarea 8 del plan 4C. Hasta aquí el 403 decía *que* faltaba probar un factor
+ * y no *cuál*, porque sólo había uno que probar. Con las passkeys hay dos y no
+ * se parecen en nada en pantalla.
+ */
+describe("requireStepUp — el 403 dice qué puede cubrirlo", () => {
+  const caducada = () => ({
+    id: 1,
+    estado: "completa" as const,
+    mfa_satisfied_at: haceMinutos(STEP_UP_WINDOW_MINUTES + 1),
+  });
+
+  it("names what the account can offer, in the order the server chose", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    metodosDeReautenticacion.mockResolvedValue(["passkey", "codigo"]);
+    const { req, res, next } = contexto(caducada());
+    await requireStepUp()(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        motivo: MOTIVO_SIN_FACTOR_RECIENTE,
+        metodos: ["passkey", "codigo"],
+      }),
+    );
+  });
+
+  // 🔴 The account this whole task exists for. Sent `["totp"]` by mistake, the
+  // window draws a six-digit field for somebody who has no way to produce
+  // one, and five attempts at it lock the account behind this same gate.
+  it("asks the inventory rather than assuming a six-digit code", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    metodosDeReautenticacion.mockResolvedValue(["passkey"]);
+    const { req, res, next } = contexto(caducada());
+    await requireStepUp()(req, res, next);
+
+    expect(metodosDeReautenticacion).toHaveBeenCalledWith(1);
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(cuerpo.metodos).toEqual(["passkey"]);
+  });
+
+  // Both halves of the ceremony in one answer, which is the whole reason
+  // `exigeContrasena` travels on this refusal: one window asks for the finger
+  // and the password together instead of two round trips.
+  it("travels beside `exigeContrasena` without displacing it", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    metodosDeReautenticacion.mockResolvedValue(["passkey", "totp"]);
+    const { req, res, next } = contexto(caducada(), {});
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        motivo: MOTIVO_SIN_FACTOR_RECIENTE,
+        exigeContrasena: true,
+        metodos: ["passkey", "totp"],
+      }),
+    );
+  });
+
+  // The refusal that means "you have nothing to prove, type your password".
+  // A list there would be empty by construction and would only invite a
+  // client to branch on it.
+  it("is absent from a `contraseña-requerida` refusal", async () => {
+    tieneAlgunFactor.mockResolvedValue(false);
+    const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null }, {});
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(cuerpo.motivo).toBe(MOTIVO_CONTRASENA_REQUERIDA);
+    expect(cuerpo).not.toHaveProperty("metodos");
+    expect(metodosDeReautenticacion).not.toHaveBeenCalled();
+  });
+
+  // `estado-incompleto` is refused before any factor question is asked, and
+  // costs no query at all. Naming what the account holds there would answer a
+  // caller who is barred from the route for a different reason entirely.
+  it("is absent from an `estado-incompleto` refusal, and costs no query", async () => {
+    const { req, res, next } = contexto({ id: 1, estado: "onboarding", mfa_satisfied_at: null });
+    await requireStepUp()(req, res, next);
+
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(cuerpo.motivo).toBe(MOTIVO_ESTADO_INCOMPLETO);
+    expect(cuerpo).not.toHaveProperty("metodos");
+    expect(metodosDeReautenticacion).not.toHaveBeenCalled();
+  });
+
+  // 🔴 An account that has a factor — so the gate must refuse — and no way to
+  // prove it: a confirmed TOTP secret this server cannot decrypt, no passkey,
+  // no unspent codes. The empty list has to travel as `[]` and not be omitted,
+  // because omitted means "this server is too old to say" and the window
+  // answers that by drawing the usual form. Here the usual form is a dead end.
+  it("sends an empty list rather than omitting the field when nothing can be proved", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    metodosDeReautenticacion.mockResolvedValue([]);
+    const { req, res, next } = contexto(caducada());
+    await requireStepUp()(req, res, next);
+
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(cuerpo).toHaveProperty("metodos");
+    expect(cuerpo.metodos).toEqual([]);
+  });
+
+  // 🔴 Three COUNTs is three more ways a dropped connection turns a
+  // well-formed refusal into a 500 — and the client's interceptor only opens
+  // the window on a 403 carrying `code`, so a 500 here does not degrade the
+  // ceremony, it removes it. Omitting the field already means "this server
+  // cannot say", which is exactly true when the query failed.
+  it("still refuses properly, without the list, when the inventory query fails", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    metodosDeReautenticacion.mockRejectedValue(new Error("la base de datos dijo que no"));
+    const { req, res, next } = contexto(caducada());
+    await requireStepUp()(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(cuerpo.code).toBe(CODIGO_STEP_UP);
+    expect(cuerpo.motivo).toBe(MOTIVO_SIN_FACTOR_RECIENTE);
+    expect(cuerpo).not.toHaveProperty("metodos");
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  // The extra COUNTs are bought on the refusal and nowhere else. A session
+  // inside its window is the hot path of every gated write in the ERP.
+  it("costs nothing on a session that is let through", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    const { req, res, next } = contexto({
+      id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1),
+    });
+    await requireStepUp()(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(metodosDeReautenticacion).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Tarea 10 del plan 4C — dos cosas que la puerta no hacía.
+ */
+describe("requireStepUp — what leaves with the request", () => {
+  // 🔴 The fresh-window shortcut let the field through untouched. The client
+  // injects the same password into every request sharing a ceremony, and
+  // `rol.controller.ts` writes `req.body` whole into the bitácora: an
+  // administrator's plaintext password on a screen, one pair of tabs away.
+  it("drops stepup_password from the body on the fresh-window path", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    const body: Record<string, unknown> = { name: "x", stepup_password: "la-de-verdad" };
+    const { req, res, next } = contexto(
+      { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
+      body,
+    );
+    await requireStepUp()(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(body).not.toHaveProperty("stepup_password");
+    expect(body.name).toBe("x");
+  });
+
+  // Built by hand and not through `contexto`, whose `body` parameter has a
+  // `{}` default: passing `undefined` there hands the gate an empty object,
+  // and this test passed with the guard deleted. A body-less DELETE arrives
+  // with `req.body` genuinely undefined, and that is what has to survive.
+  it("survives a body-less request on that same path", async () => {
+    tieneAlgunFactor.mockResolvedValue(true);
+    const req = {
+      user: { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
+      body: undefined,
+      ip: "::1",
+      originalUrl: "/api/rol/1",
+    } as never;
+    const r = { status: vi.fn().mockReturnThis(), json: vi.fn(), locals: {} };
+    const res = r as unknown as Response & typeof r;
+    const next = vi.fn();
+    await requireStepUp()(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+});
+
+describe("requireStepUp — what it says about itself", () => {
+  // What `routeGuards.test.ts` reads to tell one mount from another. The
+  // resolved triple, defaults filled in, so a table can compare whole objects.
+  it("stamps its resolved options on the gate it returns", () => {
+    expect((requireStepUp() as unknown as { opciones: unknown }).opciones).toEqual({
+      permiteOnboarding: false, exigeContrasena: false, toleraFactorIlegible: false,
+    });
+    expect(
+      (requireStepUp({ exigeContrasena: true }) as unknown as { opciones: unknown }).opciones,
+    ).toEqual({ permiteOnboarding: false, exigeContrasena: true, toleraFactorIlegible: false });
+  });
+
+  it("keeps the name Express mounts, which is what the walker finds it by", () => {
+    expect(requireStepUp().name).toBe("stepUpGate");
+  });
+
+  // The property cannot be reassigned, but the object behind it could be
+  // edited in place — and a table that compares whole objects would then read
+  // a lie that nothing in the closure shares.
+  it("hands out options nobody can edit in place", () => {
+    const opciones = (requireStepUp() as unknown as { opciones: object }).opciones;
+    expect(Object.isFrozen(opciones)).toBe(true);
+  });
+});
+
+describe("requireStepUp — the password leaves on the error paths too", () => {
+  // The rule is "every way out drops it", and `next(err)` is a way out. The
+  // error handler does not log the body today; the next Sentry hook would.
+  it("drops stepup_password before handing a limiter failure to next(err)", async () => {
+    passwordConfirmLimiter.getKey.mockRejectedValue(new Error("el almacén dijo que no"));
+    const body: Record<string, unknown> = { stepup_password: "la-de-verdad" };
+    const { req, res, next } = contexto(
+      { id: 1, estado: "completa", mfa_satisfied_at: null },
+      body,
+    );
+    await requireStepUp({ exigeContrasena: true })(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(expect.any(Error));
+    expect(body).not.toHaveProperty("stepup_password");
   });
 });

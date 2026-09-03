@@ -1467,22 +1467,19 @@ describe("changing your own credentials spends the budget for a wrong password, 
     expect(await passwordConfirmLimiter.getKey("pc:99")).toBeUndefined();
   });
 
-  it("charges nothing when an administrator renames somebody else", async () => {
-    // The false positive this mount had to avoid. Renaming another account
-    // sends no password and compares none, so billing it would answer 429 to
-    // the sixth piece of legitimate administrative work in a quarter of an
-    // hour. `can` is mocked false for the rest of this file; here the caller
-    // holds the permission, so the guard passes on the permission and not on
-    // ownership.
+  it("demands the password before an administrator renames somebody else, and charges nothing for asking", async () => {
+    // Decisión D6 del plan 4C: renombrar otra cuenta pide la contraseña
+    // siempre. This used to reach the handler through `requireStepUp`'s
+    // factor-less skip and pin a 409 from the name check; now the gate
+    // refuses first. What the test still holds, and what it was written for:
+    // a missing password is **not** a wrong one, so the shared confirmation
+    // budget is not touched — billing a refusal that compared nothing would
+    // answer 429 to the sixth piece of legitimate administrative work in a
+    // quarter of an hour. `can` is mocked false for the rest of this file;
+    // here the caller holds the permission.
     //
-    // No session override needed: the shared default's `mfa_satisfied_at:
-    // null` and no factor registered send this caller through
-    // `requireStepUp`'s branch 3 (no password sent, nothing to prove),
-    // logging STEP_UP_SKIPPED and calling on — measured identical to the
-    // "satisfied window" fiction an earlier round gave this session, which
-    // this test never needed in the first place: what it is actually
-    // checking is that `requiresOwnPassword` spares somebody else's account
-    // from `chargeConfirmBudgetOnSelfChange`'s own charge.
+    // The mutual exclusion with `chargeConfirmBudgetOnSelfChange` is pinned
+    // further down, in the `stepup_password` + `oldPass` test.
     puede = true;
     try {
       const res = await request(app)
@@ -1492,12 +1489,9 @@ describe("changing your own credentials spends the budget for a wrong password, 
         .send({ user: "isalas" });
       await settled();
 
-      // Pinned rather than excluded: `usuarioFindOne`'s default fixture
-      // resolves any query to the caller's own row, so `nombreEnUso` reads
-      // that back as "the name isn't ours to keep" and answers 409 — a
-      // fixture limit, not this route refusing anything.
-      expect(res.status).toBe(409);
-      expect(res.status).not.toBe(403);
+      expect(res.status).toBe(403);
+      // The mirror of the old `not.toBe(403)`: the *right* 403, not any 403.
+      expect(res.body).toMatchObject({ code: "STEP_UP_REQUIRED", motivo: "contraseña-requerida" });
       expect(await gastado()).toBeUndefined();
       // Nor did it land in anybody else's bucket, keyed by the target rather
       // than the caller.
@@ -1507,22 +1501,13 @@ describe("changing your own credentials spends the budget for a wrong password, 
     }
   });
 
-  it("charges nothing when an administrator resets somebody else's password", async () => {
-    // The false positive to avoid, same as the rename above: resetting another
-    // account sends no password and compares none, so billing it would answer
-    // 429 to the sixth piece of legitimate administrative work in a quarter of
-    // an hour.
-    //
-    // Pinned rather than asserted as a 200, for the reason `escribible`
-    // above gives: `usuarioFindOne` here resolves a plain object with no
-    // `set`, so the write itself cannot complete and answers 500 — a
-    // fixture limit, not the mount refusing anything. What is under test is
-    // that the mount reaches the handler at all.
-    //
-    // No session override needed, same reason as the rename test above:
-    // the shared default already sends this caller through
-    // `requireStepUp`'s branch 3, measured identical to what a "satisfied
-    // window" fiction produced.
+  it("demands the password before an administrator resets somebody else's, and charges nothing for asking", async () => {
+    // 🔴 Of the three mounts the plan had left off D6, this is the one that
+    // matters most: resetting another account's password is how a stolen
+    // administrator cookie takes the account over, and it used to reach the
+    // handler on the cookie alone (the old test pinned a 500 from a fixture
+    // limit, proving exactly that the mount let it through). Same budget rule
+    // as the rename above: asking is free, only a wrong answer costs.
     puede = true;
     try {
       const res = await request(app)
@@ -1532,8 +1517,8 @@ describe("changing your own credentials spends the budget for a wrong password, 
         .send({ pass: "una-clave-de-prueba" });
       await settled();
 
-      expect(res.status).toBe(500);
-      expect(res.status).not.toBe(403);
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: "STEP_UP_REQUIRED", motivo: "contraseña-requerida" });
       expect(await gastado()).toBeUndefined();
       expect(await passwordConfirmLimiter.getKey("pc:99")).toBeUndefined();
     } finally {
@@ -1792,9 +1777,11 @@ describe("changing your own credentials spends the budget for a wrong password, 
       expect(cortado.body.message).not.toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
       expect(cortado.body.message).toMatch(/Demasiados intentos/i);
 
-      // And the 429 does not let the caller straight back in. It is refunded
-      // too — it is not a 401 — so the counter falls back to the limit rather
-      // than climbing past it; the next request has to cross it again, and does.
+      // And the 429 does not let the caller straight back in. Since D6 this
+      // one comes from the gate's read-only `agotado` branch, which never
+      // touches the limiter: nothing is charged and nothing refunded, the
+      // counter simply stays at the limit, and the next request meets it
+      // again — and files a `critical` STEP_UP_DENIED line while it is there.
       const otro = await attempt();
       await settled();
       expect(otro.status).toBe(429);
@@ -1895,8 +1882,8 @@ describe("requireStepUp, mounted on the real routes", () => {
   // here goes through a request, and a request cannot tell an unmounted gate
   // from a satisfied one — both answer whatever the handler answers. The
   // mounts are held structurally in `routes/routeGuards.test.ts`, in one
-  // table — fourteen of them today, and the count is that table's business
-  // rather than a number restated here. Do not start a second half-table.
+  // table — and the count is that table's business rather than a number
+  // restated here. Do not start a second half-table.
 
   beforeEach(async () => {
     await passwordConfirmLimiter.resetKey(CLAVE_YO);
@@ -1919,16 +1906,19 @@ describe("requireStepUp, mounted on the real routes", () => {
     expect(totpCount).not.toHaveBeenCalled();
   });
 
-  it("lets a user get created with no factor and no password, per the corrected rule: nothing to prove, so nothing is demanded", async () => {
+  it("demands the password before a user gets created, even with no factor to prove — decisión D6", async () => {
     /**
-     * A second audit found that the version of this gate this file first
-     * pinned refused *every* gated write, unconditionally, the moment it
-     * shipped: `web/src` never sends `stepup_password` (that frontend is a
-     * later plan's job), so on a live account — no factor, unsatisfied
-     * window — the fallback always read an absent field and always refused.
-     * Saving the permission matrix, creating a role, an account changing its
-     * own password: all of it, every account, always. This test is what
-     * that outage looked like from the outside, now pinned the other way.
+     * History, because it explains the shape of this test. A second audit
+     * once found that this gate refused *every* gated write, unconditionally,
+     * the moment it shipped: `web/src` did not send `stepup_password` yet, so
+     * the fallback always read an absent field and always refused. This test
+     * was the pin against that outage — "no factor, no password, let
+     * through". Plan 4D then taught the client to answer the gate, and plan
+     * 4C's decision D6 turned the password on for accounts, roles and the
+     * permission matrix on purpose. So the same request is refused again —
+     * but now with a `motivo` the client knows how to answer, which is the
+     * difference between this and the outage: the mirror assertion below is
+     * what says so.
      */
     puede = true;
     try {
@@ -1938,17 +1928,8 @@ describe("requireStepUp, mounted on the real routes", () => {
         .set(DEL_FRONTEND)
         .send({ user: "nuevo" });
 
-      // Not a clean 200 — createUsuario needs more fields than this test
-      // supplies. Pinned at the actual answer rather than merely excluding
-      // 403: `usuarioFindOne`'s default fixture resolves *any* query to the
-      // same row, so `nombreEnUso` reads that row back as "the name isn't
-      // ours to keep" (`exceptoId` is `undefined` on a create, so the
-      // exemption never applies) and answers 409 before createUsuario ever
-      // reaches a write. Not 403, and not the 500 a missing-field crash
-      // would also have passed under `not.toBe`, which is what actually
-      // proves the gate let the request through rather than refusing it.
-      expect(res.status).toBe(409);
-      expect(res.status).not.toBe(403);
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: "STEP_UP_REQUIRED", motivo: "contraseña-requerida" });
     } finally {
       puede = false;
     }
@@ -2134,10 +2115,11 @@ describe("requireStepUp, mounted on the real routes", () => {
         .set(DEL_FRONTEND)
         .send({});
 
-      // The gate let it through; `changesFrom({})` is what answers 400, for
-      // its own reason ("No hay nada que guardar."), not step-up's.
-      expect(res.status).toBe(400);
-      expect(res.status).not.toBe(403);
+      // Decisión D6: the matrix demands the password now, before
+      // `changesFrom({})` ever gets to say "No hay nada que guardar." — the
+      // 400 this test used to pin arrives only after the password is typed.
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: "STEP_UP_REQUIRED", motivo: "contraseña-requerida" });
     } finally {
       puede = false;
     }
@@ -2246,7 +2228,14 @@ describe("requireStepUp, mounted on the real routes", () => {
    * gate at all.
    */
   describe("on DELETE, where a body only exists if Content-Type says so", () => {
-    it("lets a body-less DELETE through: no factor, nothing sent, nothing to prove", async () => {
+    it("reads nothing out of a body-less DELETE and refuses it properly, not with a crash", async () => {
+      // Decisión D6: `DELETE /api/rol/:id` demands the password now, so a
+      // body-less request is refused. What this still proves is the thing
+      // the describe is named for — with no Content-Type there is no
+      // `req.body` at all, and the gate has to read the absent field as
+      // "not sent" rather than throw on `undefined[...]`. A crash here is a
+      // 500; the right answer is the 403 the client knows how to turn into a
+      // password prompt.
       puede = true;
       try {
         const res = await request(app)
@@ -2254,18 +2243,33 @@ describe("requireStepUp, mounted on the real routes", () => {
           .set("Cookie", COOKIE)
           .set(DEL_FRONTEND);
 
-        // Measured, not assumed: deleteRol reaches a real answer here (no
-        // accounts on the role, `destroy` is a spy), and 200 is what it
-        // actually answers — which is what proves the gate let the request
-        // through rather than refusing it with STEP_UP_REQUIRED.
-        expect(res.status).toBe(200);
-        // And it took branch 3's skip to get there, not a silent "nothing
-        // was ever read" bug that would answer 200 for a different reason —
-        // the two are indistinguishable by status code alone.
-        expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
+        expect(res.status).toBe(403);
+        expect(res.body).toMatchObject({ code: "STEP_UP_REQUIRED", motivo: "contraseña-requerida" });
+        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
       } finally {
         puede = false;
       }
+    });
+
+    // 🔴 The only live-mount witness of the factor-less skip left after D6.
+    // `requireStepUp.ts`'s own docstring says a gate nothing can satisfy is an
+    // outage, and that branch — no factor, no password demanded, let through
+    // with a `STEP_UP_SKIPPED` line — is what stops that. It used to be
+    // proved through `DELETE /api/rol/:id`; D6 moved that route onto the
+    // password, so the witness moves to the one body-less mount that still
+    // takes the plain gate. Delete this and the branch has no mounted proof.
+    it("still lets a body-less DELETE through where the route asks for no password: closing another session", async () => {
+      const res = await request(app)
+        .delete("/api/auth/sessions/99")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND);
+
+      // Pinned at the measured answer, not merely `not.toBe(403)`: `endSession`
+      // answers 404 for a session id that is not the caller's, which is what
+      // proves the gate called on rather than refusing — a 500 from a crash
+      // after the gate would have passed the weaker assertion too.
+      expect(res.status).toBe(404);
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
     });
 
     it("reads stepup_password out of a DELETE body once Content-Type says to parse one", async () => {

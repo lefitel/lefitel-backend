@@ -51,6 +51,7 @@ import {
 } from "../auth/recoveryCodeStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
+import { clearSessionCookie } from "../auth/sessionCookie.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -580,6 +581,11 @@ export const deleteTotp = handler("deleteTotp", async (req: Request, res: Respon
     });
   }
 
+  // The caller's own session was among the revoked, and the message says so.
+  // Without this the browser keeps a dead cookie and the next request is a
+  // bare 401 — the same one-liner `logoutAll` and `endSession` already do.
+  // Found while auditing the passkey twin of this route (plan 4C, Task 9).
+  if (!quedaAlgunFactor) clearSessionCookie(res);
   res.status(200).json({
     message: quedaAlgunFactor ? MENSAJE_FACTOR_ELIMINADO : MENSAJE_ULTIMO_FACTOR_ELIMINADO,
   });

@@ -70,6 +70,35 @@ import { QueryInterface } from "sequelize";
 // image back, leave the schema" rollback stops being an option, since that
 // rollback depends on this exact default still standing.
 //
+// ---
+//
+// 🟢 **2026-09-02 — that entry requirement is already satisfied, by an
+// accident of history rather than by anything anyone did.** It assumes the
+// previous image is one from this arc: a build that has `createSession` but
+// predates the `estado` column. **No such build has ever been deployed.**
+//
+// Verified against the branch Coolify actually serves, confirmed by Isaias the
+// same day: `master` sits at 2026-05-12, carries exactly one migration
+// (`20260503000001`), and contains no reference to `sesiones` or
+// `createSession` anywhere in `src/` — it authenticates with JWTs. An image
+// that has never heard of the table cannot run the INSERT this default exists
+// to keep legal, so there is no traffic for the default to protect.
+//
+// **Therefore this file can be armed in the same deploy as the rest of the
+// arc, and should be.** Parking it past that deploy leaves the default
+// standing with no remaining reason, and "remember to arm it later" is the
+// kind of note that does not get acted on — which is the same argument the
+// header above makes for why the mechanism is the path and not a reminder.
+//
+// The rollback caveat survives intact for the same reason: "roll the image
+// back, leave the schema" still works, because the image being rolled back to
+// is the May one, which never touches `sesiones` at all.
+//
+// 🔴 **This paragraph expires the day anything from this arc reaches
+// production.** From then on the previous image *is* an arc build, the
+// original requirement applies word for word, and this note is wrong. If you
+// are reading it after a successful deploy of the session work, delete it.
+//
 // The rule the two migrations disagree on, on purpose: default the facts,
 // never the policy. A fact — `created_at` say — is always correctly filled
 // in by a default, so `20260827000001` gives four of them one. `estado` is a

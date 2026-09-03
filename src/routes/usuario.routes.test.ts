@@ -72,7 +72,16 @@ const passwordConfirmLimiter = vi.fn() as ReturnType<typeof vi.fn> & { getKey: R
 passwordConfirmLimiter.getKey = vi.fn();
 const passwordConfirmKey = vi.fn();
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword: (...a: unknown[]) => verifyOwnPassword(...a) }));
-vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a) }));
+vi.mock("../auth/factorInventory.js", () => ({
+  tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
+  // Añadido por el plan 4C: `requireStepUp` lo llama al rechazar con
+  // `sin-factor-reciente`. Hoy ninguna prueba de este fichero llega a ese
+  // rechazo, así que sin esta línea seguirían pasando — hasta la Tarea 10,
+  // que pone `exigeContrasena` en estas mismas monturas y las lleva justo
+  // por ahí. Está antes de hacer falta a propósito: el fallo que evita es
+  // «la función no existe», que no se parece en nada a su causa.
+  metodosDeReautenticacion: async () => ["totp"],
+}));
 vi.mock("../utils/logAction.js", () => ({ logAction: (...a: unknown[]) => logAction(...a) }));
 vi.mock("../middleware/loginLimiters.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../middleware/loginLimiters.js")>();

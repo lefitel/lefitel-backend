@@ -77,6 +77,7 @@ import authRoutes from "./routes/auth.routes.js";
 import mfaRoutes from "./routes/mfa.routes.js";
 import totpRoutes from "./routes/totp.routes.js";
 import recoveryCodesRoutes from "./routes/recoveryCodes.routes.js";
+import webauthnRoutes from "./routes/webauthn.routes.js";
 import reporteRoutes from "./routes/reporte.routes.js";
 import generadorRoutes from "./routes/generador.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
@@ -278,6 +279,13 @@ app.use("/api/auth", authRoutes);
 app.use("/api/auth", mfaRoutes);
 app.use("/api/auth/totp", totpRoutes);
 app.use("/api/auth/recovery-codes", recoveryCodesRoutes);
+// 🔴 This prefix is not a choice. `auth/sessionState.ts` already reserves
+// `/api/auth/webauthn/login`, `/api/auth/webauthn/register` and
+// `/api/auth/webauthn/credentials` in its allow-lists — mounting anywhere else
+// leaves a `parcial` session with no reachable door and no error that says so.
+// See `webauthn.routes.ts` for the loop that produces, and for why the tempting
+// opposite mistake (widening the allow-list to this whole prefix) is worse.
+app.use("/api/auth/webauthn", webauthnRoutes);
 
 app.use("/api/upload", authenticate, uploadRoutes);
 app.use("/api/reporte", authenticate, reporteRoutes);

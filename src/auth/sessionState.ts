@@ -59,14 +59,8 @@ const ONBOARDING_EXTRA: readonly string[] = [
   "/api/auth/logout-all",
 ];
 /**
- * The one value of `sesiones.mfa_source` that is **not** evidence a factor was
- * shown — see clause 3 of `estadoEfectivo`. Named rather than typed inline so
- * the string has a single home: the database's own CHECK spells the same four
- * words, and a typo here would fail open, silently.
- */
-/**
- * What proved the factor for a session — the vocabulary of `sesiones.mfa_source`
- * minus `passkey`, which is plan 4C.
+ * What proved the factor for a session — the whole vocabulary of
+ * `sesiones.mfa_source`, `passkey` included since plan 4C.
  *
  * Lives here rather than beside the endpoint that writes it, because **two
  * modules write this column and one reads it**: `sessionPromotion.ts` on a
@@ -75,11 +69,22 @@ const ONBOARDING_EXTRA: readonly string[] = [
  * the writers would make the other import from a sibling for no reason.
  *
  * The database has its own CHECK over the same four words (migration
- * `20260826000002`); this union is a strict subset of it, and a value here that
- * the CHECK does not know fails in production in the middle of a login.
+ * `20260826000002`), and as of the 4C plan the two lists are **identical** —
+ * they used to differ, with `"passkey"` allowed by the CHECK and withheld here
+ * on purpose so that writing it before anything could verify one was a
+ * compile error rather than a production failure. That guard did its job and
+ * is spent; what remains is the older rule, unchanged: a value here the CHECK
+ * does not know fails in production in the middle of a login, so this union
+ * may never gain a word the migration has not.
  */
-export type FuenteMfa = "totp" | "codigo" | "dispositivo";
+export type FuenteMfa = "totp" | "codigo" | "dispositivo" | "passkey";
 
+/**
+ * The one value of `sesiones.mfa_source` that is **not** evidence a factor was
+ * shown — see clause 3 of `estadoEfectivo`. Named rather than typed inline so
+ * the string has a single home: the database's own CHECK spells the same four
+ * words, and a typo here would fail open, silently.
+ */
 const FUENTE_DISPOSITIVO = "dispositivo";
 
 const PERMITIDAS: Record<EstadoSesion, readonly string[] | "todo"> = {
@@ -401,7 +406,7 @@ export function estadoEfectivo(
 /**
  * El `code` que acompaña a `MENSAJE_FACTOR_PENDIENTE` — plan 4D, tarea 9.
  *
- * Esa negativa la reciben quince de las diecinueve rutas protegidas cuando el
+ * Esa negativa la reciben las rutas protegidas fuera de la lista de `onboarding` cuando el
  * plazo de gracia venció sin ningún factor registrado. Llegaba al cliente como
  * un 403 pelado, y `createRol`, `editRol` y `createUsuario` lo convertían en un
  * «no se pudo» genérico: quien lo leía no tenía forma de saber que lo que le

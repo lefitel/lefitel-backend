@@ -377,6 +377,49 @@ describe("POST /auth/mfa/verify", () => {
     expect(opciones.where.id).toBe(ID_SESION);
   });
 
+  // 🔴 El encierro que este endpoint tenía y nada cubría. `estadoEfectivo`
+  // contesta `onboarding` para una fila **guardada** `completa` cuyo plazo
+  // venció y que nunca probó un factor — la forma de cualquier sesión que ya
+  // estaba abierta cuando su dueño registró su primer factor desde otro
+  // aparato. `promoverSesion` mira el estado *guardado*, no encuentra nada, y
+  // no escribe: el endpoint contestaba «Segundo factor verificado» sin sellar
+  // absolutamente nada, y la siguiente petición volvía a pedir el factor.
+  it("seals the session when there was nothing to promote, instead of answering a lie", async () => {
+    filas = [filaTotp(1, ID_USUARIO)];
+    const secret = OTPAuth.Secret.fromBase32(SECRETO);
+    const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+    const valido = OTPAuth.HOTP.generate({ secret, counter });
+    // La promoción no encaja; el sellado sí.
+    sesionUpdate.mockResolvedValueOnce([0]).mockResolvedValueOnce([1]);
+
+    const c = call({ codigo: valido });
+    await verify(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(sesionUpdate).toHaveBeenCalledTimes(2);
+    const [valores, opciones] = sesionUpdate.mock.calls[1] as [
+      Record<string, unknown>,
+      { where: Record<string, unknown> },
+    ];
+    expect(valores).toMatchObject({ mfa_source: "totp" });
+    // El sellado no toca `estado`: no hay nada que promover, sólo prueba que
+    // registrar. Es la diferencia entera entre las dos funciones.
+    expect(valores).not.toHaveProperty("estado");
+    expect(opciones.where).toEqual({ id: ID_SESION });
+  });
+
+  it("does not write the session twice when the promotion did match", async () => {
+    filas = [filaTotp(1, ID_USUARIO)];
+    const secret = OTPAuth.Secret.fromBase32(SECRETO);
+    const counter = OTPAuth.TOTP.counter({ timestamp: Date.now() });
+    const valido = OTPAuth.HOTP.generate({ secret, counter });
+
+    const c = call({ codigo: valido });
+    await verify(c.req, c.res);
+
+    expect(sesionUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses a step it has already accepted", async () => {
     filas = [filaTotp(1, ID_USUARIO)];
     const secret = OTPAuth.Secret.fromBase32(SECRETO);
@@ -508,9 +551,29 @@ describe("POST /auth/mfa/verify", () => {
     expect(valores.mfa_source).toBe("codigo");
   });
 
-  it("rolls back the spent code when there is nothing left to promote", async () => {
+  // La otra mitad del mismo fallo, que rompía hacia el lado contrario: un
+  // código de recuperación perfectamente válido se deshacía y se contestaba
+  // «código incorrecto», siempre, en el único estado que más lo necesitaba.
+  it("seals the session rather than rejecting a valid recovery code", async () => {
     gastarCodigo.mockResolvedValue(true);
-    sesionUpdate.mockResolvedValue([0]); // nothing matched — already `completa`
+    sesionUpdate.mockResolvedValueOnce([0]).mockResolvedValueOnce([1]);
+
+    const c = call({ codigo: "A".repeat(26) }, usuarioAutenticado({ estado: "completa" }));
+    await verify(c.req, c.res);
+
+    expect(c.status).toBe(200);
+    expect(sesionUpdate).toHaveBeenCalledTimes(2);
+    const [valores] = sesionUpdate.mock.calls[1] as [Record<string, unknown>];
+    expect(valores.mfa_source).toBe("codigo");
+  });
+
+  it("rolls back the spent code when there is no session at all to seal", async () => {
+    gastarCodigo.mockResolvedValue(true);
+    // Las dos escrituras fallan: ni promoción ni sellado. Eso ya no significa
+    // «la sesión estaba completa» —ese caso ahora se sella— sino que la fila
+    // no está, y gastar uno de diez códigos impresos por nada es lo que este
+    // rollback existe para impedir.
+    sesionUpdate.mockResolvedValue([0]);
 
     const c = call({ codigo: "A".repeat(26) }, usuarioAutenticado({ estado: "completa" }));
     await verify(c.req, c.res);

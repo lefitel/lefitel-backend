@@ -78,6 +78,12 @@ const revokeAllSessionsOf = vi.fn();
 vi.mock("../auth/sessionStore.js", () => ({
   revokeAllSessionsOf: (...a: unknown[]) => revokeAllSessionsOf(...a),
 }));
+// Added with plan 4C's Task 9: the last-factor branch now clears the cookie,
+// and the fake response below has no `clearCookie` to call.
+const clearSessionCookie = vi.fn();
+vi.mock("../auth/sessionCookie.js", () => ({
+  clearSessionCookie: (...a: unknown[]) => clearSessionCookie(...a),
+}));
 
 const logAction = vi.fn();
 // The four writes that finish a registration now share one transaction — see
@@ -161,6 +167,10 @@ function call(user: NonNullable<Request["user"]> | undefined, body: unknown = {}
 }
 
 beforeEach(() => {
+  // Reset like everything else here. Left alone, a call from the last-factor
+  // test above leaked into its neighbours and satisfied their assertion before
+  // they ran — the inverted mutation (`if (quedaAlgunFactor)`) stayed green.
+  clearSessionCookie.mockReset();
   usuarioFindByPk.mockReset().mockResolvedValue(usuarioRow());
   factorFindOne.mockReset().mockResolvedValue(null);
   factorUpdate.mockReset().mockResolvedValue([1]);
@@ -623,6 +633,9 @@ describe("deleteTotp", () => {
 
     expect(c.status).toBe(200);
     expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
+    // The negative half of the cookie rule: with another factor left, the
+    // caller's session survives and so must the cookie.
+    expect(clearSessionCookie).not.toHaveBeenCalled();
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
         severity: "warning",
@@ -656,6 +669,10 @@ describe("deleteTotp", () => {
           metadata: expect.objectContaining({ ultimo_factor: true, sesiones_revocadas: 3 }),
         }),
       );
+      // The caller's own session was among the revoked and the message says
+      // so; without this the browser keeps a dead cookie and the next request
+      // is a bare 401. Found auditing the passkey twin of this route.
+      expect(clearSessionCookie).toHaveBeenCalled();
     });
 
     it("spares no session — no `except` for the caller's own, unlike changePassword's self-change rotation", async () => {

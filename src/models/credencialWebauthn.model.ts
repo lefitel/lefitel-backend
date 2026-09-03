@@ -15,10 +15,19 @@ type CredencialWebauthnCreation = Optional<
 >;
 
 /**
- * One registered passkey / security key. Verified against `credential_id`
- * alone — the assertion that comes back at login names only that, with no
- * user to scope the lookup by — which is why `credential_id` is unique across
- * the whole table rather than per user.
+ * One registered passkey / security key.
+ *
+ * 🔴 **`credential_id` is unique across the whole table, and that is NOT an
+ * invitation to look a credential up by it alone.** An earlier version of this
+ * comment said exactly that — "the assertion that comes back at login names
+ * only that, with no user to scope the lookup by" — and it is true only of the
+ * passwordless ceremony of phase 2, where the credential *is* the identity.
+ * In the second-factor path the session already says whose it is, and
+ * `buscarCredencialDe` scopes by `(credential_id, id_usuario)` for a reason
+ * written out there: looked up by id alone, a colleague who knows your
+ * password finishes your login with *their own* fingerprint on a shared
+ * machine. The uniqueness exists so that phase 2 can resolve an identity from
+ * a credential; it says nothing about how phase 1 may query.
  *
  * `tableName` and `timestamps: false` are both deliberate, same reasoning as
  * every other model in this schema: Sequelize's own pluralisation has already

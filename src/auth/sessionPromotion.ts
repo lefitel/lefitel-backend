@@ -20,16 +20,19 @@ import type { EstadoSesion } from "./sessionState.js";
 /**
  * The ways a session can end up having proved a factor.
  *
- * `"passkey"` is deliberately not a member: passkeys are plan 4C's, by
- * Isaias's decision of 2026-09-01. `sesiones_mfa_source_chk` (migration
- * `20260826000002`) already allows the word `'passkey'` at the database
- * level — the CHECK's vocabulary is the four sources the schema was built
- * for, not the three this plan writes. This union is a **subset** of that
- * CHECK and must stay one: it is safe for the application's vocabulary to be
- * narrower than the column's, because Postgres still refuses anything
- * neither one allows, but it must never be wider, or a value that type-checks
- * here would fail the INSERT with a raw constraint error in the middle of a
- * login. Add `"passkey"` here the day 4C starts writing it, not before.
+ * `"passkey"` **is** a member as of 2026-09-02, and it was withheld until
+ * that day on purpose. `sesiones_mfa_source_chk` (migration
+ * `20260826000002`) has allowed the word at the database level since the
+ * schema was built, so the union could have carried it from the start; it did
+ * not, so that any code writing `'passkey'` before there was an endpoint able
+ * to verify one would be a **compile error** instead of a session promoted on
+ * a factor nobody had proved. Plan 4C is what makes it verifiable, and it
+ * arrives with the endpoint, not ahead of it.
+ *
+ * The rule that outlives that guard, unchanged: this union may be **narrower**
+ * than the CHECK but never wider. Narrower is safe — Postgres still refuses
+ * anything neither allows. Wider means a value that type-checks here fails the
+ * INSERT with a raw constraint error in the middle of a login.
  */
 // Declared in `sessionState.ts`, which owns the session vocabulary and is the
 // module that *reads* this column. Re-exported so existing importers of this
@@ -141,21 +144,42 @@ export async function promoverSesion(
  * and is fine. This function is the other half of that same write, for the
  * one case `promoverSesion` was never meant to cover.
  *
- * **Deliberately does not touch `estado`.** The only caller invokes this
- * after `promoverSesion` has already returned `false`, which — given the
- * three session states — means this row is already `completa` (or the
- * session is gone). There is no state left to promote here, only proof left
- * to record.
+ * 🔴 **And deliberately not narrowed to `{ id, id_usuario, estado }`.** Plan
+ * 4C proposed exactly that, to match the ownership triple `mfa.controller.ts`
+ * uses when it seals a step-up. The triple buys nothing here — `id_sesion`
+ * arrives from `req.user`, which `authenticate` read off the same row as the
+ * user id, so there is no request-controlled input on the path — and it costs
+ * something real: this function returns `void`, so a `WHERE` that stops
+ * matching becomes an unobservable no-op. The caller would answer "Identidad
+ * confirmada", stamp nothing, and send somebody back into the same 403 for
+ * ever. Narrow it only together with a boolean return that **both** callers
+ * read, the way `mfa.controller.ts` checks `count > 0` before it believes its
+ * own write. Note too that a revoked session still reads `estado = 'completa'`
+ * — revocation writes `revoked_at` — so the clause would not even mean what it
+ * looks like it means.
+ *
+ * **Returns whether the row was there**, which most callers may ignore and one
+ * may not: the recovery-code path in `mfa.controller.ts` spends one of ten
+ * printed codes in the same transaction, and has to roll that back if there
+ * turned out to be no session to seal. A `void` here made that impossible to
+ * express, which is also why narrowing this `WHERE` was refused above.
+ *
+ * **Deliberately does not touch `estado`.** Both callers — `confirmTotp` and,
+ * since plan 4C, `loginVerify` — invoke this only after `promoverSesion` has
+ * already returned `false`, which — given the three session states — means
+ * this row is already `completa` (or the session is gone). There is no state
+ * left to promote here, only proof left to record.
  */
 export async function sellarPruebaDeFactor(
   id_sesion: string,
   fuente: FuenteMfa,
   opciones: { transaction?: Transaction } = {},
-): Promise<void> {
-  await SesionModel.update(
+): Promise<boolean> {
+  const [count] = await SesionModel.update(
     { mfa_satisfied_at: new Date(), mfa_source: fuente },
     { where: { id: id_sesion }, transaction: opciones.transaction },
   );
+  return count > 0;
 }
 
 /**
