@@ -566,7 +566,21 @@ export async function verifyOwnPassword(input: {
  * a failure to open one — or to read the permission matrix — answered 500 while
  * the bitácora said that person had logged in. The bitácora is read to find out
  * what happened; a line for a login that did not happen is worse than no line.
+ *
+ * **`metodo` names the credential the door checked, and `id_sesion` the row
+ * it opened.** Both arrived with plan 4C's phase 2, when a second door — a
+ * passkey with no password — started writing this same verb: one `LOGIN`
+ * line per arrival, whichever door, so every report that counts logins keeps
+ * counting, and a field that says *how* for whoever asks. `"contraseña"`
+ * covers the remembered-device login too: the credential typed was the
+ * password, and the row's own `mfa_source` says the rest. The session id is
+ * what lets a line be matched to the row it opened when a credential is
+ * later found to be copied.
  */
-export function logLogin(usuario: UsuarioAutenticado, ip: string | null): void {
-  logAction({ id_usuario: usuario.id, action: "LOGIN", entity: "Usuario", entity_id: usuario.id, detail: "Inició sesión", metadata: { user: usuario.user }, severity: 'info', ip_address: ip });
+export function logLogin(
+  usuario: UsuarioAutenticado,
+  ip: string | null,
+  como: { metodo: "contraseña" | "passkey"; id_sesion: string },
+): void {
+  logAction({ id_usuario: usuario.id, action: "LOGIN", entity: "Usuario", entity_id: usuario.id, detail: "Inició sesión", metadata: { user: usuario.user, metodo: como.metodo, id_sesion: como.id_sesion }, severity: 'info', ip_address: ip });
 }

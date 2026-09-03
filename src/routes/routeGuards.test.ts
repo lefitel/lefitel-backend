@@ -54,7 +54,12 @@ const realUse = express.application.use;
   return (realUse as unknown as (...a: unknown[]) => unknown).apply(this, args);
 };
 const app = (await import("../app.js")).default;
-const { webauthnCeremonyLimiter } = await import("../middleware/loginLimiters.js");
+const {
+  webauthnCeremonyLimiter,
+  passwordlessOptionsLimiter,
+  passwordlessVerifyLimiter,
+  loginRateLimit,
+} = await import("../middleware/loginLimiters.js");
 const { puedeAlcanzar } = await import("../auth/sessionState.js");
 (express.application as unknown as { use: unknown }).use = realUse;
 
@@ -222,6 +227,17 @@ const AUTHENTICATION_NOT_APPLICABLE = [
   // be aimed at a chosen victim. See `password.controller.ts`.
   "POST /api/auth/password/forgot",
   "POST /api/auth/password/reset",
+
+  // ── Entrar con una passkey, sin contraseña (plan 4C, fase 2) ───────────
+  // Las dos son lo que produce la credencial para quien no tiene ninguna,
+  // igual que el login: pedirles una sesión sería pedir a quien viene a abrir
+  // una que ya la tenga. Lo que hace de guardia en su lugar, y por qué basta,
+  // está en `webauthnPasswordless.routes.ts`: `requireVerifiedOrigin` en la
+  // montura (las dos barreras CSRF sin la excepción de «no hay cookie»), un
+  // cubo por dirección en cada una, la lectura paranoid de la cuenta y el
+  // reto de un solo uso — y la firma, que es la credencial entera.
+  "POST /api/auth/webauthn/passwordless/options",
+  "POST /api/auth/webauthn/passwordless/verify",
 ];
 
 describe("the route table we are actually asserting about", () => {
@@ -376,6 +392,14 @@ const GATE_NOT_APPLICABLE = [
   //
   // Sí lleva step-up **con contraseña**, y eso está en `STEP_UP_GATED`.
   "DELETE /api/auth/webauthn/credentials/:id",
+  // Y las dos de entrar sin contraseña (fase 2). Un permiso es algo que tiene
+  // una cuenta, y aquí no hay cuenta en la mano hasta que la firma verifica:
+  // no hay nadie a quien preguntarle «¿puedes?». Tampoco pueden llevar
+  // `requireStepUp`, que rechaza de plano a quien no tiene sesión — sería un
+  // 403 para todo el mundo. Lo que las guarda está junto a ellas en
+  // `AUTHENTICATION_NOT_APPLICABLE`.
+  "POST /api/auth/webauthn/passwordless/options",
+  "POST /api/auth/webauthn/passwordless/verify",
 ];
 
 describe("who may change data", () => {
@@ -1023,6 +1047,53 @@ describe("el presupuesto de las ceremonias de passkey", () => {
   it("el recorrido del árbol encuentra rutas de verdad", () => {
     expect(rutasCon(webauthnCeremonyLimiter).length).toBeGreaterThan(0);
   });
+
+  // Fase 2: cada ruta anónima con su cubo, y sólo el suyo. Intercambiarlos
+  // dejaría `options` reembolsando el éxito —que es la escritura que acota— y
+  // `verify` cobrando los logins que salieron bien.
+  it("pone a cada ruta sin contraseña su propio cubo por dirección", () => {
+    expect(rutasCon(passwordlessOptionsLimiter)).toEqual(["/options"]);
+    expect(rutasCon(passwordlessVerifyLimiter)).toEqual(["/verify"]);
+  });
+
+  // Y ni el cubo del login con contraseña ni el de las ceremonias con sesión
+  // llegan a ellas: el primero degrada a un segundo cubo por dirección de diez
+  // para todo el edificio cuando el cuerpo no trae `user`, y el segundo se
+  // llama por sesión, que aquí no existe. `rutasCon` lee la ruta relativa al
+  // router, así que `/login` es la de `auth.routes.ts`.
+  it("no monta el cubo del login con contraseña en las rutas sin contraseña", () => {
+    expect(rutasCon(loginRateLimit)).toEqual(["/login"]);
+  });
+});
+
+/**
+ * La puerta de origen de las dos rutas anónimas — fase 2, y la única
+ * comprobación CSRF que tienen. `requireSameOrigin`, la global, deja pasar
+ * cualquier escritura sin cookie porque `authenticate` la rechaza después; en
+ * estas dos no hay `authenticate`, y su respuesta es un `Set-Cookie`. La
+ * puerta se monta en `app.ts` con la misma lista de orígenes que `cors()`, y
+ * el recorrido la lee como middleware de la montura.
+ */
+describe("la puerta de origen de las rutas sin contraseña", () => {
+  const conPuerta = routes
+    .filter((r) => r.chain.includes("verifiedOriginGate"))
+    .map((r) => `${r.method} ${r.path}`)
+    .sort();
+
+  it("guarda exactamente las dos rutas anónimas, y ninguna otra", () => {
+    expect(conPuerta).toEqual([
+      "POST /api/auth/webauthn/passwordless/options",
+      "POST /api/auth/webauthn/passwordless/verify",
+    ]);
+  });
+
+  // Que vaya **antes** del cubo y del manejador: una petición cross-site
+  // rechazada no debe gastar el presupuesto del edificio.
+  it("va delante del cubo y del manejador", () => {
+    for (const r of routes.filter((r) => r.path.startsWith("/api/auth/webauthn/passwordless"))) {
+      expect(r.chain[0], `${r.method} ${r.path}: ${r.chain.join(" -> ")}`).toBe("verifiedOriginGate");
+    }
+  });
 });
 
 /**
@@ -1061,6 +1132,15 @@ describe("las rutas de passkey caen donde su prefijo dice", () => {
     // dentro de su cuenta, y enumerable por una contraseña sola no debe ser.
     "/api/auth/webauthn/credentials": { parcial: false, onboarding: true },
     "/api/auth/webauthn/credentials/7": { parcial: false, onboarding: true },
+    // Entrar sin contraseña (fase 2): fuera de **todas** las listas, y no es
+    // eso lo que las protege. Las dos van sin `authenticate`, así que ninguna
+    // sesión consulta la tabla para llegar a ellas; el `false/false` dice que
+    // un estado de sesión no abre ahí nada que no abra ya la ausencia de
+    // sesión. Lo que sí afirma esta entrada, en las dos direcciones: que no
+    // cuelgan de `/login`, que `PARCIAL` abre entero, y que si alguien las
+    // moviera allí «arreglando» esta tabla, la de arriba se pondría roja.
+    "/api/auth/webauthn/passwordless/options": { parcial: false, onboarding: false },
+    "/api/auth/webauthn/passwordless/verify": { parcial: false, onboarding: false },
   };
 
   const montadas = routes

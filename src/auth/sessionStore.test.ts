@@ -133,9 +133,71 @@ describe("createSession", () => {
     await createSession(7, {}, "parcial");
     expect(create.mock.calls.at(-1)?.[0]).toMatchObject({ id_usuario: 7, estado: "parcial" });
   });
+
+  // ── Plan 4C, Task 13: born with the factor sealed, or not ─────────────────
+  // `mfa_satisfied_at` is what `requireStepUp` measures its ten-minute window
+  // from. A passwordless session that starts NULL answers "prove your factor"
+  // to the first gated write, seconds after the fingerprint — and the fallback
+  // is a password this login never asked for.
+  it("seals the factor at birth when a passkey was the whole login", async () => {
+    await createSession(7, {}, "completa", "passkey");
+    const row = written();
+    expect(row.mfa_source).toBe("passkey");
+    expect(row.mfa_satisfied_at).toBeInstanceOf(Date);
+    // The same instant as the row itself, not a second reading of the clock.
+    expect(row.mfa_satisfied_at).toEqual(row.created_at);
+  });
+
+  // 🔴 The mutation that must go red: `esPruebaDeFactor(fuente) ? now : null`
+  // rewritten as `fuente ? now : null`. A remembered device is written without
+  // anybody proving anything at that moment, and sealing it would let a stolen
+  // device cookie plus a password open ten minutes of the permission matrix —
+  // migration `20260826000002` leaves the column NULL for it on purpose.
+  it("leaves the seal empty for a remembered device, on purpose", async () => {
+    await createSession(7, {}, "completa", "dispositivo");
+    expect(written().mfa_source).toBe("dispositivo");
+    expect(written().mfa_satisfied_at).toBeNull();
+  });
+
+  it("leaves the seal empty when nothing was proved", async () => {
+    await createSession(7, {}, "completa");
+    expect(written().mfa_source).toBeNull();
+    expect(written().mfa_satisfied_at).toBeNull();
+  });
+
+  // The passwordless login marks the credential and inserts the session in
+  // one transaction — see `webauthnPasswordless.controller.ts` for the race.
+  // A store that dropped the option would leave the INSERT outside it and the
+  // defence would silently stop existing.
+  it("carries the caller's transaction so the row commits or fails with theirs", async () => {
+    const transaction = { id: "una-transaccion" };
+    await createSession(7, {}, "completa", "passkey", { transaction: transaction as never });
+    expect(create.mock.calls[0][1]).toEqual({ transaction });
+  });
+
+  it("passes no transaction when the caller has none", async () => {
+    await createSession(7, {}, "completa");
+    expect(create.mock.calls[0][1]).toEqual({ transaction: undefined });
+  });
+
+  it("hands back the row's id beside the token, and never the token in the row", async () => {
+    create.mockResolvedValue({ dataValues: { id: "1b4e28ba-2fa1-11d2-883f-0016d3cca427" } });
+    const r = await createSession(7, {}, "completa");
+    expect(r.id).toBe("1b4e28ba-2fa1-11d2-883f-0016d3cca427");
+    expect(JSON.stringify(written())).not.toContain(r.token);
+  });
 });
 
 describe("findLiveSession", () => {
+  it("carries the caller's transaction when given one, and none otherwise", async () => {
+    findOne.mockResolvedValue(null);
+    const transaction = { id: "una-transaccion" };
+    await findLiveSession("un-token", { transaction: transaction as never });
+    expect(findOne.mock.calls[0][0]).toMatchObject({ transaction });
+    await findLiveSession("un-token");
+    expect(findOne.mock.calls[1][0]).toMatchObject({ transaction: undefined });
+  });
+
   it("looks up by the hash, never by the token", async () => {
     findOne.mockResolvedValue(null);
     await findLiveSession("un-token");

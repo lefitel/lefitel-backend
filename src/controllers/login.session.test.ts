@@ -270,6 +270,10 @@ describe("the login, once the credential is good", () => {
       // column stays NULL. Only a login carried past the second factor by a
       // remembered-device cookie names one — see `auth.controller.ts`.
       undefined,
+      // No transaction: the password login opens its session on its own. The
+      // passwordless door is the caller that passes one — see
+      // `webauthnPasswordless.controller.ts` for the race it closes.
+      {},
     );
   });
 
@@ -407,10 +411,13 @@ describe("the login, once the credential is good", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(findLiveSession).toHaveBeenCalledWith("token-anterior");
-    expect(revokeSessionOf).toHaveBeenCalledWith(7, "la-anterior");
+    // The empty options: the password door passes no transaction, so the
+    // rotation runs on its own connection and commits on its own — see
+    // `issueSession` for the door that does pass one.
+    expect(findLiveSession).toHaveBeenCalledWith("token-anterior", {});
+    expect(revokeSessionOf).toHaveBeenCalledWith(7, "la-anterior", {});
     // And the new one still gets opened: rotation replaces, it does not skip.
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), expect.anything(), undefined);
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), expect.anything(), undefined, {});
   });
 
   it("revokes nothing when the cookie it was sent is already dead", async () => {
@@ -540,7 +547,7 @@ describe("the state the login opens the session in", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "completa", undefined);
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "completa", undefined, {});
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -556,7 +563,7 @@ describe("the state the login opens the session in", () => {
 
     expect(c.status).toBe(200);
     expect(c.cookieCall?.[0]).toBe(SESSION_COOKIE_NAME);
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "onboarding", undefined);
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "onboarding", undefined, {});
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -570,7 +577,7 @@ describe("the state the login opens the session in", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "parcial", undefined);
+    expect(createSession).toHaveBeenCalledWith(7, expect.anything(), "parcial", undefined, {});
     // No deadline for somebody who has already registered something.
     expect(update).not.toHaveBeenCalled();
   });

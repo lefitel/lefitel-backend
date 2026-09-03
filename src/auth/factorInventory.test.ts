@@ -655,7 +655,7 @@ describe("estadoInicialDeSesion", () => {
   describe("with a remembered device", () => {
     it("opens completa directly when the account has a factor and the device is valid", async () => {
       passkeys = [PASSKEY];
-      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, true);
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "dispositivo");
       expect(r.estado).toBe("completa");
     });
 
@@ -663,13 +663,13 @@ describe("estadoInicialDeSesion", () => {
       // Same rule as the ordinary parcial branch: nothing left to chase this
       // account for.
       passkeys = [PASSKEY];
-      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, true);
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "dispositivo");
       expect(r.graceUntil).toBeNull();
     });
 
     it("counts a confirmed TOTP the same way a passkey counts, for this branch too", async () => {
       secretosTotp = [TOTP_CONFIRMADO];
-      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, true);
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "dispositivo");
       expect(r.estado).toBe("completa");
     });
 
@@ -687,7 +687,7 @@ describe("estadoInicialDeSesion", () => {
       // deadline stamped, silently cancelling the fourteen-day clock for an
       // account that was never asked to configure anything and has nothing a
       // device could have been remembered for.
-      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, true);
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "dispositivo");
       expect(r.estado).toBe("completa");
       expect(r.graceUntil?.getTime()).toBe(ahora.getTime() + MFA_GRACE_DAYS * DIA);
     });
@@ -699,7 +699,62 @@ describe("estadoInicialDeSesion", () => {
       const r = await estadoInicialDeSesion(
         { id: YO, mfa_grace_until: new Date(ahora.getTime() - DIA) },
         ahora,
-        true,
+        "dispositivo",
+      );
+      expect(r.estado).toBe("onboarding");
+    });
+  });
+
+  // Plan 4C phase 2: the passwordless login passes `"passkey"` — the assertion
+  // it just verified is the factor. Same branch, same placement, and its own
+  // cases: the device cases above cannot catch a rule that reads
+  // `fuenteEnElLogin === "dispositivo"`, which would open every passwordless
+  // login `parcial` and send the person to prove the key they just proved.
+  describe("with a passkey that was the login itself", () => {
+    it("opens completa directly, with no grace clock, and says a factor was found", async () => {
+      passkeys = [PASSKEY];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "passkey");
+      expect(r).toEqual({ estado: "completa", graceUntil: null, conFactor: true });
+    });
+
+    // The two branches that agree on the state and disagree on the truth: the
+    // passwordless guard reads `conFactor` because of this pair.
+    it("answers the same state for an account with nothing registered and a deadline ahead — and says so", async () => {
+      const r = await estadoInicialDeSesion(
+        { id: YO, mfa_grace_until: new Date(ahora.getTime() + DIA) },
+        ahora,
+        "passkey",
+      );
+      expect(r).toEqual({ estado: "completa", graceUntil: null, conFactor: false });
+    });
+
+    it("runs its counts on the caller's transaction when given one", async () => {
+      const transaction = { id: "una-transaccion" };
+      passkeys = [PASSKEY];
+      await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "passkey", {
+        transaction: transaction as never,
+      });
+      expect(passkeyCount).toHaveBeenCalledWith({ where: { id_usuario: YO }, transaction });
+      expect(totpCount.mock.calls[0][0]).toMatchObject({ transaction });
+    });
+
+    // 🔴 The placement guard, for the second value. The passwordless
+    // controller refuses any answer but completa-with-no-deadline, treating it
+    // as "the credential was deleted under me"; that refusal only works if
+    // this function still *counts* rather than trusting the caller. Move the
+    // check above `tieneAlgunFactor` and this stamps nothing — and the
+    // controller's guard loses the witness it depends on.
+    it("still starts the grace clock for an account with nothing registered, even with the source set", async () => {
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora, "passkey");
+      expect(r.estado).toBe("completa");
+      expect(r.graceUntil?.getTime()).toBe(ahora.getTime() + MFA_GRACE_DAYS * DIA);
+    });
+
+    it("does not let the source stand in for a factor once the deadline has passed", async () => {
+      const r = await estadoInicialDeSesion(
+        { id: YO, mfa_grace_until: new Date(ahora.getTime() - DIA) },
+        ahora,
+        "passkey",
       );
       expect(r.estado).toBe("onboarding");
     });

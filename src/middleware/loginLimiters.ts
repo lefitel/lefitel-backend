@@ -29,6 +29,8 @@ import {
   LOCKOUT_MAX_MINUTES,
   PASSWORD_CONFIRM_LIMIT,
   WEBAUTHN_CEREMONY_LIMIT,
+  WEBAUTHN_PASSWORDLESS_OPTIONS_LIMIT,
+  WEBAUTHN_PASSWORDLESS_VERIFY_LIMIT,
 } from "../config/security.js";
 
 /**
@@ -401,6 +403,69 @@ export const loginAccountIpLimiter = rateLimit({
   requestWasSuccessful: costsNothing,
   keyGenerator: accountBucketKey,
   message: { message: "Demasiados intentos. Espere unos minutos." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * The keys for the passwordless ceremony, and they are the **address** — the
+ * only thing there is.
+ *
+ * `/api/auth/webauthn/passwordless/*` carries no session (it is how somebody
+ * with none gets one) and names no account (the credential is resolved inside
+ * the handler, after the request is already counted), so neither of the two
+ * keys above is available. The address is the fallback the session key
+ * already documents as worse — "the whole office is one NAT" — and here it
+ * is not the fallback but the rule. `ipKeyGenerator` for the reason every
+ * key in this file uses it: an IPv6 /56 must be one bucket, not billions.
+ *
+ * Two prefixes, one per route, so that a key read out of a store says which
+ * bucket it belongs to and the two never merge behind a shared store.
+ */
+export function passwordlessOptionsKey(req: Request): string {
+  return `pl:${ipKeyGenerator(req.ip ?? "")}`;
+}
+
+export function passwordlessVerifyKey(req: Request): string {
+  return `pv:${ipKeyGenerator(req.ip ?? "")}`;
+}
+
+/**
+ * The bucket for `POST /api/auth/webauthn/passwordless/options`.
+ *
+ * **Counts every request, successes included**, like `webauthnCeremonyLimiter`
+ * and for the same reason: what this bounds is a write — one `reto_webauthn`
+ * row per call — and here there is no success and no failure, only the row.
+ * The number is a budget for a whole building; `WEBAUTHN_PASSWORDLESS_OPTIONS_LIMIT`
+ * carries the arithmetic.
+ */
+export const passwordlessOptionsLimiter = rateLimit({
+  windowMs: LOGIN_WINDOW_MS,
+  limit: WEBAUTHN_PASSWORDLESS_OPTIONS_LIMIT,
+  keyGenerator: passwordlessOptionsKey,
+  message: { message: "Demasiados intentos con la llave desde esta red. Espere unos minutos." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * The bucket for `POST /api/auth/webauthn/passwordless/verify`.
+ *
+ * **Refused answers only** — `costsNothing`, the login's own rule: a 2xx is a
+ * login that worked and a 5xx is this server's fault, and neither is anybody's
+ * failed attempt. A 4xx is charged whatever produced it, the limiter's own 429
+ * included, so a refunded 429 cannot hand the caller straight back in. What a
+ * refusal can cost — a bitácora line against the account the credential names
+ * — is bounded per account inside the handler (`failedAssertionBudget.ts`),
+ * because this key cannot see a flood spread across addresses.
+ */
+export const passwordlessVerifyLimiter = rateLimit({
+  windowMs: LOGIN_WINDOW_MS,
+  limit: WEBAUTHN_PASSWORDLESS_VERIFY_LIMIT,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: costsNothing,
+  keyGenerator: passwordlessVerifyKey,
+  message: { message: "Demasiados intentos con la llave desde esta red. Espere unos minutos." },
   standardHeaders: true,
   legacyHeaders: false,
 });

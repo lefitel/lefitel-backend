@@ -80,12 +80,49 @@ const ONBOARDING_EXTRA: readonly string[] = [
 export type FuenteMfa = "totp" | "codigo" | "dispositivo" | "passkey";
 
 /**
+ * The two sources a session can carry **at the moment it is created** — the
+ * only two credentials checked *during* a login rather than after it.
+ *
+ * `"dispositivo"` is a remembered-device cookie riding beside a password;
+ * `"passkey"` is the passwordless ceremony of plan 4C's phase 2, where the
+ * assertion is the whole login. `"totp"` and `"codigo"` can never be here:
+ * both are proved by a request made *after* the session exists, and
+ * `sessionPromotion.ts` writes them onto the row then. Narrower than
+ * `FuenteMfa` on purpose, so the compiler refuses a login that claims to have
+ * seen a code it cannot have seen.
+ */
+export type FuenteEnElLogin = Extract<FuenteMfa, "dispositivo" | "passkey">;
+
+/**
  * The one value of `sesiones.mfa_source` that is **not** evidence a factor was
  * shown — see clause 3 of `estadoEfectivo`. Named rather than typed inline so
  * the string has a single home: the database's own CHECK spells the same four
  * words, and a typo here would fail open, silently.
  */
 const FUENTE_DISPOSITIVO = "dispositivo";
+
+/**
+ * Whether this `mfa_source` is evidence that somebody proved a factor.
+ *
+ * **One definition, two readers, and that is the whole reason it is a
+ * function.** `estadoEfectivo` below asks it to decide whether a session with
+ * a lapsed grace deadline keeps the ERP (clause 3), and `createSession` asks
+ * it to decide whether a session is *born* with `mfa_satisfied_at` stamped —
+ * plan 4C, Task 13. The two answers have to agree: a source that opens the
+ * ten-minute step-up window at login but does not count as a factor an hour
+ * later, or the reverse, is a session whose own row contradicts itself.
+ *
+ * 🔴 **`"dispositivo"` is `false`, and that is the load-bearing case.** A
+ * remembered device is written without anybody proving anything at that
+ * moment — migration `20260826000002` leaves `mfa_satisfied_at` NULL for it
+ * on purpose, because stamping it would let a stolen device cookie plus a
+ * password edit the permission matrix without touching a single factor.
+ * `null` and `undefined` are `false` for the same reason NULL is in SQL:
+ * no source is no evidence.
+ */
+export function esPruebaDeFactor(fuente: string | null | undefined): boolean {
+  return fuente != null && fuente !== FUENTE_DISPOSITIVO;
+}
 
 const PERMITIDAS: Record<EstadoSesion, readonly string[] | "todo"> = {
   parcial: PARCIAL,
@@ -202,13 +239,17 @@ export function puedeVerArchivosEstaticos(estado: EstadoSesion): boolean {
  * ---
  *
  * **`mfa_grace_until` in the past does not mean "this account has no factor".**
- * It means "the configuration deadline went by", and **nothing in `src/` ever
- * clears or moves that column again**: its only writer (`auth.controller.ts`)
- * fires solely when `estadoInicialDeSesion` hands back a date, and the two
- * branches that matter — an account that has a factor, and a deadline already
- * decided — both hand back `null`, which means "leave the column alone". Once
- * the stamp is in the past it is in the past for ever, on every account,
- * including the ones that did exactly what was asked of them.
+ * It means "the configuration deadline went by". When this was written nothing
+ * in `src/` ever cleared or moved that column again: its only writer (the
+ * login's tail, now `terminarLogin` in `auth/finishLogin.ts`) fires solely when
+ * `estadoInicialDeSesion` hands back a date, and the two branches that matter — an account that has a factor, and a
+ * deadline already decided — both hand back `null`, which means "leave the
+ * column alone". Plan 4B's `apagarLaMecha` (`sessionPromotion.ts`) now clears
+ * it when an account confirms its first factor, from `confirmTotp` and
+ * `registerVerify` both — so for an account that complied the column is NULL
+ * again, not a past date. The rule below does not depend on that: it was
+ * written for the world where the stamp stayed in the past for ever, and it
+ * still has to hold for any account whose clearing write was lost.
  *
  * A first version of this function narrowed on that stamp alone, and the
  * consequence was a permanent lockout waiting for plan 4B to arm it: register a
@@ -380,7 +421,7 @@ export function estadoEfectivo(
   // deletes its last factor, leaving a thirty-day, windowless exemption resting
   // on a cookie.
   if (sesion.mfa_satisfied_at != null) return guardado;
-  if (sesion.mfa_source != null && sesion.mfa_source !== FUENTE_DISPOSITIVO) return guardado;
+  if (esPruebaDeFactor(sesion.mfa_source)) return guardado;
 
   // Clause 2: opened after the deadline had already gone by, so its `completa`
   // cannot have come from a login that found grace left.

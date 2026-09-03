@@ -3046,3 +3046,116 @@ describe("the fourteen-day deadline, against a session that was already open", (
     expect(sesionUpdate).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The passwordless door through the real stack — plan 4C phase 2.
+ *
+ * Three things only this file can pin, because they are facts about the
+ * assembled app and not about a handler: that the two routes answer with no
+ * cookie at all (no `authenticate`, no `parcial`/`onboarding` table); that the
+ * origin gate on the mount runs before the bucket, so a cross-site request
+ * spends nothing; and that a failed assertion arriving with somebody else's
+ * live cookie revokes nothing — `rotateOut` lives inside `issueSession`, which
+ * a refusal never reaches. The ceremony itself is not run here: the library is
+ * real and there is no authenticator to answer it. The controller test covers
+ * the cryptographic path over a faked library.
+ */
+const { RetoWebauthnModel } = await import("./models/retoWebauthn.model.js");
+const { passwordlessOptionsLimiter, passwordlessVerifyLimiter } = await import(
+  "./middleware/loginLimiters.js"
+);
+const { PETICION_NO_VERIFICABLE } = await import("./config/security.js");
+const { MENSAJE_LOGIN_LLAVE } = await import("./controllers/webauthnPasswordless.controller.js");
+
+describe("the passwordless door, through the real stack", () => {
+  const DESDE = "203.0.113.77";
+  const retoCreate = vi.mocked(RetoWebauthnModel.create);
+  const retoDestroy = vi.mocked(RetoWebauthnModel.destroy);
+
+  beforeEach(async () => {
+    retoCreate.mockResolvedValue({ dataValues: {} } as never);
+    retoDestroy.mockResolvedValue(0 as never);
+    // Address-keyed, so the two buckets have to start every test empty.
+    await passwordlessOptionsLimiter.resetKey(`pl:${DESDE}`);
+    await passwordlessVerifyLimiter.resetKey(`pv:${DESDE}`);
+  });
+
+  it("mints a challenge for a caller holding no cookie, without reading any account", async () => {
+    const res = await request(app)
+      .post("/api/auth/webauthn/passwordless/options")
+      .set("X-Forwarded-For", DESDE)
+      .set(DEL_FRONTEND)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.challenge).toEqual(expect.any(String));
+    expect(res.body.allowCredentials).toEqual([]);
+    expect(res.body.userVerification).toBe("required");
+    // No `authenticate` ran: neither the session row nor the account was read.
+    expect(sesionFindOne).not.toHaveBeenCalled();
+    expect(usuarioFindByPk).not.toHaveBeenCalled();
+    // And the row it wrote belongs to nobody, under the login purpose.
+    expect(retoCreate).toHaveBeenCalledTimes(1);
+    expect(retoCreate.mock.calls[0][0]).toMatchObject({
+      proposito: "login",
+      id_usuario: null,
+      id_sesion: null,
+    });
+  });
+
+  it("refuses a cookie-less request that names no origin, before it can spend the bucket", async () => {
+    // The cross-site `fetch` with a safelisted content type: no preflight, no
+    // cookie, no `Origin` of ours. Under the global gate alone this would be
+    // a 200 and a row — and, a hundred times over from a page any employee
+    // visits, the building's whole quarter-hour.
+    const res = await request(app)
+      .post("/api/auth/webauthn/passwordless/options")
+      .set("X-Forwarded-For", DESDE)
+      .set("Content-Type", "text/plain")
+      .send("{}");
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ message: PETICION_NO_VERIFICABLE });
+    expect(retoCreate).not.toHaveBeenCalled();
+    expect(await passwordlessOptionsLimiter.getKey(`pl:${DESDE}`)).toBeUndefined();
+  });
+
+  it("refuses a cookie-less request from our origin that lacks the client header", async () => {
+    const res = await request(app)
+      .post("/api/auth/webauthn/passwordless/options")
+      .set("X-Forwarded-For", DESDE)
+      .set("Origin", ORIGIN_NUESTRO)
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(retoCreate).not.toHaveBeenCalled();
+  });
+
+  it("answers a refused assertion with the uniform sentence and never a 401, cookie or no cookie", async () => {
+    for (const cookie of [undefined, COOKIE]) {
+      const peticion = request(app)
+        .post("/api/auth/webauthn/passwordless/verify")
+        .set("X-Forwarded-For", DESDE)
+        .set(DEL_FRONTEND);
+      const res = await (cookie ? peticion.set("Cookie", cookie) : peticion).send({ respuesta: {} });
+
+      expect(res.status, cookie ?? "sin cookie").toBe(400);
+      expect(res.body, cookie ?? "sin cookie").toEqual({ message: MENSAJE_LOGIN_LLAVE });
+    }
+  });
+
+  it("revokes nothing on a refused assertion that arrived with somebody's live cookie", async () => {
+    // A shared PC: a colleague's session in the browser, a passkey that does
+    // not verify. `rotateOut` would close that session; it must not run.
+    const res = await request(app)
+      .post("/api/auth/webauthn/passwordless/verify")
+      .set("X-Forwarded-For", DESDE)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ respuesta: { id: "credencial-que-no-existe" } });
+
+    expect(res.status).toBe(400);
+    expect(sesionUpdate).not.toHaveBeenCalled();
+    expect(sesionCreate).not.toHaveBeenCalled();
+  });
+});

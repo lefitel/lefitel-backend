@@ -128,6 +128,85 @@ export const PASSWORD_CONFIRM_LIMIT = 5;
 export const WEBAUTHN_CEREMONY_LIMIT = 30;
 
 /**
+ * How many times one address may ask for passwordless login options per
+ * `LOGIN_WINDOW_MS` — `POST /api/auth/webauthn/passwordless/options`, plan
+ * 4C phase 2, Task 14.
+ *
+ * **Keyed by address, and that is a known cost rather than a choice.** The
+ * bucket above is keyed by session because "the whole office is one NAT";
+ * here there is no session and no account — nobody is named until a
+ * signature verifies — so the address is all there is, and this number is a
+ * budget for the *building*, not for a person. Every request counts,
+ * successes included, because a success is the write this bounds: one
+ * `reto_webauthn` row per call, two minutes long.
+ *
+ * **The number, defended.** Twenty people behind one address, morning rush,
+ * one quarter-hour window. A login is one `options`; a cancelled system
+ * dialog (the person closes it, or Safari's activation window lapses) is a
+ * second; a two-minute challenge that expires while somebody finds their
+ * phone is a third. At three per person that is sixty — and a hundred, the
+ * first draft, left the whole building forty requests of headroom shared
+ * with anybody retrying in a loop. Three hundred is five per person per
+ * quarter hour with room for a bad morning, and what it protects — a table
+ * of tiny rows the ceremony itself purges — costs nothing at that rate.
+ *
+ * What it cannot do: tell a guest on the office wifi from staff. A hostile
+ * insider on the LAN can empty this bucket with a loop, the same way they
+ * can empty `LOGIN_IP_LIMIT` with a loop of wrong passwords, and that is
+ * out of scope for a rate limit. What keeps a *visitor's browser* from
+ * spending it on the office's behalf is `requireVerifiedOrigin` on the
+ * route, not this number.
+ */
+export const WEBAUTHN_PASSWORDLESS_OPTIONS_LIMIT = 300;
+
+/**
+ * How many *refused* passwordless assertions one address may send per
+ * `LOGIN_WINDOW_MS` — `POST /api/auth/webauthn/passwordless/verify`.
+ *
+ * Refused ones only: a login that works is not a failed attempt and is
+ * refunded, the same rule as `LOGIN_IP_LIMIT`. What a refusal costs the
+ * server is one signature verification at most, and what it can write is one
+ * bitácora line against the account the credential names — the per-account
+ * ceiling on *those* lives in `WEBAUTHN_FAILED_ASSERTION_LINES_PER_ACCOUNT`,
+ * because an address bucket cannot see a flood spread across addresses.
+ *
+ * Fifty rather than thirty, for a failure that is not an attack: a wrong
+ * `WEBAUTHN_RP_ID` or `WEBAUTHN_ORIGIN` after a deploy makes *every*
+ * assertion fail with a 400, not a 5xx, so nothing is refunded and twenty
+ * people trying twice each would have shut the door for the rest of the
+ * quarter hour with "Demasiados intentos" — the wrong diagnosis, sending
+ * everybody to support for the wrong reason. Fifty is still a ceiling
+ * nobody reaches by using the product: a legitimate assertion fails
+ * essentially never, since a cancelled dialog never reaches the server.
+ */
+export const WEBAUTHN_PASSWORDLESS_VERIFY_LIMIT = 50;
+
+/**
+ * How many `WEBAUTHN_ASSERTION_FAILED` lines the passwordless door may write
+ * against **one account** per `LOGIN_WINDOW_MS` before it stops writing them
+ * one by one — see `auth/failedAssertionBudget.ts`.
+ *
+ * 🔴 **The address buckets cannot bound this, by construction.** A refused
+ * anonymous assertion that names a real credential writes a line against
+ * that credential's owner — the other half of decision D7, same as in phase
+ * 1. In phase 1 the caller needed a stolen cookie to reach that line; in
+ * phase 2 they need a `credential_id`, which sits in plain text in every
+ * ceremony the victim's own browser ever ran. From one address that is
+ * `WEBAUTHN_PASSWORDLESS_VERIFY_LIMIT` lines a quarter hour; from an IPv6
+ * /48 it is thousands an hour, all filed as `warning` under the victim's
+ * name, in a table nothing prunes — enough to bury the one real line among
+ * them. This is the budget that follows the *account* instead of the
+ * address, and it bounds the writing, never the refusing: past it the door
+ * keeps saying no, and writes one line saying how many it stopped counting.
+ * Bounding the refusal instead would hand the attacker a way to shut the
+ * victim's passkey login with a loop.
+ *
+ * Ten: a person cannot produce that many refused assertions by hand in a
+ * quarter hour, and ten lines already say everything the eleventh would.
+ */
+export const WEBAUTHN_FAILED_ASSERTION_LINES_PER_ACCOUNT = 10;
+
+/**
  * How long a proved factor keeps opening the sensitive operations.
  *
  * Ten minutes is long enough to create three users in a row without

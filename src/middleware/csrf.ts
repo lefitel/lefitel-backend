@@ -72,7 +72,11 @@
 // no preflight, because `express.json()` leaves `req.body` empty and
 // `verifyCredentials` answers 400 to a missing user. That is a real obstacle
 // today and an accidental one, and it disappears the day somebody mounts
-// `express.urlencoded()` for an unrelated reason.
+// `express.urlencoded()` for an unrelated reason. The passwordless login does
+// not rest on either: it carries `requireVerifiedOrigin` below, which applies
+// both barriers with no cookie in sight — see its comment for the two things
+// a cross-site page could otherwise do with a door that sets a cookie and
+// asks for nothing.
 //
 // Covering the login by the ordinary rule means a *second* login — one made
 // with a cookie already in hand — can be refused by it too, and a refusal
@@ -121,37 +125,101 @@ export function requireSameOrigin(allowed: readonly string[]): RequestHandler {
   const sameOriginGate = (req: Request, res: Response, next: NextFunction): void => {
     if (!UNSAFE_METHODS.has(req.method)) return next();
     if (!readSessionCookie(req)) return next();
-
-    const origin = req.headers.origin;
-    if (typeof origin !== "string" || !permitted.has(origin)) {
-      // Absent counts as refused, and that is the difference between a check and
-      // a suggestion: if a missing header meant "allowed", stripping it would be
-      // the bypass. Nothing legitimate is lost today — the one client that
-      // authenticates by cookie is a browser talking to a different host from the
-      // one that served it the page, and every such cross-origin request, made in
-      // CORS mode, names its origin.
-      //
-      // That is not quite "a browser always names its origin on a request that
-      // carries a body", which is what this comment used to claim. Per the Fetch
-      // standard, a *same-origin* non-GET request can still send `Origin: null`
-      // when the page's `Referrer-Policy` is `no-referrer` or `same-origin`. Not
-      // reachable here — the frontend is a different origin from the API and sets
-      // no referrer policy of its own — but if `/api` were ever proxied onto the
-      // frontend's own origin, such a policy would 403 every write with no
-      // attacker involved. Worth knowing as a trap, not as a hole: it fails
-      // closed, which is a bad afternoon and not a session handed over.
-      return refuse(req, res, "origen", origin);
-    }
-
-    const client = req.headers[CSRF_CLIENT_HEADER];
-    if (typeof client !== "string" || client.trim() === "") {
-      return refuse(req, res, "cabecera", origin);
-    }
-
-    return next();
+    return comprobarProcedencia(req, res, next, permitted);
   };
 
   return sameOriginGate;
+}
+
+/**
+ * The same two barriers, applied whether or not a cookie is present.
+ *
+ * For the two routes that hand out a session cookie to a caller holding
+ * nothing yet: `POST /api/auth/webauthn/passwordless/options` and `/verify`,
+ * plan 4C's phase 2. The ordinary gate above waves a cookie-less write
+ * through on the argument that `authenticate` refuses it a moment later — and
+ * these two routes carry no `authenticate`, by construction, because they are
+ * how somebody with no credential gets one. So on them the waiver is not
+ * "nothing of the victim's to abuse"; it is *no check at all* on the first
+ * endpoint in the API whose response is a `Set-Cookie`.
+ *
+ * Two things a page on somebody else's site could do with that, neither of
+ * which needs the victim to be logged in — which is precisely the state of
+ * somebody about to log in:
+ *
+ * - **Login CSRF.** The attacker captures the JSON of their *own* passkey
+ *   assertion (their browser, their key, two minutes to use it) and has the
+ *   victim's browser POST it here. The victim is now inside the ERP as the
+ *   attacker, and whatever they type next lands in the attacker's account.
+ *   What stops it today is that `express.json()` ignores the form-encoded body
+ *   a cross-site `<form>` can send, so the assertion never parses — the same
+ *   accidental obstacle the header of this file already calls out, and it
+ *   disappears the day somebody mounts `express.urlencoded()`.
+ * - **Burning the building's budget.** `options` reads nothing from the
+ *   request and writes one row per call, bounded by a bucket keyed on the
+ *   caller's *address*. A hidden cross-site `fetch` with a safelisted content
+ *   type needs no preflight, so a page any employee visits can spend the
+ *   office's whole quarter-hour on their behalf — one NAT, one key — and
+ *   nobody in the building can log in with a key until it rolls over.
+ *
+ * Both close the same way: the `Origin` must be one of ours, and the
+ * client header must be present. A cross-site form post carries the
+ * attacker's `Origin`; a cross-site `fetch` cannot set the header without a
+ * preflight, and the preflight is granted only to the same list. What is
+ * refused legitimately: nothing — the frontend sends both on every request,
+ * and a `curl` without them has no authenticator to answer the ceremony with.
+ *
+ * A separate function rather than an option on the one above, so that the
+ * global gate's rule — decide from the method and the credential, no
+ * exceptions — stays exactly as written, and this one is mounted by name on
+ * the two routes that need it. `routeGuards.test.ts` reads the name off the
+ * chain and pins that those two routes carry it and no other route does.
+ */
+export function requireVerifiedOrigin(allowed: readonly string[]): RequestHandler {
+  const permitted = new Set(allowed);
+
+  const verifiedOriginGate = (req: Request, res: Response, next: NextFunction): void => {
+    if (!UNSAFE_METHODS.has(req.method)) return next();
+    return comprobarProcedencia(req, res, next, permitted);
+  };
+
+  return verifiedOriginGate;
+}
+
+/** Barrier 1 then barrier 2 — see the header. One body for both gates. */
+function comprobarProcedencia(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  permitted: ReadonlySet<string>,
+): void {
+  const origin = req.headers.origin;
+  if (typeof origin !== "string" || !permitted.has(origin)) {
+    // Absent counts as refused, and that is the difference between a check and
+    // a suggestion: if a missing header meant "allowed", stripping it would be
+    // the bypass. Nothing legitimate is lost today — the one client that
+    // authenticates by cookie is a browser talking to a different host from the
+    // one that served it the page, and every such cross-origin request, made in
+    // CORS mode, names its origin.
+    //
+    // That is not quite "a browser always names its origin on a request that
+    // carries a body", which is what this comment used to claim. Per the Fetch
+    // standard, a *same-origin* non-GET request can still send `Origin: null`
+    // when the page's `Referrer-Policy` is `no-referrer` or `same-origin`. Not
+    // reachable here — the frontend is a different origin from the API and sets
+    // no referrer policy of its own — but if `/api` were ever proxied onto the
+    // frontend's own origin, such a policy would 403 every write with no
+    // attacker involved. Worth knowing as a trap, not as a hole: it fails
+    // closed, which is a bad afternoon and not a session handed over.
+    return refuse(req, res, "origen", origin);
+  }
+
+  const client = req.headers[CSRF_CLIENT_HEADER];
+  if (typeof client !== "string" || client.trim() === "") {
+    return refuse(req, res, "cabecera", origin);
+  }
+
+  return next();
 }
 
 /**
@@ -219,7 +287,7 @@ function refuse(
   const to = (req as Request & { log?: typeof csrfLog }).log ?? csrfLog;
   to.warn(
     { motivo, origin: origin ?? null, metodo: req.method, ruta: req.originalUrl },
-    "escritura con cookie rechazada: no se pudo verificar el origen",
+    "escritura rechazada: no se pudo verificar el origen",
   );
   if (motivo === "cabecera") {
     clearSessionCookie(res);

@@ -7,7 +7,13 @@
 // wrong region. A pure function is tested by calling it.
 
 import { describe, it, expect } from "vitest";
-import { puedeAlcanzar, puedeVerArchivosEstaticos, estadoEfectivo, ESTADOS_SESION } from "./sessionState.js";
+import {
+  puedeAlcanzar,
+  puedeVerArchivosEstaticos,
+  estadoEfectivo,
+  esPruebaDeFactor,
+  ESTADOS_SESION,
+} from "./sessionState.js";
 import type { EstadoSesion } from "./sessionState.js";
 
 describe("what each session state opens", () => {
@@ -383,5 +389,28 @@ describe("the state actually in force, once a session has been open a while", ()
     expect(estrechoAlgunaVez).toBe(true);
     expect(puedeAlcanzar("completa", "/api/usuario")).toBe(true);
     expect(puedeAlcanzar("onboarding", "/api/usuario")).toBe(false);
+  });
+});
+
+/**
+ * One rule, two readers: `estadoEfectivo`'s clause 3 and `createSession`'s
+ * `mfa_satisfied_at` both ask this. The mutation that matters is
+ * `fuente !== "dispositivo"` → `fuente != null`, which would seal a session
+ * born from a remembered device — the hole migration `20260826000002` names.
+ */
+describe("esPruebaDeFactor — which sources are evidence a factor was shown", () => {
+  it("counts every source that names something somebody showed", () => {
+    for (const fuente of ["passkey", "totp", "codigo"]) {
+      expect(esPruebaDeFactor(fuente), fuente).toBe(true);
+    }
+  });
+
+  it("does not count a remembered device: nobody proved anything at that moment", () => {
+    expect(esPruebaDeFactor("dispositivo")).toBe(false);
+  });
+
+  it("does not count no source at all", () => {
+    expect(esPruebaDeFactor(null)).toBe(false);
+    expect(esPruebaDeFactor(undefined)).toBe(false);
   });
 });

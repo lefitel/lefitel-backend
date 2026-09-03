@@ -31,8 +31,7 @@ import type { Request, Response } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { permissionsFor } from "../permissions/store.js";
 import { logLogin, verifyCredentials } from "../auth/credentials.js";
-import { issueSession } from "../auth/issueSession.js";
-import { estadoInicialDeSesion } from "../auth/factorInventory.js";
+import { terminarLogin, cuerpoDeLogin, SESION_NO_DISPONIBLE } from "../auth/finishLogin.js";
 import { purgeExpiredTokens } from "../auth/tokenStore.js";
 import { clearSessionCookie } from "../auth/sessionCookie.js";
 import {
@@ -56,34 +55,8 @@ import { makeHandler } from "../utils/handler.js";
 const authLog = log("auth");
 const handler = makeHandler(authLog);
 
-/**
- * What somebody is told when their password was right and the server still
- * could not let them in.
- *
- * Deliberately not beside `CREDENCIALES_INVALIDAS` and
- * `CREDENCIALES_INCOMPLETAS` in `config/security.ts`, and the line is worth
- * drawing: those two are a pair about the *credential*, kept together precisely
- * so nobody rewords one without seeing the other and leaks which usernames
- * exist. This says nothing about the account — it is about this server, right
- * now — so it belongs to the endpoint.
- *
- * "In a few minutes" is the whole point of the wording: the two ways to get
- * here are an exhausted connection pool and a locked `sesiones` table, and both
- * pass. Retyping the password will not help and the person needs to be told
- * that rather than left to conclude they have forgotten it.
- *
- * It arrived on the old `POST /api/login` first and moved here when the two
- * doors were merged, because the alternative was losing it: `handler()` below
- * turns every rejection into a 500, and a 500 tells the person nothing they can
- * act on.
- */
-const SESION_NO_DISPONIBLE =
-  "No se pudo iniciar la sesión en este momento. Inténtelo de nuevo en unos minutos.";
 /** Twin of the message in `authenticate.ts`; both mean the row is gone. */
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
-/** Named because the body below is now built in two shapes and the sentence is
- *  the same in both; two hand-typed copies of one string is how they drift. */
-const LOGIN_OK = "Login exitoso";
 /** One answer for "not yours", "never existed" and "already closed". */
 const SESION_NO_ENCONTRADA = "Esa sesión no existe o ya se cerró.";
 
@@ -179,90 +152,36 @@ export const login = handler("login", async (req: Request, res: Response) => {
     : false;
 
   /**
-   * Which of the three states this session opens in, decided before it is
-   * opened. `graceUntil` comes back non-null only when this is the first
-   * login this account has ever made past the MFA migration, and it means
-   * "stamp this deadline on them" — see the write below the try/catch.
-   *
-   * Outside the try, and that is on purpose: what the 503 below means is "the
-   * session could not be opened", and widening it to cover this would make
-   * the status say something it does not mean. A database failure here
-   * behaves exactly like a database failure in `verifyCredentials` one line
-   * above — it propagates, and `handler()` answers 500 — which is the
-   * behaviour a login has had all along when the database is unreachable.
+   * Everything from here to the response is `terminarLogin`, shared with the
+   * passwordless door (`auth/finishLogin.ts`): the state, decided by
+   * `estadoInicialDeSesion` and by nothing else; the session, or a 503 with a
+   * sentence when it cannot be opened; the grace clock, started strictly
+   * after the session; and the body, with the permission matrix only for a
+   * session that opens `completa`. Each of those rules has its argument
+   * written there, once, because each was a finding once and none of them is
+   * visible on a login that works.
    *
    * `mfa_grace_until` rides beside `check.usuario` rather than inside it
    * because `UsuarioAutenticado` is published verbatim in the response body;
    * see `ResultadoCredenciales` in `auth/credentials.ts`.
    *
-   * `dispositivoRecordadoValido` is the only new input from Task 12, and
-   * `estadoInicialDeSesion` stays the one place that turns it into an
-   * `estado` — see that function's own comment for why this handler must not
-   * also decide `completa` on its own account once the answer comes back.
+   * The source is the only input Task 12 added: `"dispositivo"` when this
+   * request walked in on a live remembered-device cookie, `undefined`
+   * otherwise. It is the trail on the row (`mfa_source`) and the input to the
+   * state — one value, both consumers — and it does **not** widen what the
+   * session may reach: since plan 4B, `estadoEfectivo` treats `"dispositivo"`
+   * and NULL identically, because a remembered device is the one source
+   * written without anybody proving anything at that moment.
    */
-  const ahora = new Date();
-  const { estado, graceUntil } = await estadoInicialDeSesion(
-    { id: check.usuario.id, mfa_grace_until: check.mfa_grace_until },
-    ahora,
-    dispositivoRecordadoValido,
+  const resultado = await terminarLogin(
+    req,
+    res,
+    { usuario: check.usuario, mfa_grace_until: check.mfa_grace_until },
+    dispositivoRecordadoValido ? "dispositivo" : undefined,
   );
-
-  /**
-   * A session this endpoint cannot open is a login it cannot grant. There is
-   * no credential other than the cookie, so a 200 without one tells the
-   * browser "Bienvenido", navigates the person into the ERP, gets 401 on the
-   * first request for data, and puts them back on the login form with nothing
-   * on screen to explain it — identically on every retry, because what is
-   * broken is the database and not anything they typed.
-   *
-   * **Caught here rather than left to `handler()`, and that is the whole point
-   * of the try/catch below.** The wrapper would turn the rejection into a 500 and
-   * `ERROR_INESPERADO`, which says "something is wrong with the software" when
-   * the truth is "a dependency is down, come back shortly". 503 is what this
-   * is, and the sentence reaches the screen: `web`'s `Login.api.ts` reads
-   * `data.message` off any non-2xx answer and hands it to the form. This is
-   * the half the retired `POST /api/login` handler got right, kept on the way
-   * through rather than dropped — losing it would have made the merge a
-   * regression for the one failure a person can actually do something about.
-   *
-   * **What this cannot do is lock anybody out.** The per-account lockout
-   * counter only moves inside `verifyCredentials` on a wrong password, so a
-   * database outage never touches it. Neither do the rate-limit buckets:
-   * `costsNothing` in `loginLimiters.ts` refunds the whole 5xx range, so an
-   * outage during the morning rush does not spend a budget that behind the
-   * office's NAT is one key for the entire building. Its comment has the
-   * reasoning, including why that cannot be turned into a free guess.
-   */
-  try {
-    // The state is decided above and passed explicitly, rather than left to a
-    // default inside `issueSession`: which doors a session opens is the login's
-    // decision to make and the storage layer's to record, and a default there
-    // would be the kind that stays correct until the day somebody adds a
-    // second caller.
-    //
-    // The source, when the cookie is what carried this login past the second
-    // factor. Without it the row says NULL and there is no way to tell, after
-    // the fact, that somebody got in on a remembered device rather than by
-    // showing something — the whole column would be written by exactly one
-    // caller and never by this one, which is the shape of a column that
-    // quietly means less than the schema claims.
-    //
-    // It does **not** change what the session may reach: since plan 4B,
-    // `estadoEfectivo` treats `"dispositivo"` and NULL identically, because a
-    // remembered device is the one source written without anybody proving
-    // anything at that moment. This is the trail, not the rule.
-    await issueSession(
-      req,
-      res,
-      check.usuario.id,
-      estado,
-      dispositivoRecordadoValido ? "dispositivo" : undefined,
-    );
-  } catch (err) {
-    authLog.error(
-      { err, id_usuario: check.usuario.id },
-      "no se pudo abrir la sesión de cookie: se rechaza el login, porque la cookie es la única credencial",
-    );
+  if (!resultado.ok) {
+    // The only refusal the password door can get from there: the session
+    // could not be opened. `factor-desaparecido` is the passkey door's alone.
     return res.status(503).json({ message: SESION_NO_DISPONIBLE });
   }
 
@@ -306,100 +225,10 @@ export const login = handler("login", async (req: Request, res: Response) => {
     }
   }
 
-  /**
-   * The grace clock starts here, after the session and never before it.
-   *
-   * Written first, this would start somebody's fourteen days on a request
-   * that ended in the 503 above — a deadline running from a login they never
-   * got, and days they had no way to spend, since there is no screen to
-   * configure anything on without a session.
-   *
-   * **What happens when this write fails, decided rather than defaulted.** It
-   * is caught, written to the log, and the login still answers 200. Three
-   * things settle that:
-   *
-   * - **Failing the login would be a lie and a worse outcome.** By this point
-   *   `issueSession` has already set the cookie and the session row exists.
-   *   Answering 503 now would send somebody back to the login form holding a
-   *   perfectly good session, and they would log in again — into the same
-   *   failing UPDATE.
-   * - **It is not lost, and this is the part worth knowing.** The column stays
-   *   null, so the *next* login runs `estadoInicialDeSesion` against a null
-   *   deadline, takes the same branch and tries the same write again. The
-   *   retry is the next login, and it costs nothing to wait for it. What a
-   *   failure actually costs is that this account's fourteen days start from
-   *   a later login than they should have — generous, never premature, and
-   *   never a lockout.
-   * - **A failure that keeps repeating is not survivable in silence**, because
-   *   the thing that stops working is the ERP's ability to ever close on
-   *   anybody: `mfa_grace_until` null for ever is `completa` for ever. So it
-   *   is logged at `error` with the sentence spelling that out, rather than
-   *   at `warn` where it would read as noise. That matches how this handler
-   *   already treats the other write it must not fail on — `purgeExpiredTokens`
-   *   below is fire-and-forget with a logged error, for the same reason.
-   *
-   * Awaited rather than fire-and-forget, which is where it differs from that
-   * purge: this one runs at most once in an account's lifetime, so it is not
-   * latency charged to every login, and the ordering it guarantees is what
-   * `login.session.test.ts` asserts when it pins the write as happening after
-   * the session and not before.
-   */
-  if (graceUntil !== null) {
-    try {
-      await UsuarioModel.update(
-        { mfa_grace_until: graceUntil },
-        { where: { id: check.usuario.id } },
-      );
-    } catch (err) {
-      authLog.error(
-        { err, id_usuario: check.usuario.id, graceUntil },
-        "no se pudo iniciar el plazo de gracia de MFA: la sesión sigue abierta y el próximo login lo reintenta, pero mientras la columna siga vacía el ERP no se cerrará nunca para esta cuenta",
-      );
-    }
-  }
-
-  /**
-   * **The permission matrix, only for a session that opens `completa`.** The
-   * same rule `GET /api/auth/me` applies below, on the door rather than the
-   * window — and the door matters more: reaching `/me` means already holding
-   * the cookie, while this answers whoever typed a correct password.
-   *
-   * From plan 4B, an account with a factor opens `parcial` here: the password
-   * was accepted, the second factor has not been proved, and `authenticate`
-   * will refuse that session everything outside `PARCIAL`, the narrowest
-   * allowlist in `auth/sessionState.ts`. Handing it the account's whole map of
-   * authority in the login body would give away, at the door, exactly what the
-   * endpoint one route away was just taught to withhold — and to the one
-   * caller the rule names.
-   *
-   * **This goes past the letter of the specification and not past its
-   * argument.** The sentence "en estado no `completa`, devuelve estado sin
-   * permisos" sits in the `/auth/me` row of §5's table. What makes publishing
-   * the matrix wrong there is the state of the session, which is the same
-   * state here; the address that publishes it is not what the reasoning turns
-   * on. Left to 4B as a note, the hole would be open from its first day and
-   * would depend on somebody reading the note.
-   *
-   * **Absent, not empty**, for the reason spelled out at `me` below, and the
-   * client already reads it that way: `permisos` is optional in `web/src`'s
-   * own session interface, and nothing in the login screen touches it.
-   *
-   * Nothing changes for anybody today. Every login that is not past its
-   * deadline opens `completa` — nobody has a factor to open `parcial` with —
-   * so this is the same body it has always been, and `login.session.test.ts`
-   * pins that shape unchanged.
-   */
-  const cuerpo =
-    estado === "completa"
-      ? {
-          usuario: check.usuario,
-          permisos: await permissionsFor(check.usuario.id_rol),
-          message: LOGIN_OK,
-        }
-      : { usuario: check.usuario, message: LOGIN_OK };
+  const cuerpo = await cuerpoDeLogin(check.usuario, resultado.estado);
   // Last, not first. Written before the session existed, this line would claim
   // somebody logged in on a request that answered 500.
-  logLogin(check.usuario, req.ip ?? null);
+  logLogin(check.usuario, req.ip ?? null, { metodo: "contraseña", id_sesion: resultado.id_sesion });
   /**
    * The opportunistic cleanup `token_uso_unico` relies on instead of a cron
    * job — see `tokenStore.ts`. A login happens constantly and for free,

@@ -41,7 +41,8 @@ import {
   escribirCodigos,
 } from "../auth/recoveryCodeStore.js";
 import { sequelize } from "../database/sequelize.js";
-import { webauthnRpId, webauthnOrigins, WEBAUTHN_RP_NAME } from "../config/security.js";
+import { WEBAUTHN_RP_NAME } from "../config/security.js";
+import { configuracionWebauthn } from "../auth/webauthnConfig.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -54,14 +55,6 @@ const MENSAJE_NO_VERIFICADA =
   "No se pudo verificar esta llave. Vuelve a intentarlo desde el principio.";
 const MENSAJE_YA_REGISTRADA = "No se pudo registrar esta llave. Prueba con otra.";
 const NOMBRE_MAX = 100;
-
-/** Resolved once per request rather than at module load, so a test can set the environment. */
-function configuracion() {
-  return {
-    rpID: webauthnRpId(process.env.WEBAUTHN_RP_ID, process.env.NODE_ENV),
-    origenes: [...webauthnOrigins(process.env.WEBAUTHN_ORIGIN, process.env.NODE_ENV)],
-  };
-}
 
 /**
  * Hand the browser what it needs to create a passkey, and write down the
@@ -109,7 +102,7 @@ export const registerOptions = handler("registerOptions", async (req: Request, r
     attributes: ["credential_id", "transports"],
   });
 
-  const { rpID } = configuracion();
+  const { rpID } = configuracionWebauthn();
   const opciones = await generateRegistrationOptions({
     rpName: WEBAUTHN_RP_NAME,
     rpID,
@@ -191,7 +184,7 @@ export const registerVerify = handler("registerVerify", async (req: Request, res
     return res.status(400).json({ message: MENSAJE_NOMBRE_REQUERIDO });
   }
 
-  const { rpID, origenes } = configuracion();
+  const { rpID, origenes } = configuracionWebauthn();
 
   // Captured out of the `expectedChallenge` callback below, which is the only
   // place the redeemed row is visible.
@@ -389,6 +382,13 @@ const MENSAJE_SIN_PASSKEYS = "Esta cuenta no tiene ninguna llave registrada.";
 const MENSAJE_NO_RECONOCIDA = "No se pudo comprobar esa llave. Inténtalo otra vez.";
 
 /**
+ * The verb, exported for the passwordless door (`webauthnPasswordless.controller.ts`),
+ * which writes the same line for a refused anonymous assertion: one name for
+ * one event, whichever door refused it, so a count by `action` sees both.
+ */
+export const WEBAUTHN_ASSERTION_FAILED = "WEBAUTHN_ASSERTION_FAILED";
+
+/**
  * The line every refused assertion leaves behind — **and the other half of the
  * decision not to charge the account lockout.**
  *
@@ -423,7 +423,7 @@ async function registrarAsercionFallida(
 ): Promise<void> {
   await logAction({
     id_usuario: caller.id,
-    action: "WEBAUTHN_ASSERTION_FAILED",
+    action: WEBAUTHN_ASSERTION_FAILED,
     entity: "credencial_webauthn",
     entity_id: id_credencial,
     detail: `Intento de probar una passkey rechazado: ${motivo}`,
@@ -465,7 +465,7 @@ export const loginOptions = handler("loginOptions", async (req: Request, res: Re
     return res.status(400).json({ message: MENSAJE_SIN_PASSKEYS });
   }
 
-  const { rpID } = configuracion();
+  const { rpID } = configuracionWebauthn();
   const opciones = await generateAuthenticationOptions({
     rpID,
     allowCredentials: credenciales.map((c) => ({
@@ -569,7 +569,7 @@ export const loginVerify = handler("loginVerify", async (req: Request, res: Resp
     return res.status(400).json({ message: MENSAJE_NO_RECONOCIDA });
   }
 
-  const { rpID, origenes } = configuracion();
+  const { rpID, origenes } = configuracionWebauthn();
   const guardado = credencial.counter;
 
   let verificacion: VerifiedAuthenticationResponse;
@@ -782,9 +782,10 @@ export const listCredentials = handler("listCredentials", async (req: Request, r
  * around either — which is the opposite of the instinct and is what makes it
  * correct.** With N passkeys the question is not "did I have a factor" but "is
  * there one left", so it can only be asked afterwards. And it must be asked of
- * *committed* state: `tieneAlgunFactor` takes no transaction, so wrapping the
- * delete in one would have it count the row this request is in the middle of
- * removing, find it, and never revoke anything. Two tabs deleting two
+ * *committed* state: `tieneAlgunFactor` is called here without a transaction,
+ * on purpose — wrapping the delete in one and passing it along would have it
+ * count the row this request is in the middle of removing, find it, and never
+ * revoke anything. Two tabs deleting two
  * different keys at once cannot both miss, either, precisely because each
  * counts only after its own delete has committed — the later count sees an
  * empty table.

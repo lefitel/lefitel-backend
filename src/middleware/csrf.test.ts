@@ -24,7 +24,7 @@ import cookieParser from "cookie-parser";
 import jwt from "jsonwebtoken";
 import request from "supertest";
 
-import { requireSameOrigin } from "./csrf.js";
+import { requireSameOrigin, requireVerifiedOrigin } from "./csrf.js";
 import { SESSION_COOKIE_NAME } from "../auth/sessionCookie.js";
 import {
   allowedOrigins,
@@ -486,6 +486,89 @@ describe("mounted on the assembled app", () => {
       .set("Origin", "https://staging.osefi.net")
       .set(CSRF_CLIENT_HEADER, CLIENTE);
 
+    expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * The gate the passwordless door carries — plan 4C phase 2 — and what
+ * separates it from the one above: **no cookie waiver.** `requireSameOrigin`
+ * waves a cookie-less write through because `authenticate` refuses it next;
+ * the two routes behind this one have no `authenticate` and answer with a
+ * `Set-Cookie`, so a cookie-less write there is the whole attack surface.
+ */
+function guardedAlways(allowed: string[] = [NUESTRO]) {
+  const probe = express();
+  probe.use(express.json());
+  probe.use(cookieParser());
+  probe.use(requireVerifiedOrigin(allowed));
+  probe.all("/x", (_req, res) => {
+    res.status(200).json({ llego: true });
+  });
+  return probe;
+}
+
+describe("the gate the passwordless door carries: no cookie, still checked", () => {
+  it("lets a cookie-less write through when it names our origin and carries our header", async () => {
+    const res = await request(guardedAlways())
+      .post("/x")
+      .set("Origin", NUESTRO)
+      .set(CSRF_CLIENT_HEADER, CLIENTE)
+      .send({});
+    expect(res.status).toBe(200);
+  });
+
+  // 🔴 The line that separates the two gates. Under `requireSameOrigin` this
+  // exact request is a 200 — and on the passwordless route it would be a
+  // cross-site page burning the office's budget, or logging the victim in as
+  // the attacker.
+  it("refuses a cookie-less write that names no origin at all", async () => {
+    const res = await request(guardedAlways()).post("/x").set(CSRF_CLIENT_HEADER, CLIENTE).send({});
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ message: PETICION_NO_VERIFICABLE });
+  });
+
+  it("refuses a cookie-less write from any origin that is not ours", async () => {
+    for (const origen of AJENOS) {
+      const res = await request(guardedAlways())
+        .post("/x")
+        .set("Origin", origen)
+        .set(CSRF_CLIENT_HEADER, CLIENTE)
+        .send({});
+      expect(res.status, origen).toBe(403);
+    }
+  });
+
+  it("refuses a cookie-less write from our origin that lacks our header", async () => {
+    // The form-post shape: an HTML form can name our origin, and cannot set a
+    // header of ours. Barrier 2, with no cookie to key on.
+    const res = await request(guardedAlways()).post("/x").set("Origin", NUESTRO).send({});
+    expect(res.status).toBe(403);
+  });
+
+  it("still checks a write that does carry a cookie, the same way", async () => {
+    const res = await request(guardedAlways())
+      .post("/x")
+      .set("Cookie", COOKIE)
+      .set("Origin", "https://evil.example")
+      .set(CSRF_CLIENT_HEADER, CLIENTE)
+      .send({});
+    expect(res.status).toBe(403);
+  });
+
+  it("leaves a read alone, whatever it carries", async () => {
+    for (const verbo of LECTURAS) {
+      const res = await request(guardedAlways())[verbo]("/x");
+      expect(res.status, verbo).toBe(200);
+    }
+  });
+
+  it("is the same equality the global gate uses: exact, never a suffix", async () => {
+    const res = await request(guardedAlways([NUESTRO]))
+      .post("/x")
+      .set("Origin", "https://evil-osefi.net")
+      .set(CSRF_CLIENT_HEADER, CLIENTE)
+      .send({});
     expect(res.status).toBe(403);
   });
 });

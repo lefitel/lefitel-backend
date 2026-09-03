@@ -8,28 +8,33 @@
 // a 401 on the very next request; and forgetting the first one is what left the
 // sessions screen unreadable (see `rotateOut` below).
 //
-// One caller, on two addresses: `auth.controller.ts`'s `login`, which both
-// `POST /api/auth/login` and the old `POST /api/login` are mounted on. It used
-// to have a second caller — the old door's own handler, where this rode along
-// beside a signed JWT so that everybody logging in through the frontend of the
-// day was migrated onto a session without noticing. That migration is done and
-// that handler is gone; the cookie this opens is now the only credential either
-// address hands out.
+// Two callers, three addresses. `auth/finishLogin.ts`'s `terminarLogin`, which
+// both the password login (`POST /api/auth/login` and the old `POST /api/login`,
+// one handler) and the passwordless login (`POST /api/auth/webauthn/passwordless/verify`)
+// go through; and `usuario.controller.ts`'s `changePassword`, which rotates the
+// caller's own session after a password change. This used to say "one caller"
+// — the old door's JWT handler was the second and is gone — and it stopped
+// being true the day the password change started rotating; the cookie this
+// opens is the only credential any of them hands out.
 
 import type { Request, Response } from "express";
+import type { Transaction } from "sequelize";
 import { createSession, findLiveSession, revokeSessionOf } from "./sessionStore.js";
 import { readSessionCookie, setSessionCookie } from "./sessionCookie.js";
 import { SESSION_EXPIRES_HEADER } from "../config/security.js";
-import type { EstadoSesion } from "./sessionState.js";
-import type { FuenteMfa } from "./sessionState.js";
+import type { EstadoSesion, FuenteEnElLogin } from "./sessionState.js";
 
 /**
  * Open a session for this person and put it in the response as a cookie.
  *
- * Returns nothing, deliberately. The token exists for exactly as long as this
- * function runs and then only the browser has it — a return value would be an
- * invitation to put it in a response body, which is the one thing the cookie
- * was introduced to stop.
+ * Returns the row's id and nothing else, deliberately. The token exists for
+ * exactly as long as this function runs and then only the browser has it — a
+ * return value carrying it would be an invitation to put it in a response
+ * body, which is the one thing the cookie was introduced to stop. The id is a
+ * different thing: it names the row without opening it, `GET /auth/sessions`
+ * already publishes it, and the bitácora line a login writes wants to say
+ * which session it opened — the question worth asking after a credential is
+ * found to be copied.
  *
  * `user_agent` and `ip` are read off the request here rather than passed in, so
  * the two callers cannot disagree about which header the session list shows.
@@ -77,10 +82,25 @@ export async function issueSession(
   id_usuario: number,
   estado: EstadoSesion,
   /** Passed straight through to `createSession` — see its own comment. */
-  fuente?: FuenteMfa,
-): Promise<void> {
-  await rotateOut(req);
-  const { token, expiresAt } = await createSession(
+  fuente?: FuenteEnElLogin,
+  /**
+   * The passwordless login's transaction, and every query here joins it —
+   * `rotateOut`'s two included. Not for atomicity's sake: a transaction holds
+   * one pool connection, and a query issued without it while the transaction
+   * is open borrows a *second*; fifteen such logins at once, on a pool of
+   * fifteen, would each hold one and wait for another until the acquire
+   * timeout, for the whole API. So inside a transaction nothing may go around
+   * it. The consequence for `rotateOut` is that a rollback leaves the previous
+   * session alive — and that is the right outcome: the only rollback on that
+   * path is a commit failure, which answers 500 and clears the cookie, so the
+   * browser can no longer reach that row anyway, and nothing was changed by a
+   * login that did not happen. The password door passes no transaction and
+   * keeps its old shape: revoke first, autocommit, then create.
+   */
+  opciones: { transaction?: Transaction } = {},
+): Promise<{ id: string }> {
+  await rotateOut(req, opciones);
+  const { token, expiresAt, id } = await createSession(
     id_usuario,
     {
       userAgent: req.headers["user-agent"],
@@ -88,9 +108,11 @@ export async function issueSession(
     },
     estado,
     fuente,
+    opciones,
   );
   setSessionCookie(res, token, expiresAt);
   res.setHeader(SESSION_EXPIRES_HEADER, expiresAt.toISOString());
+  return { id };
 }
 
 /**
@@ -127,10 +149,10 @@ export async function issueSession(
  * reached from this browser any more. In every real case it is the same person
  * entering again.
  */
-async function rotateOut(req: Request): Promise<void> {
+async function rotateOut(req: Request, opciones: { transaction?: Transaction }): Promise<void> {
   const previous = readSessionCookie(req);
   if (!previous) return;
-  const live = await findLiveSession(previous);
+  const live = await findLiveSession(previous, opciones);
   if (!live) return;
-  await revokeSessionOf(live.id_usuario, live.id);
+  await revokeSessionOf(live.id_usuario, live.id, opciones);
 }

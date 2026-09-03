@@ -134,7 +134,44 @@ export async function buscarCredencialDe(
 }
 
 /**
+ * The credential an assertion names, looked up by `credential_id` **alone** —
+ * the passwordless lookup, and the one place that lookup is correct.
+ *
+ * Here nobody is named yet: the browser offered whichever discoverable
+ * credential the person picked, and the row is how the ERP learns *who* that
+ * is. The column is unique across the table (`credencialWebauthn.model.ts`),
+ * so one id resolves to at most one row and one owner, and the signature is
+ * then verified against that row's own public key — which is what makes the
+ * owner trustworthy: a caller can put any id in the request, but cannot
+ * produce a valid signature for a key they do not hold.
+ *
+ * `buscarCredencialDe` above is the second-factor lookup and scopes by the
+ * session's account on top; its comment has the attack that scoping closes.
+ * The two are separate functions rather than one with an optional owner, so
+ * that the phase-1 path cannot lose its scope by omitting an argument.
+ */
+export async function buscarCredencialPorId(
+  credentialId: string,
+): Promise<{ id: number; id_usuario: number; credential_id: string; public_key: Buffer; counter: string } | null> {
+  const fila = await CredencialWebauthnModel.findOne({
+    where: { credential_id: credentialId },
+    // `public_key` by name, past the model's `defaultScope`: this is the one
+    // other caller that verifies a signature. Same exception, same reason.
+    attributes: ["id", "id_usuario", "credential_id", "public_key", "counter"],
+  });
+  if (!fila) return null;
+  return {
+    id: fila.dataValues.id,
+    id_usuario: fila.dataValues.id_usuario,
+    credential_id: fila.dataValues.credential_id,
+    public_key: fila.dataValues.public_key,
+    counter: fila.dataValues.counter,
+  };
+}
+
+/**
  * Record that this credential was used, and move its counter forward.
+ * Returns whether a row was there to record it on.
  *
  * 🔴 **`GREATEST`, not a plain assignment, and the difference is permanent.**
  * A synced passkey reports 0 on every assertion. Assign that 0 over a stored
@@ -148,17 +185,32 @@ export async function buscarCredencialDe(
  * `last_used_at` rides along because this is the only moment it can be known,
  * and the list of credentials on screen is what lets somebody recognise a
  * passkey they do not remember.
+ *
+ * 🔴 **The boolean and the `transaction` together are what the passwordless
+ * login's race defence is made of.** An `UPDATE` takes the row lock, and a
+ * `DELETE` of the same row — `deleteCredential`, or the administrator's
+ * `restablecerSegundoFactor` — then waits until this transaction ends. So
+ * when the passwordless controller runs this and `createSession` inside one
+ * transaction, the deletion either went first, in which case this matched
+ * nothing and the login is refused, or it waits, in which case its own
+ * revocation of every live session runs *after* the new session is committed
+ * and takes that one too. Read this as a plain "touch the row" and move it
+ * out of the transaction, and a login in flight during a deletion produces a
+ * sealed thirty-day session on an account with no factor left. The phase-1
+ * caller ignores the return value: its session already exists and is what a
+ * deletion revokes.
  */
 export async function marcarCredencialUsada(
   id: number,
   contadorRecibido: number,
   opciones: { transaction?: Transaction } = {},
-): Promise<void> {
-  await CredencialWebauthnModel.update(
+): Promise<boolean> {
+  const [count] = await CredencialWebauthnModel.update(
     {
       counter: sequelize.fn("GREATEST", sequelize.col("counter"), contadorRecibido) as never,
       last_used_at: new Date(),
     },
     { where: { id }, transaction: opciones.transaction },
   );
+  return count > 0;
 }

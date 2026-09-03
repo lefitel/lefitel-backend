@@ -46,7 +46,7 @@ import helmet from "helmet";
 import { httpLogger } from "./middleware/httpLogger.js";
 import { authenticate, authenticateArchivos } from "./middleware/authenticate.js";
 import { loginRateLimit } from "./middleware/loginLimiters.js";
-import { requireSameOrigin } from "./middleware/csrf.js";
+import { requireSameOrigin, requireVerifiedOrigin } from "./middleware/csrf.js";
 import { allowedOrigins, HSTS_MAX_AGE_SECONDS, ROLE_HEADER, SESSION_EXPIRES_HEADER } from "./config/security.js";
 
 // Import routes
@@ -78,6 +78,7 @@ import mfaRoutes from "./routes/mfa.routes.js";
 import totpRoutes from "./routes/totp.routes.js";
 import recoveryCodesRoutes from "./routes/recoveryCodes.routes.js";
 import webauthnRoutes from "./routes/webauthn.routes.js";
+import webauthnPasswordlessRoutes from "./routes/webauthnPasswordless.routes.js";
 import reporteRoutes from "./routes/reporte.routes.js";
 import generadorRoutes from "./routes/generador.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
@@ -279,12 +280,31 @@ app.use("/api/auth", authRoutes);
 app.use("/api/auth", mfaRoutes);
 app.use("/api/auth/totp", totpRoutes);
 app.use("/api/auth/recovery-codes", recoveryCodesRoutes);
+/**
+ * The passwordless door — plan 4C, phase 2 — mounted **before** the
+ * authenticated passkey router below, under a prefix of its own, and behind
+ * `requireVerifiedOrigin` and nothing else.
+ *
+ * 🔴 The gate is the whole CSRF story for these two routes. The global
+ * `requireSameOrigin` above waves a cookie-less write through on the
+ * argument that `authenticate` refuses it next — and this is the one router
+ * whose routes have no `authenticate`, because they are how somebody with no
+ * credential gets one, and whose answer is a `Set-Cookie`. `csrf.ts` has the
+ * two things a cross-site page could do with that. Mounted here rather than
+ * inside the router so it takes the same `ORIGINS` array as `cors()` and the
+ * global gate: an origin list kept in two places is one that differs in one.
+ * `routeGuards.test.ts` reads the gate's name off this mount and pins that
+ * exactly these two routes carry it.
+ */
+app.use("/api/auth/webauthn/passwordless", requireVerifiedOrigin(ORIGINS), webauthnPasswordlessRoutes);
 // 🔴 This prefix is not a choice. `auth/sessionState.ts` already reserves
 // `/api/auth/webauthn/login`, `/api/auth/webauthn/register` and
 // `/api/auth/webauthn/credentials` in its allow-lists — mounting anywhere else
 // leaves a `parcial` session with no reachable door and no error that says so.
 // See `webauthn.routes.ts` for the loop that produces, and for why the tempting
 // opposite mistake (widening the allow-list to this whole prefix) is worse.
+// `/passwordless` above is the deliberate exception: outside every list, and
+// reachable by nobody who has a session to be in a list with.
 app.use("/api/auth/webauthn", webauthnRoutes);
 
 app.use("/api/upload", authenticate, uploadRoutes);

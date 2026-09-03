@@ -26,12 +26,18 @@ import {
   passwordConfirmKey,
   webauthnCeremonyKey,
   passwordConfirmLimiter,
+  passwordlessOptionsKey,
+  passwordlessVerifyKey,
+  passwordlessOptionsLimiter,
+  passwordlessVerifyLimiter,
   siguienteBloqueo,
 } from "./loginLimiters.js";
 import {
   LOCKOUT_AFTER_FAILURES,
   LOCKOUT_MAX_MINUTES,
   PASSWORD_CONFIRM_LIMIT,
+  WEBAUTHN_PASSWORDLESS_OPTIONS_LIMIT,
+  WEBAUTHN_PASSWORDLESS_VERIFY_LIMIT,
 } from "../config/security.js";
 
 describe("estaBloqueada", () => {
@@ -754,6 +760,100 @@ describe("the chain the real login endpoint is mounted behind", () => {
     await settled();
 
     expect(await loginIpLimiter.getKey(CLAVE_IP)).toBeUndefined();
+  });
+});
+
+/**
+ * The two anonymous buckets — plan 4C phase 2, Task 14. Keyed by address
+ * because there is nothing else, and the two rules that tell them apart:
+ * `options` counts everything (the success is the write), `verify` charges
+ * refusals only (a login that works is not a failed attempt). Each is a
+ * mutation that leaves everything else green: `skipSuccessfulRequests` added
+ * to the first, or dropped from the second.
+ */
+describe("what the passwordless buckets spend", () => {
+  const CLAVE_OPTIONS = `pl:${DESDE}`;
+  const CLAVE_VERIFY = `pv:${DESDE}`;
+
+  beforeEach(async () => {
+    // Address-keyed, so there is no per-test username to keep tests apart:
+    // both keys start every test empty or the counters carry over.
+    await passwordlessOptionsLimiter.resetKey(CLAVE_OPTIONS);
+    await passwordlessVerifyLimiter.resetKey(CLAVE_VERIFY);
+  });
+
+  it("keys both on the address, each under its own prefix", () => {
+    expect(passwordlessOptionsKey(fakeReq(DESDE))).toBe(CLAVE_OPTIONS);
+    expect(passwordlessVerifyKey(fakeReq(DESDE))).toBe(CLAVE_VERIFY);
+    // Nothing from the body: there is no account to name, and a body field
+    // must not be able to buy a second bucket.
+    expect(passwordlessOptionsKey(fakeReq(DESDE, { user: "isaias" }))).toBe(CLAVE_OPTIONS);
+  });
+
+  it("folds an IPv6 address into its block, like every key in this file", () => {
+    expect(passwordlessOptionsKey(fakeReq("2001:db8:1:2:3:4:5:6"))).toBe(
+      passwordlessOptionsKey(fakeReq("2001:db8:1:2:ffff:ffff:ffff:ffff")),
+    );
+    expect(passwordlessVerifyKey(fakeReq("2001:db8:1:2:3:4:5:6"))).toBe(
+      passwordlessVerifyKey(fakeReq("2001:db8:1:2:ffff:ffff:ffff:ffff")),
+    );
+  });
+
+  // 🔴 The one most easily got wrong, because every neighbouring bucket
+  // refunds a success: a challenge that was minted is a row that was written,
+  // and refunding it would leave the flood unbounded for anybody whose
+  // requests happen to succeed — which, on this route, is everybody.
+  it("charges the options bucket for a challenge that was minted", async () => {
+    await post(appAround(passwordlessOptionsLimiter, 200), {});
+    await settled();
+    expect(await hits(passwordlessOptionsLimiter, CLAVE_OPTIONS)).toBe(1);
+  });
+
+  it("charges the verify bucket nothing for a login that worked", async () => {
+    await post(appAround(passwordlessVerifyLimiter, 200), {});
+    await settled();
+    // Zero, not undefined: the key exists, the hit was refunded.
+    expect(await hits(passwordlessVerifyLimiter, CLAVE_VERIFY)).toBe(0);
+  });
+
+  it("charges the verify bucket for a refused assertion", async () => {
+    await post(appAround(passwordlessVerifyLimiter, 400), {});
+    await settled();
+    expect(await hits(passwordlessVerifyLimiter, CLAVE_VERIFY)).toBe(1);
+  });
+
+  it("charges the verify bucket nothing when the server is what failed", async () => {
+    // The 503 for a session that could not be opened: reachable only past a
+    // verified signature, so it cannot be manufactured for a free attempt.
+    await post(appAround(passwordlessVerifyLimiter, 503), {});
+    await settled();
+    expect(await hits(passwordlessVerifyLimiter, CLAVE_VERIFY)).toBe(0);
+  });
+
+  it("closes the options bucket at the configured limit, and not one before", async () => {
+    const bare = appAround(passwordlessOptionsLimiter, 200);
+    for (let i = 0; i < WEBAUTHN_PASSWORDLESS_OPTIONS_LIMIT; i += 1) {
+      const res = await post(bare, {});
+      expect(res.status, `petición ${i + 1}`).toBe(200);
+    }
+    const res = await post(bare, {});
+    expect(res.status).toBe(429);
+  });
+
+  it("closes the verify bucket at the configured limit of refusals, and keeps charging the 429", async () => {
+    const bare = appAround(passwordlessVerifyLimiter, 400);
+    for (let i = 0; i < WEBAUTHN_PASSWORDLESS_VERIFY_LIMIT; i += 1) {
+      const res = await post(bare, {});
+      expect(res.status, `petición ${i + 1}`).toBe(400);
+    }
+    const res = await post(bare, {});
+    expect(res.status).toBe(429);
+    await settled();
+    // The 429 is a 4xx and stays on the tab: a refunded 429 would hand the
+    // caller straight back in, one request at a time, for ever.
+    expect(await hits(passwordlessVerifyLimiter, CLAVE_VERIFY)).toBe(
+      WEBAUTHN_PASSWORDLESS_VERIFY_LIMIT + 1,
+    );
   });
 });
 

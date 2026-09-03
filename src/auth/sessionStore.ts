@@ -8,8 +8,8 @@ import {
   SESSION_IP_MAX,
 } from "../config/security.js";
 import type { ISesion } from "../interfaces/index.js";
-import type { EstadoSesion } from "./sessionState.js";
-import type { FuenteMfa } from "./sessionState.js";
+import type { EstadoSesion, FuenteEnElLogin } from "./sessionState.js";
+import { esPruebaDeFactor } from "./sessionState.js";
 
 const DAY_MS = 86_400_000;
 
@@ -51,6 +51,11 @@ function fitIp(ip?: string): string | null {
  *
  * `id` is not set here: the column's own `DataTypes.UUIDV4` default (see
  * `sesion.model.ts`) generates it, so there is exactly one place that does.
+ * Sequelize fills that default in before the INSERT, which is why the id can
+ * be handed back beside the token: the bitácora line a login writes wants to
+ * name the session it opened, and the id is the one handle for a row that is
+ * safe to write down — the token is not, and it is not returned to anybody
+ * but the browser.
  */
 export async function createSession(
   id_usuario: number,
@@ -65,38 +70,63 @@ export async function createSession(
   /**
    * What proved the factor for this session, when anything did at login time.
    *
-   * Only ever `"dispositivo"` today: it is the one credential that is checked
-   * *during* the login rather than after it, so it is the only source a row can
-   * carry the moment it is created. A factor proved afterwards is written by
-   * `sessionPromotion.ts` instead, which is why this is optional rather than
-   * required.
+   * Two values are possible, and they are the two credentials checked *during*
+   * a login rather than after it: `"dispositivo"`, a remembered-device cookie
+   * beside a password, and — since plan 4C's phase 2 — `"passkey"`, the
+   * passwordless ceremony where the assertion is the whole login. A factor
+   * proved afterwards is written by `sessionPromotion.ts` instead, which is why
+   * this is optional rather than required. `FuenteEnElLogin` is the narrower
+   * type that keeps a login from claiming a code it cannot have seen.
    *
    * `undefined` writes NULL, which is what every other login does and what this
-   * column meant before. And after plan 4B's change to `estadoEfectivo`, NULL
-   * and `"dispositivo"` are treated identically there — this exists for the
-   * trail, not for the rule: without it there is no way to tell, from a session
-   * row, that somebody got in on a cookie rather than by showing something.
+   * column meant before.
+   *
+   * 🔴 **And it decides `mfa_satisfied_at`, through one rule shared with
+   * `estadoEfectivo`.** `esPruebaDeFactor` says which sources are evidence a
+   * factor was shown: `"passkey"` is — the authenticator saw a fingerprint or
+   * a PIN, which is exactly what the seal records — so a passwordless session
+   * is born with the stamp, and the first gated write finds its ten-minute
+   * window open instead of demanding, three seconds after the ceremony, a
+   * password this login never asked for. `"dispositivo"` is **not**, and the
+   * column stays NULL for it, as migration `20260826000002` requires: a
+   * remembered device is written without anybody proving anything at that
+   * moment, and stamping it would let a stolen device cookie plus a password
+   * open the permission matrix without touching a single factor. `estadoEfectivo`
+   * treats that source and NULL identically for the same reason.
    */
-  fuente?: FuenteMfa,
-): Promise<{ token: string; expiresAt: Date }> {
+  fuente?: FuenteEnElLogin,
+  /**
+   * The caller's transaction, when the session must commit or fail together
+   * with something else. The passwordless login is the caller: it marks the
+   * credential used and inserts the session in one transaction, so that a
+   * concurrent deletion of that credential either goes first — and the mark
+   * matches nothing — or waits on the row lock and revokes this session too.
+   * See `webauthnPasswordless.controller.ts` for the race that needs it.
+   */
+  opciones: { transaction?: Transaction } = {},
+): Promise<{ token: string; expiresAt: Date; id: string }> {
   const token = newSessionToken();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + SESSION_IDLE_DAYS * DAY_MS);
 
-  await SesionModel.create({
-    id_usuario,
-    token_hash: hashSessionToken(token),
-    user_agent: fitUserAgent(meta.userAgent),
-    ip_address: fitIp(meta.ip),
-    created_at: now,
-    last_used_at: now,
-    expires_at: expiresAt,
-    revoked_at: null,
-    estado,
-    mfa_source: fuente ?? null,
-  });
+  const creada = await SesionModel.create(
+    {
+      id_usuario,
+      token_hash: hashSessionToken(token),
+      user_agent: fitUserAgent(meta.userAgent),
+      ip_address: fitIp(meta.ip),
+      created_at: now,
+      last_used_at: now,
+      expires_at: expiresAt,
+      revoked_at: null,
+      estado,
+      mfa_source: fuente ?? null,
+      mfa_satisfied_at: esPruebaDeFactor(fuente) ? now : null,
+    },
+    { transaction: opciones.transaction },
+  );
 
-  return { token, expiresAt };
+  return { token, expiresAt, id: creada.dataValues.id };
 }
 
 /**
@@ -107,7 +137,11 @@ export async function createSession(
  * ceiling are all "no". Checking them in JavaScript after the fact is how one
  * of them ends up forgotten on a later edit.
  */
-export async function findLiveSession(token: string): Promise<{
+export async function findLiveSession(
+  token: string,
+  /** The caller's transaction — `rotateOut` inside a passwordless login. Normally absent. */
+  opciones: { transaction?: Transaction } = {},
+): Promise<{
   id: string;
   id_usuario: number;
   created_at: Date;
@@ -135,6 +169,7 @@ export async function findLiveSession(token: string): Promise<{
       "mfa_satisfied_at",
       "mfa_source",
     ],
+    transaction: opciones.transaction,
   });
   if (!found) return null;
   const v = found.dataValues;
@@ -241,10 +276,15 @@ export async function touchSession(id: string, at: Date, createdAt: Date): Promi
  * answer 404 for "not yours", "does not exist" and "already closed" with the
  * same words. A 403 would confirm the row exists and belongs to somebody.
  */
-export async function revokeSessionOf(id_usuario: number, id: string): Promise<boolean> {
+export async function revokeSessionOf(
+  id_usuario: number,
+  id: string,
+  /** The caller's transaction — `rotateOut` inside a passwordless login. Normally absent. */
+  opciones: { transaction?: Transaction } = {},
+): Promise<boolean> {
   const [count] = await SesionModel.update(
     { revoked_at: new Date() },
-    { where: { id, id_usuario, revoked_at: null } },
+    { where: { id, id_usuario, revoked_at: null }, transaction: opciones.transaction },
   );
   return count > 0;
 }

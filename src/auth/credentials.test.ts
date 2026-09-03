@@ -89,7 +89,11 @@ vi.mock("../permissions/store.js", () => ({ permissionsFor: async () => ({}) }))
 // single assertion. `authenticate.test.ts` mocks the session store for the same
 // reason. What the login does with the cookie is asserted in
 // `controllers/login.session.test.ts`, where `issueSession` is real.
-vi.mock("./issueSession.js", () => ({ issueSession: vi.fn() }));
+// It answers the row id, as the real one does since plan 4C phase 2: a
+// bare `vi.fn()` resolves `undefined`, the destructure in `terminarLogin`
+// throws, and every login in this file would answer 503 for a reason that
+// has nothing to do with the credential.
+vi.mock("./issueSession.js", () => ({ issueSession: vi.fn(async () => ({ id: "sesion-nueva" })) }));
 // The store as well, and mocking `issueSession` above is not enough to avoid it:
 // `auth.controller.ts` imports these three names for its *other* five
 // endpoints, none of which this file calls, and that import alone is what pulls

@@ -382,7 +382,7 @@ describe("POST /api/auth/login", () => {
       // Withholding the matrix must not turn into refusing the login, which
       // would lock out every account the day its deadline passed.
       expect(c.status, estado).toBe(200);
-      expect(createSession, estado).toHaveBeenCalledWith(YO, expect.anything(), estado, undefined);
+      expect(createSession, estado).toHaveBeenCalledWith(YO, expect.anything(), estado, undefined, {});
       expect(Object.keys(c.payload ?? {}).sort(), estado).toEqual(["message", "usuario"]);
       // Absent, and absent because it was never asked for.
       expect(permissionsFor, estado).not.toHaveBeenCalled();
@@ -398,7 +398,7 @@ describe("POST /api/auth/login", () => {
     await login(c.req, c.res);
 
     expect(c.status).toBe(200);
-    expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "completa", undefined);
+    expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "completa", undefined, {});
     expect(Object.keys(c.payload ?? {}).sort()).toEqual(["message", "permisos", "usuario"]);
     expect(c.payload?.permisos).toEqual(PERMISOS);
   });
@@ -573,7 +573,7 @@ describe("POST /api/auth/login", () => {
       await login(c.req, c.res);
 
       expect(comprobarDispositivo).toHaveBeenCalledWith("un-token-valido", YO);
-      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "completa", "dispositivo");
+      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "completa", "dispositivo", {});
       expect(c.status).toBe(200);
       expect(c.payload?.permisos).toEqual(PERMISOS);
     });
@@ -585,7 +585,7 @@ describe("POST /api/auth/login", () => {
       await login(c.req, c.res);
 
       expect(comprobarDispositivo).not.toHaveBeenCalled();
-      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "parcial", undefined);
+      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "parcial", undefined, {});
     });
 
     it("still opens parcial for an account with a factor when the presented device is not valid", async () => {
@@ -595,7 +595,7 @@ describe("POST /api/auth/login", () => {
       const c = call(undefined, { body: { user: "isaias", pass: "secreta" } });
       await login(c.req, c.res);
 
-      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "parcial", undefined);
+      expect(createSession).toHaveBeenCalledWith(YO, expect.anything(), "parcial", undefined, {});
     });
 
     it("renews the cookie only when the body asks for it and the existing one was already valid", async () => {

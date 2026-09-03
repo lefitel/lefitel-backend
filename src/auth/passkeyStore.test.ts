@@ -7,8 +7,34 @@
 // broken in production, which is the exact trap `ultimo_paso` fell into and
 // `totpStore.test.ts` now guards against by the same means.
 
-import { describe, expect, it } from "vitest";
-import { esContadorDeClon } from "./passkeyStore.js";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+// The model and the connection, faked so the two store functions below can be
+// asserted on the shape of what they send — `esContadorDeClon` is pure and
+// does not notice either mock.
+const findOne = vi.fn();
+const update = vi.fn();
+vi.mock("../models/credencialWebauthn.model.js", () => ({
+  CredencialWebauthnModel: {
+    findOne: (...a: unknown[]) => findOne(...a),
+    update: (...a: unknown[]) => update(...a),
+  },
+}));
+vi.mock("../database/sequelize.js", () => ({
+  sequelize: {
+    fn: (nombre: string, ...args: unknown[]) => ({ fn: nombre, args }),
+    col: (nombre: string) => ({ col: nombre }),
+  },
+}));
+
+const { esContadorDeClon, buscarCredencialPorId, marcarCredencialUsada } = await import(
+  "./passkeyStore.js"
+);
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  update.mockResolvedValue([1]);
+});
 
 describe("esContadorDeClon — a counter that moves", () => {
   // Deliberately not starting from "0". A rule written as a bare
@@ -97,5 +123,95 @@ describe("esContadorDeClon — the shape it is actually called with", () => {
     const recibido: number = 101;
     expect(esContadorDeClon(guardado, recibido)).toBe(false);
     expect(typeof guardado).toBe("string");
+  });
+});
+
+/**
+ * The passwordless lookup — plan 4C phase 2 — where the credential *is* the
+ * identity and the lookup is by `credential_id` alone, on purpose. The
+ * scoped sibling `buscarCredencialDe` is the phase-1 one and is asserted from
+ * `webauthn.controller.test.ts`.
+ */
+describe("buscarCredencialPorId — the passwordless lookup", () => {
+  const FILA = {
+    dataValues: {
+      id: 7,
+      id_usuario: 42,
+      credential_id: "credencial-base64url",
+      public_key: Buffer.from([1, 2, 3]),
+      counter: "5",
+    },
+  };
+
+  it("looks the credential up by its id and by nothing else", async () => {
+    findOne.mockResolvedValue(FILA);
+    await buscarCredencialPorId("credencial-base64url");
+    // `toStrictEqual`: an `id_usuario: undefined` slipped into the where would
+    // be dropped by Sequelize and read as equal by `toEqual`.
+    expect(findOne.mock.calls[0][0].where).toStrictEqual({ credential_id: "credencial-base64url" });
+  });
+
+  it("asks for the public key and the owner by name, past the default scope", async () => {
+    findOne.mockResolvedValue(FILA);
+    await buscarCredencialPorId("credencial-base64url");
+    expect(findOne.mock.calls[0][0].attributes).toEqual([
+      "id",
+      "id_usuario",
+      "credential_id",
+      "public_key",
+      "counter",
+    ]);
+  });
+
+  it("hands back the owner with the key, which is how the door learns who is there", async () => {
+    findOne.mockResolvedValue(FILA);
+    const r = await buscarCredencialPorId("credencial-base64url");
+    expect(r).toEqual({
+      id: 7,
+      id_usuario: 42,
+      credential_id: "credencial-base64url",
+      public_key: Buffer.from([1, 2, 3]),
+      // A string, exactly as `pg` returns a BIGINT — never converted here.
+      counter: "5",
+    });
+  });
+
+  it("answers null for a credential this ERP has never seen", async () => {
+    findOne.mockResolvedValue(null);
+    expect(await buscarCredencialPorId("desconocida")).toBeNull();
+  });
+});
+
+/**
+ * The boolean is the passwordless door's race defence: inside its
+ * transaction, a mark that matched nothing means the credential was deleted
+ * under the ceremony, and the login is refused. A `void` here would let the
+ * controller open a session for a credential that no longer exists.
+ */
+describe("marcarCredencialUsada — whether there was a row to mark", () => {
+  it("says so when the row was there", async () => {
+    update.mockResolvedValue([1]);
+    expect(await marcarCredencialUsada(7, 6)).toBe(true);
+  });
+
+  it("says so when it was not", async () => {
+    update.mockResolvedValue([0]);
+    expect(await marcarCredencialUsada(7, 6)).toBe(false);
+  });
+
+  it("marks exactly that row, inside the caller's transaction", async () => {
+    const transaction = { id: "una-transaccion" };
+    await marcarCredencialUsada(7, 6, { transaction: transaction as never });
+    expect(update.mock.calls[0][1]).toEqual({ where: { id: 7 }, transaction });
+  });
+
+  it("moves the counter forward with GREATEST, never with a plain assignment", async () => {
+    // A synced passkey reports 0 for ever; assigned over a stored 5 the column
+    // would go backwards and clone detection would be off for that credential
+    // for good.
+    await marcarCredencialUsada(7, 6);
+    const escrito = update.mock.calls[0][0] as { counter: unknown; last_used_at: unknown };
+    expect(escrito.counter).toEqual({ fn: "GREATEST", args: [{ col: "counter" }, 6] });
+    expect(escrito.last_used_at).toBeInstanceOf(Date);
   });
 });

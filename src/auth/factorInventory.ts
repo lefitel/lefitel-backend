@@ -22,13 +22,13 @@
 // answering about real rows, so a change here changes who gets through a gate
 // today rather than on some future deploy day.
 
-import { Op } from "sequelize";
+import { Op, type Transaction } from "sequelize";
 import { CredencialWebauthnModel } from "../models/credencialWebauthn.model.js";
 import { FactorTotpModel } from "../models/factorTotp.model.js";
 import { CodigoRecuperacionModel } from "../models/codigoRecuperacion.model.js";
 import { MFA_GRACE_DAYS } from "../config/security.js";
 import { totpEstaDisponible } from "./mfaKeyCheck.js";
-import type { EstadoSesion } from "./sessionState.js";
+import type { EstadoSesion, FuenteEnElLogin } from "./sessionState.js";
 
 const DIA_MS = 24 * 60 * 60 * 1000;
 
@@ -76,10 +76,22 @@ export async function factoresDe(id_usuario: number): Promise<InventarioFactores
  * there is no third function here for one copy of it to live in without one
  * of these two calling the other and paying for a table it does not need.
  */
-export async function tieneAlgunFactor(id_usuario: number): Promise<boolean> {
+export async function tieneAlgunFactor(
+  id_usuario: number,
+  /**
+   * The caller's transaction, so that a login that already holds one runs
+   * these two counts on the same connection instead of borrowing a second
+   * from the pool while the first sits waiting — with `max: 15`, fifteen
+   * such logins at once would starve the whole API. Optional and normally
+   * absent: `deleteCredential` in particular must NOT pass one, so that it
+   * counts committed state and never the row it is in the middle of removing.
+   */
+  opciones: { transaction?: Transaction } = {},
+): Promise<boolean> {
+  const { transaction } = opciones;
   const [passkeys, totp] = await Promise.all([
-    CredencialWebauthnModel.count({ where: { id_usuario } }),
-    FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } } }),
+    CredencialWebauthnModel.count({ where: { id_usuario }, transaction }),
+    FactorTotpModel.count({ where: { id_usuario, confirmed_at: { [Op.ne]: null } }, transaction }),
   ]);
   return passkeys > 0 || totp > 0;
 }
@@ -237,11 +249,14 @@ export async function metodosDeReautenticacion(
  * every request, which is the cost this whole design refuses — so it belongs to
  * the endpoint that causes it, at the moment it causes it.
  *
- * **And the tidying that is worth doing even though nothing depends on it:**
- * clear `usuarios.mfa_grace_until` when an account registers its first factor.
- * The first branch below already says a date in that column "reads as: this
- * account is still being chased", and after registration it is not. Third line
- * of defence, not the first.
+ * **And the tidying that was worth doing even though nothing depends on it —
+ * done, by `apagarLaMecha` in `sessionPromotion.ts`:** `usuarios.mfa_grace_until`
+ * is cleared when an account confirms its first factor, from `confirmTotp` and
+ * from `registerVerify`. The first branch below already says a date in that
+ * column "reads as: this account is still being chased", and after
+ * registration it is not. Third line of defence, not the first — which is
+ * why an account whose clearing write was lost is still handled correctly by
+ * `estadoEfectivo`'s clause 3.
  *
  * ~~A decision 4B has to take rather than inherit: `factoresDe` and
  * `InventarioFactores` have no caller anywhere in `src/`.~~ **Settled by plan
@@ -255,61 +270,80 @@ export async function metodosDeReautenticacion(
  * `graceUntil` is an instruction to the caller, not a fact about the account:
  * a date means "write this into `usuarios.mfa_grace_until`", `null` means
  * "leave that column alone". It is returned rather than written here because
- * the write must not happen until the session actually exists — see the call
- * site in `auth.controller.ts` for what starting somebody's fourteen days on a
- * request that ended in a 503 would cost them.
+ * the write must not happen until the session actually exists — see
+ * `terminarLogin` in `auth/finishLogin.ts` for what starting somebody's
+ * fourteen days on a request that ended in a 503 would cost them.
  *
- * **`dispositivoRecordadoValido`, added by plan 4B's Task 12 (Decision 4).**
- * Whether the caller already found a live "remember this device" cookie for
- * this account — see `auth/rememberedDeviceIssue.ts`'s `comprobarDispositivo`.
- * Defaults to `false` so every caller written before this parameter existed
- * keeps behaving exactly as it did.
+ * **`conFactor` says which branch answered, and it is there because two of
+ * them can agree.** Branch 1 (a factor exists, the login covered it) and
+ * branch 3 (no factor, deadline still ahead) both answer `completa` with no
+ * deadline. The passwordless login has to refuse the second — it means the
+ * credential it just verified was deleted under the ceremony — and could not
+ * tell them apart from the state alone. A review found the guard it had
+ * written on `estado` and `graceUntil` passing exactly that case.
+ *
+ * **`fuenteEnElLogin` — what, if anything, already covered the second factor
+ * during this login.** Two values are possible, and they are the two
+ * credentials checked *during* a login rather than after it: `"dispositivo"`,
+ * a live "remember this device" cookie the caller already resolved for this
+ * account (plan 4B's Task 12, Decision 4 — see `comprobarDispositivo`), and
+ * `"passkey"`, the passwordless ceremony of plan 4C's phase 2, where the
+ * assertion the caller just verified *is* the factor. It used to be a boolean
+ * named for the first of those; the second gave it a name that says what was
+ * proved rather than which caller is asking. `undefined` means "nothing was",
+ * so every caller written before this parameter existed keeps behaving
+ * exactly as it did.
  *
  * **This function stays the *only* place that answers "which state does this
- * session open in", which is why the flag is a parameter here rather than a
- * second decision made in `login`.** The obvious-looking alternative —
- * `estadoInicialDeSesion` returns `parcial` as it always did, and the login
- * controller overwrites that to `completa` when a device is remembered — puts
- * two places in charge of one question, and the failure mode is not
- * hypothetical: hallazgo D2 is exactly a function computing this and a second
- * one recomputing it without knowing that the first one already had. So the
- * flag comes in here, is read in exactly one branch (the first), and nowhere
- * else in `src/` decides `estado` on its own account.
+ * session open in", which is why the source is a parameter here rather than a
+ * second decision made in `login` or in the passwordless controller.** The
+ * obvious-looking alternative — `estadoInicialDeSesion` returns `parcial` as
+ * it always did, and the controller overwrites that to `completa` when it
+ * knows better — puts two places in charge of one question, and the failure
+ * mode is not hypothetical: hallazgo D2 is exactly a function computing this
+ * and a second one recomputing it without knowing that the first one already
+ * had. So the source comes in here, is read in exactly one branch (the first),
+ * and nowhere else in `src/` decides `estado` on its own account.
  *
- * **The flag only ever matters inside branch 1, below, and that placement is
- * itself part of the contract.** An account with nothing registered has
- * nothing for a remembered device to skip, so `dispositivoRecordadoValido`
+ * **The source only ever matters inside branch 1, below, and that placement is
+ * itself part of the contract — for both values.** An account with nothing
+ * registered has nothing for a remembered device to skip, so `"dispositivo"`
  * must not be consulted before `tieneAlgunFactor` — reading it first would
  * short-circuit straight to `completa` with no `graceUntil` stamped, silently
  * cancelling the fourteen-day clock for an account that has never even been
- * asked to configure anything.
+ * asked to configure anything. `"passkey"` is kept in the same place rather
+ * than given a shortcut of its own, even though the caller has just verified
+ * a credential of this very account: the count is a second, independent
+ * witness that the credential is still there, and the passwordless controller
+ * treats any answer but `completa`-with-no-deadline as "it was deleted under
+ * me" and refuses — see its own comment for the race that makes that matter.
+ * A shortcut here would turn that witness into a precondition the caller has
+ * to remember to satisfy.
  *
  * **What this function does not do, and whose job that is instead.** It never
- * calls `comprobarDispositivo` itself, and it never writes
- * `sesiones.mfa_source`. The caller resolves the cookie — strictly *after*
- * the password has already checked out, never before (`auth.controller.ts`'s
- * `login` is the only caller today, and it is written that way on purpose:
- * resolving whose device a cookie names ahead of the password is the exact
- * trap `comprobarDispositivo`'s own header warns against). And nothing in
- * `src/` today can write `mfa_source = 'dispositivo'` on the row this answer
- * opens — doing that means widening `sessionStore.ts`'s `createSession`,
- * which is outside this task's file list. Left unwritten, the column reads as
- * NULL, and `estadoEfectivo`'s third clause in `sessionState.ts` already
- * treats NULL exactly like `'dispositivo'` — neither counts as durable
- * evidence a factor was shown — so no security property here depends on that
- * column actually being set. What is lost without it is observability only:
- * nothing can tell, from the row alone, that a login took this path. Worth a
- * small follow-up; not a hole this parameter needs to close.
+ * calls `comprobarDispositivo` itself, never verifies an assertion, and never
+ * writes `sesiones.mfa_source` or `mfa_satisfied_at`. The caller resolves the
+ * credential — strictly *after* the password has already checked out, or
+ * after the signature verified, never before (resolving whose device a cookie
+ * names ahead of the password is the exact trap `comprobarDispositivo`'s own
+ * header warns against). Both doors reach here through `terminarLogin`
+ * (`auth/finishLogin.ts`), which hands the same source on to `createSession`:
+ * that is where `mfa_source` is written, and where `mfa_satisfied_at` is
+ * stamped from it — see `esPruebaDeFactor` in `sessionState.ts` for the one
+ * rule that decides which sources count. An earlier version of this paragraph
+ * said the column could not be written yet and that nothing depended on it;
+ * both stopped being true with plan 4C's phase 2.
  *
  * Three branches, in this order, and the order is the load-bearing part:
  *
- * 1. **There is a factor to prove** → `parcial`, **unless a valid remembered
- *    device was already presented, which opens `completa` instead.** That is
- *    Decision 4's whole point: this account has something to prove, and this
- *    browser already proved it once and asked not to be asked again. Checked
- *    first, so that somebody who *has* a passkey but no remembered device is
- *    still asked to use it rather than sent to a setup screen for a factor
- *    they already registered.
+ * 1. **There is a factor to prove** → `parcial`, **unless this login already
+ *    covered it, which opens `completa` instead.** A valid remembered device
+ *    is Decision 4's whole point: this account has something to prove, and
+ *    this browser already proved it once and asked not to be asked again. A
+ *    verified passkey assertion is the factor itself, proved a moment ago.
+ *    Checked first, so that somebody who *has* a passkey but no remembered
+ *    device is still asked to use it rather than sent to a setup screen for a
+ *    factor they already registered.
  * 2. **No usable deadline stored** → stamp one, and `completa`. Started at
  *    their first login *after* the deploy rather than filled in by the
  *    migration: from the deploy, somebody on holiday comes back on day 30 to a
@@ -396,16 +430,18 @@ export async function estadoInicialDeSesion(
   // the key is a normal caller of this function and not a mistake.
   usuario: { id: number; mfa_grace_until: Date | null | undefined },
   ahora: Date,
-  dispositivoRecordadoValido = false,
-): Promise<{ estado: EstadoSesion; graceUntil: Date | null }> {
-  if (await tieneAlgunFactor(usuario.id)) {
+  fuenteEnElLogin?: FuenteEnElLogin,
+  /** Forwarded to `tieneAlgunFactor` — see its own comment for the pool. */
+  opciones: { transaction?: Transaction } = {},
+): Promise<{ estado: EstadoSesion; graceUntil: Date | null; conFactor: boolean }> {
+  if (await tieneAlgunFactor(usuario.id, opciones)) {
     // No deadline is stamped on them: they have nothing left to be given
     // fourteen days for, and a date in that column reads as "this account is
     // still being chased". True whichever of the two states below fires.
-    if (dispositivoRecordadoValido) {
-      return { estado: "completa", graceUntil: null };
+    if (fuenteEnElLogin) {
+      return { estado: "completa", graceUntil: null, conFactor: true };
     }
-    return { estado: "parcial", graceUntil: null };
+    return { estado: "parcial", graceUntil: null, conFactor: true };
   }
 
   // **`Number.isNaN` is the guard that matters here; the loose `== null` is
@@ -425,10 +461,18 @@ export async function estadoInicialDeSesion(
   // to write, on every login for ever, and the ERP would never close.
   const limite = usuario.mfa_grace_until == null ? NaN : new Date(usuario.mfa_grace_until).getTime();
   if (Number.isNaN(limite)) {
-    return { estado: "completa", graceUntil: new Date(ahora.getTime() + MFA_GRACE_DAYS * DIA_MS) };
+    return {
+      estado: "completa",
+      graceUntil: new Date(ahora.getTime() + MFA_GRACE_DAYS * DIA_MS),
+      conFactor: false,
+    };
   }
 
   // `<=` and not `<`: the stored instant is when the grace is over, so a login
   // at exactly that millisecond is already past it.
-  return { estado: limite <= ahora.getTime() ? "onboarding" : "completa", graceUntil: null };
+  return {
+    estado: limite <= ahora.getTime() ? "onboarding" : "completa",
+    graceUntil: null,
+    conFactor: false,
+  };
 }
