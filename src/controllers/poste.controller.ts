@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { literal, Op } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
-import { deleteImageFile } from "../utils/fileUtils.js";
+import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
 import { authoredBy, withoutAuthor } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
 import { AdssModel } from "../models/adss.model.js";
@@ -257,8 +257,9 @@ export const updatePoste = handler("updatePoste", async (req: Request, res: Resp
   // here: `withoutAuthor` drops id/createdAt/updatedAt/deletedAt/id_usuario and
   // never `image`. Said out loud because the day `image` joins that list, this
   // line would delete the old file while the write refused the new one.
+  // And only if nothing else names the file — see `imageRefs.ts`.
   if (oldImage && bodyWithoutAdss.image && oldImage !== bodyWithoutAdss.image) {
-    deleteImageFile(oldImage);
+    void deleteImageIfUnreferenced(oldImage);
   }
   if (Object.keys(beforeMeta).some(k => beforeMeta[k] !== afterMeta[k])) {
     logAction({ id_usuario: req.user?.id, action: "UPDATE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Editó Poste #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });

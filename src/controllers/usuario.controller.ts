@@ -9,7 +9,7 @@ import { issueSession } from "../auth/issueSession.js";
 import { verifyOwnPassword } from "../auth/credentials.js";
 import { restablecerSegundoFactor, type ActorRescate } from "../auth/rescueCore.js";
 import bcryptjs from "bcryptjs";
-import { deleteImageFile } from "../utils/fileUtils.js";
+import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
 import { logAction } from "../utils/logAction.js";
 import { can } from "../permissions/store.js";
 import { BCRYPT_COST } from "../config/security.js";
@@ -421,8 +421,14 @@ export const updateUsuario = handler("updateUsuario", async (req: Request, res: 
   }
   TempUsuario.set(patch);
   await TempUsuario.save();
+  // After the save, and only if nothing else names the file. `oldImage` is
+  // whatever this row said its portrait was — and this row's value came from a
+  // previous PUT, on a route every account may call for itself. Deleting it on
+  // the row's word alone let any account name any photograph in the system as
+  // "my old portrait" and have the server remove it on the next edit. See
+  // `imageRefs.ts`.
   if (oldImage && patch.image && oldImage !== patch.image) {
-    deleteImageFile(oldImage);
+    void deleteImageIfUnreferenced(oldImage);
   }
   logAction({ id_usuario: req.user?.id, action: "UPDATE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Editó perfil del usuario #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
   res.status(200).json(withoutPass(TempUsuario));

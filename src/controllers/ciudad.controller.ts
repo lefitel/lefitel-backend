@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { Op } from "sequelize";
 import { CiudadModel } from "../models/ciudad.model.js";
-import { deleteImageFile } from "../utils/fileUtils.js";
+import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
 import { logAction } from "../utils/logAction.js";
 import { assignable } from "../utils/authorship.js";
 
@@ -41,8 +41,9 @@ export const updateCiudad = handler("updateCiudad", async (req: Request, res: Re
   const beforeCiudad = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
   TempCiudad.set(editable);
   await TempCiudad.save();
+  // Only if nothing else names the file — see `imageRefs.ts`.
   if (oldImage && req.body.image && oldImage !== req.body.image) {
-    deleteImageFile(oldImage);
+    void deleteImageIfUnreferenced(oldImage);
   }
   logAction({ id_usuario: req.user?.id, action: "UPDATE_CIUDAD", entity: "Ciudad", entity_id: Number(id), detail: `Editó ciudad #${id}`, metadata: { before: beforeCiudad, after: editable }, severity: 'warning' });
   res.status(200).json(TempCiudad);

@@ -1,8 +1,28 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { resolveImagePath } from "./fileUtils.js";
+import { imageFileName, resolveImagePath } from "./fileUtils.js";
 
 const ROOT = path.resolve("/tmp/osefi-images");
+
+describe("imageFileName", () => {
+  // The one place the two stored shapes meet. Everything that compares a
+  // stored value with a file on disk has to agree on this answer, and the
+  // Archivos screen did not — see `files.controller.test.ts`.
+  it("maps both stored shapes to the same bare name", () => {
+    expect(imageFileName("/foto.jpg")).toBe("foto.jpg");
+    expect(imageFileName("images/foto.jpg")).toBe("foto.jpg");
+    expect(imageFileName("/images/foto.jpg")).toBe("foto.jpg");
+    expect(imageFileName("foto.jpg")).toBe("foto.jpg");
+  });
+
+  it("answers null for anything that is not a plain name", () => {
+    expect(imageFileName("../x.jpg")).toBeNull();
+    expect(imageFileName("a/b.jpg")).toBeNull();
+    expect(imageFileName("")).toBeNull();
+    expect(imageFileName(null)).toBeNull();
+    expect(imageFileName(42)).toBeNull();
+  });
+});
 
 describe("resolveImagePath", () => {
   it("accepts a stored value as it appears in the database", () => {

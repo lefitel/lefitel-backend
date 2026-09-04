@@ -1,4 +1,3 @@
-import fs from "fs";
 import path from "path";
 
 const IMAGES_DIR = process.env.IMAGES_DIR ?? "/images";
@@ -17,19 +16,8 @@ const IMAGES_DIR = process.env.IMAGES_DIR ?? "/images";
  * part is how a check turns into a bypass.
  */
 export function resolveImagePath(value: unknown, directory = IMAGES_DIR): string | null {
-  if (typeof value !== "string") return null;
-
-  // Two shapes are stored: "/foto.jpg" for 3.090 rows and "images/foto.jpg"
-  // for 424 more. Both name the same file inside IMAGES_DIR — the second is an
-  // older upload path that survived in the data. The client already strips it
-  // the same way. Only a *leading* run is removed, and everything below still
-  // applies to the remainder, so "images/../secreto" is still refused.
-  const name = value.trim().replace(/^(?:[/\\]+|images[/\\]+)+/i, "");
-  if (name === "") return null;
-  // No separators, no traversal, no drive letters, no NUL byte.
-  if (/[/\\]/.test(name) || name.includes("..") || /^[a-zA-Z]:/.test(name) || name.includes("\0")) {
-    return null;
-  }
+  const name = imageFileName(value);
+  if (name === null) return null;
 
   const root = path.resolve(directory);
   const resolved = path.resolve(root, name);
@@ -41,13 +29,39 @@ export function resolveImagePath(value: unknown, directory = IMAGES_DIR): string
 }
 
 /**
- * Deletes an image given its stored path (e.g. "/1234_photo.jpg").
- * Errors are ignored on purpose: the file may already be gone.
+ * The bare file name a stored image value refers to, or null when it is not a
+ * plain name that belongs in IMAGES_DIR.
+ *
+ * Two shapes are stored: "/foto.jpg" for 3.090 rows and "images/foto.jpg" for
+ * 424 more. Both name the same file inside IMAGES_DIR — the second is an older
+ * upload path that survived in the data. The client already strips it the same
+ * way. Only a *leading* run is removed, and every check below still applies to
+ * the remainder, so "images/../secreto" is still refused.
+ *
+ * **This is the one place the two shapes meet, and everything that compares a
+ * stored value with a file on disk has to go through it.** The Archivos screen
+ * did not: it indexed the disk as `/name` and the database as whatever string
+ * was stored, so the 424 `images/` rows never matched anything — "delete
+ * orphans" would have removed every one of those photographs, and "clear broken
+ * references" would have nulled every one of those rows. Found by an audit on
+ * 3 September, before anybody pressed either button.
  */
-export function deleteImageFile(imagePath: string | null | undefined): void {
-  const fullPath = resolveImagePath(imagePath);
-  if (fullPath === null) return;
-  fs.unlink(fullPath, () => {});
+export function imageFileName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const name = value.trim().replace(/^(?:[/\\]+|images[/\\]+)+/i, "");
+  if (name === "") return null;
+  // No separators, no traversal, no drive letters, no NUL byte.
+  if (/[/\\]/.test(name) || name.includes("..") || /^[a-zA-Z]:/.test(name) || name.includes("\0")) {
+    return null;
+  }
+  return name;
 }
+
+// There used to be a `deleteImageFile(stored)` here: resolve, then unlink, no
+// questions asked. Every controller that replaced a photograph called it on the
+// old value — and nothing checked that the old value was *this row's* to
+// delete. A profile edit could name any file on the server as "my previous
+// portrait" and have it removed. Its replacement is `deleteImageIfUnreferenced`
+// in `imageRefs.ts`, which asks the database first.
 
 export { IMAGES_DIR };

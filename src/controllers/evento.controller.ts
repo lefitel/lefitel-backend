@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { literal, Op, Order } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
-import { deleteImageFile } from "../utils/fileUtils.js";
+import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
 import { authoredBy, withoutAuthor } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
 import { CiudadModel } from "../models/ciudad.model.js";
@@ -372,8 +372,9 @@ export const updateEvento = handler("updateEvento", async (req: Request, res: Re
   // here: `withoutAuthor` drops id/createdAt/updatedAt/deletedAt/id_usuario and
   // never `image`. Said out loud because the day `image` joins that list, this
   // line would delete the old file while the write refused the new one.
+  // And only if nothing else names the file — see `imageRefs.ts`.
   if (oldImage && bodyWithoutObs.image && oldImage !== bodyWithoutObs.image) {
-    deleteImageFile(oldImage);
+    void deleteImageIfUnreferenced(oldImage);
   }
   // No RESOLVE_EVENTO branch here any more, and there has not been a reachable
   // one since `state` started being destructured out of the body above: the
@@ -412,7 +413,11 @@ export const reabrirEvento = handler("reabrirEvento", async (req: Request, res: 
     await evento.save({ transaction: t });
   });
 
-  if (solucionImage) deleteImageFile(solucionImage);
+  // The repair photo, only if nothing else names it. The `solucions` row was
+  // soft-deleted just above and still names it — so in practice the file now
+  // stays until the row is purged, which is what the Archivos cleaner already
+  // assumes about archived rows. Deleting it left that row pointing at nothing.
+  if (solucionImage) void deleteImageIfUnreferenced(solucionImage);
 
   logAction({ id_usuario: req.user?.id, action: "REABRIR_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Reabrió Evento #${id}`, metadata: { before: { state: true }, after: { state: false } }, severity: 'warning' });
   res.sendStatus(200);
