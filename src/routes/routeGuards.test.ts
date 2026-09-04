@@ -991,17 +991,44 @@ const ROLES_GATES: Record<string, string> = {
 };
 
 /**
+ * What each route of the audit log must ask for, exactly.
+ *
+ * The module has one action in the vocabulary — `ver` — so every pair below is
+ * the same, and the repetition is not the point. The module is. These three
+ * routes read the record of everything everybody has done, the report builder's
+ * private state included, and the mistake this table exists to catch is one of
+ * them coming to ask for something else: re-gated to `seguridad.ver`, a route
+ * here would still be gated, this file would still call it protected, and the
+ * set of people who can read the audit log would quietly have become a different
+ * set.
+ *
+ * `GET /api/bitacora/:id_usuario` is an ownership route, and it sits here on the
+ * same footing as the rest: the pair is what a *stranger* needs. The other half
+ * of that gate — "or it is your own row" — is ownership rather than a checkbox,
+ * and is asserted in `requirePermission.test.ts`, where a request can actually be
+ * aimed at somebody else's id.
+ */
+const BITACORA_GATES: Record<string, string> = {
+  "GET /api/bitacora/": "bitacora.ver",
+  "GET /api/bitacora/autores": "bitacora.ver",
+  "GET /api/bitacora/:id_usuario": "bitacora.ver",
+};
+
+/**
  * The routers whose tables claim to describe every gated route completely.
  *
  * Three for a long while — `usuario`, `rol`, `permisos` — because those were the
  * only tables written as complete descriptions. `poste`, `evento` and `reporte`
  * joined on 3 September, when an audit showed a gated route added to `evento`
  * one commit after this file had promised the table was complete, and nothing
- * here had said so. `EVENTOS_GATES` also names `POST /api/revision/` and
- * `GET /api/dashboard/`, which live on other routers; the check below is per
- * router prefix, so those two are simply not held to completeness.
+ * here had said so. `bitacora` joined with `/autores`, the route that made it a
+ * three-route router: small enough that a fourth would arrive without anybody
+ * thinking to look, and pointed at the one table that records what everyone did.
+ * `EVENTOS_GATES` also names `POST /api/revision/` and `GET /api/dashboard/`,
+ * which live on other routers; the check below is per router prefix, so those
+ * two are simply not held to completeness.
  */
-const MODULOS_TABULADOS = /^\/api\/(usuario|rol|permisos|poste|evento|reporte)\b/;
+const MODULOS_TABULADOS = /^\/api\/(usuario|rol|permisos|poste|evento|reporte|bitacora)\b/;
 
 describe("which permission each gate asks for", () => {
   it("asks for the one the route is about, not merely for one", () => {
@@ -1014,6 +1041,7 @@ describe("which permission each gate asks for", () => {
       ...REPORTES_GATES,
       ...SEGURIDAD_GATES,
       ...ROLES_GATES,
+      ...BITACORA_GATES,
     })) {
       const [method, path] = route.split(" ");
       const found = routes.find((r) => r.method === method && r.path === path);
@@ -1028,27 +1056,27 @@ describe("which permission each gate asks for", () => {
     expect(wrong, `puertas que piden otra cosa: ${wrong.join(" | ")}`).toEqual([]);
   });
 
-  it("names every gated route of the six tabulated routers, so a new one cannot join unlisted", () => {
+  it("names every gated route of the seven tabulated routers, so a new one cannot join unlisted", () => {
     // The assertion above runs table → code, so it can only catch a pair that
-    // changed under a route somebody already wrote down. A route added
-    // tomorrow is invisible to it, and on these three routers that is the
-    // expensive direction: they are the ones that create accounts, archive
-    // them, and rewrite the permission matrix itself.
+    // changed under a route somebody already wrote down. A route added tomorrow
+    // is invisible to it, and on these routers that is the expensive direction:
+    // between them they create accounts, archive them, rewrite the permission
+    // matrix itself, and serve the record of everything anybody has ever done.
     //
-    // Only these three routers, and not every router in the file, because the
-    // two tables above are the only ones written as complete descriptions.
-    // `PARAMETROS_GATES` is deliberately partial and says so: it names the five
-    // `/stats` reads and none of the `parametros.crear`, `editar` and
-    // `archivar` writes sitting beside them on those same five routers, so
-    // demanding completeness of it would assert the opposite of what its own
-    // comment decided. `GENERADOR_GATES` and `EVENTOS_GATES` do happen to name
-    // every gated route of theirs today, and nothing here holds them to it.
+    // Not every router in the file, because not every table here is written as a
+    // complete description. `PARAMETROS_GATES` is deliberately partial and says
+    // so: it names the five `/stats` reads and none of the `parametros.crear`,
+    // `editar` and `archivar` writes sitting beside them on those same five
+    // routers, so demanding completeness of it would assert the opposite of what
+    // its own comment decided. `GENERADOR_GATES` is the one table that happens to
+    // name every gated route of its own today without being held to it.
     const tabuladas = new Set([
       ...Object.keys(SEGURIDAD_GATES),
       ...Object.keys(ROLES_GATES),
       ...Object.keys(EVENTOS_GATES),
       ...Object.keys(POSTES_GATES),
       ...Object.keys(REPORTES_GATES),
+      ...Object.keys(BITACORA_GATES),
     ]);
     const faltan = routes
       .filter((r) => MODULOS_TABULADOS.test(r.path))
@@ -1059,7 +1087,7 @@ describe("which permission each gate asks for", () => {
 
     expect(
       faltan,
-      `rutas con puerta y sin permiso declarado; añádelas a SEGURIDAD_GATES o ROLES_GATES:\n  ${faltan.join("\n  ")}`,
+      `rutas con puerta y sin permiso declarado; añádelas a la tabla de su router:\n  ${faltan.join("\n  ")}`,
     ).toEqual([]);
   });
 

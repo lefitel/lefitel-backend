@@ -178,6 +178,19 @@ fallo de Postgres en la lista de incidencias sigue llegando al navegador.
 > Meterlos en una migración es trabajo pendiente, no está en las catorce tareas
 > del estándar, y merece la pena hacerlo antes de que alguien monte un entorno
 > nuevo.
+>
+> **Los índices que sí vienen de una migración no están en esta lista**, y no es
+> descuido: la lista es la de los que faltarían en una base nueva. Los migrados
+> son bastantes más —una veintena, repartidos por casi todas las migraciones:
+> los de `reporte_vistas`, `sesiones`, las tablas de factores, los tokens de un
+> solo uso, `codigo_correo`…— y no se enumeran aquí a propósito, porque una lista
+> escrita a mano envejece igual de mal que la de arriba. **La forma de saberlo
+> sin creerse a nadie es `grep -rn "addIndex\|CREATE INDEX" src/migrations/`.**
+>
+> Se dice porque un `grep` de un solo nombre ya confundió a un revisor una vez,
+> en el sentido peligroso —dio por migrado uno que no lo está— y una primera
+> versión de este párrafo nombraba cinco migrados como si fueran todos, que es el
+> error contrario y lleva a concluir que la lista no vale.
 
 ```sql
 -- eventos: subquery pendingEvents (crítico — se ejecuta 1 vez por poste)

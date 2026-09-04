@@ -303,7 +303,7 @@ nadie las envuelva por parecerse a un listado:
 | `GET /api/dashboard/` | Dos colecciones nombradas en un objeto |
 | `GET /api/permisos/` | Cuatro colecciones paralelas |
 | los tres `/opciones` (§5) | Varias colecciones nombradas en un objeto, cada una con su proyección — la misma forma que `/api/permisos/`. Faltaban en esta tabla y ya estaban montados |
-| `GET /api/bitacora/autores` (B2) | Una lista de pares id/nombre; sin sobre, como los bloques de opciones |
+| `GET /api/bitacora/autores` (B2) | Una lista de `{id, name, lastname, deletedAt}`; sin sobre, como los bloques de opciones. `deletedAt` porque los archivados van en la lista y la pantalla los marca |
 | `GET /api/files/orphans`, `/broken-refs` | Diagnóstico de la pantalla de Archivos; su forma la fija esa pantalla |
 | los cinco `/stats` | Un resumen. **No es el mismo en los cinco**: adss, material y tipoObs devuelven `{ total, mostUsed, empty }`; obs devuelve `{ total, unclassified, critical }` y propietario `{ total, mostPostes, mostPendientes }`. La segunda versión afirmaba uno solo |
 | `GET /api/files/entity-stats` | Un objeto de objetos |
@@ -724,15 +724,49 @@ GET /api/bitacora/autores    → bitacora:ver
 Declarado **antes** de `GET /:id_usuario` (§3.2). Devuelve id y nombre de quien
 tiene entradas.
 
-Hoy la pantalla rellena su filtro llamando a `GET /api/usuario/`, que exige
-`seguridad:ver`. Un rol con `bitacora:ver` y sin `seguridad:ver` recibe un 403 que
-la llamada descarta con un `.catch(() => {})` vacío: el desplegable aparece con
-«Todos» y nada más. Parece que no hay usuarios.
+✅ **Hecha.** La pantalla rellenaba su filtro llamando a `GET /api/usuario/`,
+que exige `seguridad:ver`. Un rol con `bitacora:ver` y sin `seguridad:ver` recibe
+un 403 que la llamada descartaba con un `.catch(() => {})` vacío: el desplegable
+aparecía con «Todos» y nada más. Parece que no hay usuarios.
 
-**No es acceso nuevo al directorio**, y conviene decirlo: los nombres ya viajan
-en las propias filas del log, con `bitacora:ver`, desde el `include` de usuario
-que hay en su controlador. Esto es una comodidad sobre datos ya servidos, no una
-puerta nueva.
+**A ningún rol sembrado le pasa hoy**, y conviene decirlo con la misma
+honestidad que §9 exige del resto: el rol 1 tiene los dos permisos, y los roles 2
+y 3 no tienen bitácora, así que quien puede abrir la pantalla puede llamar al
+directorio. Esto es endurecimiento, no una avería viva. Lo que lo hace real es
+que el editor de la matriz crea ese rol en dos clics, y nadie habría sabido por
+qué el filtro salía vacío.
+
+**Los archivados sí van en la lista, y llevan `deletedAt` para poder marcarlos.**
+Es la decisión que faltaba por escribir: son justo a quien busca alguien que
+revisa trabajo antiguo —una persona que ya no está—, y el directorio los deja
+fuera por defecto, que es como lo llamaba la pantalla (`GET /api/usuario/` sí los
+devuelve con `?archived=true`). El desplegable los muestra como «Nombre Apellido
+(archivado)».
+
+**Y sólo el desplegable.** En las filas de la tabla el autor aparece sin marca, y
+es una decisión, no un olvido: marcarlas exigiría que `deletedAt` viajara también
+en el `include` de autor, y ese `include` tiene un techo —`USUARIO_AS_AUTHOR`,
+vigilado por `responseShape.test.ts`— que existe porque este mismo controlador
+llegó a mandar el nombre de usuario escribiendo su propia lista. Ensanchar el
+techo de **todos** los includes de autor de la aplicación para añadir un
+paréntesis a una tabla es mal negocio. La marca va donde alguien **elige** entre
+personas y dos pueden leerse igual; en las filas, el nombre dice quién hizo algo,
+y eso no cambia porque esa persona se vaya.
+
+**Sí hay una ampliación, pequeña y deliberada**, y la primera redacción de este
+párrafo la negaba con un argumento circular: decía que los nombres «ya viajan en
+las propias filas del log», y para las cuentas archivadas eso sólo es cierto
+**desde este mismo cambio** —el `include` que se citaba como prueba es el que B2
+arregló—. Y `deletedAt`, la fecha en que se archivó una cuenta, no viajaba bajo
+`bitacora:ver` por ningún sitio.
+
+Dicho con precisión: quien pueda leer la bitácora podrá saber también cuáles de
+sus autores ya no están, y desde cuándo. Es lo que se busca, no un efecto
+colateral —una lista de autores que omite a quien se fue es la lista equivocada
+para un registro que se consulta justo para revisar su trabajo—, pero es una
+ampliación y llamarla «ninguna» estaba mal. Lo que sigue sin poderse preguntar
+por aquí es quién trabaja en la empresa: una cuenta que nunca tocó el sistema no
+aparece.
 
 ### 5.5 Qué asume el frontend
 
@@ -915,10 +949,20 @@ usándolo. Es el ejemplo exacto de por qué §9 pone que **cada tarea se audita
 antes de empezarla**: en este árbol trabajan tres sesiones y un párrafo puede
 nacer caducado.
 
-Recuento final: **105 − 7 borradas + 5 nuevas (cuatro de opciones y `autores`)
-= 103 rutas.** Y con la advertencia que gobierna todo este documento desde la
-segunda auditoría: esa cifra es para entender el tamaño, no para firmar nada. Se
-movió dos veces en dos días. El manejador de 404 de §3.6 tampoco entra en la
+Recuento, y esta vez contado en vez de arrastrado. **Hoy hay 133 rutas
+montadas, de las cuales 27 son de la familia de autenticación: 106 fuera de
+ella.** Ése es el número de hoy, y es el que el resto de este documento debería
+usar cuando dice «105» —una cifra del día en que se escribió, ya movida por dos
+planes de autenticación y por B2—.
+
+La proyección es otra cosa y conviene no confundirlas: **cuando las familias C y
+D hayan retirado sus 7 rutas, quedarán 99.** La tercera versión escribía «105 − 7
++ 5 = 103» y la cuarta lo corrigió a 102 arreglando sólo el sumando —el cuarto
+endpoint de opciones se borró en `7faa178`, §5.3— sin volver a derivar la base,
+que era el error de verdad. Sirve de recordatorio de la advertencia que gobierna
+todo este documento desde la segunda auditoría: **estas cifras son para entender
+el tamaño, no para firmar nada.** Cinco rutas no-auth desaparecieron entre el día
+del spec y hoy sin que ningún recuento se enterara. El manejador de 404 de §3.6 tampoco entra en la
 cuenta: no es una ruta, es lo que responde cuando no hay ninguna.
 
 ---
@@ -1118,8 +1162,17 @@ cd api && grep -cE '/api/(postes|eventos)|RevicionModel' docs/ARCHITECTURE.md   
 
 ### Familia B — aditivas, no cambian nada existente
 
-Añaden rutas que todavía no llama nadie. Si salen mal, no rompen nada, porque no
-hay quien las use hasta la familia C.
+Añaden rutas que no sustituyen a ninguna: nada deja de funcionar por ellas, y no
+hay contrato que romper.
+
+**Matiz que introdujo B2, y que la primera redacción no admitía.** Esto decía
+«rutas que todavía no llama nadie», dejando toda la orilla del cliente para la
+familia C. Vale para los tres endpoints de opciones, que sustituyen llamadas que
+hoy funcionan. No vale para `/autores`, que no sustituye a nada: existe para
+arreglar un fallo de la pantalla, y sin el cambio del cliente la ruta nace
+muerta. Así que B2 lleva las dos orillas, y su criterio de terminado nombra un
+test de cada repositorio. La regla que queda es la de verdad: **la familia B no
+cambia ningún contrato existente**, y por eso no paga maniobra.
 
 **B1 · Los tres endpoints de opciones, en el servidor (§5).** ✅ Hecha,
 `6f31a26`. La trampa de §3.2 era real —`/opciones` es un literal y hay que
@@ -1137,11 +1190,59 @@ toca hasta la tarea que lo retira.
 cd api && npx vitest run src/routes/opciones.test.ts src/routes/routeOrder.test.ts
 ```
 
-**B2 · `GET /api/bitacora/autores` (§5.4).** Misma trampa: antes de
-`/:id_usuario`.
+**B2 · `GET /api/bitacora/autores` (§5.4).** ✅ Hecha. La trampa de §3.2 era la
+misma que en B1 —el literal antes de `/:id_usuario`— y está probada en las dos
+formas que hacen falta: `routeOrder.test.ts` la vigila genéricamente, y una
+petición real comprueba que `getBitacora` **no** corrió.
+
+Cinco cosas que la tarea añadió sobre lo planeado, de sus dos auditorías:
+
+- **Una migración con un índice**, `idx_bitacoras_id_usuario`, sobre
+  `(id_usuario, id DESC)`. La columna de autor de la bitácora no tenía ninguno, y
+  tres consultas la usan: el historial del perfil, el filtro por usuario de la
+  pantalla, y este endpoint. Medido antes de escribirlo: las dos formas de
+  preguntar «quién tiene entradas» —un `JOIN` con `GROUP BY` y un `EXISTS`—
+  planifican **igual de mal** sin índice, un escaneo secuencial de toda la
+  bitácora. Con él, el `EXISTS` sondea una vez por cuenta y para. **Dos columnas
+  y no una**, que es corrección de la auditoría posterior: las otras dos
+  consultas piden «las últimas cincuenta entradas de esta persona», y con
+  `id_usuario` a secas Postgres tiene que leer y ordenar el historial entero de
+  esa persona para encontrarlas.
+- **El autor dejó de desaparecer de sus propias entradas.** El `include` de
+  `getAllBitacora` colgaba `deletedAt IS NULL` del `ON` del join, así que una
+  entrada escrita por una cuenta ya archivada llegaba con `usuario: null`: la
+  pantalla imprimía `#12` y `BitacoraPanel` —el bloque de actividad de ciudad,
+  evento y poste— no pintaba autor ninguno. 13 entradas de 2 cuentas en los datos
+  de hoy, y una más por cada persona que se archive.
+- **Las dos orillas**, por lo dicho arriba: el cliente pasa a `/autores`, marca
+  a los archivados y **dice en voz alta** que no pudo cargar la lista, en vez del
+  `.catch(() => {})`. Con la excepción del 401, que ya lo cuenta
+  `SesionProvider`: una sesión caducada producía tres avisos, dos de ellos
+  señalando al problema equivocado.
+- **`BitacoraPanel` dejó de mentir**, y esto sí era una avería viva. Ese bloque
+  lee la bitácora desde pestañas gobernadas por `postes`, `eventos` y `ciudades`,
+  y se tragaba el 403 para caer en «Sin actividad registrada en bitácora» — una
+  afirmación sobre el registro, hecha sin saber nada del registro. Los roles
+  sembrados 2 y 3 tienen esos permisos y **no** tienen `bitacora`, así que a
+  Coordinador y Cliente el sistema les venía diciendo, en cada ficha de cada
+  poste, que nunca había pasado nada. Ahora distingue tres respuestas: no hay
+  actividad, no tiene permiso, o no se pudo cargar.
+- **`BITACORA_GATES` en `routeGuards.test.ts`**, y el router entra en
+  `MODULOS_TABULADOS`: tres rutas gobernadas por el mismo par son exactamente la
+  forma en la que llega una cuarta sin puerta y nadie lo nota.
+
+Y una cosa que la auditoría posterior tumbó y hay que dejar escrita, porque el
+texto que la justificaba era mío: **la primera versión de la migración usaba
+`CREATE INDEX IF NOT EXISTS` argumentando que un fallo dejaría el contenedor en
+bucle de reinicio.** No es cierto desde que el `Dockerfile` sacó las migraciones
+del arranque a propósito — «si falla, el despliegue aborta y la versión anterior
+sigue en pie»—. Y `IF NOT EXISTS` compara el nombre y nunca la definición, así
+que un índice hecho a mano con ese nombre sobre otra columna se habría tragado en
+silencio, que es justo la ceguera que el test de al lado existe para cerrar.
 
 ```
-cd api && npx vitest run src/controllers/bitacora.autores.test.ts
+cd api && npx vitest run src/routes/bitacora.autores.test.ts src/migrations/20260903000002-index-bitacora-author.test.ts
+cd web && npx vitest run src/api/Bitacora.api.test.ts src/pages/menu/bitacora/index.test.tsx src/components/BitacoraPanel.test.tsx
 ```
 
 **B3 · Los limitadores del generador a su propio fichero, y aplicados a los seis
@@ -1407,6 +1508,7 @@ el documento sigue teniendo razón.
 | 3.8 propiedad | `routeGuards.test.ts` ya distingue el gate de propiedad del de permiso; se añade que el tercer argumento coincida con el parámetro de la ruta |
 | 3.9 entrada | ✅ `requestShape.test.ts` y `responseShape.test.ts`, ya escritos |
 | 4.1 / 4.2 cliente | Test en `web`: un 403, un 500 y un fallo de red producen `status` 403, 500 y 0; el auto-logout sigue disparando con 401; **y la ventana de step-up sigue abriéndose con un 403 con `code`** — el segundo interceptor que la segunda versión no sabía que existía |
+| 5.4 autores | ✅ `bitacora.autores.test.ts` en `api` —el literal gana al paramétrico porque `getBitacora` no corre, el `where` es un semi-join que nombra la columna cualificada, y las columnas se leen contra `USUARIO_AS_AUTHOR`— y en `web` dos ficheros: `index.test.tsx` comprueba que la pantalla **no** vuelve a pedir el directorio de personal y que filtra por el `id` de la opción, y `BitacoraPanel.test.tsx` que «no hay actividad», «no tiene permiso» y «no se pudo cargar» son tres respuestas y no una |
 | 5 opciones | ✅ `opciones.test.ts`, por endpoint y por bloque: qué bloques devuelve, con qué columnas **exactas pedidas a la base de datos** —leídas del espía y no de la respuesta, porque los modelos están mockeados y las filas serían las del propio test— y que el paramétrico no le robó la ruta, comprobado porque `findOne` no se llamó. Los tres endpoints |
 
 ---
