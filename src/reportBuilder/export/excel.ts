@@ -47,6 +47,11 @@ export interface ExcelInput {
   /** What one row is: "eventos", "tramos". Names the first indicator. */
   noun: string;
   photos?: LoadedPhotos | null;
+  /**
+   * The tab at the bottom of the workbook. Defaults to what every sheet was
+   * called before there was anything but reports to put in one.
+   */
+  sheetName?: string;
 }
 
 /** Native dates and numbers, so the reader can still sort and filter. */
@@ -93,7 +98,7 @@ export async function buildExcel(input: ExcelInput): Promise<Buffer> {
   workbook.creator = "Osefi srl";
   workbook.created = new Date();
 
-  const sheet = workbook.addWorksheet("Reporte", {
+  const sheet = workbook.addWorksheet(input.sheetName ?? "Reporte", {
     views: [{ state: "frozen", ySplit: ROW.HEADER }],
   });
   const lastCol = Math.max(1, columns.length);

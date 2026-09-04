@@ -7,6 +7,8 @@ import { assignable } from "../utils/authorship.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const obsLog = log("obs");
 const handler = makeHandler(obsLog);
@@ -20,14 +22,17 @@ export const getObsStats = handler("getObsStats", async (req: Request, res: Resp
 
 export const getObs = handler("getObs", async (req: Request, res: Response) => {
   const archived = req.query.archived === "true";
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempObs = await ObsModel.findAll({
+  const listado = await listar(ObsModel, {
     order: [["id", "DESC"]],
     paranoid: !archived,
     where: archived ? { deletedAt: { [Op.ne]: null } } : {},
     include: [{ model: TipoObsModel, as: "tipoObs", paranoid: false }],
-  });
-  res.status(200).json(TempObs);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 export const createObs = handler("createObs", async (req: Request, res: Response) => {
   const TempObs = await ObsModel.create(assignable(req.body));

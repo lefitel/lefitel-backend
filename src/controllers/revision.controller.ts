@@ -6,21 +6,26 @@ import { logAction } from "../utils/logAction.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const revisionLog = log("revision");
 const handler = makeHandler(revisionLog);
 
 export const getRevision = handler("getRevision", async (req: Request, res: Response) => {
   const { id_evento } = req.params;
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const revisions = await RevisionModel.findAll({
+  const listado = await listar(RevisionModel, {
     where: { id_evento },
     // Not the whole row: this route is authenticated and nothing more, and
     // the author belongs to the generator's gate. See the attribute list.
     attributes: [...REVISION_PUBLIC_ATTRIBUTES],
     order: [["id", "DESC"]],
-  });
-  res.status(200).json(revisions);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 /**
  * Resolves the event a revision belongs to, for the audit log.

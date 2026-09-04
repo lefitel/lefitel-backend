@@ -81,9 +81,11 @@ const usuarioFindAll = vi.spyOn(UsuarioModel, "findAll");
 /** `getAllBitacora`'s, read for the one assertion about the include. */
 const bitacoraFindAndCountAll = vi.spyOn(BitacoraModel, "findAndCountAll");
 /**
- * `getBitacora`'s query — the handler behind `/:id_usuario`. Left rejecting: a
- * bare spy answers `undefined`, and a shadowed literal would then look merely
- * empty instead of wrong.
+ * A tripwire, since C3: **no listing on this model uses `findAll` any more.**
+ * Both bitácora handlers answer the standard envelope through `listar`, which
+ * counts and fetches in one call. Left rejecting, so a handler that goes back
+ * to `findAll` — and with it to a bare array — fails here rather than quietly
+ * answering a different shape than the one this file pins.
  */
 const bitacoraFindAll = vi.spyOn(BitacoraModel, "findAll");
 
@@ -161,7 +163,9 @@ describe("the route is reachable at all", () => {
     // The assertion this endpoint exists for. `/:id_usuario` is declared seven
     // lines below `/autores`; declared seven lines above, this spy is what runs
     // — and it rejects, so the request would answer 500.
-    expect(bitacoraFindAll, "el literal /autores no ganó al paramétrico /:id_usuario")
+    // `/autores` reads `UsuarioModel` and nothing else, so touching the bitácora
+    // model at all means `/:id_usuario` swallowed the literal.
+    expect(bitacoraFindAndCountAll, "el literal /autores no ganó al paramétrico /:id_usuario")
       .not.toHaveBeenCalled();
   });
 
@@ -170,12 +174,15 @@ describe("the route is reachable at all", () => {
     // literal first is only correct while it does not swallow the parametric
     // route in turn. A single-segment literal cannot, but this is what would
     // notice a future `/autores/:algo`, or `/:id_usuario` accidentally removed.
-    bitacoraFindAll.mockResolvedValue([{ id: 1, action: "login" }] as never);
+    bitacoraFindAndCountAll.mockResolvedValue({ count: 1, rows: [{ id: 1, action: "login" }] } as never);
 
     const res = await request(app).get(`/api/bitacora/${YO}`).set("Cookie", COOKIE);
 
     expect(res.status).toBe(200);
-    expect(bitacoraFindAll).toHaveBeenCalled();
+    expect(bitacoraFindAndCountAll).toHaveBeenCalled();
+    // And in the envelope every listing answers with, since C3. This route used
+    // to hand back a bare array with a `limit` that had no floor at all.
+    expect(Object.keys(res.body).sort()).toEqual(["data", "limit", "page", "total"]);
   });
 });
 

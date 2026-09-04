@@ -13,15 +13,51 @@ import { PropietarioModel } from "../models/propietario.model.js";
 import { RevisionModel, REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.model.js";
 import { SolucionModel } from "../models/solucion.model.js";
 import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
+import type { IEvento } from "../interfaces/index.js";
+import {
+  construirFichero, esFormato, responderFichero, responderFalloDeExport,
+  subtituloDeFiltros, type Columna,
+} from "../exports/tabla.js";
+import { exportSlot } from "../reportBuilder/export/queue.js";
+import { MAX_EXPORT_ROWS } from "../reportBuilder/export/index.js";
+import { etiquetaCriticidad, peorCriticidad } from "../utils/criticidad.js";
+import { nombreDeTramo } from "../utils/tramo.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const eventoLog = log("evento");
 const handler = makeHandler(eventoLog);
 
-export const getEvento = handler("getEvento", async (req: Request, res: Response) => {
-  const { archived, page, limit, filterColumn, filterValue, export: isExport, sortBy, sortOrder } = req.query;
+/**
+ * Everything that decides *which* incidents, resolved once for the endpoints
+ * that need it.
+ *
+ * The twin of `filtroDePostes`, and it exists for the same reason: the list and
+ * the export have to agree row for row. This one carries more, because an
+ * incident is filtered by three things that are not columns of its own table —
+ * the pole it stands on, whether it is resolved, and how bad it is, which lives
+ * in the observation catalogue and is reached by the sub-select below.
+ *
+ * `posteWhere` comes back separately because it does not belong in the root
+ * `where`: it constrains the joined pole, and putting it in the wrong place is
+ * the difference between "incidents on poles named X" and no rows at all.
+ */
+export interface FiltroEventos {
+  where: Record<string, unknown>;
+  order: Order;
+  paranoid: boolean;
+  isArchived: boolean;
+  /** Belongs inside the pole include, never in the root `where`. */
+  posteWhere: Record<string, unknown> | undefined;
+  /** The active filters in the screen\'s own words, for the export to print. */
+  descripcion: string[];
+}
+
+export const filtroDeEventos = (query: Request["query"]): FiltroEventos | string => {
+  const { archived, filterColumn, filterValue, sortBy, sortOrder } = query;
   const isArchived = archived === "true";
 
   const filterCols = Array.isArray(filterColumn) ? filterColumn as string[] : filterColumn ? [filterColumn as string] : [];
@@ -33,24 +69,74 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
     return typeof v === "string" && v.trim() ? v.trim() : undefined;
   };
 
+  /**
+   * The columns this endpoint really filters by, and anything else is refused.
+   *
+   * The pole list got this rule in C3 and this one did not, which left the two
+   * screens disagreeing about what an unrecognised filter means: one answers a
+   * sentence, the other quietly returns every row with the filter chip drawn as
+   * active on screen. The second is worse than an error, because the user reads
+   * the result as the answer to the question they asked.
+   *
+   * Five, and the set is exactly what the screen can send: `description` and
+   * `poste` from the column filter bar, and `state`, `criticality` and
+   * `priority` from the three quick filters above the table.
+   */
+  const FILTRABLE = new Set(["description", "poste", "state", "criticality", "priority"]);
+  const desconocida = filterCols.find((col) => !FILTRABLE.has(col));
+  if (desconocida !== undefined) {
+    return `No se puede filtrar la lista de incidencias por «${desconocida}».`;
+  }
+
   const where: Record<string, unknown> = isArchived ? { deletedAt: { [Op.ne]: null } } : {};
 
+  const descripcion: string[] = [];
+  if (isArchived) descripcion.push("archivadas");
+
   const descVal = getFilterVal("description");
-  if (descVal) where["description"] = { [Op.iLike]: `%${descVal}%` };
+  if (descVal) {
+    where["description"] = { [Op.iLike]: `%${descVal}%` };
+    descripcion.push(`descripción contiene «${descVal}»`);
+  }
 
   const posteVal = getFilterVal("poste");
   const posteWhere = posteVal ? { name: { [Op.iLike]: `%${posteVal}%` } } : undefined;
+  if (posteVal) descripcion.push(`poste contiene «${posteVal}»`);
 
   // `state` is nullable, so "pendiente" cannot be `state = false`: that misses
   // the rows where nobody ever set it. The screen calls anything that is not
   // resolved pending, and so does this.
+  /**
+   * The three closed vocabularies, refused when the value is not one of them.
+   *
+   * `FILTRABLE` above checks the column and this checks the value, and leaving
+   * the second out was the same defect one level deeper:
+   * `?filterColumn=state&filterValue=resuelto` — the Spanish word, an easy
+   * thing to send — matched neither branch, applied nothing, and answered
+   * every incident with the filter drawn as active on screen. Unreachable from
+   * the segmented controls, which only emit these values; reachable from the
+   * API and from the export, which is where a wrong answer travels furthest.
+   *
+   * The criticality bands are checked a few lines down, where their Map is.
+   */
+  const VALORES: Record<string, readonly string[]> = {
+    state: ["pending", "solved"],
+    priority: ["true", "false"],
+  };
+  for (const [col, permitidos] of Object.entries(VALORES)) {
+    const val = getFilterVal(col);
+    if (val !== undefined && !permitidos.includes(val)) {
+      return `No se puede filtrar la lista de incidencias por «${col}» con el valor «${val}».`;
+    }
+  }
+
   const stateVal = getFilterVal("state");
-  if (stateVal === "pending") where["state"] = { [Op.not]: true };
-  if (stateVal === "solved") where["state"] = true;
+  if (stateVal === "pending") { where["state"] = { [Op.not]: true }; descripcion.push("pendientes"); }
+  if (stateVal === "solved") { where["state"] = true; descripcion.push("resueltas"); }
 
   const priorityVal = getFilterVal("priority");
-  if (priorityVal === "true") where["priority"] = true;
-  if (priorityVal === "false") where["priority"] = { [Op.not]: true };
+  if (priorityVal === "true") { where["priority"] = true; descripcion.push("solo prioritarias"); }
+  if (priorityVal === "false") { where["priority"] = { [Op.not]: true }; descripcion.push("sin prioridad"); }
 
   // Criticality is a property of the observation catalogue, not of the event,
   // so both the filter and the sort below reach it the same way: the worst
@@ -82,11 +168,27 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
     ["sin", null],
   ]);
   const critVal = getFilterVal("criticality");
+  // Same rule as the two above: a band this endpoint does not know is refused,
+  // not ignored. Written here rather than in `VALORES` because the list of
+  // bands is the Map itself, and a second copy of it would be a second thing to
+  // keep in step.
+  if (critVal !== undefined && !CRITICALITY_BANDS.has(critVal)) {
+    return `No se puede filtrar la lista de incidencias por «criticality» con el valor «${critVal}».`;
+  }
   const critBand = critVal !== undefined && CRITICALITY_BANDS.has(critVal)
     // `get` returns null for "sin", which is a band, so the presence check
     // above is what decides — not the value.
     ? { range: CRITICALITY_BANDS.get(critVal) ?? null }
     : undefined;
+  const NOMBRE_BANDA: Record<string, string> = {
+    criticas: "gravedad crítica (1-3)",
+    altas: "gravedad alta (4-5)",
+    medias: "gravedad media (6-7)",
+    bajas: "gravedad baja (8-9)",
+    sin: "sin clasificar",
+  };
+  if (critBand && critVal !== undefined) descripcion.push(NOMBRE_BANDA[critVal]);
+
   const critCondition = critBand
     ? literal(
       critBand.range
@@ -95,7 +197,11 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
     )
     : undefined;
 
-  const SORTABLE = new Set(["id", "description", "date", "state", "priority", "createdAt"]);
+  // `deletedAt` for the Archivados tab, which pages on the server since C3 and
+  // would otherwise offer an order the server drops. `updatedAt` for the same
+  // reason: the Columnas menu can show it, its header sorts, and it was not
+  // here — so the arrow moved and the rows did not.
+  const SORTABLE = new Set(["id", "description", "date", "state", "priority", "createdAt", "updatedAt", "deletedAt"]);
   const sortByCols = Array.isArray(sortBy) ? sortBy as string[] : sortBy ? [sortBy as string] : [];
   const sortOrderVals = Array.isArray(sortOrder) ? sortOrder as string[] : sortOrder ? [sortOrder as string] : [];
   const orderEntries = sortByCols.map((col, i) => {
@@ -106,13 +212,31 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
     if (col === "poste")            return [PosteModel, "name", dir];
     if (col === "usuario")      return [UsuarioModel, "name", dir];
     if (col === "propietario")  return [PosteModel, PropietarioModel, "name", dir];
+    if (col === "tramo")        return [PosteModel, { model: CiudadModel, as: "ciudadA" }, "name", dir];
     return SORTABLE.has(col) ? [col, dir] : null;
   }).filter(Boolean);
 
-  const queryOptions = {
+  return {
+    where: critCondition ? { ...where, [Op.and]: [critCondition] } : where,
     order: (orderEntries.length ? orderEntries : [["id", "DESC"]]) as Order,
     paranoid: !isArchived,
-    where: critCondition ? { ...where, [Op.and]: [critCondition] } : where,
+    isArchived,
+    posteWhere,
+    descripcion,
+  };
+};
+
+export const getEvento = handler("getEvento", async (req: Request, res: Response) => {
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
+
+  const filtro = filtroDeEventos(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
+
+  const queryOptions = {
+    order: filtro.order,
+    paranoid: filtro.paranoid,
+    where: filtro.where,
     attributes: { exclude: ["image"] },
     include: [
       {
@@ -129,7 +253,7 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
         model: PosteModel,
         paranoid: false,
         attributes: ["id", "name", "lat", "lng", "id_ciudadA", "id_ciudadB", "id_propietario"],
-        ...(posteWhere ? { where: posteWhere, required: true } : {}),
+        ...(filtro.posteWhere ? { where: filtro.posteWhere, required: true } : {}),
         include: [
           { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
           { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
@@ -153,50 +277,210 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
     ],
   };
 
-  if (isExport === "true") {
-    const data = await EventoModel.findAll(queryOptions);
-    return res.status(200).json(data);
+  // `distinct` because this query joins a `hasMany`: without it Postgres counts
+  // one row per revision and the total is several times the number of incidents.
+  const listado = await listar(EventoModel, queryOptions, paginacion, true);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
+});
+
+// ── Export ────────────────────────────────────────────────────────────
+
+/**
+ * The columns of the incident file.
+ *
+ * Thirteen where the browser had twelve, and the difference is what pays for
+ * the colour. The spreadsheet tints a resolved row green and shades the rest by
+ * how bad they are — the same rule, and the same palette, the report generator
+ * has always used — but it can only tint by a column it is printing: there is
+ * no way to colour a row by a value the sheet does not contain. So the two
+ * columns the tint reads are real columns.
+ *
+ * That is why `Estado` became `Resuelto` with Sí/No rather than staying
+ * Resuelto/Pendiente: the tint needs the boolean, and a boolean column headed
+ * "Estado" reading "Sí" would be a worse cell than either. And why `Gravedad`
+ * is now the number and `Clasificación` its name, where the browser wrote
+ * "3 - Sujeto a árbol" into one: the tint needs the number, and a reader who
+ * only gets the number has to go and find out what 3 means.
+ *
+ * No author column, and no `id_usuario`. The listing sends both in every row;
+ * the screen draws neither, and a file naming the employee behind each of
+ * 1.514 incidents is the report §6 closed `/api/evento/usuario/:id` to prevent.
+ */
+const COLUMNAS_EVENTO: readonly Columna[] = [
+  { key: "n", label: "#", kind: "number" },
+  { key: "poste", label: "Poste", kind: "string" },
+  { key: "tramo", label: "Tramo", kind: "string" },
+  { key: "propietario", label: "Propietario", kind: "string" },
+  { key: "lat", label: "Lat", kind: "number" },
+  { key: "lng", label: "Lng", kind: "number" },
+  { key: "description", label: "Descripción", kind: "string" },
+  { key: "state", label: "Resuelto", kind: "boolean", semantic: "state" },
+  { key: "criticality", label: "Gravedad", kind: "number", semantic: "criticality" },
+  { key: "clasificacion", label: "Clasificación", kind: "string" },
+  { key: "priority", label: "Prioritario", kind: "boolean" },
+  { key: "ultimaRevision", label: "Última revisión", kind: "date" },
+  { key: "observaciones", label: "Observaciones", kind: "string" },
+];
+
+/** What the export query brings back, and nothing else. */
+type EventoExportado = Pick<IEvento, "id" | "description" | "state" | "priority"> & {
+  poste?: {
+    name?: string | null;
+    lat?: number | null;
+    lng?: number | null;
+    ciudadA?: { name?: string | null } | null;
+    ciudadB?: { name?: string | null } | null;
+    propietario?: { name?: string | null } | null;
+  } | null;
+  revisions?: { date: Date | string }[] | null;
+  eventoObs?: { ob?: { name?: string | null; criticality?: number | null } | null }[] | null;
+};
+
+/**
+ * The incident list as a spreadsheet, a CSV or a document.
+ *
+ * POST with no body, filters in the query — the reasons are written out over
+ * `exportarPostes`, and they are the same two here.
+ */
+export const exportarEventos = handler("exportarEventos", async (req: Request, res: Response) => {
+  const { format } = req.query;
+  if (!esFormato(format)) {
+    return res.status(400).json({ message: "Formato no válido. Use «excel», «csv» o «pdf»." });
   }
 
-  const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(100, Math.max(15, Number(limit) || 50));
-  const offset = (pageNum - 1) * limitNum;
+  const filtro = filtroDeEventos(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
 
-  const { count, rows } = await EventoModel.findAndCountAll({
-    ...queryOptions,
-    limit: limitNum,
-    offset,
-    distinct: true,
-  });
+  /**
+   * The rows are read **inside** the slot, not before it.
+   *
+   * The slot exists so that only one export is assembling anything at a time,
+   * and the first version took it only around `construirFichero` — which left
+   * the larger half unprotected. Twenty thousand incidents plus their
+   * revisions and observations, all resident, is a bigger peak than the
+   * workbook built from them; and ten of those can be in flight at once per
+   * person, which is what the budget allows. The report generator resolves
+   * only the viewer outside its slot and runs its query inside, for this
+   * reason.
+   */
+  try {
+    const fichero = await exportSlot.run(async () => {
+    const filas = (await EventoModel.findAll({
+      where: filtro.where,
+      paranoid: filtro.paranoid,
+      order: filtro.order,
+      attributes: ["id", "description", "state", "priority"],
+      include: [
+        { model: RevisionModel, separate: true, attributes: ["id", "date", "id_evento"] },
+        {
+          model: PosteModel,
+          paranoid: false,
+          attributes: ["id", "name", "lat", "lng"],
+          ...(filtro.posteWhere ? { where: filtro.posteWhere, required: true } : {}),
+          include: [
+            { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
+            { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+            { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
+          ],
+        },
+        {
+          model: EventoObsModel,
+          separate: true,
+          attributes: ["id", "id_obs", "id_evento"],
+          include: [{ model: ObsModel, paranoid: false, attributes: ["id", "name", "criticality"] }],
+        },
+        // Joined so `sortBy=usuario` has a table to order by, and read by no
+        // column below. The shared filter maps that order to `UsuarioModel`, the
+        // listing includes it and this did not, so pressing the Creador header
+        // and then Exportar answered a neutral 500 — Postgres refusing an
+        // `ORDER BY "usuario"."name"` with no such table in the query.
+        { model: UsuarioModel, attributes: ["id", "name"] },
+      ],
+      limit: MAX_EXPORT_ROWS + 1,
+    })).map((fila, i) => {
+      const e = fila.toJSON() as EventoExportado;
+      const nivel = peorCriticidad(e.eventoObs);
+      // `Math.max` of an empty list is -Infinity, which becomes an Excel date in
+      // 1899 rather than an empty cell. Hence the length check and not a `??`.
+      const fechas = (e.revisions ?? [])
+        .map((r) => new Date(r.date).getTime())
+        .filter((t) => Number.isFinite(t));
+      return {
+        n: i + 1,
+        poste: e.poste?.name ?? null,
+        tramo: nombreDeTramo(e.poste?.ciudadA, e.poste?.ciudadB),
+        propietario: e.poste?.propietario?.name ?? null,
+        lat: e.poste?.lat ?? null,
+        lng: e.poste?.lng ?? null,
+        description: e.description,
+        state: e.state === true,
+        criticality: nivel,
+        clasificacion: etiquetaCriticidad(nivel),
+        priority: e.priority === true,
+        ultimaRevision: fechas.length ? new Date(Math.max(...fechas)) : null,
+        observaciones: (e.eventoObs ?? []).map((eo) => eo.ob?.name).filter(Boolean).join(", "),
+      };
+    });
 
-  return res.status(200).json({
-    data: rows,
-    total: count,
-    page: pageNum,
-    totalPages: Math.ceil(count / limitNum),
-    limit: limitNum,
-  });
+      return construirFichero({
+        formato: format,
+        columnas: COLUMNAS_EVENTO,
+        filas,
+        titulo: filtro.isArchived ? "Incidencias archivadas" : "Incidencias",
+        subtitulo: subtituloDeFiltros(filtro.descripcion),
+        sustantivo: ["incidencia", "incidencias"],
+        hoja: "Incidencias",
+      });
+    });
+
+    logAction({
+      id_usuario: req.user?.id,
+      action: "EXPORT_EVENTO",
+      entity: "Evento",
+      entity_id: null,
+      detail: `Exportó ${fichero.filas} incidencias a ${format}`,
+      metadata: { formato: format, filas: fichero.filas, bytes: fichero.buffer.length, archivados: filtro.isArchived, filtros: filtro.descripcion },
+      severity: "info",
+      ip_address: req.ip ?? null,
+    });
+
+    return responderFichero(res, fichero);
+  } catch (error) {
+    if (responderFalloDeExport(res, error)) return;
+    throw error;
+  }
 });
 
 export const getEvento_poste = handler("getEvento_poste", async (req: Request, res: Response) => {
   const { id_poste } = req.params;
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempEvento = await EventoModel.findAll({
+  const listado = await listar(EventoModel, {
     where: { id_poste },
     order: [["id", "DESC"]],
-  });
-  res.status(200).json(TempEvento);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 
 export const getEvento_usuario = handler("getEvento_usuario", async (req: Request, res: Response) => {
   const { id_usuario } = req.params;
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempEvento = await EventoModel.findAll({
+  // The envelope earns its keep here more than anywhere: the profile screen and
+  // the staff detail screen both compute "total incidents" and a resolution
+  // percentage from `length`, so a truncated list did not look truncated — it
+  // looked like an appraisal.
+  const listado = await listar(EventoModel, {
     where: { id_usuario },
     order: [["id", "DESC"]],
     include: [{ model: PosteModel, attributes: ["id", "name"] }],
-  });
-  res.status(200).json(TempEvento);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 
 export const searchEvento = handler("searchEvento", async (req: Request, res: Response) => {
@@ -220,6 +504,10 @@ export const searchEvento = handler("searchEvento", async (req: Request, res: Re
       { model: EventoObsModel, include: [{ model: ObsModel, paranoid: false }] },
     ],
   });
+  // 404 rather than 200 with `null`: see `searchPoste`. Here the screen does
+  // guard every read with `?.`, so the result was a detail page with every
+  // field empty and nothing saying why.
+  if (!TempEvento) return res.status(404).json({ message: "El evento no existe." });
   res.status(200).json(TempEvento);
 });
 

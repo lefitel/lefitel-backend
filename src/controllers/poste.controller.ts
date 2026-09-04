@@ -11,15 +11,55 @@ import { MaterialModel } from "../models/material.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
+import type { IPoste } from "../interfaces/index.js";
+import {
+  construirFichero, esFormato, responderFichero, responderFalloDeExport,
+  subtituloDeFiltros, type Columna,
+} from "../exports/tabla.js";
+import { exportSlot } from "../reportBuilder/export/queue.js";
+import { MAX_EXPORT_ROWS } from "../reportBuilder/export/index.js";
+import { nombreDeTramo } from "../utils/tramo.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const posteLog = log("poste");
 const handler = makeHandler(posteLog);
 
-export const getPoste = handler("getPoste", async (req: Request, res: Response) => {
-  const { ciudadA, ciudadB, ciudadId, archived, page, limit, filterColumn, filterValue, export: isExport, sortBy, sortOrder } = req.query;
+/**
+ * Everything that decides *which* poles, resolved once for the two endpoints
+ * that need it.
+ *
+ * The list and the export have to agree row for row, and before the export
+ * moved to the server it did not even try: the button downloaded the whole
+ * table whatever the screen was filtered to, so somebody looking at one stretch
+ * got a file with all 1.687 poles in it and nothing inside saying so. The file
+ * is what the screen shows now, and that only stays true while there is **one**
+ * filter builder. A copy would have drifted the first time a column became
+ * filterable on one of the two.
+ *
+ * It returns the sentence to answer with when a filter names a column this
+ * endpoint does not have. That is a 400 rather than an empty list, and the
+ * caller decides the status because only the caller knows whether it is
+ * answering with JSON or with a file.
+ */
+export interface FiltroPostes {
+  where: Record<string, unknown>;
+  order: [[string, string]];
+  paranoid: boolean;
+  isArchived: boolean;
+  /**
+   * The active filters in the words the screen uses, for the export to print
+   * inside the file. Built here rather than by the exporter because this is
+   * where it is known which of them actually took effect.
+   */
+  descripcion: string[];
+}
+
+export const filtroDePostes = (query: Request["query"]): FiltroPostes | string => {
+  const { ciudadA, ciudadB, ciudadId, archived, filterColumn, filterValue, sortBy, sortOrder } = query;
   const isArchived = archived === "true";
 
   const where: Record<string, unknown> = isArchived
@@ -37,24 +77,101 @@ export const getPoste = handler("getPoste", async (req: Request, res: Response) 
 
   const filterCols = Array.isArray(filterColumn) ? filterColumn as string[] : filterColumn ? [filterColumn as string] : [];
   const filterVals = Array.isArray(filterValue) ? filterValue as string[] : filterValue ? [filterValue as string] : [];
+  /**
+   * The columns this endpoint really filters by.
+   *
+   * Declared, and **anything else is refused**. Before C3 an unknown column was
+   * dropped on the floor: the table sent `filterColumn=deletedAt`, the server
+   * ignored it, and the screen drew every row with the filter chip showing as
+   * active. A filter that quietly does nothing is worse than one that says it
+   * cannot — the user reads the result as the answer to a question nobody asked.
+   */
+  const FILTRABLE = new Set(["name"]);
+  const desconocida = filterCols.find((col) => !FILTRABLE.has(col));
+  if (desconocida !== undefined) {
+    return `No se puede filtrar la lista de postes por «${desconocida}».`;
+  }
+  /**
+   * The filters that took effect, and only those.
+   *
+   * The chain above is exclusive — archived wins over a city, a city wins over a
+   * stretch — so this has to be exclusive too. Written as three independent
+   * `if`s it produced a file of every archived pole subtitled "Filtrado por
+   * archivados · una ciudad", which is the exact failure `subtituloDeFiltros`
+   * exists to prevent: a document making a claim its rows do not support.
+   */
+  const descripcion: string[] = [];
+  if (isArchived) descripcion.push("archivados");
+  else if (ciudadId) descripcion.push("una ciudad");
+  else if (ciudadA && ciudadB) descripcion.push("un tramo");
   filterCols.forEach((col, i) => {
     const val = filterVals[i];
     if (typeof val !== "string" || !val.trim()) return;
-    if (col === "name") where["name"] = { [Op.iLike]: `%${val.trim()}%` };
+    if (col === "name") {
+      where["name"] = { [Op.iLike]: `%${val.trim()}%` };
+      descripcion.push(`nombre contiene «${val.trim()}»`);
+    }
   });
 
-  const SORTABLE = new Set(["id", "name", "date", "createdAt"]);
+  /**
+   * The orders this endpoint can really apply.
+   *
+   * An audit measured the claim that used to be here — that the Archivados tab
+   * offered `material` and `tramo` — and it was false: those two columns are
+   * declared with an `id` and a `cell` and no accessor, so TanStack never made
+   * their headers clickable. `usuario` is the same, and the audit was wrong
+   * about that one in the other direction: it reported the Creador column as
+   * sortable and it is not, for exactly the reason it had just given for the
+   * other two. Checked before believing either of us.
+   *
+   * **`updatedAt` is the real one.** It carries an `accessorKey`, so its header
+   * does sort, the Columnas menu can show it, and it was missing here — the
+   * arrow moved, the request went out, and the same rows came back in
+   * `id DESC`. That is the failure the paragraph above was describing, found in
+   * the column nobody had suspected.
+   *
+   * The mapped entries below stay, dead as three of them are today: they are
+   * what the shared filter owes the export the day a screen adds one accessor,
+   * and an order the listing can express and the file cannot is a 500 — which
+   * is what `sortBy=usuario` on the incident export was until this task.
+   */
+  const SORTABLE = new Set(["id", "name", "date", "createdAt", "updatedAt", "deletedAt"]);
   const sortByCols = Array.isArray(sortBy) ? sortBy as string[] : sortBy ? [sortBy as string] : [];
   const sortOrderVals = Array.isArray(sortOrder) ? sortOrder as string[] : sortOrder ? [sortOrder as string] : [];
   const orderEntries = sortByCols.map((col, i) => {
     const dir = sortOrderVals[i] === "asc" ? "ASC" : "DESC";
+    if (col === "usuario")      return [UsuarioModel, "name", dir];
+    if (col === "material")     return [MaterialModel, "name", dir];
+    if (col === "propietario")  return [PropietarioModel, "name", dir];
+    if (col === "tramo")        return [{ model: CiudadModel, as: "ciudadA" }, "name", dir];
     return SORTABLE.has(col) ? [col, col === "id" && !!ciudadA && !!ciudadB ? "ASC" : dir] : null;
   }).filter(Boolean);
 
-  const queryOptions = {
+  return {
     where,
-    paranoid: !isArchived,
     order: (orderEntries.length ? orderEntries : [["id", ciudadA && ciudadB ? "ASC" : "DESC"]]) as [[string, string]],
+    paranoid: !isArchived,
+    isArchived,
+    descripcion,
+  };
+};
+
+export const getPoste = handler("getPoste", async (req: Request, res: Response) => {
+  // `?export=true` is gone. It changed the **type** of the response on the
+  // same URL — a bare array instead of an envelope — which is the one thing
+  // §3.3 exists to stop, and eight of its fourteen callers never exported
+  // anything: they used it to mean "give me every row". That is `limit=all`
+  // now, and it comes with a ceiling.
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
+
+  const filtro = filtroDePostes(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
+
+  const queryOptions = {
+    where: filtro.where,
+    paranoid: filtro.paranoid,
+    order: filtro.order,
     attributes: {
       include: [[
         literal(`(SELECT COUNT(*) FROM "eventos" WHERE "eventos"."id_poste" = "poste"."id" AND "eventos"."state" = false AND "eventos"."deletedAt" IS NULL)`),
@@ -71,28 +188,144 @@ export const getPoste = handler("getPoste", async (req: Request, res: Response) 
     ],
   };
 
-  if (isExport === "true") {
-    const data = await PosteModel.findAll(queryOptions);
-    return res.status(200).json(data);
+  const listado = await listar(PosteModel, queryOptions, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
+});
+
+// ── Export ────────────────────────────────────────────────────────────
+
+/**
+ * The columns of the pole file — and, which is the point of writing them out,
+ * the only fields that reach it.
+ *
+ * Not borrowed from the listing, because the listing sends more than it shows:
+ * `id_usuario` and the name of whoever registered each pole travel in every row
+ * of `GET /api/poste`. In a paginated response that is a leak somebody has to
+ * go looking for. In a spreadsheet it is a column — sortable, countable, and
+ * naming the employee behind each of 1.687 poles — in the hands of a Cliente
+ * role that §6 deliberately keeps away from exactly that. The screen draws no
+ * such column, so neither does the file.
+ *
+ * The eight are the eight the browser exporter had, with two corrections it
+ * could not make: `#` is a number rather than the text "1", so a spreadsheet
+ * sorts it 1, 2, 10 instead of 1, 10, 2; and the coordinates and the date are
+ * typed, so they can be filtered by range instead of only looked at.
+ */
+const COLUMNAS_POSTE: readonly Columna[] = [
+  { key: "n", label: "#", kind: "number" },
+  { key: "name", label: "Nombre", kind: "string" },
+  { key: "tramo", label: "Tramo", kind: "string" },
+  { key: "material", label: "Material", kind: "string" },
+  { key: "propietario", label: "Propietario", kind: "string" },
+  { key: "lat", label: "Lat", kind: "number" },
+  { key: "lng", label: "Lng", kind: "number" },
+  { key: "date", label: "Fecha en campo", kind: "date" },
+];
+
+/** What the export query brings back, which is `COLUMNAS_POSTE` and nothing else. */
+type PosteExportado = Pick<IPoste, "id" | "name" | "lat" | "lng" | "date"> & {
+  material?: { name?: string | null } | null;
+  propietario?: { name?: string | null } | null;
+  ciudadA?: { name?: string | null } | null;
+  ciudadB?: { name?: string | null } | null;
+};
+
+/**
+ * The pole list as a spreadsheet, a CSV or a document.
+ *
+ * **It is a POST and it has no body**, which looks odd twice over and is
+ * deliberate both times. POST because `requireSameOrigin` only guards the
+ * writing verbs: a GET that builds a workbook is a page anyone can embed
+ * twenty times over in `<img>` tags and have any logged-in employee's browser
+ * fire at the server, which is CPU and memory spent on somebody else's say-so.
+ * No body because the filters travel as query parameters — the very same ones
+ * the listing takes, read by the very same function — and a second way of
+ * expressing "filtered by name" is a second thing to drift.
+ */
+export const exportarPostes = handler("exportarPostes", async (req: Request, res: Response) => {
+  const { format } = req.query;
+  if (!esFormato(format)) {
+    return res.status(400).json({ message: "Formato no válido. Use «excel», «csv» o «pdf»." });
   }
 
-  const pageNum = Math.max(1, Number(page) || 1);
-  const limitNum = Math.min(100, Math.max(15, Number(limit) || 50));
-  const offset = (pageNum - 1) * limitNum;
+  const filtro = filtroDePostes(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
 
-  const { count, rows } = await PosteModel.findAndCountAll({
-    ...queryOptions,
-    limit: limitNum,
-    offset,
-  });
+  /**
+   * The rows are read **inside** the slot, not before it.
+   *
+   * The slot exists so that only one export is assembling anything at a time,
+   * and the first version took it only around `construirFichero` — which left
+   * the larger half unprotected. Twenty thousand incidents plus their
+   * revisions and observations, all resident, is a bigger peak than the
+   * workbook built from them; and ten of those can be in flight at once per
+   * person, which is what the budget allows. The report generator resolves
+   * only the viewer outside its slot and runs its query inside, for this
+   * reason.
+   */
+  try {
+    const fichero = await exportSlot.run(async () => {
+    const filas = (await PosteModel.findAll({
+      where: filtro.where,
+      paranoid: filtro.paranoid,
+      order: filtro.order,
+      attributes: ["id", "name", "lat", "lng", "date"],
+      include: [
+        { model: MaterialModel, paranoid: false, attributes: ["id", "name"] },
+        { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
+        { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
+        { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+        // Joined so that `sortBy=usuario` has a table to order by, and read by no
+        // column below: the file does not name who registered each pole, and §6
+        // is the reason. Without the join Postgres answers "missing FROM-clause
+        // entry" and the user gets a neutral 500 for pressing a column header.
+        { model: UsuarioModel, attributes: ["id", "name"] },
+      ],
+      // One over the ceiling, so the refusal below is reached rather than a file
+      // being built out of a silently truncated table.
+      limit: MAX_EXPORT_ROWS + 1,
+    })).map((fila, i) => {
+      const p = fila.toJSON() as PosteExportado;
+      return {
+        n: i + 1,
+        name: p.name,
+        tramo: nombreDeTramo(p.ciudadA, p.ciudadB),
+        material: p.material?.name ?? null,
+        propietario: p.propietario?.name ?? null,
+        lat: p.lat,
+        lng: p.lng,
+        date: p.date,
+      };
+    });
 
-  return res.status(200).json({
-    data: rows,
-    total: count,
-    page: pageNum,
-    totalPages: Math.ceil(count / limitNum),
-    limit: limitNum,
-  });
+      return construirFichero({
+        formato: format,
+        columnas: COLUMNAS_POSTE,
+        filas,
+        titulo: filtro.isArchived ? "Postes archivados" : "Postes",
+        subtitulo: subtituloDeFiltros(filtro.descripcion),
+        sustantivo: ["poste", "postes"],
+        hoja: "Postes",
+      });
+    });
+
+    logAction({
+      id_usuario: req.user?.id,
+      action: "EXPORT_POSTE",
+      entity: "Poste",
+      entity_id: null,
+      detail: `Exportó ${fichero.filas} postes a ${format}`,
+      metadata: { formato: format, filas: fichero.filas, bytes: fichero.buffer.length, archivados: filtro.isArchived, filtros: filtro.descripcion },
+      severity: "info",
+      ip_address: req.ip ?? null,
+    });
+
+    return responderFichero(res, fichero);
+  } catch (error) {
+    if (responderFalloDeExport(res, error)) return;
+    throw error;
+  }
 });
 
 // `getTramos` and its route `GET /api/poste/tramos` were removed with C2.
@@ -172,6 +405,14 @@ export const searchPoste = handler("searchPoste", async (req: Request, res: Resp
       { model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] },
     ],
   });
+  // 404, and the reason is not tidiness. This answered **200 with a body of
+  // `null`**, and `PosteSheet` decides between "edit" and "create" with
+  // `!!poste?.id`: open the pole list, have somebody else archive a pole, press
+  // Editar on that row, and the form came up titled "Nuevo poste" and saved a
+  // **duplicate**, announcing "Poste creado correctamente". The detail screen
+  // was worse still — it reads `dataPoste.id` with no guard, and this
+  // application has no error boundary anywhere, so the whole app went white.
+  if (!TempPoste) return res.status(404).json({ message: "El poste no existe." });
   res.status(200).json(TempPoste);
 });
 export const updatePoste = handler("updatePoste", async (req: Request, res: Response) => {

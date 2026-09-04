@@ -137,14 +137,38 @@ describe("getEvento — filtro de gravedad", () => {
     expect(text).toContain('eo."id_evento" = "evento"."id"');
   });
 
-  it("ignora una banda que no existe en vez de construir SQL con ella", async () => {
+  it("rechaza una banda que no existe en vez de construir SQL con ella", async () => {
+    // La propiedad que importa sigue siendo la misma — el texto del que llama no
+    // llega jamás a la cadena SQL — y ahora se cumple de una forma más fuerte:
+    // la consulta ni se ejecuta. Esta prueba decía "ignora" y ese era el
+    // comportamiento: la banda desconocida no aplicaba nada y la respuesta era
+    // la lista entera, con el filtro pintado como activo en pantalla. Un filtro
+    // que calla y no hace nada es peor que uno que dice que no puede, que es lo
+    // que el guardián de columnas de este mismo controlador ya sostenía un nivel
+    // más arriba.
     for (const value of ["urgentes", "1", "constructor", "toString", "1 AND 3) OR (1=1"]) {
       vi.clearAllMocks();
       findAndCountAll.mockResolvedValue({ count: 0, rows: [] });
+      const r = res();
+      await getEvento({ query: { filterColumn: "criticality", filterValue: value } } as unknown as Request, r);
+
+      expect(r.status, value).toHaveBeenCalledWith(400);
+      // Y — lo que esta prueba existe para medir — no se llegó a consultar nada,
+      // así que no hay SQL en el que el texto pudiera haberse interpolado.
+      expect(findAndCountAll, value).not.toHaveBeenCalled();
+      // El mensaje repite el valor para que el usuario sepa cuál fue; eso es
+      // texto de una respuesta JSON, no de una consulta.
+      const cuerpo = r.json.mock.calls[0][0] as { message: string };
+      expect(cuerpo.message, value).toContain(value);
+    }
+  });
+
+  it("acepta las cinco bandas, para que la de arriba no pase rechazándolo todo", async () => {
+    for (const value of ["criticas", "altas", "medias", "bajas", "sin"]) {
+      vi.clearAllMocks();
+      findAndCountAll.mockResolvedValue({ count: 0, rows: [] });
       const options = await query({ filterColumn: "criticality", filterValue: value });
-      expect(bandConditions(options.where), value).toHaveLength(0);
-      // And nothing the caller typed reached the query.
-      expect(JSON.stringify(options.where), value).not.toContain(value);
+      expect(bandConditions(options.where), value).toHaveLength(1);
     }
   });
 });

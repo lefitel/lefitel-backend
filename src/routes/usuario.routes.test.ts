@@ -46,6 +46,7 @@ vi.mock("../controllers/usuario.controller.js", () => ({
   deleteUsuario: stub("deleteUsuario"),
   desarchivarUsuario: stub("desarchivarUsuario"),
   desbloquearUsuario: stub("desbloquearUsuario"),
+  exportarUsuarios: stub("exportarUsuarios"),
   getUsuario: stub("getUsuario"),
   rescatarMfaDeUsuario: stub("rescatarMfaDeUsuario"),
   searchUsuario: stub("searchUsuario"),

@@ -5,6 +5,7 @@ import {
   deleteUsuario,
   desarchivarUsuario,
   desbloquearUsuario,
+  exportarUsuarios,
   getUsuario,
   rescatarMfaDeUsuario,
   searchUsuario,
@@ -15,6 +16,7 @@ import {
   updateUsuario,
 } from "../controllers/usuario.controller.js";
 import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
+import { exportLimiter } from "../middleware/limiters.js";
 import { requireStepUp } from "../middleware/requireStepUp.js";
 import { passwordConfirmLimiter } from "../middleware/loginLimiters.js";
 
@@ -214,6 +216,26 @@ router.post(
   rescatarMfaDeUsuario,
 );
 router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);
+
+/**
+ * The list as a file.
+ *
+ * **POST, for a download.** `requireSameOrigin` only guards the writing verbs,
+ * so a GET that assembles a spreadsheet is something any page on the internet
+ * can make a logged-in employee's browser do, twenty times over, from an
+ * `<img>` tag it never gets to read. Nothing is stolen; the server just spends
+ * somebody else's memory and the only export slot it has. The report
+ * generator's own export is a POST for this reason.
+ *
+ * The filters ride in the query string all the same, because they are the
+ * listing's own parameters read by the listing's own function — see
+ * `filtroDe*` in the controller.
+ *
+ * `exportLimiter` is shared with the generator on purpose: what is being
+ * rationed is the one slot that builds documents, and a per-route budget would
+ * let one person hold it four times over by rotating between the routes.
+ */
+router.post("/export", requirePermission("seguridad", "ver"), exportLimiter, exportarUsuarios);
 
 // The full directory backs the security and bitácora screens.
 router.get("/", requirePermission("seguridad", "ver"), getUsuario);

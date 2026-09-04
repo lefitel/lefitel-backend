@@ -7,6 +7,8 @@ import { assignable } from "../utils/authorship.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const adssLog = log("adss");
 const handler = makeHandler(adssLog);
@@ -34,13 +36,16 @@ export const getAdssStats = handler("getAdssStats", async (req: Request, res: Re
 
 export const getAdss = handler("getAdss", async (req: Request, res: Response) => {
   const archived = req.query.archived === "true";
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempAdss = await AdssModel.findAll({
+  const listado = await listar(AdssModel, {
     order: [["id", "DESC"]],
     paranoid: !archived,
     where: archived ? { deletedAt: { [Op.ne]: null } } : {},
-  });
-  res.status(200).json(TempAdss);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 export const createAdss = handler("createAdss", async (req: Request, res: Response) => {
   const TempAdss = await AdssModel.create(assignable(req.body));

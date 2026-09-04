@@ -19,6 +19,8 @@ import type { Request, Response } from "express";
 
 const rolFindOne = vi.fn();
 const rolRestore = vi.fn();
+// `findAndCountAll` and no longer `findAll`: since C3 every listing answers
+// the same envelope, and the count comes back with the rows.
 const rolFindAll = vi.fn();
 const usuarioCount = vi.fn();
 const logAction = vi.fn();
@@ -27,7 +29,7 @@ vi.mock("../models/rol.model.js", () => ({
   RolModel: {
     findOne: (...a: unknown[]) => rolFindOne(...a),
     restore: (...a: unknown[]) => rolRestore(...a),
-    findAll: (...a: unknown[]) => rolFindAll(...a),
+    findAndCountAll: (...a: unknown[]) => rolFindAll(...a),
   },
 }));
 // Mocked rather than real: `usuario.model.ts` calls `RolModel.hasMany` while
@@ -160,7 +162,7 @@ describe("desarchivarRol", () => {
 
 describe("getRol", () => {
   it("hides archived roles by default", async () => {
-    rolFindAll.mockResolvedValue([]);
+    rolFindAll.mockResolvedValue({ count: 0, rows: [] });
 
     await getRol(req({}, {}), fakeRes());
 
@@ -170,7 +172,7 @@ describe("getRol", () => {
   });
 
   it("lists only the archived ones when asked", async () => {
-    rolFindAll.mockResolvedValue([]);
+    rolFindAll.mockResolvedValue({ count: 0, rows: [] });
 
     await getRol(req({}, { archived: "true" }), fakeRes());
 
@@ -182,7 +184,7 @@ describe("getRol", () => {
   });
 
   it("treats any other value of the flag as 'not archived'", async () => {
-    rolFindAll.mockResolvedValue([]);
+    rolFindAll.mockResolvedValue({ count: 0, rows: [] });
 
     await getRol(req({}, { archived: "1" }), fakeRes());
 

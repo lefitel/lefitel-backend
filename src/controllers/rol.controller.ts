@@ -8,6 +8,8 @@ import { assignable } from "../utils/authorship.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const rolLog = log("rol");
 const handler = makeHandler(rolLog);
@@ -17,13 +19,16 @@ export const getRol = handler("getRol", async (req: Request, res: Response) => {
   // manageable entity here uses. Ungated on purpose, like the rest of this read:
   // every screen that shows a person needs the name of their role.
   const isArchived = req.query.archived === "true";
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempRol = await RolModel.findAll({
+  const listado = await listar(RolModel, {
     where: isArchived ? { deletedAt: { [Op.ne]: null } } : undefined,
     paranoid: !isArchived,
     order: [["id", "DESC"]],
-  });
-  res.status(200).json(TempRol);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 
 export const createRol = handler("createRol", async (req: Request, res: Response) => {

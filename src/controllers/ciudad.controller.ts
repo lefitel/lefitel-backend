@@ -7,19 +7,24 @@ import { assignable } from "../utils/authorship.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const ciudadLog = log("ciudad");
 const handler = makeHandler(ciudadLog);
 
 export const getCiudad = handler("getCiudad", async (req: Request, res: Response) => {
   const archived = req.query.archived === "true";
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempCiudad = await CiudadModel.findAll({
+  const listado = await listar(CiudadModel, {
     order: [["id", "DESC"]],
     paranoid: !archived,
     where: archived ? { deletedAt: { [Op.ne]: null } } : {},
-  });
-  res.status(200).json(TempCiudad);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 export const createCiudad = handler("createCiudad", async (req: Request, res: Response) => {
   const TempCiudad = await CiudadModel.create(assignable(req.body));

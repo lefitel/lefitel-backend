@@ -299,7 +299,7 @@ nadie las envuelva por parecerse a un listado:
 
 | Ruta | Por qué no es un listado |
 |---|---|
-| `GET /api/evento/:id/solucion` | Relación 1:1. Devuelve el objeto **o `null`**, y `null` es el caso normal — un evento sin resolver. Envolverla haría `{data: null}`, que es *truthy*, y **todo evento pendiente aparecería como resuelto** |
+| `GET /api/solucion/evento/:id_evento` | Relación 1:1. Devuelve el objeto **o `null`**, y `null` es el caso normal — un evento sin resolver. Envolverla haría `{data: null}`, que es *truthy*, y **todo evento pendiente aparecería como resuelto**. La dirección de esta fila decía `GET /api/evento/:id/solucion`, que es la que tendrá después de D1 y no la que tiene: hoy el módulo está montado aparte y `listShape.test.ts` la clasifica con su nombre real |
 | `GET /api/dashboard/` | Dos colecciones nombradas en un objeto |
 | `GET /api/permisos/` | Cuatro colecciones paralelas |
 | los tres `/opciones` (§5) | Varias colecciones nombradas en un objeto, cada una con su proyección — la misma forma que `/api/permisos/`. Faltaban en esta tabla y ya estaban montados |
@@ -310,6 +310,48 @@ nadie las envuelva por parecerse a un listado:
 | `GET /api/generador/catalogo` | Un árbol |
 | los seis de `/api/reporte/` | Su forma la fija la pantalla de informes y no cambia en este arco. **Tres de los seis sí devuelven filas de `eventos`** con sus includes —general, tramo y recorrido—, así que la justificación de la segunda versión («filas calculadas») era falsa para la mitad. Se quedan sin sobre porque ninguno pagina; acotarlos es trabajo aparte (§9, familia E) |
 | `GET /api/generador/reportes` | Pagina por `offset`, y su cliente también. Conserva `rows`/`offset` |
+
+**Cuarta categoría: la descarga.** Un `POST` cuya respuesta es un fichero. No
+existía cuando se escribió esta sección porque no había ninguna fuera del
+generador, y C3 añadió tres: `POST /api/poste/export`, `/api/evento/export` y
+`/api/usuario/export`. No es un listado ni una agregada, y meterla en la tabla de
+arriba habría dejado una prueba en verde cuya frase ya no describía lo que
+comprueba — esa tabla se afirma sobre respuestas JSON, y un `.xlsx` no es un
+objeto. Lleva su propia casilla en `listShape.test.ts`, con su propio barrido.
+
+Lo que una descarga promete, y lo que la prueba mide:
+
+- **`Content-Disposition: attachment`**, con el nombre en sus dos formas — la
+  codificada, para que los acentos sobrevivan, y una ASCII para lo que ignore la
+  RFC 5987. Llega al navegador sólo porque `app.ts` expone esa cabecera en CORS;
+  sin eso, todas las descargas se llaman «download» y nada falla.
+- **`Cache-Control: no-store`**, por el mismo motivo que los seis informes fijos:
+  esto es el registro de activos de una empresa saliendo del sistema.
+- **Un `Content-Type` que no es JSON**, y un cuerpo que no es el sobre.
+- **Sus propios topes**, que no son el de los listados. `MAX_LIST_ROWS` gobierna
+  `limit=all` y su mensaje dice «pida la lista por páginas», que es un consejo
+  imposible de seguir mientras te descargas un fichero. Una descarga se corta por
+  filas (20.000), por celdas según el formato (200.000 en hoja de cálculo, 80.000
+  en documento) y por peso del fichero terminado (25 MB) — los tres números del
+  generador, medidos donde están definidos — y responde **`413`**.
+
+  `413` aquí y `422` en un listado no es una contradicción, aunque lo parezca. El
+  argumento de más abajo contra el `413` es que un cliente no puede distinguirlo
+  de «tu foto es demasiado grande», y eso vale en un router que acepta subidas;
+  estas tres rutas no aceptan ninguna, y su vecina de significado — la
+  exportación del generador — ya responde `413` desde que existe. Un solo código
+  para «el fichero que pides no se puede construir», en las cuatro.
+
+**Y son `POST`, para una descarga.** `requireSameOrigin` sólo guarda los verbos
+que escriben, así que un `GET` que arma una hoja de cálculo es algo que
+cualquier página de internet puede hacer ejecutar al navegador de un empleado con
+sesión, veinte veces seguidas, desde un `<img>` que nunca llega a leer. No se
+lleva nada: gasta memoria ajena y la única plaza que el proceso tiene para armar
+documentos. Es la misma puerta abierta que `reporte.routes.ts` dejó anotada como
+deuda de B3 para los seis informes; estas tres nacen sin ella. Los filtros viajan
+igualmente en la cadena de consulta, porque son los del listado y los lee la
+misma función — una segunda forma de decir «filtrado por nombre» es una segunda
+cosa que se desincroniza.
 
 **Fuera `?export=true`.** Hoy ese parámetro cambia el tipo de la respuesta en la
 misma URL, y el frontend vive con la consecuencia: cuatro funciones sobre `GET
@@ -366,11 +408,21 @@ Y hay un segundo uso que el nombre esconde: `exportPostes(true)` y
 `exportEventos(true)` **no exportan nada** — son el cargador de la pestaña
 «Archivados». Quitar `export=true` también la rompe.
 
-Las dos cosas se deciden al empezar C3, y son decisiones de verdad, no detalles:
-o el techo distingue por destino, o las exportaciones de navegador pasan a
-construirse en el servidor como las del generador, o la pestaña de archivados
-deja de pedir todas las filas de golpe. La tercera es la barata y probablemente
-la correcta.
+**Decidido en C3, y se hicieron las dos** (Isaias, 4 de septiembre): la pestaña
+de archivados pagina en el servidor como la de al lado, y las nueve
+exportaciones de navegador se construyen en el servidor como las del generador.
+La tercera opción — que el techo distinguiera por destino — se descartó: era la
+única que dejaba en pie la duplicación que causó el problema.
+
+Lo que decidió el empate no fue el techo, que hoy no muerde con 1.687 postes y
+1.514 incidencias, sino lo que encontró la auditoría previa dentro de esas
+doscientas líneas copiadas tres veces: un PDF que dibujaba su pie en el
+milímetro 212 de una hoja de 210 — sin números de página en ninguna página, en un
+documento que va al cliente —, otro con los anchos de columna de un diseño que
+había perdido una columna, fechas que cambiaban según el huso del portátil que
+exportaba, y el mismo escapador de CSV en los tres sin defensa contra lo único
+para lo que existe un escapador de CSV. Ninguna de las tres pantallas tenía una
+sola prueba sobre su fichero, porque en el navegador no se podía mirar dentro.
 
 **Por qué el sobre también en los catálogos.** Un catálogo de doce materiales
 envuelto responde `page: 1` y `total: 12`, que hoy no aporta nada. Aporta el día que la
@@ -1477,11 +1529,47 @@ Tres decisiones que la segunda versión dejaba a C3, tomadas o encaminadas:
   tabla de al lado, que ya es `manualPagination`. Cinco líneas de `web`, sin
   cambio de servidor, y se lleva por delante dos de los catorce llamantes de
   `?export=true`.
-- **Los botones de Excel, CSV y PDF siguen construyéndose en el navegador por
-  ahora**, con `limit=all` y el cortafuegos de arriba. La base tiene unas 1.400
-  incidencias y 1.700 postes; el techo de 5.000 no muerde hoy ni con crecimiento
-  normal. Pasarlos al servidor, como hace el generador, es la práctica completa y
-  queda anotado como trabajo cuando el techo se acerque.
+- **Los nueve botones de Excel, CSV y PDF se construyen en el servidor**, en
+  `POST /api/{poste,evento,usuario}/export` (§3.3, cuarta categoría). No fue por
+  el techo — con 1.687 postes y 1.514 incidencias no muerde — sino porque la
+  auditoría previa encontró diez defectos dentro de las doscientas líneas
+  copiadas en cada pantalla, y ninguno era comprobable desde una prueba de
+  navegador. La hoja de cálculo y el documento son los del generador, así que
+  las incidencias salen con las filas resueltas en verde y el resto teñido por
+  gravedad, como el resto del producto; el CSV es nuevo y defiende contra la
+  inyección de fórmulas, que las cinco copias del navegador no hacían.
+  **Y el fichero es lo que la pantalla muestra**: los filtros, el orden y la
+  pestaña viajan con la petición, leídos en el servidor por la misma función que
+  usa el listado. El botón de antes no mandaba un solo parámetro.
+- **Y lo que la auditoría posterior encontró debajo de todo esto, que no era de
+  C3 y lo invalidaba entero: los filtros nunca llegaban al servidor.** Axios
+  escribe un parámetro repetido como `filterColumn[]=name`; Express 5 cambió su
+  lector de consultas por defecto de `extended` a `simple`, y `simple` no
+  interpreta los corchetes. El servidor recibía un parámetro **llamado**
+  `filterColumn[]` y nada bajo `filterColumn`, así que todos los controladores
+  leían `undefined`, lo normalizaban a lista vacía y contestaban la tabla entera
+  — con el chip del filtro dibujado como activo en la pantalla. Los tres
+  controles de incidencias, la barra de filtros de columna y todo el orden por
+  cabecera: nada de eso funcionaba, ni antes de este arco.
+
+  Ninguna de las dos suítes podía verla. Las del cliente simulan los módulos de
+  la API, así que jamás construían una cadena de consulta real; las del servidor
+  hablan por `supertest`, que escribe las listas como claves repetidas — la
+  única forma que sí funciona. Lo único que ninguna de las dos medía era la
+  costura, y era lo único roto. Ahora la mide `listado.test.ts` en `web`.
+
+  Se arregló en el cliente (`paramsSerializer: { indexes: null }`, que escribe
+  claves repetidas) y no en el servidor. La otra opción de una línea,
+  `app.set("query parser", "extended")`, cambia el lector para **todas** las
+  rutas de la API y mete `qs`, que además convierte `?a[b][c]=1` en un objeto
+  anidado donde todos los manejadores esperan una cadena. Ensanchar la forma de
+  `req.query` en toda la superficie para arreglar cómo un cliente escribe una
+  lista es el cambio grande y el arriesgado.
+- **Dos cosas que quedan dichas y sin hacer.** Las pestañas «Archivados» de
+  postes e incidencias **no tienen botón de exportar**, ni lo tenían antes; el
+  servidor ya lo soporta y añadirlo es el menú repetido. Y la pantalla de
+  Seguridad filtra y pagina en el navegador, así que su fichero es el directorio
+  entero — como siempre fue — y lo dice en su subtítulo en vez de callarlo.
 - `AddEventoPageSheet` pide los postes con `GET /api/poste/?limit=all`: es un
   problema de peso (0,7 MB en un desplegable), no de permiso —todo rol que puede
   crear incidencias tiene `postes:ver`—, y no bloquea C3.

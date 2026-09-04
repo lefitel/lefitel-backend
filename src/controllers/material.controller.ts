@@ -7,6 +7,8 @@ import { assignable } from "../utils/authorship.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const materialLog = log("material");
 const handler = makeHandler(materialLog);
@@ -34,13 +36,16 @@ export const getMaterialStats = handler("getMaterialStats", async (req: Request,
 
 export const getMaterial = handler("getMaterial", async (req: Request, res: Response) => {
   const archived = req.query.archived === "true";
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempMaterial = await MaterialModel.findAll({
+  const listado = await listar(MaterialModel, {
     order: [["id", "DESC"]],
     paranoid: !archived,
     where: archived ? { deletedAt: { [Op.ne]: null } } : {},
-  });
-  res.status(200).json(TempMaterial);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 export const createMaterial = handler("createMaterial", async (req: Request, res: Response) => {
   const TempMaterial = await MaterialModel.create(assignable(req.body));

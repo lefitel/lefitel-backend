@@ -8,6 +8,8 @@ import { assignable } from "../utils/authorship.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const propietarioLog = log("propietario");
 const handler = makeHandler(propietarioLog);
@@ -64,13 +66,16 @@ export const getPropietarioStats = handler("getPropietarioStats", async (req: Re
 
 export const getPropietario = handler("getPropietario", async (req: Request, res: Response) => {
   const archived = req.query.archived === "true";
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempPropietario = await PropietarioModel.findAll({
+  const listado = await listar(PropietarioModel, {
     order: [["id", "DESC"]],
     paranoid: !archived,
     where: archived ? { deletedAt: { [Op.ne]: null } } : {},
-  });
-  res.status(200).json(TempPropietario);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
 export const createPropietario = handler("createPropietario", async (req: Request, res: Response) => {
   const TempPropietario = await PropietarioModel.create(assignable(req.body));

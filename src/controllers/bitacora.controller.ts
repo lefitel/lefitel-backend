@@ -5,6 +5,8 @@ import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const bitacoraLog = log("bitacora");
 const handler = makeHandler(bitacoraLog);
@@ -34,9 +36,8 @@ const CON_ENTRADAS = literal(
 );
 
 export const getAllBitacora = handler("getAllBitacora", async (req: Request, res: Response) => {
-  const page   = Math.max(Number(req.query.page)  || 1,   1);
-  const limit  = Math.min(Number(req.query.limit) || 50, 100);
-  const offset = (page - 1) * limit;
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
   const { id_usuario, action, entity, entity_id, from, to, severity, sortBy, sortOrder } = req.query;
 
   const where: WhereOptions = {};
@@ -60,11 +61,9 @@ export const getAllBitacora = handler("getAllBitacora", async (req: Request, res
     return SORTABLE.has(col) ? [col, dir] : null;
   }).filter(Boolean);
 
-  const { count, rows } = await BitacoraModel.findAndCountAll({
+  const listado = await listar(BitacoraModel, {
     where,
     order: orderEntries.length ? orderEntries as [[string, string]] : [["id", "DESC"]],
-    limit,
-    offset,
     include: [{
       model: UsuarioModel,
       attributes: [...USUARIO_AS_AUTHOR],
@@ -80,8 +79,13 @@ export const getAllBitacora = handler("getAllBitacora", async (req: Request, res
       // archived from here on.
       paranoid: false,
     }],
-  });
-  res.status(200).json({ data: rows, total: count });
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  // Half an envelope before C3: `{data, total}` with no `page` and no `limit`,
+  // so a caller could not tell a complete answer from a truncated one — and
+  // `BitacoraPanel`, which never sends a `limit`, has been showing the first
+  // fifty entries of a sheet's history as though they were the whole of it.
+  res.status(200).json(listado);
 });
 
 /**
@@ -145,12 +149,17 @@ export const getAutoresBitacora = handler("getAutoresBitacora", async (_req: Req
 
 export const getBitacora = handler("getBitacora", async (req: Request, res: Response) => {
   const { id_usuario } = req.params;
-  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const data = await BitacoraModel.findAll({
+  // This reader had no floor at all, so `?limit=-5` reached Postgres as
+  // `LIMIT -5` and came back as a neutral 500 — and this route is gated by
+  // `requireSelfOrPermission`, so any live session could trigger it on its own
+  // log without holding a single permission.
+  const listado = await listar(BitacoraModel, {
     where: { id_usuario },
     order: [["id", "DESC"]],
-    limit,
-  });
-  res.status(200).json(data);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  res.status(200).json(listado);
 });

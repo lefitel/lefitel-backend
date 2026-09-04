@@ -15,9 +15,17 @@ import { can } from "../permissions/store.js";
 import { BCRYPT_COST } from "../config/security.js";
 import { validarPassword } from "../utils/password.js";
 import { whereUsernameIs } from "../utils/username.js";
+import {
+  construirFichero, esFormato, responderFichero, responderFalloDeExport,
+  subtituloDeFiltros, type Columna,
+} from "../exports/tabla.js";
+import { exportSlot } from "../reportBuilder/export/queue.js";
+import { MAX_EXPORT_ROWS } from "../reportBuilder/export/index.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerPaginacion } from "../utils/paginacion.js";
+import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
 
 const usuarioLog = log("usuario");
 const handler = makeHandler(usuarioLog);
@@ -150,16 +158,145 @@ function isUsernameUniqueViolation(error: unknown): boolean {
 
 export const getUsuario = handler("getUsuario", async (req: Request, res: Response) => {
   const archived = req.query.archived === "true";
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
-  const TempUsuario = await UsuarioModel.findAll({
+  const listado = await listar(UsuarioModel, {
     order: [["id", "DESC"]],
     attributes: { exclude: ["pass"] },
     include: [{ model: RolModel }],
     paranoid: !archived,
     where: archived ? { deletedAt: { [Op.ne]: null } } : {},
-  });
-  res.status(200).json(TempUsuario);
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json(listado);
 });
+// ── Export ────────────────────────────────────────────────────────────
+
+/**
+ * The columns of the staff directory file.
+ *
+ * **This list is the security control of this endpoint**, and the reason it is
+ * written out instead of borrowed from `getUsuario` above. That handler
+ * projects `attributes: { exclude: ["pass"] }` — a blacklist of exactly one
+ * field — so every row it sends also carries `email`, `email_verified_at`,
+ * `mfa_grace_until`, `locked_until` and `failed_attempts`. On the screen those
+ * feed the lock and verification badges. In a spreadsheet that gets forwarded
+ * they are something else entirely: the recovery address of every account, and
+ * a column saying **which accounts can currently sign in without a second
+ * factor and until when**. Reusing the listing's projection here would have
+ * turned a directory export into a target list.
+ *
+ * `Nacimiento` is on the list because it was on the browser's list, not
+ * because the screen shows it — no column of the users table does. It is
+ * flagged rather than silently dropped: taking data out of a file people
+ * already use is a decision, not a cleanup.
+ */
+const COLUMNAS_USUARIO: readonly Columna[] = [
+  { key: "n", label: "#", kind: "number" },
+  { key: "name", label: "Nombre", kind: "string" },
+  { key: "lastname", label: "Apellido", kind: "string" },
+  { key: "user", label: "Usuario", kind: "string" },
+  { key: "phone", label: "Teléfono", kind: "string" },
+  { key: "rol", label: "Rol", kind: "string" },
+  { key: "birthday", label: "Nacimiento", kind: "date" },
+  { key: "createdAt", label: "Registrado", kind: "date" },
+];
+
+type UsuarioExportado = {
+  name?: string | null;
+  lastname?: string | null;
+  user?: string | null;
+  phone?: string | null;
+  birthday?: Date | string | null;
+  createdAt?: Date | string | null;
+  rol?: { name?: string | null } | null;
+};
+
+/**
+ * The staff directory as a spreadsheet, a CSV or a document.
+ *
+ * Unlike its two siblings this one takes no filters beyond the archived tab,
+ * and that is not an omission: the Seguridad screen filters, sorts and pages
+ * **in the browser** over a directory it holds whole, so there is nothing on
+ * the wire for the server to honour. Its button already exported the entire
+ * directory rather than the filtered view; the difference now is that the file
+ * says so on its second line instead of leaving the reader to guess.
+ */
+export const exportarUsuarios = handler("exportarUsuarios", async (req: Request, res: Response) => {
+  const { format } = req.query;
+  if (!esFormato(format)) {
+    return res.status(400).json({ message: "Formato no válido. Use «excel», «csv» o «pdf»." });
+  }
+  const archived = req.query.archived === "true";
+
+  /**
+   * The rows are read **inside** the slot, not before it.
+   *
+   * The slot exists so that only one export is assembling anything at a time,
+   * and the first version took it only around `construirFichero` — which left
+   * the larger half unprotected. Twenty thousand incidents plus their
+   * revisions and observations, all resident, is a bigger peak than the
+   * workbook built from them; and ten of those can be in flight at once per
+   * person, which is what the budget allows. The report generator resolves
+   * only the viewer outside its slot and runs its query inside, for this
+   * reason.
+   */
+  try {
+    const fichero = await exportSlot.run(async () => {
+    const filas = (await UsuarioModel.findAll({
+      order: [["id", "DESC"]],
+      attributes: ["id", "name", "lastname", "user", "phone", "birthday", "createdAt"],
+      include: [{ model: RolModel, attributes: ["id", "name"] }],
+      paranoid: !archived,
+      where: archived ? { deletedAt: { [Op.ne]: null } } : {},
+      limit: MAX_EXPORT_ROWS + 1,
+    })).map((fila, i) => {
+      const u = fila.toJSON() as UsuarioExportado;
+      return {
+        n: i + 1,
+        name: u.name,
+        lastname: u.lastname,
+        user: u.user,
+        phone: u.phone ?? null,
+        rol: u.rol?.name ?? null,
+        birthday: u.birthday ?? null,
+        createdAt: u.createdAt ?? null,
+      };
+    });
+
+      return construirFichero({
+        formato: format,
+        columnas: COLUMNAS_USUARIO,
+        filas,
+        titulo: archived ? "Usuarios archivados" : "Usuarios",
+        subtitulo: subtituloDeFiltros(archived ? ["archivados"] : []),
+        sustantivo: ["usuario", "usuarios"],
+        hoja: "Usuarios",
+      });
+    });
+
+    logAction({
+      id_usuario: req.user?.id,
+      action: "EXPORT_USUARIO",
+      entity: "Usuario",
+      entity_id: null,
+      detail: `Exportó el directorio de ${fichero.filas} usuarios a ${format}`,
+      metadata: { formato: format, filas: fichero.filas, bytes: fichero.buffer.length, archivados: archived },
+      // Louder than its two siblings, and than most writes. This is the moment
+      // the staff directory — names, telephones, birth dates — stops being
+      // something behind a session and becomes a file that can be forwarded.
+      severity: "warning",
+      ip_address: req.ip ?? null,
+    });
+
+    return responderFichero(res, fichero);
+  } catch (error) {
+    if (responderFalloDeExport(res, error)) return;
+    throw error;
+  }
+});
+
 export const searchUsuario = handler("searchUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;
 
@@ -168,6 +305,9 @@ export const searchUsuario = handler("searchUsuario", async (req: Request, res: 
     attributes: { exclude: ["pass"] },
     include: [{ model: RolModel }],
   });
+  // 404 rather than 200 with `null`. `searchUsuario_user`, a few lines below,
+  // has answered 404 since it was written; these two never agreed.
+  if (!TempUsuario) return res.status(404).json({ message: "El usuario no existe." });
   res.status(200).json(TempUsuario);
 });
 

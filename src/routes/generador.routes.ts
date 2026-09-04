@@ -1,5 +1,5 @@
 import { Router } from "express";
-import rateLimit, { ipKeyGenerator } from "express-rate-limit";
+import rateLimit from "express-rate-limit";
 import {
   getCatalogo,
   postConteo,
@@ -13,12 +13,14 @@ import {
   postDuplicar,
 } from "../controllers/generador.controller.js";
 import { requirePermission } from "../middleware/requirePermission.js";
+// `perUser` and the export budget moved to `middleware/limiters.ts` when the
+// pole, incident and user lists gained exports of their own. The budget is
+// **shared with them by design**, not merely reused: what it rations is the one
+// slot in the process that assembles a document, so four separate budgets would
+// let one person hold that slot four times over.
+import { exportLimiter, perUser } from "../middleware/limiters.js";
 
 const router = Router();
-
-/** The key every limiter here counts against. */
-const perUser = (req: { user?: { id?: number }; ip?: string }) =>
-  req.user?.id != null ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip ?? "")}`;
 
 /**
  * Running a report is the only endpoint here that can hold a database
@@ -52,20 +54,6 @@ const conteoLimiter = rateLimit({
   limit: 120,
   keyGenerator: perUser,
   message: { message: "Demasiadas comprobaciones seguidas. Espere un momento." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-/**
- * Exporting reads the whole report and, for a spreadsheet, thousands of
- * photographs from disk. Ten a minute is generous for a person clicking a
- * button and low enough that a script cannot use it to exhaust the server.
- */
-const exportLimiter = rateLimit({
-  windowMs: 60_000,
-  limit: 10,
-  keyGenerator: perUser,
-  message: { message: "Demasiadas exportaciones seguidas. Espere un momento e intente de nuevo." },
   standardHeaders: true,
   legacyHeaders: false,
 });

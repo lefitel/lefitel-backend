@@ -840,6 +840,18 @@ const EVENTOS_GATES: Record<string, string> = {
   // left 1.421 tests green. Now `MODULOS_TABULADOS` below holds this router to
   // completeness too, so the next one cannot repeat it.
   "GET /api/evento/opciones": "eventos.ver",
+  // The permission §6 assigns to the listing this export is built from, which
+  // for poles and incidents is **stricter than the listing itself asks today**:
+  // those two `GET /` carry no gate at all and sit in
+  // `READ_GATE_NOT_APPLICABLE` below, the list C5 exists to empty. The export
+  // is not going to join that list on its way in.
+  //
+  // Deliberately not an `exportar` action of its own. A file adds a shape over
+  // `?limit=all`, not a reach; and a new action costs five coordinated pieces,
+  // one of which is a migration that seeds the cell for every role. Miss that
+  // one and the endpoint is a 403 for everybody, the administrator included,
+  // with no checkbox anywhere to fix it.
+  "POST /api/evento/export": "eventos.ver",
 };
 
 /**
@@ -888,6 +900,18 @@ const POSTES_GATES: Record<string, string> = {
   "DELETE /api/poste/:id": "postes.archivar",
   "PATCH /api/poste/:id/desarchivar": "postes.archivar",
   "GET /api/poste/opciones": "postes.ver",
+  // The permission §6 assigns to the listing this export is built from, which
+  // for poles and incidents is **stricter than the listing itself asks today**:
+  // those two `GET /` carry no gate at all and sit in
+  // `READ_GATE_NOT_APPLICABLE` below, the list C5 exists to empty. The export
+  // is not going to join that list on its way in.
+  //
+  // Deliberately not an `exportar` action of its own. A file adds a shape over
+  // `?limit=all`, not a reach; and a new action costs five coordinated pieces,
+  // one of which is a migration that seeds the cell for every role. Miss that
+  // one and the endpoint is a 403 for everybody, the administrator included,
+  // with no checkbox anywhere to fix it.
+  "POST /api/poste/export": "postes.ver",
 };
 
 /**
@@ -958,6 +982,18 @@ const SEGURIDAD_GATES: Record<string, string> = {
   "PUT /api/usuario/:id": "seguridad.editar",
   "PUT /api/usuario/username/:id": "seguridad.editar",
   "PUT /api/usuario/userpass/:id": "seguridad.editar",
+  // The permission §6 assigns to the listing this export is built from, which
+  // for poles and incidents is **stricter than the listing itself asks today**:
+  // those two `GET /` carry no gate at all and sit in
+  // `READ_GATE_NOT_APPLICABLE` below, the list C5 exists to empty. The export
+  // is not going to join that list on its way in.
+  //
+  // Deliberately not an `exportar` action of its own. A file adds a shape over
+  // `?limit=all`, not a reach; and a new action costs five coordinated pieces,
+  // one of which is a migration that seeds the cell for every role. Miss that
+  // one and the endpoint is a 403 for everybody, the administrator included,
+  // with no checkbox anywhere to fix it.
+  "POST /api/usuario/export": "seguridad.ver",
 };
 
 /**
@@ -1384,8 +1420,28 @@ describe("which options each step-up gate was mounted with", () => {
     // and rewrite the matrix — and reusing the wider regex would demand a
     // password on every pole edit, which is not what D6 decided.
     const ADMINISTRATIVOS = /^\/api\/(usuario|rol|permisos)\b/;
+    /**
+     * The one route on these three routers whose verb is a write and whose
+     * effect is not.
+     *
+     * `POST /api/usuario/export` builds the staff directory as a file and
+     * changes nothing. It is a POST because `requireSameOrigin` guards only the
+     * writing verbs, so a GET that assembles a spreadsheet is something any
+     * page on the internet can make a logged-in employee's browser do, twenty
+     * times over, from an `<img>` tag — the verb is buying CSRF protection
+     * here, not announcing a mutation. Demanding somebody's current password
+     * to download a list would be a password prompt on a read, which is not
+     * what D6 decided any more than dropping it from the matrix was.
+     *
+     * **Named one at a time, never a pattern.** A rule excusing anything ending
+     * in `/export` would wave through a future `POST /api/usuario/export-and-purge`
+     * without a word.
+     */
+    const LECTURAS_CON_VERBO_DE_ESCRITURA = ["POST /api/usuario/export"];
     const escrituras = routes.filter(
-      (r) => WRITES.includes(r.method) && ADMINISTRATIVOS.test(r.path),
+      (r) => WRITES.includes(r.method)
+        && ADMINISTRATIVOS.test(r.path)
+        && !LECTURAS_CON_VERBO_DE_ESCRITURA.includes(nombre(r)),
     );
     expect(escrituras.length).toBeGreaterThan(10);
     for (const r of escrituras) {
