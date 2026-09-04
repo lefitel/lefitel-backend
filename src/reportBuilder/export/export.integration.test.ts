@@ -289,7 +289,12 @@ describe("ExportTooLargeError", () => {
   });
 });
 
-describe("what an export refuses, and when it gives up", () => {
+// `skipIf` like the block above, and it was missing: both tests here call
+// `buildExport`, which queries. Without a database they failed instead of
+// skipping — invisible while the suite only ever ran on a machine that had one,
+// and fatal the moment `npm test` became a deploy gate inside a container where
+// nothing answers on 5432.
+describe.skipIf(!dbAvailable)("what an export refuses, and when it gives up", () => {
   it("stops when the caller has hung up, and gives the slot back", async () => {
     // Cancelling used to cancel nothing: the browser dropped the request and the
     // server kept building a file for nobody while holding the only export slot

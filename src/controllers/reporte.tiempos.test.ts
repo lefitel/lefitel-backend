@@ -51,7 +51,7 @@ vi.mock("../models/adssPoste.model.js", () => ({ AdssPosteModel: {} }));
 vi.mock("../models/obs.model.js", () => ({ ObsModel: {} }));
 vi.mock("../models/tipoObs.model.js", () => ({ TipoObsModel: {} }));
 
-const { putTiemposResumen } = await import("./reporte.controller.js");
+const { getTiemposResumen } = await import("./reporte.controller.js");
 
 /** One evento as Sequelize hands it over, with the two cities of its tramo. */
 function evento(opts: {
@@ -97,7 +97,13 @@ function res() {
   return r as unknown as Response & { statusCode: number; body: any };
 }
 
-const req = (body: unknown) => ({ body }) as Request;
+/**
+ * The filter now travels in the URL, not in a body (task C1 of the API
+ * standard), so this builds a `query`. Left as a helper with the same name so
+ * the twelve call sites below read unchanged: what moved is where the six
+ * handlers look, not what this file is about.
+ */
+const req = (query: unknown) => ({ query }) as Request;
 const RANGO = { fechaInicial: "2026-01-01", fechaFinal: "2026-12-31" };
 
 beforeEach(() => {
@@ -106,7 +112,7 @@ beforeEach(() => {
   revisionFindAll.mockResolvedValue([{ dataValues: { id_evento: 1 } }]);
 });
 
-describe("putTiemposResumen", () => {
+describe("getTiemposResumen", () => {
   it("cuenta desde la fecha del hecho, no desde el alta en el sistema", async () => {
     // The fault happened on the 1st; nobody typed it in until the 10th; it was
     // repaired on the 11th. That is 10 days of a pole being broken, not 1.
@@ -125,7 +131,7 @@ describe("putTiemposResumen", () => {
     ]);
 
     const r = res();
-    await putTiemposResumen(req(RANGO), r);
+    await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.tramos[0].avgDias).toBe(10);
   });
@@ -143,7 +149,7 @@ describe("putTiemposResumen", () => {
     ]);
 
     const r = res();
-    await putTiemposResumen(req(RANGO), r);
+    await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.tramos[0].avgDias).toBe(19);
   });
@@ -161,7 +167,7 @@ describe("putTiemposResumen", () => {
     ]);
 
     const r = res();
-    await putTiemposResumen(req(RANGO), r);
+    await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.tramos[0].avgDias).toBe(10);
     expect(r.body.tramos[0].count).toBe(1);
@@ -175,7 +181,7 @@ describe("putTiemposResumen", () => {
     ]);
 
     const r = res();
-    await putTiemposResumen(req(RANGO), r);
+    await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.tramos[0].count).toBe(1);
     expect(r.body.tramos[0].avgDias).toBe(10);
@@ -188,7 +194,7 @@ describe("putTiemposResumen", () => {
       evento({ id: 1, date: "2026-03-01", solucionDate: "2026-03-11" }),
     ]);
 
-    await putTiemposResumen(req(RANGO), res());
+    await getTiemposResumen(req(RANGO), res());
 
     expect(solucionFindAll).toHaveBeenCalled();
     const where = solucionFindAll.mock.calls[0][0].where;
@@ -207,7 +213,7 @@ describe("putTiemposResumen", () => {
     ]);
 
     const r = res();
-    await putTiemposResumen(req(RANGO), r);
+    await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.descartados).toBe(1);
     expect(r.body.tramos[0].count).toBe(1);
@@ -230,7 +236,7 @@ describe("putTiemposResumen", () => {
     ]);
 
     const r = res();
-    await putTiemposResumen(req(RANGO), r);
+    await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.tramos[0].avgVisitas).toBe(2);
   });
@@ -247,7 +253,7 @@ describe("putTiemposResumen", () => {
     ]);
 
     const r = res();
-    await putTiemposResumen(req(RANGO), r);
+    await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.tramos[0].avgVisitas).toBe(1);
   });
@@ -258,7 +264,7 @@ describe("putTiemposResumen", () => {
     ]);
 
     const r = res();
-    await putTiemposResumen(req(RANGO), r);
+    await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.descartados).toBe(0);
   });

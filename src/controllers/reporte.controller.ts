@@ -15,6 +15,7 @@ import { ICiudad, IEvento, IEventoObs, IObs, IPoste, ITipoObs } from "../interfa
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
+import { leerFiltro, leerFiltroSinRango } from "./reporteFiltro.js";
 
 const reporteLog = log("reporte");
 const handler = makeHandler(reporteLog);
@@ -65,14 +66,11 @@ const getEventIdsRepairedInRange = async (fechaInicial: Date, fechaFinal: Date):
   return rows.map((r) => r.dataValues.id_evento as number);
 };
 
-export const putReporteGeneral = handler("putReporteGeneral", async (req: Request, res: Response) => {
-  const { fechaInicial, fechaFinal, excludeOld } = req.body;
-  if (!fechaInicial || !fechaFinal) {
-    return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
-  }
+export const getReporteGeneral = handler("getReporteGeneral", async (req: Request, res: Response) => {
+  const filtro = leerFiltro(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
+  const { fechaInicial: fi, fechaFinal: ff, excludeOld } = filtro;
 
-  const fi = new Date(fechaInicial);
-  const ff = new Date(fechaFinal);
   const eventIds = await getEventIdsInRange(fi, ff);
   const eventoWhere: Record<string, unknown> = { id: { [Op.in]: eventIds } };
   if (excludeOld) eventoWhere.date = { [Op.between]: [fi, ff] };
@@ -102,11 +100,11 @@ export const putReporteGeneral = handler("putReporteGeneral", async (req: Reques
   res.status(200).json(data);
 });
 
-export const putReporteTramo = handler("putReporteTramo", async (req: Request, res: Response) => {
-  const { fechaInicial, fechaFinal, TramoInicial, TramoFinal, excludeOld } = req.body;
-  if (!fechaInicial || !fechaFinal) {
-    return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
-  }
+export const getReporteTramo = handler("getReporteTramo", async (req: Request, res: Response) => {
+  const filtro = leerFiltro(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
+  const { fechaInicial: fi, fechaFinal: ff, excludeOld } = filtro;
+  const { tramoInicial: TramoInicial, tramoFinal: TramoFinal } = filtro;
 
   const posteWhere = (TramoInicial && TramoFinal)
     ? {
@@ -117,8 +115,6 @@ export const putReporteTramo = handler("putReporteTramo", async (req: Request, r
       }
     : undefined;
 
-  const fi = new Date(fechaInicial);
-  const ff = new Date(fechaFinal);
   const eventIds = await getEventIdsInRange(fi, ff);
   const eventoWhere: Record<string, unknown> = { id: { [Op.in]: eventIds } };
   if (excludeOld) eventoWhere.date = { [Op.between]: [fi, ff] };
@@ -147,17 +143,14 @@ export const putReporteTramo = handler("putReporteTramo", async (req: Request, r
   res.status(200).json(data);
 });
 
-export const putReporteRecorrido = handler("putReporteRecorrido", async (req: Request, res: Response) => {
-  const { TramoInicial, TramoFinal, fechaInicial, fechaFinal, excludeOld } = req.body;
-  if (!TramoInicial || !TramoFinal) {
-    return res.status(400).json({ message: "TramoInicial y TramoFinal son requeridos" });
-  }
-  if (!fechaInicial || !fechaFinal) {
-    return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
-  }
+export const getReporteRecorrido = handler("getReporteRecorrido", async (req: Request, res: Response) => {
+  // The one report that cannot answer anything without a stretch: it draws the
+  // line between two cities.
+  const filtro = leerFiltro(req.query, { tramo: "obligatorio" });
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
+  const { fechaInicial: fi, fechaFinal: ff, excludeOld } = filtro;
+  const { tramoInicial: TramoInicial, tramoFinal: TramoFinal } = filtro;
 
-  const fi = new Date(fechaInicial);
-  const ff = new Date(fechaFinal);
   const eventIds = await getEventIdsInRange(fi, ff);
   const eventoWhere: Record<string, unknown> = { id: { [Op.in]: eventIds } };
   if (excludeOld) eventoWhere.date = { [Op.between]: [fi, ff] };
@@ -198,12 +191,15 @@ export const putReporteRecorrido = handler("putReporteRecorrido", async (req: Re
 // Agrupa postes por tramo y cuenta eventos pendientes.
 // Si se proveen fechas, solo cuenta eventos con revisión en ese rango.
 
-export const putEstadoRed = handler("putEstadoRed", async (req: Request, res: Response) => {
-  const { fechaInicial, fechaFinal } = req.body;
+export const getEstadoRed = handler("getEstadoRed", async (req: Request, res: Response) => {
+  // The only one of the six that answers over the whole history when given no
+  // period, which is why it reads the filter with its own function.
+  const filtro = leerFiltroSinRango(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
 
   let eventWhere: { id: { [key: symbol]: number[] } } | undefined;
-  if (fechaInicial && fechaFinal) {
-    const eventIds = await getEventIdsInRange(new Date(fechaInicial), new Date(fechaFinal));
+  if (filtro.fechaInicial && filtro.fechaFinal) {
+    const eventIds = await getEventIdsInRange(filtro.fechaInicial, filtro.fechaFinal);
     eventWhere = { id: { [Op.in]: eventIds } };
   }
 
@@ -272,13 +268,11 @@ export const putEstadoRed = handler("putEstadoRed", async (req: Request, res: Re
 // ─── Observaciones Frecuentes ─────────────────────────────────────────────────
 // Cuenta cuántas veces aparece cada observación en los eventos del período.
 
-export const putObsFrecuencia = handler("putObsFrecuencia", async (req: Request, res: Response) => {
-  const { fechaInicial, fechaFinal } = req.body;
-  if (!fechaInicial || !fechaFinal) {
-    return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
-  }
+export const getObsFrecuencia = handler("getObsFrecuencia", async (req: Request, res: Response) => {
+  const filtro = leerFiltro(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
 
-  const eventIds = await getEventIdsInRange(new Date(fechaInicial), new Date(fechaFinal));
+  const eventIds = await getEventIdsInRange(filtro.fechaInicial, filtro.fechaFinal);
   const rows = await EventoObsModel.findAll({
     where: { id_evento: { [Op.in]: eventIds } },
     attributes: ["id_obs"],
@@ -325,13 +319,11 @@ export const putObsFrecuencia = handler("putObsFrecuencia", async (req: Request,
 // con un Math.max, que es como un tercio de los eventos acababa publicándose
 // como resuelto el mismo día.
 
-export const putTiemposResumen = handler("putTiemposResumen", async (req: Request, res: Response) => {
-  const { fechaInicial, fechaFinal } = req.body;
-  if (!fechaInicial || !fechaFinal) {
-    return res.status(400).json({ message: "fechaInicial y fechaFinal son requeridos" });
-  }
+export const getTiemposResumen = handler("getTiemposResumen", async (req: Request, res: Response) => {
+  const filtro = leerFiltro(req.query);
+  if (typeof filtro === "string") return res.status(400).json({ message: filtro });
 
-  const eventIds = await getEventIdsRepairedInRange(new Date(fechaInicial), new Date(fechaFinal));
+  const eventIds = await getEventIdsRepairedInRange(filtro.fechaInicial, filtro.fechaFinal);
   const eventos = await EventoModel.findAll({
     where: { id: { [Op.in]: eventIds }, state: true },
     attributes: ["id", "date"],
@@ -427,3 +419,29 @@ export const putTiemposResumen = handler("putTiemposResumen", async (req: Reques
 
   res.status(200).json({ tramos: result, descartados });
 });
+
+// ─── The former names, and where they read from ──────────────────────────────
+//
+// `reportBuilder/regression.test.ts` imports three of the six by the names they
+// had while they were `PUT`, and hands them the filter in the **body**, which is
+// where it used to be. That file has uncommitted changes belonging to another
+// session, so editing it would mix their work into this task's commit: it is
+// left alone.
+//
+// These aliases are the bridge, and they do two things — keep the old name, and
+// read the filter out of the body when there is no query. **They are mounted on
+// no route**: `reporte.routes.ts` uses the new names, so there is no way to
+// reach these over HTTP. They exist for one consumer inside this repository, and
+// they go the moment that session changes its `fakeReq` to put the filter in
+// `query`, which is one line of theirs.
+const desdeElCuerpo =
+  (manejador: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response): Promise<unknown> =>
+    manejador({ ...req, query: req.query ?? req.body } as Request, res);
+
+export const putReporteGeneral = desdeElCuerpo(getReporteGeneral);
+export const putReporteTramo = desdeElCuerpo(getReporteTramo);
+export const putReporteRecorrido = desdeElCuerpo(getReporteRecorrido);
+export const putEstadoRed = desdeElCuerpo(getEstadoRed);
+export const putObsFrecuencia = desdeElCuerpo(getObsFrecuencia);
+export const putTiemposResumen = desdeElCuerpo(getTiemposResumen);

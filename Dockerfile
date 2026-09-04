@@ -20,15 +20,30 @@ COPY . .
 # on for migrations.
 RUN npm run lint
 
-# The fake connection string is load-bearing, and it never leaves this line.
-# `.dockerignore` keeps `.env` out of the build context, and `database/sequelize`
-# refuses to load without connection settings — it calls `process.exit(1)` while
-# being imported, so the suite would die on its first `import` rather than fail a
-# test. Nothing here connects: every query in the suite is mocked, and
-# `new Sequelize(url)` opens no socket on its own. `ENV` is deliberately not used
-# so this cannot reach the runtime image, which starts from a second `FROM` and
-# reads the real value from the host anyway.
-RUN DATABASE_URL="postgres://gate:gate@127.0.0.1:5432/gate" npm test
+# The two fake values are load-bearing, and neither leaves this line.
+#
+# `.dockerignore` keeps `.env` out of the build context, so the suite runs with
+# nothing configured. Two things then fail, and the first version of this gate
+# only knew about one of them — it aborted every build, which is exactly what an
+# unbuilt image looks like:
+#
+#   · `DATABASE_URL` — `database/sequelize` calls `process.exit(1)` while being
+#     *imported* when it finds no connection settings, so the suite would die on
+#     its first `import` rather than fail a test. Nothing connects:
+#     `new Sequelize(url)` opens no socket on its own, the address is the build
+#     container's own loopback, and the handful of tests that do want a real
+#     database skip themselves when none answers.
+#   · `CORS_ORIGIN` — five test files send `allowedOrigins(...)[0]` as an `Origin`
+#     header, and with nothing configured that list is empty outside development.
+#     Node refuses a header whose value is `undefined`: **68 tests failed** for
+#     that alone. `app.auth.test.ts` says in a comment that it relies on this
+#     suite's `.env` always setting it.
+#
+# `ENV` is deliberately not used, so neither value can reach the runtime image —
+# it starts from a second `FROM` and reads the real ones from the host.
+RUN DATABASE_URL="postgres://gate:gate@127.0.0.1:5432/gate" \
+    CORS_ORIGIN="https://www.osefi.net" \
+    npm test
 
 RUN npm run build
 

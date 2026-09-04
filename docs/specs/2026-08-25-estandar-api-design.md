@@ -1266,7 +1266,9 @@ cd web && npx vitest run src/api/Bitacora.api.test.ts src/pages/menu/bitacora/in
 ```
 
 **B3 · Los limitadores del generador a su propio fichero, y aplicados a los seis
-informes.** Hoy son `const` sin `export` dentro de `generador.routes.ts`. Se
+informes.** *(C1 le añadió urgencia: al pasar los seis a `GET` salieron de
+`requireSameOrigin`, y este router no tiene ningún cubo. El escenario es CPU
+ajena, no fuga —CORS impide leer la respuesta—, pero hoy nada lo acota.)* Hoy son `const` sin `export` dentro de `generador.routes.ts`. Se
 mudan a `src/middleware/reportLimiters.ts` sin cambiar sus números. **Decisión
 pendiente:** si los seis informes fijos comparten cubo con
 `POST /generador/consulta` —y entonces tirar informes se come el presupuesto del
@@ -1285,23 +1287,53 @@ en el mismo corte. Lo que se escribe abajo sobre pasos vale sólo para lo que
 quede pendiente cuando el corte ya haya pasado — y entonces, para los cambios de
 respuesta (C3, C4), **el cliente va primero**, no el servidor.
 
-**C1 · Los seis informes, de `PUT` a `GET` (§3.1).** El filtro pasa a la URL
-como cinco parámetros; `reporte.routes.ts` monta seis `router.get` y
-`web/src/api/reporte.api.ts` seis `axios.get`. `REPORTES_GATES` en
-`routeGuards.test.ts` cambia de método con ellos. El primer entregable no es el
-cambio: **es el test que hoy no existe.** Ninguna prueba ejercita `/api/reporte`,
-y el único test que toca esos controladores se auto-omite si no hay Postgres, que
-es peor que nada porque pasa en verde sin haberse ejecutado. Antes de mover nada
-hay que decidir qué comprueba ese test y con qué datos, porque no hay base de
-pruebas. **Y con él, las validaciones que faltan**: `new Date(fechaInicial)` sin
-comprobar produce `Invalid Date`, entra en el `between` y sale como un 500
-neutro; §3.5 dice que el error esperado no se calla con el inesperado, y el
-patrón (`handleError` del generador) ya existe. Es el router con más entrada sin
-validar y ningún test: los dos entregables van juntos.
+**C1 · Los seis informes, de `PUT` a `GET` (§3.1).** ✅ Hecha. El filtro viaja
+en la URL como cinco escalares, y las dos orillas cambian en el mismo commit
+—§11: antes del corte no hay maniobra—.
+
+**El primer entregable no era el cambio, era el test que no existía**, y sigue
+siendo lo más valioso de la tarea. Corrección de la auditoría previa: *dos* tests
+tocaban estos controladores, no uno. `reporte.tiempos.test.ts` corre siempre y es
+bueno; lo que no existía es **ninguna prueba que ejercitara `/api/reporte` por
+HTTP** — ni el método, ni la dirección, ni la puerta. Eso es
+`src/routes/reporte.contract.test.ts`, junto a sus dos hermanos y no en
+`controllers/`: mockear un modelo rompe el grafo de asociaciones de todos los
+routers que carga `app.ts`, así que va por supertest con espías.
+
+**Las validaciones, en un lector compartido** (`controllers/reporteFiltro.ts`).
+Los seis leían cinco valores y comprobaban como mucho que dos estuvieran. Lo que
+se cierra, en orden de gravedad:
+
+- **`excludeOld` deja de ser booleano al viajar en la URL.** `false` llega como
+  la cadena `"false"`, que es *truthy*: el interruptor «excluir arrastradas»
+  habría ignorado su propia posición de apagado. Es el único defecto de la lista
+  que produce **un informe plausible con las filas equivocadas**, y por eso el
+  único que nadie reportaría.
+- **Un parámetro repetido llega como array**, y leerlo como «no vino» ensancha el
+  filtro en silencio: `?TramoInicial=1&TramoInicial=2` significaba *ningún
+  tramo*, o sea el informe de toda la red mientras la URL nombra dos ciudades.
+  La primera versión del lector tenía justo ese fallo y un comentario prometiendo
+  lo contrario; lo encontró su propia auditoría.
+- **`new Date("ayer")` es `Invalid Date`**, que Sequelize serializa como el texto
+  `'Invalid date'` y Postgres rechaza: 500 neutro donde tocaba un 400 con una
+  frase.
+- **Un id de tramo mayor que `int4`** también acababa en 500. Y medio rango en
+  `estado-red` se ignoraba: el informe cubría toda la historia con una fecha de
+  inicio en pantalla.
+
+**Y una cosa que C1 abre y no cierra, que es de Isaias.** `requireSameOrigin`
+sólo guarda los cuatro verbos que escriben, así que al pasar a `GET` los seis
+salen de ella: pierden la comprobación de `Origin` y la cabecera de cliente a la
+vez, y la cookie es `SameSite=Lax`, que una navegación de primer nivel lleva. Una
+página ajena puede hacer que el navegador de alguien con sesión ejecute la
+consulta más cara del producto. **No puede leer la respuesta** —CORS— así que es
+CPU ajena, no una fuga. Y este router no tiene limitador ninguno. El arreglo es
+un cubo, que es **B3**, cuya decisión sigue pendiente: no se inventa aquí. Lo que
+sí lleva C1 es `Cache-Control: no-store` en los seis, que con `PUT` sobraba.
 
 ```
-cd api && npx vitest run src/controllers/reporte.contract.test.ts
-cd web && grep -c 'axios.put' src/api/reporte.api.ts    # 0
+cd api && npx vitest run src/routes/reporte.contract.test.ts src/controllers/reporteFiltro.test.ts
+cd web && npx vitest run src/api/reporte.api.test.ts
 ```
 
 **C2 · El cliente pasa a usar los endpoints de opciones (§5.5).** Siete
@@ -1596,7 +1628,7 @@ el documento sigue teniendo razón.
 
 | Regla | Cómo se comprueba |
 |---|---|
-| 3.1 método | El test de contrato de los seis informes (C1), que hay que escribir antes de mover nada; asevera `GET`, y las validaciones de entrada con él |
+| 3.1 método | ✅ `reporte.contract.test.ts`: los seis contestan en `GET`, ninguno en `PUT`, los seis piden `reportes.ver`, y la respuesta lleva `Cache-Control: no-store`. Con él `reporteFiltro.test.ts`, que cubre cada forma en que el filtro puede venir mal — incluida la que produce un informe plausible y falso (`excludeOld=false` leído como verdadero) y la que lo ensancha en silencio (un parámetro repetido) |
 | 3.2 sub-recursos y orden de declaración | ✅ `routeOrder.test.ts`, escrito en B1. Recorre el `stack` compilado de cada router —descubiertos por directorio, no listados— y falla si un patrón declarado antes ya casa con una ruta declarada después, contando `router.all` y avisando de un `router.use` con ruta, cuyo prefijo Express 5 no expone. **Desviación consciente:** lee los módulos de router, no la tabla montada, así que cubre un router antes de que nadie lo monte y no vería una ruta declarada directamente sobre la app — eso lo ve `routeGuards.test.ts` |
 | 3.3 sobre | Test con la **lista escrita a mano** de los listados. Derivarlo es imposible: `res.json(x)` no revela la forma de `x`, y ése fue el error de la primera versión. La lista se cuenta al empezar C3, no ahora: A1 ya borró uno, así que la cuenta de la primera versión sobra |
 | 3.3 techo y centinela | Test del centinela sobre una colección por encima y por debajo del tope —`422`, no `413`—, más un caso del valor que el servidor viejo interpretaba como `50`, y el lector único de `limit` con sus tres clamps |

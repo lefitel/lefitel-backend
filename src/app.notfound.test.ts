@@ -84,9 +84,21 @@ describe("what it must not have swallowed", () => {
     // would still pass, because they assert on routers rather than on the app's
     // tail. A route that exists but has no session answers 401 — that is
     // `authenticate` running, which means the request got past this handler.
-    const res = await request(app).get("/api/bitacora/");
+    // Two mounts, not one, and deliberately the first and the last of the
+    // authenticated block: an assertion against a single mount only proves the
+    // handler sits after *that* line. Dropped in between two routers it would
+    // turn everything below it into 404s while this file stayed green — and
+    // `routeGuards.test.ts` would not see it either, because it enumerates the
+    // router stack instead of making requests.
+    for (const ruta of ["/api/bitacora/", "/api/files/"]) {
+      const res = await request(app).get(ruta);
+      expect(res.status, `${ruta} contestó ${res.status}`).toBe(401);
+    }
 
-    expect(res.status).toBe(401);
+    // And one that reaches a controller rather than stopping at `authenticate`:
+    // a login with no body is answered by the route, not by this handler.
+    const login = await request(app).post("/api/login/").set("Content-Type", "application/json").send({});
+    expect(login.status, `login contestó ${login.status}`).not.toBe(404);
   });
 
   it("leaves a body the parser rejected to the terminal error handler", async () => {

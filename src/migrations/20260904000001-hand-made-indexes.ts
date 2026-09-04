@@ -86,13 +86,18 @@ export const sentenciaDe = (i: (typeof INDICES)[number]) =>
  */
 const VERIFICACION = `
   SELECT i.relname AS nombre,
-         array_to_string(array_agg(a.attname ORDER BY k.ord), ',') AS columnas
+         array_to_string(array_agg(a.attname ORDER BY k.ord), ',') AS columnas,
+         x.indisvalid AS valido,
+         (x.indpred IS NOT NULL) AS parcial,
+         am.amname AS metodo
     FROM pg_class i
+    JOIN pg_namespace n ON n.oid = i.relnamespace AND n.nspname = 'public'
+    JOIN pg_am am ON am.oid = i.relam
     JOIN pg_index x ON x.indexrelid = i.oid
     JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
     JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = k.attnum
    WHERE i.relname IN (${INDICES.map((i) => `'${i.nombre}'`).join(", ")})
-   GROUP BY i.relname`;
+   GROUP BY i.relname, x.indisvalid, x.indpred, am.amname`;
 
 export async function up({ context: queryInterface }: { context: QueryInterface }) {
   await queryInterface.sequelize.transaction(async (transaction) => {
@@ -119,16 +124,31 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
     // every later `IF NOT EXISTS` then skips while reporting success. A dead
     // index nobody rebuilds and a migration that swears everything is fine.
 
-    const reales = await queryInterface.sequelize.query<{ nombre: string; columnas: string }>(
+    // `type: QueryTypes.SELECT` is load-bearing: without it Sequelize answers
+    // `[rows, metadata]`, every lookup below misses, and the migration fails the
+    // deploy claiming all nine are absent.
+    type Real = { nombre: string; columnas: string; valido: boolean; parcial: boolean; metodo: string };
+    const reales = await queryInterface.sequelize.query<Real>(
       VERIFICACION,
       { transaction, type: QueryTypes.SELECT },
     );
-    const porNombre = new Map(reales.map((f) => [f.nombre, f.columnas]));
+    const porNombre = new Map(reales.map((f) => [f.nombre, f]));
     const mal = INDICES.flatMap((i) => {
-      const encontrado = porNombre.get(i.nombre);
+      const real = porNombre.get(i.nombre);
       const esperado = i.columnas.join(",");
-      if (encontrado === undefined) return [`${i.nombre}: no existe después de crearlo`];
-      return encontrado === esperado ? [] : [`${i.nombre}: cubre (${encontrado}), se esperaba (${esperado})`];
+      if (real === undefined) return [`${i.nombre}: no existe después de crearlo`];
+      const problemas: string[] = [];
+      if (real.columnas !== esperado) problemas.push(`cubre (${real.columnas}), se esperaba (${esperado})`);
+      // The case the comment above about `CONCURRENTLY` describes: a failed
+      // concurrent build leaves an INVALID index, with a complete `indkey`, that
+      // `IF NOT EXISTS` then skips for ever. Columns alone call it correct.
+      if (!real.valido) problemas.push("está INVALID: existe y Postgres no lo usa");
+      // `docs/ARCHITECTURE.md` warns that the tempting "improvement" to the two
+      // `deletedAt` indexes is a partial one, which is exactly the shape that
+      // cannot serve the query they exist for.
+      if (real.parcial) problemas.push("es parcial, y ninguno de estos nueve debe serlo");
+      if (real.metodo !== "btree") problemas.push(`usa ${real.metodo}, no btree`);
+      return problemas.map((p) => `${i.nombre}: ${p}`);
     });
     if (mal.length > 0) {
       // Thrown inside the transaction, so nothing this migration did survives.

@@ -901,12 +901,12 @@ const POSTES_GATES: Record<string, string> = {
  */
 const REPORTES_GATES: Record<string, string> = {
   "GET /api/reporte/opciones": "reportes.ver",
-  "PUT /api/reporte/general": "reportes.ver",
-  "PUT /api/reporte/tramo": "reportes.ver",
-  "PUT /api/reporte/recorrido": "reportes.ver",
-  "PUT /api/reporte/estado-red": "reportes.ver",
-  "PUT /api/reporte/obs-frecuencia": "reportes.ver",
-  "PUT /api/reporte/tiempos-resumen": "reportes.ver",
+  "GET /api/reporte/general": "reportes.ver",
+  "GET /api/reporte/tramo": "reportes.ver",
+  "GET /api/reporte/recorrido": "reportes.ver",
+  "GET /api/reporte/estado-red": "reportes.ver",
+  "GET /api/reporte/obs-frecuencia": "reportes.ver",
+  "GET /api/reporte/tiempos-resumen": "reportes.ver",
 };
 
 /**

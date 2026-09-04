@@ -35,21 +35,36 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { up, down, INDICES, sentenciaDe } from "./20260904000001-hand-made-indexes.js";
 
+/** How the database is pretending to be, for the verification step. */
+type Estado = { columnas?: string; valido?: boolean; parcial?: boolean; metodo?: string };
+
 /**
- * A queryInterface that records, and answers the verification query with
- * whatever the test wants the database to look like.
+ * A queryInterface that records what it was asked, and answers the verification
+ * query with whatever the test wants the database to look like.
  */
-function fakeQueryInterface(columnasReales?: Map<string, string>) {
+function fakeQueryInterface(estados?: Map<string, Estado>) {
   const calls: { fn: string; args: unknown[] }[] = [];
   const query = (...args: unknown[]) => {
     calls.push({ fn: "query", args });
     const sql = String(args[0]);
     if (!sql.includes("pg_index")) return Promise.resolve([]);
-    const filas = INDICES.map((i) => ({
-      nombre: i.nombre,
-      columnas: columnasReales?.get(i.nombre) ?? i.columnas.join(","),
-    })).filter((f) => f.columnas !== "AUSENTE");
-    return Promise.resolve(filas);
+    const filas = INDICES.map((i) => {
+      const e = estados?.get(i.nombre) ?? {};
+      return {
+        nombre: i.nombre,
+        columnas: e.columnas ?? i.columnas.join(","),
+        valido: e.valido ?? true,
+        parcial: e.parcial ?? false,
+        metodo: e.metodo ?? "btree",
+      };
+    }).filter((f) => f.columnas !== "AUSENTE");
+    // Modelled rather than ignored, because this is a mutation the suite could
+    // not otherwise see: without `type: QueryTypes.SELECT` Sequelize answers
+    // `[rows, metadata]`, every lookup in the migration misses, and it fails the
+    // deploy swearing all nine are absent — while every assertion here stays
+    // green, because they read the calls and not the answers.
+    const opciones = args[1] as { type?: string } | undefined;
+    return Promise.resolve(opciones?.type === "SELECT" ? filas : [filas, {}]);
   };
   return {
     calls,
@@ -61,8 +76,8 @@ function fakeQueryInterface(columnasReales?: Map<string, string>) {
   };
 }
 
-const ran = async (fn: typeof up, columnasReales?: Map<string, string>) => {
-  const qi = fakeQueryInterface(columnasReales);
+const ran = async (fn: typeof up, estados?: Map<string, Estado>) => {
+  const qi = fakeQueryInterface(estados);
   await fn({ context: qi as never });
   return qi;
 };
@@ -177,14 +192,49 @@ describe("how it runs", () => {
     // created `idx_eventos_deleted` by hand over the wrong column; the migration
     // skips it, reports success, and the Archivados tab goes on scanning while
     // this repository says the index is there.
-    const mentira = new Map([["idx_eventos_deleted", "id_poste"]]);
+    const mentira = new Map([["idx_eventos_deleted", { columnas: "id_poste" }]]);
 
     await expect(ran(up, mentira)).rejects.toThrow(/idx_eventos_deleted/);
   });
 
+  it("refuses an index that exists and Postgres will not use", async () => {
+    // The case the migration's own comment about `CONCURRENTLY` describes, and
+    // the first version of the check could not see: a cancelled concurrent build
+    // leaves an INVALID index, with its columns intact, that `IF NOT EXISTS`
+    // then skips for ever. Read by columns alone it looks perfect.
+    const invalido = new Map([["idx_eventos_poste_state_deleted", { valido: false }]]);
+
+    await expect(ran(up, invalido)).rejects.toThrow(/INVALID/);
+  });
+
+  it("refuses a partial index, which is the tempting wrong improvement", async () => {
+    // `docs/ARCHITECTURE.md` warns about exactly this one: a partial index on
+    // `WHERE "deletedAt" IS NULL` is smaller, looks smarter, and cannot serve
+    // the Archivados tab, which asks for `IS NOT NULL`.
+    const parcial = new Map([["idx_eventos_deleted", { parcial: true }]]);
+
+    await expect(ran(up, parcial)).rejects.toThrow(/parcial/);
+  });
+
+  it("refuses an index built with another access method", async () => {
+    const hash = new Map([["idx_bitacora_created", { metodo: "hash" }]]);
+
+    await expect(ran(up, hash)).rejects.toThrow(/hash/);
+  });
+
+  it("asks for the rows themselves, not for rows and metadata", async () => {
+    // `type: QueryTypes.SELECT` decides the shape Sequelize answers with, and
+    // dropping it breaks the migration in the deploy while changing nothing that
+    // the other assertions here look at.
+    const qi = await ran(up);
+    const verificacion = qi.calls.find((c) => String(c.args[0]).includes("pg_index"));
+
+    expect((verificacion?.args[1] as { type?: string })?.type).toBe("SELECT");
+  });
+
   it("refuses when one of them is missing after being created", async () => {
     // The other half: a statement that ran without error and left nothing.
-    const ausente = new Map([["idx_bitacora_created", "AUSENTE"]]);
+    const ausente = new Map([["idx_bitacora_created", { columnas: "AUSENTE" }]]);
 
     await expect(ran(up, ausente)).rejects.toThrow(/no existe/);
   });
