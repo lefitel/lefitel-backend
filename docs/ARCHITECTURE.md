@@ -132,8 +132,11 @@ observaciones. Una llamada es el registro entero de activos.
 El comentario de `dashboard.routes.ts` ya lo decía, y este documento lo
 contradecía a dos secciones de distancia: «*todas las demás lecturas abiertas
 paginan al menos de cien en cien; ésta no tiene `where`, ni `limit`, ni
-proyección*». Se cierra en el estándar; mientras tanto, no lo cites como ejemplo
-de nada.
+proyección*». **Ninguna de las catorce tareas del estándar lo acota** —la primera
+versión de este párrafo decía «se cierra en el estándar», y una auditoría lo
+desmintió—. Está gateado con `eventos.ver`, que tienen los tres roles sembrados,
+así que la puerta no cierra nada en la práctica. Acotarlo es trabajo pendiente
+con nombre; mientras tanto, no lo cites como ejemplo de nada.
 
 ### Un fallo no se cuenta al navegador
 
@@ -195,7 +198,8 @@ CREATE INDEX idx_postes_ciudadA ON public.postes ("id_ciudadA");
 CREATE INDEX idx_postes_ciudadB ON public.postes ("id_ciudadB");
 
 -- revicions: separate:true hace WHERE id_evento IN (...)
--- (el único de esta lista que sí tiene migración)
+-- Tampoco está en ninguna migración: su nombre aparece en una, dentro de un
+-- comentario que dice que está mal escrito. Ver el aviso de arriba.
 CREATE INDEX idx_reviciones_id_evento ON public.revicions (id_evento);
 
 -- eventoObs: idem

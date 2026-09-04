@@ -834,6 +834,13 @@ const EVENTOS_GATES: Record<string, string> = {
   // exception list instead of nothing: it hands over every incident and every
   // pole in one response, so `ver` has to mean something here.
   "GET /api/dashboard/": "eventos.ver",
+  // Added by B1 and left out of this table by the same commit — while the
+  // comment a few lines up said the table named every gated route it had, and
+  // one commit after `aa38830` had fixed the same omission for `/desarchivar`.
+  // The audit of 3 September caught it: re-gating this line to `seguridad.ver`
+  // left 1.421 tests green. Now `MODULOS_TABULADOS` below holds this router to
+  // completeness too, so the next one cannot repeat it.
+  "GET /api/evento/opciones": "eventos.ver",
 };
 
 /**
@@ -861,6 +868,45 @@ const PARAMETROS_GATES: Record<string, string> = {
   "GET /api/material/stats": "parametros.ver",
   "GET /api/obs/stats": "parametros.ver",
   "GET /api/tipoObs/stats": "parametros.ver",
+};
+
+/**
+ * What each gated route of the pole register must ask for, exactly.
+ *
+ * This table did not exist, and the same audit that found the `opciones` entry
+ * missing above found why that mattered here: `PUT /api/poste/:id` could be
+ * re-gated to `postes.ver` — so an account allowed only to look at poles could
+ * rewrite any of them — and nothing in the suite would say a word. The chain of
+ * names says a gate is *there*; only a table says which.
+ *
+ * The three reads on this router that carry no gate at all — `GET /`,
+ * `/tramos`, `/:id` — are named in `READ_GATE_NOT_APPLICABLE`, which is where an
+ * ungated route's reason belongs. `/opciones` is the one gated read.
+ */
+const POSTES_GATES: Record<string, string> = {
+  "POST /api/poste/": "postes.crear",
+  "PUT /api/poste/:id": "postes.editar",
+  "DELETE /api/poste/:id": "postes.archivar",
+  "PATCH /api/poste/:id/desarchivar": "postes.archivar",
+  "GET /api/poste/opciones": "postes.ver",
+};
+
+/**
+ * What each route of the fixed reports must ask for, exactly.
+ *
+ * `reportes` has one action in the vocabulary — `ver` — so this is the only pair
+ * any of these may carry, and the table exists so that a seventh report cannot
+ * arrive gated by something else, or by nothing. The six are `PUT` today and
+ * move to `GET` in C1 of the API standard; the method changes here with them.
+ */
+const REPORTES_GATES: Record<string, string> = {
+  "GET /api/reporte/opciones": "reportes.ver",
+  "PUT /api/reporte/general": "reportes.ver",
+  "PUT /api/reporte/tramo": "reportes.ver",
+  "PUT /api/reporte/recorrido": "reportes.ver",
+  "PUT /api/reporte/estado-red": "reportes.ver",
+  "PUT /api/reporte/obs-frecuencia": "reportes.ver",
+  "PUT /api/reporte/tiempos-resumen": "reportes.ver",
 };
 
 /**
@@ -944,8 +990,18 @@ const ROLES_GATES: Record<string, string> = {
   "PUT /api/permisos/:id_rol": "roles.editar",
 };
 
-/** The three routers the two tables above claim to describe completely. */
-const MODULOS_TABULADOS = /^\/api\/(usuario|rol|permisos)\b/;
+/**
+ * The routers whose tables claim to describe every gated route completely.
+ *
+ * Three for a long while — `usuario`, `rol`, `permisos` — because those were the
+ * only tables written as complete descriptions. `poste`, `evento` and `reporte`
+ * joined on 3 September, when an audit showed a gated route added to `evento`
+ * one commit after this file had promised the table was complete, and nothing
+ * here had said so. `EVENTOS_GATES` also names `POST /api/revision/` and
+ * `GET /api/dashboard/`, which live on other routers; the check below is per
+ * router prefix, so those two are simply not held to completeness.
+ */
+const MODULOS_TABULADOS = /^\/api\/(usuario|rol|permisos|poste|evento|reporte)\b/;
 
 describe("which permission each gate asks for", () => {
   it("asks for the one the route is about, not merely for one", () => {
@@ -954,6 +1010,8 @@ describe("which permission each gate asks for", () => {
       ...GENERADOR_GATES,
       ...EVENTOS_GATES,
       ...PARAMETROS_GATES,
+      ...POSTES_GATES,
+      ...REPORTES_GATES,
       ...SEGURIDAD_GATES,
       ...ROLES_GATES,
     })) {
@@ -970,7 +1028,7 @@ describe("which permission each gate asks for", () => {
     expect(wrong, `puertas que piden otra cosa: ${wrong.join(" | ")}`).toEqual([]);
   });
 
-  it("names every gated route of usuario, rol and permisos, so a new one cannot join unlisted", () => {
+  it("names every gated route of the six tabulated routers, so a new one cannot join unlisted", () => {
     // The assertion above runs table → code, so it can only catch a pair that
     // changed under a route somebody already wrote down. A route added
     // tomorrow is invisible to it, and on these three routers that is the
@@ -985,7 +1043,13 @@ describe("which permission each gate asks for", () => {
     // demanding completeness of it would assert the opposite of what its own
     // comment decided. `GENERADOR_GATES` and `EVENTOS_GATES` do happen to name
     // every gated route of theirs today, and nothing here holds them to it.
-    const tabuladas = new Set([...Object.keys(SEGURIDAD_GATES), ...Object.keys(ROLES_GATES)]);
+    const tabuladas = new Set([
+      ...Object.keys(SEGURIDAD_GATES),
+      ...Object.keys(ROLES_GATES),
+      ...Object.keys(EVENTOS_GATES),
+      ...Object.keys(POSTES_GATES),
+      ...Object.keys(REPORTES_GATES),
+    ]);
     const faltan = routes
       .filter((r) => MODULOS_TABULADOS.test(r.path))
       .filter((r) => r.chain.some((name) => GATES.includes(name)))
@@ -1287,8 +1351,14 @@ describe("which options each step-up gate was mounted with", () => {
   // never see it — the one direction D6 most needs to be caught in. Filtered
   // from `routes`, it fails here by name.
   it("demands the password on every write to permissions, roles and accounts", () => {
+    // Its own prefix list, not `MODULOS_TABULADOS`: that one names the routers
+    // whose gate tables are complete, and grew to six on 3 September. The claim
+    // here is narrower — the three routers that mint accounts, hand out roles
+    // and rewrite the matrix — and reusing the wider regex would demand a
+    // password on every pole edit, which is not what D6 decided.
+    const ADMINISTRATIVOS = /^\/api\/(usuario|rol|permisos)\b/;
     const escrituras = routes.filter(
-      (r) => WRITES.includes(r.method) && MODULOS_TABULADOS.test(r.path),
+      (r) => WRITES.includes(r.method) && ADMINISTRATIVOS.test(r.path),
     );
     expect(escrituras.length).toBeGreaterThan(10);
     for (const r of escrituras) {

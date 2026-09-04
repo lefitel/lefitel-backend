@@ -62,6 +62,19 @@ const { EventoModel } = await import("../models/evento.model.js");
 
 const sesionFindOne = vi.spyOn(SesionModel, "findOne");
 const usuarioFindByPk = vi.spyOn(UsuarioModel, "findByPk");
+/**
+ * The third query `authenticate` can make, spied so that the claim in this
+ * file's header — nothing reaches Postgres — is asserted and not assumed.
+ *
+ * `touchSession` fires an `UPDATE sesiones` when the row's `last_used_at` is
+ * older than the throttle. The fixture below sets it to now, so today it never
+ * fires — but that is the throttle constant doing the work, not this file, and
+ * lowering it would have sent a real UPDATE to the configured database with
+ * every test still green. Rejecting rather than resolving: if it ever runs, the
+ * request still answers (the touch is fire-and-forget), and the spy's call
+ * count is what `reached the database on the happy path` would show.
+ */
+const sesionUpdate = vi.spyOn(SesionModel, "update");
 
 const adssFindAll = vi.spyOn(AdssModel, "findAll");
 const ciudadFindAll = vi.spyOn(CiudadModel, "findAll");
@@ -146,6 +159,7 @@ beforeEach(() => {
   // would answer `undefined` and let a shadowed route look merely empty.
   posteFindOne.mockRejectedValue(new Error("searchPoste corrió: /opciones quedó tapada por /:id") as never);
   eventoFindOne.mockRejectedValue(new Error("searchEvento corrió: /opciones quedó tapada por /:id") as never);
+  sesionUpdate.mockRejectedValue(new Error("touchSession corrió: este test habría escrito en la base de datos") as never);
 });
 
 /** What the handler asked Sequelize for, on the nth call of that spy. */
@@ -275,6 +289,9 @@ describe("what each block asks the database for", () => {
     // answers correctly and the database does the work of the whole register.
     expect(consulta(posteFindAll)?.attributes).toEqual(["id_ciudadA", "id_ciudadB"]);
     expect(consulta(posteFindAll)?.group).toEqual(["id_ciudadA", "id_ciudadB"]);
+    // By the grouped columns: the only order a grouped query can carry, and the
+    // one block of the six that the first version of this file left unordered.
+    expect(consulta(posteFindAll)?.order).toEqual([["id_ciudadA", "ASC"], ["id_ciudadB", "ASC"]]);
   });
 
   it("asks for plain rows, not model instances", async () => {
@@ -376,5 +393,9 @@ describe("who may call them", () => {
     for (const spy of [adssFindAll, ciudadFindAll, materialFindAll, obsFindAll, propietarioFindAll, tipoObsFindAll, posteFindAll]) {
       expect(spy).toHaveBeenCalled();
     }
+    // And the one write on the request path never ran. If this ever fails, the
+    // session touch reached past the throttle — and, unspied, it would have
+    // reached the database.
+    expect(sesionUpdate, "touchSession intentó escribir la sesión").not.toHaveBeenCalled();
   });
 });

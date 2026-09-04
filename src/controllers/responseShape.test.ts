@@ -14,79 +14,184 @@
 // a test per endpoint would only pin the endpoints that exist today, while the
 // way this recurs is somebody adding a column — or a controller — later.
 //
-// So the assertion is about the shape of the code: for these three models, an
+// So the assertion is about the shape of the code: for these five models, an
 // include without `attributes` fails, wherever it is written.
+//
+// **What the second version closed**, after an audit ran the spellings past
+// the first:
+//
+//   - `include: [UsuarioModel]` — legal Sequelize, sends every column, and the
+//     first version looked only for the string `model: UsuarioModel`, so a bare
+//     model in the include array was invisible. So was `model:UsuarioModel`
+//     without the space.
+//   - `attributes: { exclude: ["pass"] }` — passed as "has attributes", and
+//     every column added later leaks. For a guarded model, only a list counts.
+//   - A child include's `attributes` satisfying its parent, because the walk
+//     took the whole entry, nested entries included. Only the entry's own
+//     top-level `attributes` counts now.
+//   - The credential-ceiling test skipped any entry mentioning
+//     `USUARIO_AS_AUTHOR`, which was six of the seven — so
+//     `[...USUARIO_AS_AUTHOR, "pass"]` was exempt by construction. Every entry
+//     is judged now; the spread is allowed, anything beside it must be in the
+//     list, and any other spread or name is a finding.
+//   - Single quotes, and a comment inside the entry: the scan now runs over
+//     text with strings and comments blanked and reads field names back from
+//     the original at the same positions.
+//
+// Scanned: `src/controllers/`. Nothing else in `src/` writes an `include:`
+// outside a comment today; if a repository or service layer ever does, extend
+// `DIRECTORIOS`.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  REVISION_PUBLIC_ATTRIBUTES,
-} from "../models/revision.model.js";
+import { REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.model.js";
 import { SOLUCION_PUBLIC_ATTRIBUTES } from "../models/solucion.model.js";
 import { USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
+import { sinLiterales, cierra, lineaDe } from "../testkit/sourceText.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const DIRECTORIOS = [here];
 
 /** Models whose full row must never reach a client. */
-const GUARDED = ["UsuarioModel", "RevisionModel", "SolucionModel", "PosteModel", "EventoModel"];
+const GUARDED = ["UsuarioModel", "RevisionModel", "SolucionModel", "PosteModel", "EventoModel"] as const;
+const GUARDADOS = GUARDED.join("|");
+
+interface Entrada {
+  file: string;
+  line: number;
+  model: string;
+  /** How the model was written into the include. */
+  forma: "objeto" | "pelado";
+  /** The entry's own `attributes` value, from the original text; null if none. */
+  attributes: string | null;
+}
 
 /**
- * Finds the object literal an `include` entry sits in, by matching braces.
- *
- * A regex cannot do this: the entry may be one line or six, and may itself
- * contain nested includes with their own braces. Walking from the `{` that
- * opens the entry to its match is the only way to ask "does *this* entry name
- * its attributes" rather than "does the word appear somewhere nearby".
+ * The `{ … }` an occurrence of `model: X` sits in, by walking back to the brace
+ * that opens it — over blanked text, so a brace in a string cannot mislead.
  */
-function enclosingLiteral(source: string, modelAt: number): string | null {
-  let open = -1;
+function entradaDe(clean: string, at: number): [number, number] | null {
   let depth = 0;
-  // Walk backwards to the `{` that opens this entry.
-  for (let i = modelAt; i >= 0; i--) {
-    if (source[i] === "}") depth++;
-    else if (source[i] === "{") {
-      if (depth === 0) { open = i; break; }
+  for (let i = at; i >= 0; i--) {
+    if (clean[i] === "}") depth++;
+    else if (clean[i] === "{") {
+      if (depth === 0) return [i, cierra(clean, i)];
       depth--;
-    }
-  }
-  if (open === -1) return null;
-
-  depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}") {
-      depth--;
-      if (depth === 0) return source.slice(open, i + 1);
     }
   }
   return null;
 }
 
-/** Every `model: XModel` in the controllers, with the entry it belongs to. */
-function includes(): { file: string; line: number; model: string; literal: string }[] {
-  const found: { file: string; line: number; model: string; literal: string }[] = [];
-  for (const file of readdirSync(here).filter((f) => f.endsWith(".controller.ts"))) {
-    const source = readFileSync(join(here, file), "utf8");
-    for (const model of GUARDED) {
-      const needle = `model: ${model}`;
-      let at = source.indexOf(needle);
-      while (at !== -1) {
-        const literal = enclosingLiteral(source, at);
-        if (literal !== null) {
-          found.push({
-            file,
-            line: source.slice(0, at).split("\n").length,
-            model,
-            literal,
-          });
-        }
-        at = source.indexOf(needle, at + 1);
+/**
+ * The value of the entry's *own* `attributes`, as `[start, end)` in the entry.
+ *
+ * Top level only: a nested include has its own entry and its own judgment, and
+ * letting a child's list vouch for its parent is one of the holes this version
+ * closes. Found by scanning at depth zero for the key.
+ */
+function attributesPropias(entrada: string): [number, number] | null {
+  let depth = 0;
+  for (let i = 1; i < entrada.length - 1; i++) {
+    const c = entrada[i];
+    if (c === "{" || c === "[" || c === "(") { depth++; continue; }
+    if (c === "}" || c === "]" || c === ")") { depth--; continue; }
+    if (depth !== 0) continue;
+    const m = /^attributes\s*:\s*/.exec(entrada.slice(i));
+    if (!m || (i > 0 && /[\w$]/.test(entrada[i - 1]))) continue;
+    const start = i + m[0].length;
+    const abre = entrada[start];
+    if (abre === "[" || abre === "{") return [start, cierra(entrada, start, abre === "[" ? "[]" : "{}") + 1];
+    // A bare name — `attributes: SOME_LIST` — runs to the next comma or the end.
+    const fin = entrada.slice(start).search(/[,}]/);
+    return [start, fin === -1 ? entrada.length - 1 : start + fin];
+  }
+  return null;
+}
+
+/**
+ * Whether position `at` sits directly inside an array that is the value of an
+ * `include:` key — walking back to the `[` that encloses it at depth zero and
+ * reading what precedes that bracket.
+ */
+function dentroDeInclude(clean: string, at: number): boolean {
+  let depth = 0;
+  for (let i = at; i >= 0; i--) {
+    const c = clean[i];
+    if (c === "]" || c === "}" || c === ")") depth++;
+    else if (c === "{" || c === "(") { if (depth === 0) return false; depth--; }
+    else if (c === "[") {
+      if (depth === 0) return /\binclude\s*:\s*$/.test(clean.slice(0, i));
+      depth--;
+    }
+  }
+  return false;
+}
+
+/** Every include of a guarded model, in every scanned file. */
+function includes(): Entrada[] {
+  const found: Entrada[] = [];
+  for (const dir of DIRECTORIOS) {
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))) {
+      const source = readFileSync(join(dir, file), "utf8");
+      const clean = sinLiterales(source);
+
+      // `model: X`, with any whitespace.
+      const objeto = new RegExp(String.raw`\bmodel\s*:\s*(${GUARDADOS})\b`, "g");
+      let m: RegExpExecArray | null;
+      while ((m = objeto.exec(clean)) !== null) {
+        const span = entradaDe(clean, m.index);
+        if (span === null) continue;
+        const [open, close] = span;
+        const entrada = clean.slice(open, close + 1);
+        const attrs = attributesPropias(entrada);
+        found.push({
+          file,
+          line: lineaDe(clean, m.index),
+          model: m[1],
+          forma: "objeto",
+          attributes: attrs === null ? null : source.slice(open + attrs[0], open + attrs[1]),
+        });
+      }
+
+      // `X` alone as an element of an *include* array: preceded by `[` or `,`,
+      // followed by `,` or `]`, and the array is the value of `include:`. Sends
+      // every column, and the first version could not see it at all. The last
+      // condition is what keeps `order: [[PosteModel, "name", dir]]` — a sort
+      // key, which is the other place a bare model legitimately sits in an
+      // array — from being reported as a bare include.
+      const pelado = new RegExp(String.raw`(?<=[\[,]\s*)(${GUARDADOS})(?=\s*[,\]])`, "g");
+      while ((m = pelado.exec(clean)) !== null) {
+        if (!dentroDeInclude(clean, m.index)) continue;
+        found.push({ file, line: lineaDe(clean, m.index), model: m[1], forma: "pelado", attributes: null });
       }
     }
   }
   return found;
+}
+
+/** The string elements of an `attributes` array, and whatever else is in it. */
+function elementos(lista: string): { campos: string[]; otros: string[] } {
+  const body = lista.trim().replace(/^\[/, "").replace(/\]$/, "");
+  const campos: string[] = [];
+  const otros: string[] = [];
+  let depth = 0;
+  let start = 0;
+  const partes: string[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "(" || c === "{" || c === "[") depth++;
+    else if (c === ")" || c === "}" || c === "]") depth--;
+    else if (c === "," && depth === 0) { partes.push(body.slice(start, i)); start = i + 1; }
+  }
+  partes.push(body.slice(start));
+  for (const p of partes.map((x) => x.trim()).filter((x) => x.length > 0)) {
+    const s = /^["']([^"']+)["']$/.exec(p);
+    if (s) campos.push(s[1]);
+    else otros.push(p);
+  }
+  return { campos, otros };
 }
 
 describe("every include names the columns it wants", () => {
@@ -100,12 +205,22 @@ describe("every include names the columns it wants", () => {
 
   it("never includes one of the guarded models bare", () => {
     const bare = includes()
-      .filter((i) => !/\battributes\b/.test(i.literal))
-      .map((i) => `${i.file}:${i.line} — ${i.model} sin attributes`);
+      .filter((i) => i.attributes === null)
+      .map((i) => `${i.file}:${i.line} — ${i.model} sin attributes${i.forma === "pelado" ? " (modelo pelado en el array)" : ""}`);
 
     // The message is the point: it names the file and the line, because the fix
     // is one line and the reader needs to know where.
     expect(bare).toEqual([]);
+  });
+
+  it("never uses an exclude list where a guarded model is concerned", () => {
+    // `attributes: { exclude: ["pass"] }` is a promise about today's columns.
+    // The next column added to `usuarios` travels. For these five models, only
+    // a list of what to send counts.
+    const excluye = includes()
+      .filter((i) => i.attributes !== null && i.attributes.trim().startsWith("{"))
+      .map((i) => `${i.file}:${i.line} — ${i.model} con exclude`);
+    expect(excluye).toEqual([]);
   });
 });
 
@@ -136,29 +251,32 @@ describe("the lists themselves", () => {
   // nobody is obliged to use proves nothing: it states the right answer without
   // checking that anybody gave it.
   //
-  // `user` is the login name, and the screen reading that endpoint paints
-  // `name` and `lastname` and nothing else, so it travelled to every account
-  // holding `bitacora.ver` for no reason at all.
-  //
   // Narrower is allowed, and deliberately: the report builder sends `["id"]`
   // alone to a viewer who may not see authors. The rule is a ceiling, not an
-  // equality — writing it as "must be the constant" would have failed that
-  // line, which is the one place in the repository already doing the careful
-  // thing.
+  // equality.
+  //
+  // Every usuario include is judged — the first version exempted any entry that
+  // mentioned `USUARIO_AS_AUTHOR`, which was six of seven, so that
+  // `[...USUARIO_AS_AUTHOR, "user", "pass"]` passed by construction. The spread
+  // of the constant is fine; a string beside it must be in the constant; and any
+  // other spread or bare name is something this test cannot vouch for.
   it("never sends more of an account than USUARIO_AS_AUTHOR holds", () => {
     const allowed = new Set<string>(USUARIO_AS_AUTHOR);
+    const usuario = includes().filter((i) => i.model === "UsuarioModel");
+    // Judged, not skipped: the count is what the old exemption hid.
+    expect(usuario.length, "no se encontró ningún include de usuario").toBeGreaterThan(5);
 
-    const over = includes()
-      .filter((i) => i.model === "UsuarioModel")
-      .filter((i) => !i.literal.includes("USUARIO_AS_AUTHOR"))
-      .flatMap((i) => {
-        const list = /attributes:\s*\[([^\]]*)\]/.exec(i.literal);
-        if (list === null) return [`${i.file}:${i.line} (sin attributes)`];
-        return [...list[1].matchAll(/"([^"]+)"/g)]
-          .map((m) => m[1])
-          .filter((field) => !allowed.has(field))
-          .map((field) => `${i.file}:${i.line} manda "${field}"`);
-      });
+    const over = usuario.flatMap((i) => {
+      if (i.attributes === null) return [`${i.file}:${i.line} (sin attributes)`];
+      const lista = i.attributes.trim();
+      if (lista === "USUARIO_AS_AUTHOR" || lista === "[...USUARIO_AS_AUTHOR]") return [];
+      if (!lista.startsWith("[")) return [`${i.file}:${i.line} attributes es ${lista.slice(0, 30)}, no una lista`];
+      const { campos, otros } = elementos(lista);
+      return [
+        ...campos.filter((f) => !allowed.has(f)).map((f) => `${i.file}:${i.line} manda "${f}"`),
+        ...otros.filter((o) => o !== "...USUARIO_AS_AUTHOR").map((o) => `${i.file}:${i.line} lleva ${o.slice(0, 30)}, que este test no puede juzgar`),
+      ];
+    });
 
     expect(
       over,

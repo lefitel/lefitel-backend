@@ -90,6 +90,56 @@ describe("what never reaches the log", () => {
     expect(JSON.stringify(nested)).not.toContain("papel-en-un-cajon");
   });
 
+  it("hides the bound values and the statement of a failed query", async () => {
+    // What `makeHandler` logs when a write fails is the exception itself, and a
+    // Sequelize `DatabaseError` carries the statement and its bound values as
+    // own properties. On `updateUserPass` the first bound value is the bcrypt
+    // hash that was just computed — so a lock timeout there wrote a credential
+    // into the log, past every field-name rule above. This is the shape pino
+    // actually sees: an `Error` with own enumerable `sql`, `parameters`,
+    // `parent`, `original`, and — for a `ValidationError` — `errors[].value`.
+    const HASH = "$2b$12$abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQ";
+    const SQL = 'UPDATE "usuarios" SET "pass"=$1 WHERE "id"=$2';
+    const pg = Object.assign(new Error("canceling statement due to lock timeout"), {
+      code: "55P03",
+      detail: "Key (id)=(7) is locked.",
+      sql: SQL,
+      parameters: [HASH, 7],
+    });
+    const err = Object.assign(new Error(pg.message), {
+      name: "SequelizeDatabaseError",
+      sql: SQL,
+      parameters: [HASH, 7],
+      parent: pg,
+      original: pg,
+    });
+    const validation = Object.assign(new Error("Validation error"), {
+      name: "SequelizeValidationError",
+      errors: [{ path: "pass", message: "too short", value: "hunter2" }],
+    });
+
+    const [line, val] = await captured((log) => {
+      log.error({ err, ruta: "/api/usuario/userpass/7" }, "fallo en updateUserPass");
+      log.error({ err: validation }, "fallo en createUsuario");
+    });
+
+    const texto = JSON.stringify(line);
+    expect(texto).not.toContain(HASH);
+    // A word from the statement, not a phrase with quotes in it: the first
+    // version asserted `SET "pass"`, and `JSON.stringify` escapes the quotes,
+    // so the serialised line read `SET \"pass\"` and the assertion passed
+    // with the statement fully present. Caught by mutation, not by reading.
+    expect(texto).not.toContain("UPDATE");
+    expect(texto).not.toContain("usuarios");
+    expect((line.err as { sql: string }).sql).toBe("[oculto]");
+    expect(JSON.stringify(val)).not.toContain("hunter2");
+    // And it stays diagnosable: what failed, and which key, are still there.
+    const e = line.err as { message: string; parent: { code: string; detail: string } };
+    expect(e.message).toContain("lock timeout");
+    expect(e.parent.code).toBe("55P03");
+    expect(e.parent.detail).toContain("Key (id)=(7)");
+  });
+
   it("leaves everything else alone", async () => {
     // Redaction that swallowed the useful fields would be its own kind of
     // failure: a log nobody can read is not safer, it is just empty.

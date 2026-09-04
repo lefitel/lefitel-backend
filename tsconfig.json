@@ -24,5 +24,9 @@
     "resolveJsonModule": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "vitest.config.ts"]
+  // `src/testkit/` holds helpers that only tests import — the source-text
+  // scanners the four `*Shape.test.ts` files share. Not a `.test.ts` itself, so
+  // it needs naming here or `npm run build` would emit it into dist/. It is
+  // still type-checked: `tsconfig.test.json` includes all of `src/`.
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/testkit/**", "vitest.config.ts"]
 }

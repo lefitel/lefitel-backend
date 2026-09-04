@@ -141,6 +141,42 @@ export const REDACT_PATHS = [
   "*.otpauth",
   "*.codigo",
   "*.recovery",
+  // What a failed query carries, and why it is here at all.
+  //
+  // Every list above names a *field*. A Sequelize `DatabaseError` is not a
+  // field: it is an `Error` with own properties `sql`, `parameters`, `parent`
+  // and `original`, and pino's `err` serializer copies every own property it
+  // finds. `parameters` are the bound values of the statement that failed — so
+  // when `UPDATE "usuarios" SET "pass" = $1` hits a lock timeout, `$1` is the
+  // bcrypt hash that was just computed, and it lands in the log verbatim under
+  // `err.parameters[0]`, where "pass" and "*.pass" cannot see it. `makeHandler`
+  // logs `{ err }` for every converted controller, which is what widened this
+  // from a corner into a path. Found by the audit of 3 September.
+  //
+  // `sql` goes with it: this codebase binds (`bind:`), so the statement holds
+  // `$1` rather than the value, but Sequelize inlines literals for
+  // `replacements:` and nothing here stops the next query from using those.
+  // `message`, `code`, `constraint` and `parent.detail` stay, and they are what
+  // a reader needs — Postgres puts the failing column and constraint in the
+  // message, and `detail` names the key, never a secret.
+  //
+  // `errors[*].value` is the same hole on a `ValidationError`: each item carries
+  // the value that failed validation, and a password too short to pass the
+  // length rule is still the password.
+  "err.sql",
+  "err.parameters",
+  "err.parent.sql",
+  "err.parent.parameters",
+  "err.original.sql",
+  "err.original.parameters",
+  "err.errors[*].value",
+  // And the copy pino makes of it: the `err` serializer reads an `errors`
+  // property as an aggregate error and re-emits each item under
+  // `aggregateErrors[]`, `value` included. The test found this path; nothing in
+  // pino's documentation of the serializer says it does this.
+  "err.aggregateErrors[*].value",
+  "*.sql",
+  "*.parameters",
 ] as const;
 
 const redact = { paths: [...REDACT_PATHS], censor: REDACT_CENSOR };

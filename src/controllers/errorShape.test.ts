@@ -11,9 +11,10 @@
 // the browser whatever Sequelize or Postgres raised: column names, constraint
 // names, sometimes the SQL. A caller who can reach any route can map the schema
 // by feeding it bad input. There were ninety of these across nineteen
-// controllers: seventy-four converted, sixteen left in the three files named
-// below. (The commit that did the work says eighty-five, counted before the
-// audit recounted — this is the number that matches the tree.)
+// controllers. Seventy-four went in A3; the last sixteen — ten in `evento`, one
+// in `eventoObs`, five in `rol` — went when the audit of 3 September found that
+// the condition A3 had set for converting them ("the moment that work lands")
+// had been met by the very next commit and nobody had come back.
 //
 // The fix is not a neutral string in place — that trades a leak for blindness,
 // because these failures are logged nowhere else and the browser was the only
@@ -24,76 +25,76 @@
 //
 // Scoped to 500 on purpose. The generator answers 400, 413 and 429 with typed
 // messages of its own, written for a person to read, and those must keep working.
+//
+// **What the second version closed.** The first walked braces over the raw
+// source, so a `}` inside a string or a comment ended the `catch` body before
+// the 500 and the block read as clean — while its own comment claimed it failed
+// loud, having guarded only the rarer case of an unmatched `{`. It also could
+// not follow `const payload = { message: e.message }; res.status(500).json(payload)`,
+// nor `const code = 500; res.status(code)`. The walk now runs over text with
+// every string and comment blanked, and both aliases are resolved.
 
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sinLiterales, cierra, resuelve, lineaDe } from "../testkit/sourceText.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Three files not converted, for two different reasons, both about other
- * sessions working the same tree.
+ * Files this test deliberately does not scan. Empty, and meant to stay so.
  *
- * `rol.controller.ts` belongs to the roles session, which owns that file while
- * its screen is being built.
- *
- * `evento.controller.ts` and `eventoObs.controller.ts` are nobody else's, but
- * had uncommitted work in them when this ran, and converting a file somebody is
- * halfway through editing is how two people lose an afternoon. Ten and one leak
- * respectively; convert them the moment that work lands.
- *
- * Listed rather than converted, so this test is honest about what it does not
- * cover. `keeps the exception list honest` below fails if an entry outlives the
- * defect — remove it then, do not relax the rule.
+ * It held three for a while — `rol` because another session owned the file,
+ * `evento` and `eventoObs` because they had uncommitted work in them — and the
+ * shape is kept because a list with a staleness test is the honest way to carry
+ * a debt, if one ever has to be carried again. `keeps the exception list
+ * honest` below fails if an entry outlives the defect: remove the entry then,
+ * do not relax the rule.
  */
-const NOT_OURS = ["rol.controller.ts", "evento.controller.ts", "eventoObs.controller.ts"];
+const NOT_OURS: string[] = [];
 
 /** The controller files this test is responsible for. */
 const escaneados = () =>
   readdirSync(here).filter((f) => f.endsWith(".controller.ts") && !NOT_OURS.includes(f));
 
-function catchBlocks(only?: string[]) {
-  const found: { file: string; line: number; name: string; body: string }[] = [];
+interface Catch {
+  file: string;
+  line: number;
+  /** The binding: `error` in `catch (error)`. */
+  name: string;
+  /** The block, strings and comments blanked. */
+  body: string;
+  /** Where the block starts in the cleaned file, for alias resolution. */
+  at: number;
+  clean: string;
+}
+
+function catchBlocks(only?: string[]): Catch[] {
+  const found: Catch[] = [];
   const files = only ?? escaneados();
 
   for (const file of files) {
-    const source = readFileSync(join(here, file), "utf8");
+    const clean = sinLiterales(readFileSync(join(here, file), "utf8"));
     // The binding may carry a type annotation. `catch (e: unknown)` is what
     // `useUnknownInCatchVariables` pushes you to write, and the first version of
     // this pattern went blind the moment somebody wrote one.
-    const re = /catch\s*\(\s*([A-Za-z_$][\w$]*)\s*(?::[^)]*)?\)\s*\{/g;
+    const re = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*(?::[^)]*)?\)\s*\{/g;
     let m: RegExpExecArray | null;
-    while ((m = re.exec(source)) !== null) {
-      // Walk from the block's opening brace to its match, so a nested block
-      // does not end the body early.
-      const open = source.indexOf("{", m.index + m[0].length - 1);
-      let depth = 0;
-      let close = -1;
-      for (let i = open; i < source.length; i++) {
-        if (source[i] === "{") depth++;
-        else if (source[i] === "}") {
-          depth--;
-          if (depth === 0) { close = i; break; }
-        }
-      }
-      // Loud, not silent. The brace walk knows nothing about strings or
-      // comments, so an unbalanced `{` inside one leaves `close` at -1 — and a
-      // block dropped quietly reads to every check below as "this file is
-      // clean", including the one that decides an exception has expired.
-      if (close === -1) {
-        throw new Error(
-          `${file}: no se pudo cerrar el catch de la línea ` +
-            `${source.slice(0, m.index).split("\n").length}. ` +
-            "Probablemente una llave suelta en un comentario o una cadena.",
-        );
-      }
+    while ((m = re.exec(clean)) !== null) {
+      const open = m.index + m[0].length - 1;
+      // Throws on unbalanced text, in either direction. On blanked text that
+      // means real code is unbalanced, which is worth stopping on — and it is
+      // the opposite of the first version, where a stray `}` ended the walk
+      // early and the block read as clean.
+      const close = cierra(clean, open);
       found.push({
         file,
-        line: source.slice(0, m.index).split("\n").length,
+        line: lineaDe(clean, m.index),
         name: m[1],
-        body: source.slice(open, close + 1),
+        body: clean.slice(open, close + 1),
+        at: open,
+        clean,
       });
     }
   }
@@ -121,32 +122,35 @@ const ACCESOS = /\.\s*(message|stack|original|parent|detail|sql|toString\s*\()|S
  * Judging the argument rather than the whole block is what makes this both
  * stricter and kinder. Stricter, because `catch (e: unknown)` forces a cast and
  * the leak then reads `(e as {parent?: …}).parent` — the binding is no longer
- * next to the property, so looking for `e.parent` in the block misses it, which
- * is exactly what an audit of the first version caught. Kinder, because a block
- * that hands the exception to the logger and answers a neutral 500 is correct,
- * and looking at the whole block would have flagged it.
+ * next to the property, so looking for `e.parent` in the block misses it.
+ * Kinder, because a block that hands the exception to the logger and answers a
+ * neutral 500 is correct, and looking at the whole block would have flagged it.
+ *
+ * Both the status and the argument are followed through one alias: `const code
+ * = 500; res.status(code)` is a 500, and `res.status(500).json(payload)` is
+ * judged on what `payload` was assigned.
  */
-function respuesta500(body: string): string | null {
-  const at = body.search(/res\s*\.\s*status\s*\(\s*500\s*\)/);
-  if (at === -1) return /sendStatus\s*\(\s*500\s*\)/.test(body) ? "" : null;
-  const call = body.slice(at).search(/\.\s*(json|send)\s*\(/);
-  if (call === -1) return "";
-  const open = body.indexOf("(", at + call);
-  let depth = 0;
-  for (let i = open; i < body.length; i++) {
-    if (body[i] === "(") depth++;
-    else if (body[i] === ")") {
-      depth--;
-      if (depth === 0) return body.slice(open + 1, i);
-    }
+function respuesta500(c: Catch): string | null {
+  const status = /res\s*\.\s*status\s*\(\s*([^)]+?)\s*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = status.exec(c.body)) !== null) {
+    const codigo = resuelve(c.clean, m[1], c.at + m.index).text.trim();
+    if (codigo !== "500") continue;
+    const rest = c.body.slice(m.index + m[0].length);
+    const call = rest.search(/^\s*\.\s*(json|send)\s*\(/);
+    if (call === -1) return "";
+    const open = c.body.indexOf("(", m.index + m[0].length + rest.indexOf("("));
+    const close = cierra(c.body, open, "()");
+    const arg = c.body.slice(open + 1, close);
+    return resuelve(c.clean, arg, c.at + open).text;
   }
-  return body.slice(open + 1);
+  return /sendStatus\s*\(\s*500\s*\)/.test(c.body) ? "" : null;
 }
 
 /** A catch that answers 500 with something taken off the exception. */
 const leaks = (files?: string[]) =>
   catchBlocks(files).filter((c) => {
-    const arg = respuesta500(c.body);
+    const arg = respuesta500(c);
     if (arg === null) return false;
     // Naming the binding inside the answer at all is enough. Whatever is being
     // done with it there, it is the exception talking to the browser.
@@ -155,21 +159,18 @@ const leaks = (files?: string[]) =>
 
 describe("what a failure may say out loud", () => {
   // A source-level test that finds nothing to read passes for the wrong reason.
-  // Counts files read, not `catch` blocks found. The first version asserted on
-  // blocks, which measures how much unconverted code is left — so finishing the
-  // job would have reddened the test that guards it. `generador` alone holds ten
-  // of the eighteen that remain.
+  // Two bounds: files read, so an empty walk cannot pass; and blocks found, so
+  // a `catch` regex that went blind on some spelling cannot either. The second
+  // is low on purpose — `makeHandler` is the point, so few catches remain — but
+  // `usuario` keeps three for its 409 branches and `generador` ten that route
+  // through `handleError`, and those are not going anywhere.
   it("reads the controllers at all, so an empty walk cannot pass", () => {
-    expect(
-      escaneados().length,
-      "el escáner no encontró ningún controlador que leer",
-    ).toBeGreaterThan(15);
+    expect(escaneados().length, "el escáner no encontró ningún controlador que leer").toBeGreaterThan(15);
+    expect(catchBlocks().length, "el escáner no encontró ningún catch que leer").toBeGreaterThan(5);
   });
 
   it("keeps the exception list honest", () => {
-    // A named file that no longer exists is a stale entry too, and reading it
-    // would otherwise throw ENOENT with no explanation of what to do about it.
-    const perdidos = NOT_OURS.filter((f) => !escaneados().concat(NOT_OURS).includes(f) || !existsSync(join(here, f)));
+    const perdidos = NOT_OURS.filter((f) => !existsSync(join(here, f)));
     expect(
       perdidos,
       `estos ficheros de NOT_OURS ya no existen: quita la entrada:\n  ${perdidos.join("\n  ")}`,

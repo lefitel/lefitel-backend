@@ -1,15 +1,22 @@
 // The dropdown lists each form needs, one response per form.
 //
-// Four endpoints and not one `/api/catalogo`, and §5.1 of the API standard spec
+// Three endpoints and not one `/api/catalogo`, and §5.1 of the API standard spec
 // explains why at length: `routeGuards.test.ts` decides whether a route is
 // protected by reading a stamp of a single `modulo.accion` pair, so a single
 // address serving eight blocks could not declare a permission at all. The real
-// case was never "one catalogue" — it was "four forms need lists", and that is
-// four addresses.
+// case was never "one catalogue" — it was "forms need lists", and that is one
+// address per form.
 //
-// All four in one file because the blocks overlap and their projections do not.
-// `ciudad` travels in two of the four responses with different columns, `obs` in
-// two, and the three plain catalogues in two — sharing the reader and stating
+// Three and not four. §5 first planned a `GET /api/usuario/opciones` serving
+// the role list under `roles:editar`, and the audit of 3 September took it off
+// the table: `GET /api/rol/` already serves exactly `{id, name}` to the same
+// screen, and gating the same list at a second address under a *different*
+// permission would have left a user manager without `roles:editar` staring at
+// a dropdown that never loads. `UsuarioSheet` keeps calling `getRol()`.
+//
+// All three in one file because the blocks overlap and their projections do not.
+// `ciudad` travels in two of the three responses with different columns, `obs`
+// in two, and the three plain catalogues in two — sharing the reader and stating
 // the columns per endpoint is what §5.2 asks for, and it is what lets the shape
 // of each block be decided by whoever consumes it rather than by whoever wrote
 // the model.
@@ -22,7 +29,7 @@
 // `obs` carries `id_tipoObs` because both incident forms group the list by type
 // with `filter(o => o.id_tipoObs === …)`, which without the column yields an
 // empty group that reads as "no observations configured". Nothing here carries
-// `description` or `criticality`: no consumer of these four endpoints reads
+// `description` or `criticality`: no consumer of these three endpoints reads
 // either off a catalogue list. The five Parámetros sections do read
 // `description`, and they stay on the administration endpoints (§5.5).
 
@@ -34,7 +41,6 @@ import { MaterialModel } from "../models/material.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
-import { RolModel } from "../models/rol.model.js";
 import { TipoObsModel } from "../models/tipoObs.model.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -43,10 +49,10 @@ const opcionesLog = log("opciones");
 const handler = makeHandler(opcionesLog);
 
 /**
- * Any of the seven catalogue models, as far as this file is concerned.
+ * Any of the six catalogue models, as far as this file is concerned.
  *
  * Structural rather than `ModelDefined<A, B>`: each model is generic over its
- * own attribute interface, so no single instantiation accepts all seven, and the
+ * own attribute interface, so no single instantiation accepts all six, and the
  * alternatives are a generic parameter that buys nothing here — none of these
  * lists is typed on the way out, they are projections — or `any`. What this
  * helper needs of a model is one method, so that is what it asks for.
@@ -84,7 +90,7 @@ const OBS_AGRUPABLE = ["id", "name", "id_tipoObs"] as const;
  * existing endpoints exactly is also what keeps C2 from being a visible change.
  *
  * **No `paranoid: false` and no `archived` query parameter**, which is how §5's
- * "los archivados no viajan" is satisfied: all seven models are `paranoid: true`,
+ * "los archivados no viajan" is satisfied: all six models are `paranoid: true`,
  * so the default already excludes archived rows. Do not copy the
  * `paranoid: false` that appears in `poste.controller.ts`'s includes — that is
  * there so an archived city can still label a pole that exists, which is the
@@ -120,6 +126,12 @@ async function tramosEntre(ciudadesVivas: Set<number>) {
   const filas = await PosteModel.findAll({
     attributes: ["id_ciudadA", "id_ciudadB"],
     group: ["id_ciudadA", "id_ciudadB"],
+    // Ordered, for the reason `lista()` gives at length above — and this was
+    // the one block in this file that was not, which an audit caught: a
+    // `GROUP BY` without `ORDER BY` hands back whatever order the hash
+    // aggregate produced, so the Tramo combobox could reorder between loads.
+    // By the grouped columns, which is the only order a grouped query can have.
+    order: [["id_ciudadA", "ASC"], ["id_ciudadB", "ASC"]],
     raw: true,
   }) as unknown as { id_ciudadA: number; id_ciudadB: number }[];
 
@@ -151,7 +163,8 @@ async function tramosEntre(ciudadesVivas: Set<number>) {
  * here, and `poste/index.tsx` swallows it with an empty `.catch`: the dropdowns
  * simply never populate. No seeded role is in that position (all three have `ver`
  * wherever they have `editar`), but the matrix editor can make one. The same
- * sentence as the one on `getOpcionesUsuario` below, for the same reason.
+ * sentence the audit made about the role list, for the same reason — and the
+ * reason that endpoint was dropped.
  *
  * Worth knowing beside it: this is the **only gated read on that router**.
  * `GET /api/poste/`, `/tramos` and `/:id` carry no permission at all — they are
@@ -187,7 +200,7 @@ export const getOpcionesEvento = handler("getOpcionesEvento", async (_req: Reque
 /**
  * `reportes:ver`, for the three report screens.
  *
- * The widest of the four, and the only one whose blocks depend on each other:
+ * The widest of the three, and the only one whose blocks depend on each other:
  * `tramos` is filtered against the `ciudad` block, so the cities are fetched
  * first and the pairs after. `reportes` has exactly one action in the permission
  * vocabulary — `ver` — so it is the only pair this route could ask for.
@@ -202,34 +215,4 @@ export const getOpcionesReporte = handler("getOpcionesReporte", async (_req: Req
     tramosEntre(new Set(ciudad.map((c) => c.id))),
   ]);
   res.status(200).json({ ciudad, adss, material, propietario, obs, tramos });
-});
-
-/**
- * `roles:editar`, and the pair is the point — see §5.3.
- *
- * 🔴 **Not mounted yet, and that is the one loose end of B1.** Its route belongs
- * in `usuario.routes.ts`, and its permission has to be declared in
- * `ROLES_GATES` inside `routeGuards.test.ts` — `MODULOS_TABULADOS` fails any
- * gated route under `/api/usuario` that no table names. Both files had another
- * session's uncommitted work in them when this was written, so mounting it would
- * have meant committing somebody else's half-finished change. Three lines when
- * they land: the route, the table entry, and a case in `opciones.test.ts`.
- *
- * Not `seguridad:ver`, which is what the screen around this list is gated by.
- * Whoever picks a role from this dropdown is about to assign one, and
- * `createUsuario` answers 403 to a caller without `roles.editar` **and files a
- * `severity: 'critical'` line reading `ROLE_CHANGE_DENIED`**. Serving the list
- * under a permission that cannot use it would turn a user manager's ordinary
- * afternoon into a run of privilege-escalation alerts.
- *
- * Consequence worth handing to C2: a custom role holding `seguridad.editar`
- * without `roles.editar` gets 403 here, and `UsuarioSheet`'s `loadRoles` has no
- * `.catch`, so its `finally`-less `setLoadingRoles(false)` never runs and the
- * combobox stays a skeleton. No seeded role is in that position — role 1 holds
- * both, roles 2 and 3 hold neither and cannot reach the screen — but the matrix
- * editor can create one.
- */
-export const getOpcionesUsuario = handler("getOpcionesUsuario", async (_req: Request, res: Response) => {
-  const rol = await lista(RolModel, NOMBRE);
-  res.status(200).json({ rol });
 });
