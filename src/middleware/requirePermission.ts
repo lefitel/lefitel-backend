@@ -6,6 +6,23 @@ import { log } from "../utils/logger.js";
 const gateLog = log("permisos");
 
 /**
+ * What a request with no role is told.
+ *
+ * These two gates answered `res.sendStatus(401)`, which sends the word
+ * `Unauthorized` as plain text — not the `{ message }` every other failure in
+ * this API carries, and not something any screen knows how to show. §3.6 of the
+ * API standard is what this closes.
+ *
+ * Neither branch is reachable over HTTP today, and that is worth stating rather
+ * than discovering: `authenticate` always populates `id_rol` before it calls
+ * `next()`, and `routeGuards.test.ts` requires `authenticate` in front of every
+ * gated route. This is defence in depth — the shape the answer takes if that
+ * ever stops being true — so it is verified in `requirePermission.test.ts`
+ * against the middleware directly, not through a request that cannot be made.
+ */
+const SIN_SESION = "Su sesión expiró. Vuelva a iniciar sesión.";
+
+/**
  * The permission a mounted gate is asking for, readable from outside.
  *
  * `routeGuards.test.ts` walks the assembled Express app to prove every write
@@ -80,7 +97,7 @@ export function requirePermission(modulo: Module, accion: Action) {
   // wrapper, so the wrapped function is the one that carries it.
   const requirePermissionGate = async (req: Request, res: Response, next: NextFunction) => {
     const role = req.user?.id_rol;
-    if (role === undefined) return res.sendStatus(401);
+    if (role === undefined) return res.status(401).json({ message: SIN_SESION });
 
     if (await can(role, modulo, accion)) return next();
     return res.status(403).json({ message: "No tiene permiso para realizar esta acción." });
@@ -114,7 +131,7 @@ export function requireSelfOrPermission(modulo: Module, accion: Action, param = 
     next: NextFunction,
   ) => {
     const role = req.user?.id_rol;
-    if (role === undefined) return res.sendStatus(401);
+    if (role === undefined) return res.status(401).json({ message: SIN_SESION });
     if (await can(role, modulo, accion)) return next();
 
     const value = req.params[param];

@@ -48,6 +48,12 @@ function fakeRes() {
     json(payload: unknown) { this.body = payload; return this; },
     sendStatus(code: number) { this.statusCode = code; return this; },
   };
+  // An arbitrary JSON body, read straight off (`body.cuentas`, `body.message`)
+  // rather than through a cast at each assertion. `unknown` would need one every
+  // time: for a serialised response, `any` is the right type here and the rule
+  // is the thing that is wrong. Turned off on this line, with the reason, so that
+  // `eslint` can be a deploy gate (task E3 of the API standard).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return res as unknown as Response & { statusCode: number; body: any };
 }
 

@@ -76,6 +76,12 @@ describe("requirePermission", () => {
 
     expect(call.statusCode).toBe(401);
     expect(call.calledNext()).toBe(false);
+    // And with the body every other failure in this API carries. This used to be
+    // `res.sendStatus(401)`, which sends the word `Unauthorized` as plain text —
+    // §3.6 of the API standard. The assertion reads the body and not only the
+    // code on purpose: the double below implements `sendStatus` too, so a status
+    // check alone stays green against either version.
+    expect((call.res as unknown as { body?: { message?: string } }).body?.message).toBeTruthy();
     // Never even asked: no role, no question.
     expect(can).not.toHaveBeenCalled();
   });
@@ -129,6 +135,8 @@ describe("requireSelfOrPermission", () => {
 
     expect(call.statusCode).toBe(401);
     expect(call.calledNext()).toBe(false);
+    // Same reasoning as the sibling gate above: the body is what changed.
+    expect((call.res as unknown as { body?: { message?: string } }).body?.message).toBeTruthy();
   });
 
   it("lets the permission act on anyone", async () => {

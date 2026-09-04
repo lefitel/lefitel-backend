@@ -11,7 +11,7 @@ import { MaterialModel } from "../models/material.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { TipoObsModel } from "../models/tipoObs.model.js";
-import { ICiudad, IEvento, IEventoObs, IObs, IPoste, IRevision, ITipoObs } from "../interfaces/index.js";
+import { ICiudad, IEvento, IEventoObs, IObs, IPoste, ITipoObs } from "../interfaces/index.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -30,15 +30,6 @@ interface IPosteConEventos extends IPoste {
 interface IEventoObsConOb extends IEventoObs {
   ob: (Pick<IObs, "id" | "name" | "criticality"> & {
     tipoObs: Pick<ITipoObs, "id" | "name"> | null;
-  }) | null;
-}
-
-interface IEventoConRevisions extends IEvento {
-  createdAt: Date;
-  revisions: Pick<IRevision, "date">[];
-  poste: (Pick<IPoste, "id" | "id_ciudadA" | "id_ciudadB"> & {
-    ciudadA: Pick<ICiudad, "id" | "name"> | null;
-    ciudadB: Pick<ICiudad, "id" | "name"> | null;
   }) | null;
 }
 

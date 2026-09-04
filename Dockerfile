@@ -10,6 +10,26 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
+
+# ── Deploy gates ──────────────────────────────────────────────────────────────
+# Nothing ran the tests or the linter between a commit and production. The image
+# was built from whatever was on the branch, and the first thing to notice a
+# broken build was the ERP. These two lines are the whole of task E3 of the API
+# standard, and they cost nothing to keep: a failing gate aborts the deploy, and
+# the previous version stays up — the same property the CMD comment below relies
+# on for migrations.
+RUN npm run lint
+
+# The fake connection string is load-bearing, and it never leaves this line.
+# `.dockerignore` keeps `.env` out of the build context, and `database/sequelize`
+# refuses to load without connection settings — it calls `process.exit(1)` while
+# being imported, so the suite would die on its first `import` rather than fail a
+# test. Nothing here connects: every query in the suite is mocked, and
+# `new Sequelize(url)` opens no socket on its own. `ENV` is deliberately not used
+# so this cannot reach the runtime image, which starts from a second `FROM` and
+# reads the real value from the host anyway.
+RUN DATABASE_URL="postgres://gate:gate@127.0.0.1:5432/gate" npm test
+
 RUN npm run build
 
 # ── Runtime ───────────────────────────────────────────────────────────────────

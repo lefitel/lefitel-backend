@@ -93,8 +93,17 @@ consultas aparte, `WHERE id_evento IN (...)`.
 ```
 
 El modelo se llama `RevisionModel`; la **tabla** se llama `revicions`, con la
-errata dentro. No es lo mismo y este documento las confundía: los nombres de
-índice de abajo llevan la errata a propósito, porque nombran la tabla.
+errata dentro. No es lo mismo y este documento las confundía.
+
+Y son **dos erratas distintas**, que es lo que decía mal la versión anterior de
+este párrafo: la tabla es `revic**ions**` y el índice es
+`idx_revic**iones**_id_evento`. O sea que el índice **no** nombra a su tabla, y
+la regla que aquí se enunciaba —«llevan la errata a propósito, porque nombran la
+tabla»— no describe el nombre que hay. Importa porque quien la crea se ve
+tentado de «corregirlo» a `idx_revicions_id_evento`, que es la convención que sí
+sigue la migración de autoría, y eso no renombra nada: **crea un segundo índice
+idéntico**. El nombre se conserva tal cual; renombrarlo, si algún día se quiere,
+es un `ALTER INDEX` en su propia migración.
 
 `criticality` viaja en el include de observaciones desde que se descubrió que la
 lista de incidencias podía nombrar la observación sin decir su gravedad — que es
@@ -157,27 +166,41 @@ fallo de Postgres en la lista de incidencias sigue llegando al navegador.
 
 ## Base de datos — Índices
 
-> ⚠️ **Ninguno de estos nueve índices está en una migración.** Se crearon a mano
-> contra el servidor y este documento es el único sitio donde existen. Una base
-> de datos nueva —un entorno de pruebas, una restauración desde esquema— no
-> tendrá ni uno, y nadie se enterará hasta que una consulta tarde diez segundos.
+> ✅ **Los nueve están ya en una migración**, `20260904000001-hand-made-indexes`
+> (tarea E1 del estándar, 4 de septiembre de 2026). Antes de eso se habían
+> creado a mano contra el servidor y este documento era el único sitio donde
+> existían.
 >
-> Que la cuenta sea nueve y no ocho, y que no haya excepción, es corrección de
-> una revisión: la primera versión de este aviso decía «siete de ocho» y daba
-> `idx_reviciones_id_evento` por migrado. No lo está. Ese nombre aparece en
-> `20260822000002-add-authorship.ts` **dentro de un comentario**, en una línea
-> que dice precisamente que está mal escrito, y un `grep` del nombre lo confunde
-> con una migración. Era la peor de las dos erratas posibles: manda saltarse
-> justo el índice que sostiene la lista de incidencias.
+> **Lo que eso arregla, dicho sin inflarlo.** La versión anterior de este aviso
+> decía que una base de datos nueva no tendría ni uno. Es cierto y es
+> inalcanzable: **ninguna migración crea las tablas base** —la más antigua ya
+> hace `addColumn("obs", …)` dando por hecho que existen— y el `sync({ alter:
+> true })` que las creaba se retiró. Así que `npm run migrate` contra una base
+> vacía muere mucho antes de llegar aquí, y las dos formas de montar un entorno
+> nuevo son restaurar un `pg_dump` —que trae los índices dentro— o nada. Lo que
+> E1 compra es **procedencia**: los nueve dejan de vivir sólo en prosa y pasan a
+> estar declarados, versionados y comprobables.
 >
-> La forma de verlo sin creerse a nadie: las migraciones **sí** crean
-> `idx_solucions_id_evento` —el hermano exacto de este, para la otra tabla de la
-> misma consulta—, y de `revicions` solo migran el de `id_usuario`. El hueco es
-> ese.
+> **Y comprobados de verdad.** La migración no se limita a crearlos con `IF NOT
+> EXISTS`, que compara el nombre y nunca la definición: al final lee de
+> `pg_index` las columnas reales de los nueve y falla si alguna no es la de aquí.
+> Ese es el único caso que `IF NOT EXISTS` se traga —un índice hecho a mano con
+> uno de estos nombres sobre otra columna— y es exactamente el que dejaría una
+> consulta escaneando mientras este documento jura lo contrario.
 >
-> Meterlos en una migración es trabajo pendiente, no está en las catorce tareas
-> del estándar, y merece la pena hacerlo antes de que alguien monte un entorno
-> nuevo.
+> **Dos nombres de esta lista no son lo que parecen, y están así a propósito.**
+> `idx_postes_ciudadA` se escribe aquí sin comillas, que es como se creó, y
+> Postgres pasa a minúsculas todo identificador sin comillas: en la base se llama
+> `idx_postes_ciudada`. Entrecomillarlo en una migración —que es lo que hace
+> `queryInterface.addIndex` por su cuenta— busca un nombre que no existe y
+> **crea un índice duplicado**. Lo mismo con `idx_reviciones_id_evento` y su
+> errata. Los dos casos están escritos en la cabecera de la migración.
+>
+> Que la cuenta sea nueve y no ocho es corrección de una revisión anterior: decía
+> «siete de ocho» y daba `idx_reviciones_id_evento` por migrado porque su nombre
+> aparece en `20260822000002-add-authorship.ts` **dentro de un comentario**, en
+> una línea que dice precisamente que está mal escrito. Un `grep` del nombre lo
+> confundía con una migración.
 >
 > **Los índices que sí vienen de una migración no están en esta lista**, y no es
 > descuido: la lista es la de los que faltarían en una base nueva. Los migrados
@@ -197,16 +220,23 @@ fallo de Postgres en la lista de incidencias sigue llegando al navegador.
 CREATE INDEX idx_eventos_poste_state_deleted
 ON public.eventos (id_poste, state, "deletedAt");
 
--- eventos: queries paranoid
+-- eventos: la pestaña Archivados, que pide `deletedAt IS NOT NULL`.
+-- NO las consultas paranoid: ésas piden `IS NULL`, que casa con casi toda la
+-- tabla, y para eso un índice no sirve. El comentario anterior decía lo
+-- contrario y mandaba a cualquiera que quisiera «mejorarlo» a un índice parcial
+-- `WHERE "deletedAt" IS NULL`, que es justo el que NO puede servir a Archivados.
 CREATE INDEX idx_eventos_deleted ON public.eventos ("deletedAt");
 
 -- eventos: getEvento_usuario
 CREATE INDEX idx_eventos_id_usuario ON public.eventos (id_usuario);
 
--- postes: queries paranoid
+-- postes: la pestaña Archivados, igual que en eventos.
 CREATE INDEX idx_postes_deleted ON public.postes ("deletedAt");
 
--- postes: getPosteByTramo / getPosteByCiudad
+-- postes: `getPoste` filtrado por `ciudadId`, o por `ciudadA`+`ciudadB`. (Los
+-- nombres `getPosteByTramo` y `getPosteByCiudad` que decía aquí antes no existen
+-- ni han existido: son parámetros de consulta sobre el mismo manejador.)
+-- Nombre SIN comillas a propósito: en la base está en minúsculas. Ver el aviso.
 CREATE INDEX idx_postes_ciudadA ON public.postes ("id_ciudadA");
 CREATE INDEX idx_postes_ciudadB ON public.postes ("id_ciudadB");
 

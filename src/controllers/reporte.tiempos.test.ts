@@ -87,6 +87,13 @@ function res() {
     status(c: number) { r.statusCode = c; return r; },
     json(b: unknown) { r.body = b; return r; },
   };
+  // An arbitrary JSON body that the assertions below walk three levels into
+  // (`body.tramos[0].avgDias`). `unknown` would need a cast at every one of
+  // them, and `Record<string, unknown>` does not let you past the first key: for
+  // a serialised response read this way, `any` is the right type and the rule is
+  // the thing that is wrong. Turned off on this line, with the reason, so that
+  // `eslint` can be a deploy gate (task E3 of the API standard).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return r as unknown as Response & { statusCode: number; body: any };
 }
 

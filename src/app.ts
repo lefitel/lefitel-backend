@@ -387,6 +387,52 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 /**
+ * An address that does not exist, answered in JSON.
+ *
+ * A 404 is not an error — nothing threw — so it never reaches the terminal
+ * handler below, and until now it fell through to Express's `finalhandler`,
+ * which answers **HTML**. Every client module in `web` reads
+ * `error.response.data.message` and falls back to its own wording when that is
+ * missing, so seventeen call sites were showing a generic phrase for what is
+ * really a very specific fault: the address is wrong.
+ *
+ * That matters most for the task that makes 404s on purpose. Renaming routes
+ * (D1) means a browser holding yesterday's bundle asks for an address that has
+ * moved, and this is what it will be told. Hence the wording: **the address does
+ * not exist**, and not "an error occurred" — a phrase that sends whoever reads
+ * the report looking for a server fault that is not there.
+ *
+ * **Global, not scoped to `/api`.** This process serves the API and one
+ * `express.static` mount for the images directory; the web client is deployed
+ * elsewhere. So there is no path here that should ever answer HTML. In practice
+ * a non-API path is answered by `authenticateArchivos` with 401 long before it
+ * gets here — deliberately, so that the mount cannot be used to guess which
+ * photographs exist (`app.images.test.ts`) — and this handler is what serves the
+ * rest.
+ *
+ * **Three parameters, and the third is load-bearing twice over.** A function of
+ * four is an error handler to Express and would never run, which would remove
+ * this silently; and `res.headersSent` has to hand the request onwards rather
+ * than answer twice, because a second `res.status()` throws
+ * `ERR_HTTP_HEADERS_SENT` into the handler below, which would then try to answer
+ * a third time. Not reachable today — the two places that could respond late
+ * both check `headersSent` themselves — which is why it is one line and a
+ * comment rather than a test.
+ *
+ * It does not log. `httpLogger` already writes a line per request, with the
+ * request id, and logging here as well produces the double entry the terminal
+ * handler below documents. The exception is a missing image: `isNoise` in
+ * `httpLogger` ignores static asset extensions, so those 404s are logged
+ * nowhere. That is on purpose too — one export fetches photographs by the
+ * thousand — and the place that answers "which references are broken" is the
+ * Archivos screen, which asks the database rather than the log.
+ */
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) return next();
+  res.status(404).json({ message: "La dirección solicitada no existe." });
+});
+
+/**
  * Terminal error handler.
  *
  * Anything thrown before a controller — the body-parser size limit, malformed

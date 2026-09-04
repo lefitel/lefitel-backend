@@ -502,17 +502,29 @@ ese fallo ya ocurrió una vez y costó una inspección de campo. Y su test mocke
 decide: se documenta. Con dos correcciones que la primera versión daba por
 hechas y no lo estaban:
 
-- **Once respuestas no llevan `message`:** nueve `res.sendStatus(401)` con cuerpo
-  vacío y dos `res.status(500).send("…")` de texto plano en
-  [`upload.controller.ts`](../../src/controllers/upload.controller.ts). Las dos
-  de subida pasan a `{ message }`. De los nueve `401`, siete son de la sesión de
-  autenticación; los otros dos están en `requirePermission.ts` y por tanto son de
-  éste: una petición que llega sin `id_rol` recibe hoy un cuerpo vacío.
-- **Falta el manejador de 404.** Una ruta que no existe no es un error, así que
-  no llega al manejador global: cae en el `finalhandler` de Express, que responde
-  **HTML**. Y el 404-de-ruta-inexistente es exactamente lo que fabrican los
-  tramos que mueven direcciones. Se añade `app.use((req, res) => res.status(404)
-  .json({ message: … }))` al final, y es prerrequisito de D1.
+- **Las respuestas sin `message`, recontadas el 4 de septiembre** porque el
+  inventario de la tercera versión estaba caducado en las dos direcciones. Los
+  dos `res.status(500).send("…")` de `upload.controller.ts` **ya no existen**:
+  los quitó `3288fcc`. Y los `res.sendStatus(401)` no eran nueve sino **24** —que
+  además no mandan cuerpo vacío, mandan `Unauthorized` en texto plano—: 22 son de
+  la sesión de autenticación y 2 eran de éste, en `requirePermission.ts`. ✅ Esos
+  dos llevan ya `{ message }`. Ninguna de las dos ramas es alcanzable por HTTP
+  hoy —`authenticate` siempre rellena `id_rol`, y `routeGuards.test.ts` exige
+  `authenticate` delante de toda ruta con puerta—, así que es defensa en
+  profundidad y se verifica contra el middleware, no con una petición.
+- ✅ **El manejador de 404**, hecho en A2. Una ruta que no existe no es un error,
+  así que no llegaba al manejador global: caía en el `finalhandler` de Express,
+  que responde **HTML** y además refleja el método y la ruta pedidos. Es
+  prerrequisito de D1: mover direcciones es justo lo que fabrica 404s, y los 17
+  sitios del cliente que leen `error.response.data.message` recibían `undefined`
+  y enseñaban su propia frase genérica. **Global y no acotado a `/api`**, porque
+  este proceso sólo sirve la API y el montaje de imágenes; y **de tres
+  parámetros**, porque con cuatro Express lo trataría como manejador de error y
+  dejaría de existir en silencio. Ojo con una cosa que la auditoría previa fijó:
+  una ruta **no**-API no llega aquí, la contesta `authenticateArchivos` con 401
+  antes de mirar el disco, y eso es a propósito — si contestara 404 para un
+  fichero que falta y 401 para uno que existe, el montaje sería un oráculo para
+  adivinar nombres de fotografías.
 
 ### 3.7 Toda ruta declara su permiso, lecturas incluidas
 
@@ -1117,12 +1129,20 @@ cd api && grep -cE 'router\.(post|put|delete)\(' src/routes/solucion.routes.ts  
 cd api && npx vitest run && npm run lint && npm run typecheck
 ```
 
-**A2 · El manejador de 404 en JSON (§3.6).** Vive en `src/app.ts`, que es
-fichero de la sesión de autenticación: hay que avisar. Y decide dos cosas que la
-primera versión daba por obvias: si va acotado a `/api` o es global —porque
-`express.static` está montado en la raíz y un manejador global cambiaría también
-lo que devuelve una imagen que falta— y si va antes o después del manejador de
-error terminal.
+**A2 · El manejador de 404 en JSON (§3.6).** ✅ Hecha. Las dos decisiones que
+quedaban abiertas, resueltas y con su motivo: **global**, porque este proceso
+sólo sirve la API y el montaje de imágenes y no hay ninguna ruta que deba
+contestar HTML; y **delante del manejador terminal**, con tres parámetros, que es
+lo que lo deja transparente para el camino de error —comprobado contra el
+`router` instalado, no de memoria—.
+
+Lo que la auditoría previa corrigió del plan: la frase **no** puede reutilizar la
+del manejador terminal (17 sitios del cliente empiezan a enseñarla, y «ocurrió un
+error» manda a buscar un fallo del servidor que no existe); el cuerpo **no**
+refleja la ruta pedida, que es lo que hacía `finalhandler` y lo único que un
+`toBe(404)` no ve; y una ruta **no**-API sigue contestando 401, no 404, porque
+`authenticateArchivos` responde antes de mirar el disco — a propósito, para que
+el montaje no sirva para adivinar qué fotografías existen.
 
 ```
 cd api && npx vitest run src/app.notfound.test.ts
@@ -1426,15 +1446,47 @@ lo que la auditoría del 3 de septiembre encontró fuera de las catorce pero
 dentro de lo que este documento no puede callar. Ninguna cambia un contrato.
 
 **E1 · Los nueve índices, en una migración** (decisión del 3 de septiembre).
-Existen sólo en `ARCHITECTURE.md`; ninguna migración los crea, y el que la
-segunda versión daba por migrado aparecía en una migración **dentro de un
-comentario**. Nueve `addIndex` idempotentes —`IF NOT EXISTS`, porque la base de
-producción ya los tiene a mano—, sin tocar datos ni esquema de tablas. **Antes
-de C3**: `getPoste` hace una subconsulta correlada por fila, y `limit=all` sin
-`idx_eventos_poste_state_deleted` son 1.700 recorridos de `eventos`.
+✅ Hecha, `20260904000001-hand-made-indexes`. Existían sólo en
+`ARCHITECTURE.md`, creados a mano contra el servidor.
+
+Cuatro correcciones de su auditoría previa, y las dos primeras evitaban un daño
+real en producción:
+
+- **Los nombres van tal cual están en la base, y dos no son los que parecen.**
+  `idx_postes_ciudadA` se escribió sin comillas, y Postgres pasa a minúsculas
+  todo identificador sin comillas: en la base se llama `idx_postes_ciudada`.
+  Entrecomillarlo —que es lo que hace `queryInterface.addIndex` por su cuenta—
+  busca un nombre que no existe y **crea un índice duplicado**: cuatro índices en
+  `postes` donde hay dos, encareciendo cada escritura para siempre y sin que nada
+  falle ni se registre. Lo mismo con `idx_reviciones_id_evento`, cuya errata
+  **no** se corrige por el mismo motivo: son dos erratas distintas —la tabla es
+  `revicions`— así que el índice no nombra a su tabla, y «arreglarlo» duplica.
+- **`IF NOT EXISTS` no basta, porque compara el nombre y nunca la definición.**
+  La migración lee de `pg_index` las columnas reales de los nueve al final de la
+  misma transacción y falla si alguna no coincide. Ése es el único caso que la
+  cláusula se traga —un índice a mano con uno de estos nombres sobre otra
+  columna— y dejaría una consulta escaneando mientras el documento jura lo
+  contrario. Verificado contra la base el 4 de septiembre: los nueve existen y
+  coinciden byte a byte, así que la migración es un no-op real.
+- **`down()` no borra nada, a propósito.** Los nueve existían antes de la
+  migración; un `down` que los borrara destruiría índices que no creó, en el peor
+  momento posible. Y `IF NOT EXISTS` no informa de si creó algo, así que no hay
+  forma de que sepa cuáles son suyos.
+- **`addIndex` no admite `IF NOT EXISTS` en Sequelize 6**, así que va en SQL
+  crudo. La tercera versión de este documento mandaba a alguien a buscar una
+  opción que no existe.
+
+Y una corrección de fondo: **esto no arregla «un entorno nuevo»**, que es lo que
+decían este documento y `ARCHITECTURE.md`. Ninguna migración crea las tablas
+base —la más antigua ya hace `addColumn("obs", …)`— y el `sync({ alter: true })`
+que las creaba se retiró, así que `npm run migrate` contra una base vacía muere
+mucho antes de llegar aquí. Lo que E1 compra es **procedencia**: los nueve dejan
+de vivir en prosa. El orden «antes de C3» se mantiene y no hace daño, pero su
+justificación tampoco era correcta: en producción los nueve ya están, así que C3
+corre igual con E1 que sin ella.
 
 ```
-cd api && npm run migrate && npx vitest run src/migrations/*indexes*.test.ts
+cd api && npx vitest run src/migrations/20260904000001-hand-made-indexes.test.ts
 ```
 
 **E2 · La pantalla de inicio, acotada.** `GET /api/dashboard` no tiene `where`
@@ -1450,21 +1502,63 @@ más urgentes— y servir eso.
 cd api && npx vitest run src/controllers/dashboard.controller.test.ts
 ```
 
-**E3 · Las puertas de despliegue** (decisión del 3 de septiembre). Una línea en
-la etapa de build del `Dockerfile` de `api` —`npm run lint && npm run typecheck
-&& npm test` antes de `npm run build`— y una en el script `build` de `web`. Un
-despliegue con la suite roja no arranca; Vercel se queda con el build anterior.
-**Antes de ponerlas: los tres avisos de lint de `HEAD`**, que son de otras
-sesiones (`d0fef5b`, `0c91d55`) y bloquearían el primer despliegue.
+**E3 · Las puertas de despliegue** (decisión del 3 de septiembre). ✅ Hecha.
+`npm run lint` y `npm test` en la etapa de build del `Dockerfile` de `api`, antes
+de `npm run build`; y `lint` + `test` al principio del script `build` de `web`.
+Un despliegue con la suite roja no arranca, y Vercel se queda con el build
+anterior.
 
-**E4 · `autoUpdate`, y la versión del cliente en cada escritura** (decisión del
-3 de septiembre). `registerType: "autoUpdate"` en `vite.config.ts`, decidido
-antes de que exista un service worker en producción, que es la única vez que
-sale gratis. Y `X-Osefi-Client` pasa de `"web"` a `web/<versión del build>`: el
-servidor sólo comprueba que no esté vacía, así que no rompe nada, y con la
-cabecera en el log de peticiones «¿quién sigue en la versión vieja?» es una
-consulta. Sólo en escrituras, como ya está — en lecturas forzaría un *preflight*
-por cada foto de una exportación.
+Dos cosas que no estaban en la línea original:
+
+- **Los tests necesitan una cadena de conexión falsa dentro del build**, y va en
+  el propio `RUN`, no en un `ENV`. `.dockerignore` deja `.env` fuera del
+  contexto, y `database/sequelize` llama a `process.exit(1)` **mientras se
+  importa** si no encuentra configuración: sin ella la suite no falla un test,
+  muere en el primer `import`. Nada se conecta —todas las consultas están
+  mockeadas y `new Sequelize(url)` no abre socket—, y al ir en el `RUN` no puede
+  llegar a la imagen de ejecución, que arranca de un segundo `FROM`.
+- **Los tres avisos de lint ajenos, arreglados** (`d0fef5b`, `0c91d55`): una
+  interfaz muerta en `reporte.controller.ts` —y el `import` que se quedó huérfano
+  al quitarla— y dos `any` en dobles de respuesta de test, donde `any` es el tipo
+  correcto (las aserciones bajan tres niveles por un cuerpo JSON) y la regla la
+  que sobra: desactivada en una línea, con el motivo escrito.
+
+La puerta de `web` está **probada de punta a punta** (`npm run build` completo).
+La de `api` **no**: el demonio de Docker no estaba levantado en esta máquina, así
+que la imagen no se ha construido. Lo que sí está comprobado por separado es la
+premisa que la sostiene —sin variables de entorno el proceso muere con un FATAL
+de configuración; con la cadena falsa arranca y no conecta—.
+
+**E4 · La actualización deja de ser opcional, y la versión del cliente viaja en
+cada escritura** (decisión del 3 de septiembre). ✅ Hecha, con **una desviación
+que Isaias debe confirmar o revertir**, y es de una línea.
+
+`X-Osefi-Client` pasa de `"web"` a `web/<versión del build>`: el servidor sólo
+comprueba que no esté vacía, así que no rompe nada, y con la cabecera en el log
+de peticiones «¿quién sigue en la versión vieja?» es una consulta. Sólo en
+escrituras, como ya estaba — en lecturas forzaría un *preflight* por cada foto de
+una exportación.
+
+**La desviación.** La decisión decía `registerType: "autoUpdate"` en
+`vite.config.ts`. Tomado al pie de la letra, ese ajuste **recarga la página en el
+instante en que aterriza un despliegue**, y el fichero llevaba escrito desde
+antes por qué no: a un técnico a medio rellenar un poste no se le arranca la
+pantalla. Esa parte no se puso sobre la mesa al decidir, así que la decisión se
+implementa por su intención —que ningún cliente se quede atrás— y no por su
+letra:
+
+- `registerType` se queda en `"prompt"`, que es lo único que deja a la aplicación
+  elegir **el momento**. No es «que decida la persona»: es «que lo decida el
+  código».
+- `<UpdatePrompt />` aplica la versión nueva **sola, en el primer cambio de
+  pantalla**, donde recargar no cuesta nada porque esa pantalla se estaba dejando
+  igualmente. La ventana pasa de «hasta que alguien pulse Actualizar» a «hasta
+  que pulse cualquier cosa».
+- El aviso se queda como salida inmediata para quien la quiera ya, y es el único
+  camino que puede perder trabajo, así que sigue diciéndolo.
+
+Si Isaias prefiere la letra, es cambiar `"prompt"` por `"autoUpdate"` y borrar el
+efecto que mira la navegación.
 
 **E5 · `migrate:deploy` en Coolify, confirmado y escrito.** El servidor no
 migra al arrancar; lo hace un *pre-deployment command* que vive en el panel de
@@ -1472,8 +1566,14 @@ Coolify y en ningún fichero. Esta rama trae las migraciones de MFA, correo y
 passkeys: si ese ajuste no está, el servidor arranca contra una base sin esas
 tablas. Se comprueba antes del corte y se apunta en `ARCHITECTURE.md`.
 
-**E6 · Defectos de integridad que la auditoría encontró y que no son de este
-arco, apuntados con nombre.** `POST /api/evento` acepta `state: true` en el
+**E6 · Defectos de integridad que las auditorías encontraron y que no son de
+este arco, apuntados con nombre.** *(Añadido el 4 de septiembre, de la auditoría
+de E1:* **la ficha del poste y la lista de incidencias no cuentan lo mismo por
+«pendiente»**. El contador del poste cuenta `state = false`; el filtro de la
+lista usa `state IS NOT TRUE`, y su propio comentario explica por qué —`state` es
+nullable, así que «pendiente» no puede ser `= false`, que se deja fuera las filas
+donde nadie lo fijó nunca—. Una incidencia creada sin `state` cuenta cero en la
+ficha y aparece en la lista: la pantalla se contradice consigo misma.*)* `POST /api/evento` acepta `state: true` en el
 cuerpo y crea una incidencia nacida resuelta sin fila de solución —`updateEvento`
 lo destructura fuera; `createEvento` no—. `resolverEvento` toma `date` del
 cuerpo sin comprobarla, así que el tiempo de reparación de los informes se puede
@@ -1503,7 +1603,7 @@ el documento sigue teniendo razón.
 | 3.4 nombres | Test que recorre **la tabla montada** —no los ficheros— y falla si un segmento tiene mayúsculas, o si un verbo u operación no está en inglés, o si un sustantivo de la lista de negocio no está en español |
 | 3.5 códigos | Test por método sobre las rutas que crean y archivan |
 | 3.5 `error.message` | Test que lo prohíbe **en cualquier parte del cuerpo de un `catch` que responde**, no sólo dentro del `res.json` — la forma con variable intermedia es la mayoritaria. Acotado al `500`: el generador lo devuelve a propósito en `400`/`413`/`429`, y son frases escritas para el usuario |
-| 3.6 formato de error | Test de que una dirección inexistente responde JSON |
+| 3.6 formato de error | ✅ `app.notfound.test.ts`: una dirección inexistente responde 404 en JSON con `message`, la frase habla de la dirección y no de un error, el cuerpo **no** refleja la ruta pedida —que es lo que hacía `finalhandler`—, una ruta montada sigue llegando a su router, y un cuerpo mal formado sigue saliendo por el manejador terminal, que es lo que se rompe si alguien le pone cuatro parámetros a este manejador |
 | 3.7 permisos | `routeGuards.test.ts`, que ya existe — con la excepción de `express.static` escrita **con la verdad de hoy** (§6): detrás de sesión, sin permiso por objeto |
 | 3.8 propiedad | `routeGuards.test.ts` ya distingue el gate de propiedad del de permiso; se añade que el tercer argumento coincida con el parámetro de la ruta |
 | 3.9 entrada | ✅ `requestShape.test.ts` y `responseShape.test.ts`, ya escritos |
