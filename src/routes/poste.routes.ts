@@ -4,7 +4,6 @@ import {
   deletePoste,
   desarchivarPoste,
   getPoste,
-  getTramos,
   searchPoste,
   updatePoste,
 } from "../controllers/poste.controller.js";
@@ -16,7 +15,6 @@ const router = Router();
 // Routes
 router.post("/", requirePermission("postes", "crear"), createPoste);
 router.put("/:id", requirePermission("postes", "editar"), updatePoste);
-router.get("/tramos", getTramos);
 // Before `/:id`, and that is not style — see `routeOrder.test.ts`. `/opciones`
 // is a literal, and Express matches layers in declaration order, so a literal
 // declared after a parametric sibling never runs: the request would reach

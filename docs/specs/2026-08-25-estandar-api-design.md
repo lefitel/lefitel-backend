@@ -85,7 +85,7 @@ mensaje neutro; estos se lo saltan.
 ### Lo que este diseño no es
 
 No es un rediseño de la API ni una revisión de sus funciones. Pero **sí cambia
-capacidades**, y la primera versión decía que no: cerrar veinte lecturas quita a
+capacidades**, y la primera versión decía que no: cerrar esas lecturas quita a
 algún rol algo que hoy puede hacer, y eso es el punto, no un efecto colateral.
 Los cambios de capacidad, enumerados: la bitácora deja de fallar en silencio
 (§5.4), los desplegables pasan a pedirse en una sola petición (§5), y los roles
@@ -250,8 +250,8 @@ primera versión y la regla la exige: en `/api/bitacora`, `:id_usuario` no es la
 bitácora.
 
 **Un segmento literal se declara antes que cualquier paramétrico del mismo
-nivel.** Es la regla implícita de la que ya dependen `/tramos` antes de `/:id` en
-[`poste.routes.ts`](../../src/routes/poste.routes.ts) y `/orphans` antes de
+nivel.** Es la regla implícita de la que ya dependen `/opciones` antes de `/:id`
+en [`poste.routes.ts`](../../src/routes/poste.routes.ts) y `/orphans` antes de
 `/:name` en `files.routes.ts`, y la primera versión no la escribió — con lo que
 su propio `GET /api/bitacora/autores` habría caído dentro de `GET /:id_usuario`,
 consultando `id_usuario = "autores"` y produciendo un 500 con el texto de
@@ -340,7 +340,7 @@ tampoco valía: allí el mensaje pide al usuario que reduzca la consulta, y
 **Y una honestidad sobre el techo, porque la auditoría la pidió:** hoy no acota
 nada grande. Las dos listas paginadas ya se topan en 100 por página, y las
 lecturas de verdad sin tope —la pantalla de inicio, los tres informes de filas,
-`/tramos`, los dos diagnósticos de Archivos— están en la tabla de agregadas y
+los dos diagnósticos de Archivos— están en la tabla de agregadas y
 fuera de su alcance. El techo gobierna `limit=all`, y solo eso. Acotar el
 inicio y los informes es trabajo con nombre propio en §9 (familia E), no una
 consecuencia de esta regla.
@@ -434,7 +434,7 @@ en singular (`export`, `count`, `query`).
 | `/dashboard` | sin cambio | Vocabulario de la API, no de la red: con la regla de arriba se queda en inglés. La segunda versión lo traducía a `/inicio` por el desempate que ya no existe |
 | `/upload` | sin cambio | Verbo inglés como raíz, y chirría — pero renombrarlo toca seis diálogos para ganar coherencia y nada más. Queda anotado, no hecho |
 | `/files`, `/orphans`, `/broken-refs`, `/stats` | sin cambio | Inglés, y correctos |
-| `/tramos`, `/poste`, `/evento`, `/adss`, `/bitacora` | sin cambio | Sustantivos del negocio |
+| `/poste`, `/evento`, `/adss`, `/bitacora` | sin cambio | Sustantivos del negocio |
 
 **Dos excepciones conscientes**, escritas para que no aparezcan luego como
 descuidos:
@@ -703,7 +703,6 @@ consumir:
 | `/api/reporte/opciones` | `tramos` | `id_ciudadA, id_ciudadB` — pares, no filas |
 | | `ciudad` | `id, name, lat, lng` — **`ReportRecorrido` traza la línea con ellas**; sin `lat`/`lng` la guarda sale por la primera línea y la pantalla se dibuja sin recorrido |
 | | resto | `id, name` |
-| `/api/usuario/opciones` | `rol` | `id, name` |
 
 Los archivados no viajan. Y `ciudad` apareciendo en tres respuestas no es
 duplicación: son proyecciones distintas para consumidores distintos, servidas por
@@ -793,15 +792,29 @@ edición en línea de `poste/index.tsx`. `UsuarioSheet` no: sigue con `getRol()`
 Parámetros y `CiudadesPage` siguen con los endpoints de administración, que es lo
 suyo.
 
+**Y una corrección de la auditoría previa de C2, porque el aviso de §9 nombraba
+las pantallas equivocadas.** Decía que `poste/index.tsx` y `PosteSheet` se
+muestran detrás de `postes.editar`/`crear` y no de `ver`. Medido: las dos cuelgan
+de `<ModuleRoute modulo="postes">`, que ya exige `postes.ver` y redirige sin él,
+así que el rol descrito no llega ni a montarlas. Los dos huecos reales son otros:
+la **pantalla de inicio**, que pide `eventos.ver` y abre `PosteSheet` sólo tras
+`postes.editar`; y **`EventoSheet` abierto desde las pantallas de postes**, por
+lo mismo contra `/api/evento/opciones`. Ninguno afecta a un rol sembrado, pero la
+matriz se edita en producción desde el 18 de agosto, así que la siembra ya no es
+prueba de nada.
+
 **Y dos que la primera versión se dejó fuera llamándose «la lista completa».** La
 auditoría del 26 de agosto las encontró, y las dos importan porque son el único
 camino hacia un dato que ningún endpoint de opciones sirve todavía:
 
-- `useTramoNeighbors.ts` es el **único** llamante de `GET /api/poste/tramos`, y
-  de él cuelgan las tres pantallas de informes. §5 promete un bloque `tramos` en
-  `/api/reporte/opciones`; o ese bloque no tiene quien lo use, o hay que tocar
-  este fichero. Con los roles sembrados no rompe —Cliente tiene `postes:ver`—
-  pero un rol de sólo informes se quedaría sin el desplegable de tramos.
+- `useTramoNeighbors.ts` era el **único** llamante de `GET /api/poste/tramos`.
+  ✅ Resuelto en C2, y con una vuelta de tuerca que la auditoría previa obligó a
+  dar: el hook **recibe** los pares, no los pide. Si los pidiera él, cada
+  pantalla de informes llamaría dos veces al mismo endpoint por montaje —el
+  `GROUP BY` sobre `postes` incluido— que es estrictamente peor que las dos
+  peticiones distintas que sustituye. Y como el bloque `tramos` pasa a ser la
+  única fuente, **C2 retira `GET /api/poste/tramos`**: se quedaba sin un solo
+  llamante en los dos repositorios.
 - `AddEventoPageSheet` pide el listado de postes con `exportPostes()`, o sea con
   `?export=true`, que C3 borra. `/api/evento/opciones` cubre sus otros dos
   catálogos pero no los postes, y **añadir un bloque de postes ahí sería servir
@@ -810,16 +823,22 @@ camino hacia un dato que ningún endpoint de opciones sirve todavía:
 
 ---
 
-## 6. Cómo quedan las veinte lecturas
+## 6. Cómo quedan las dieciocho lecturas
 
 **Con las direcciones de hoy**, porque este cierre es C5 y los
 sub-recursos son D1 — la primera versión las nombraba ya renombradas y
 obligaba a traducir la tabla de vuelta.
 
+Eran veinte cuando se escribió esta sección. Hoy son **dieciocho**, y no porque
+se hayan cerrado: A1 borró `GET /api/solucion/` y C2 retiró
+`GET /api/poste/tramos`. La cuenta viva está en `READ_GATE_NOT_APPLICABLE`, en
+`routeGuards.test.ts`, que es lo que hay que mirar al empezar C5 — no este
+párrafo.
+
 | Permiso | Rutas |
 |---|---|
 | `parametros:ver` | `GET /api/{adss,material,obs,tipoObs,propietario}/` |
-| `postes:ver` | `/api/poste/`, `/api/poste/:id`, `/api/poste/tramos`, `/api/adssposte/:id_poste` |
+| `postes:ver` | `/api/poste/`, `/api/poste/:id`, `/api/adssposte/:id_poste` |
 | `eventos:ver` | `/api/evento/`, `/api/evento/:id`, `/api/evento/poste/:id_poste`, `/api/eventoObs/:id_evento`, `/api/revision/:id_evento`, `/api/solucion/evento/:id_evento` |
 | `seguridad:ver` | `/api/evento/usuario/:id_usuario` |
 | `ciudades:ver` | `/api/ciudad/`, `/api/ciudad/:id` |
@@ -839,10 +858,15 @@ expediente de actividad de cada empleado — y ese controlador no declara
 humo. Las dos primeras estaban desde la primera versión; las dos últimas las
 encontró la auditoría del 26 de agosto, y la cuarta es la más incómoda.
 
-- **`GET /api/poste/tramos` gateado no cierra nada** mientras el generador siga
-  por debajo: el rol Cliente tiene `generador: TODO`, y el generador sirve
-  `ciudad` con `lat`/`lng` sin marca de staff. La topología de la red ya está a
-  su alcance por otra puerta. Se cierra por coherencia, no porque proteja.
+- **Gatear la topología de la red no la cierra**, y la advertencia ha cambiado
+  de dirección sin cambiar de fondo. Se escribió sobre `GET /api/poste/tramos`,
+  que C2 retiró; los mismos pares viajan hoy por dos sitios: el bloque `tramos`
+  de `GET /api/reporte/opciones`, bajo `reportes:ver` —que el rol Cliente
+  tiene—, y `GET /api/poste/`, que proyecta `id_ciudadA`/`id_ciudadB` en cada
+  fila y **no lleva permiso ninguno** hasta que C5 se lo ponga. Y por debajo
+  sigue el generador: el rol Cliente tiene `generador: TODO`, y sirve `ciudad`
+  con `lat`/`lng` sin marca de staff. Se cierra por coherencia, no porque
+  proteja.
 - **`parametros:ver` sobre los cinco catálogos esconde poco** mientras
   `searchPoste` y `searchEvento` incluyan material, propietario y ciudades sin
   `attributes`. Por eso los veinticinco `include` de §3.9 van en el mismo tramo:
@@ -1203,8 +1227,8 @@ que la tarea cambió respecto a lo planeado, ambas de sus auditorías: el criter
 de terminado eran dos tests y no uno, y todos los bloques llevan `order`
 —`ReportTramoSec` construye una columna de Excel por elemento en el orden de la
 lista, y un `findAll` sin `order` recibe el orden de montón de Postgres—. El
-`tramos` nuevo descarta pares que nombran una ciudad archivada; `getTramos` no se
-toca hasta la tarea que lo retira.
+`tramos` nuevo descarta pares que nombran una ciudad archivada; `getTramos` se
+dejó intacto hasta la tarea que lo retirase, que acabó siendo C2.
 
 ```
 cd api && npx vitest run src/routes/opciones.test.ts src/routes/routeOrder.test.ts
@@ -1336,16 +1360,105 @@ cd api && npx vitest run src/routes/reporte.contract.test.ts src/controllers/rep
 cd web && npx vitest run src/api/reporte.api.test.ts
 ```
 
-**C2 · El cliente pasa a usar los endpoints de opciones (§5.5).** Siete
-pantallas. De diez peticiones de catálogo a dos. No retira nada del servidor.
-Dos avisos que dejó la auditoría: `poste/index.tsx` y `PosteSheet` se muestran
-detrás de `postes.editar`/`crear`, no de `ver`, así que un rol a medida con
-`editar` y sin `ver` recibe 403 del endpoint y la lista se le queda vacía en
-silencio — ningún rol sembrado está en ese caso; y `useTramoNeighbors` deja de
-llamar a `/tramos` para leer el bloque `tramos` de `/api/reporte/opciones`.
+**C2 · El cliente pasa a usar los endpoints de opciones (§5.5).** ✅ Hecha. Once
+ficheros de código en el cliente —diez tocados y uno nuevo— y de diez peticiones
+de catálogo a dos. **Sí retira algo del servidor**, al contrario de lo que decía
+esta ficha: `GET /api/poste/tramos` se queda sin un solo llamante y se va con la
+tarea.
+
+**Y es la primera tarea del arco que no tolera media entrega.** §11 pide que las
+dos orillas salgan en el mismo *corte*, no en el mismo commit —son dos
+repositorios—. C1 y C3 dejan código que aguanta el desfase; ésta no: un `api`
+sin la ruta junto a un `web` que aún la llama devuelve 404 y deja los
+desplegables de tramo vacíos en las tres pantallas de informes. **Los dos
+commits de C2 van juntos al corte o no va ninguno.**
+
+**Un módulo cliente propio, `api/opciones.api.ts`, con tipos propios.** No es
+estética: cinco de las seis interfaces compartidas declaran obligatorio un campo
+que la proyección no trae —`description` en cuatro, `image` en `CiudadInterface`—
+y `web` compila en `strict`. Tiparlo con ellas era no compilar o mentir con un
+`as`. Y un módulo aparte evita una trampa medida: `vi.mock` con factoría
+sustituye el módulo **entero**, así que añadir estas funciones a `Evento.api.ts`
+habría dejado a `EventoSheet` llamando a `undefined` en un test que sigue verde.
+Los exportadores de tramo pasan a pedir `{id, name}`, que es lo único que leían.
+
+**Lo que la auditoría previa cambió de la tarea, y no es poco.** Tres agentes en
+paralelo. Lo que encontraron, por gravedad:
+
+- **La trampa que C2 habría metido, y la más cara.** Cuatro de los seis
+  catálogos de `ReportTramoSec` se pedían **dentro** de `handleGenerar`, en el
+  mismo `try` que el informe. Eso tenía una propiedad que nadie había escrito:
+  si fallaban, la generación fallaba con ellos, la tarjeta «Resultados» no
+  aparecía, y el botón Exportar vive dentro de esa tarjeta. Al mover la carga al
+  montaje —que es lo que obliga una respuesta única— esa protección desaparece
+  sola: el informe se genera bien con las cuatro listas vacías, y **todas las
+  columnas de contenido de ese informe salen de esas cuatro listas**. El fichero
+  resultante lleva su título, su rango de fechas y sus números de poste, y ni una
+  columna de contenido, sin nada dentro que lo diga, camino de un cliente. Ahora
+  la pantalla se niega a generar y lo dice en pantalla, no sólo en un aviso de
+  cuatro segundos.
+- **Dos huecos de permiso reales, y no los que esta ficha decía** (ver §5.5). La
+  pantalla de inicio abre `PosteSheet` con `postes.editar` a secas, y las dos
+  pantallas de postes abren `EventoSheet` sin exigir `eventos.ver`. §5.5 ya
+  decidió qué hacer: la pantalla trata el 403 como lo que es. Las cinco pantallas
+  distinguen ahora «no tiene permiso» de «no se pudo cargar», que antes eran el
+  mismo aviso —y en la edición en línea de postes, un `.catch` vacío—.
+- **`EventoSheet` se dibujaba en blanco.** En edición, los dos catálogos
+  viajaban en el mismo `Promise.all` que la incidencia, sus revisiones y su
+  solución. Un 403 en los catálogos rechazaba el lote entero y dejaba la ficha
+  vacía —sin descripción, sin revisiones, sin solución— para una incidencia que
+  el rol sí puede leer. Ahora son dos preguntas y dos respuestas.
+- **Un cambio visible que conviene saber:** el bloque `tramos` descarta pares
+  que nombran una ciudad archivada, y `/tramos` no lo hacía. Una ciudad cuyo
+  único vecino esté archivado desaparece del desplegable «Tramo desde». Hoy se
+  ofrece y no lleva a ninguna parte.
+
+**Siete ficheros de prueba nuevos donde no había ninguno**, uno de ellos el
+tercer espejo entre repositorios del sistema —los otros dos son de contraseñas,
+de agosto—: lee `opciones.controller.ts` del disco y compara los nombres de
+bloque que el servidor manda con los que el cliente lee. Se omite visiblemente
+si `api` no está al lado, y **falla** —no se salta— si no encuentra el ancla.
+
+Son **diez** ficheros de prueba al terminar, no siete: la auditoría posterior
+señaló que tres de las pantallas tocadas se quedaban sin ninguna, y las tres la
+tienen. `ReportRecorrido` pasó además de dos ficheros a uno —el que leía su
+fuente como texto se fusionó con el nuevo, que ya monta la pantalla—, que es la
+convención de este repositorio y además lo que el analizador de lint necesita
+para no tropezar con dos ficheros del mismo nombre.
+
+**La auditoría posterior encontró que el arreglo de arriba no estaba completo, y
+eso es lo más instructivo de la tarea.** La primera versión guardaba «¿falló?»
+en un valor que podía ser nulo, y **nulo significaba a la vez “aún no ha vuelto”
+y “todo bien”**: durante toda la ventana de carga el botón Generar seguía
+habilitado, el informe es otra petición y puede contestar antes, y la tarjeta de
+Resultados —con su botón Exportar— aparecía con las cuatro listas todavía
+vacías. Es decir: el fichero sin columnas seguía siendo alcanzable, producido
+por el arreglo que decía impedirlo. Ahora el estado tiene cuatro valores
+—cargando, listas, denegado, fallo—, y lo exigen **las dos** puertas: Generar y
+`handleExport`. La misma auditoría encontró otras cinco: un 403 de segundo
+factor pendiente que se leía como «no tiene permiso» —lo distingue el campo
+`code`, que aparece en esas dos respuestas del servidor y en ninguna otra—, un
+`catch` compartido que culpaba al catálogo de un fallo ajeno, un mensaje de alta
+enseñado en un formulario de edición donde era falso, un «Cargando…» eterno para
+un catálogo legítimamente vacío, y cinco afirmaciones falsas en mis propios
+comentarios.
+
+**Y una tercera auditoría, sobre las pruebas, encontró lo que la verificación
+por mutación no ve: pruebas que pasan midiendo menos de lo que su comentario
+promete.** Un `click` sobre un botón deshabilitado no despacha nada, así que
+«y además pulsarlo no hace nada» repetía la línea anterior; dos aserciones
+buscaban el mismo nodo creyéndose dos hechos; una negativa sobre un índice fijo
+seguía en verde si la columna se desplazaba; y el espejo entre repositorios se
+**saltaba** cuando el controlador se renombraba —justo la deriva que existe para
+cazar— además de poder leer, en tres reescrituras válidas, la respuesta del
+handler siguiente. Todo corregido, y con ello un defecto de verdad: el bloque
+`tramos` llega de un `r.data` sin validar, así que una respuesta parcial dejaba
+las tres pantallas de informes **en blanco** —no hay error boundary en ninguna
+parte de la aplicación—.
 
 ```
 cd web && npx vitest run
+cd api && npx vitest run src/routes/
 ```
 
 **C3 · El sobre único en los listados (§3.3).** Sin `totalPages`, con `422` al
@@ -1402,13 +1515,23 @@ cd web && npx vitest run src/api/statusPropagation.test.ts
 cd api && npx vitest run src/routes/statusCodes.test.ts
 ```
 
-**C5 · Cerrar las veinte lecturas sin permiso (§3.7, §6).** Después de C2, y no
-por cortesía: `ReportTramoSec` pide cuatro catálogos **dentro del mismo `try`
-que el informe**, así que un 403 en un desplegable mata el informe entero para el
-rol Cliente. Rompe a cualquier rol que no tenga el permiso, así que se comprueba
-contra los roles sembrados antes del corte — y hay una decisión de datos que la
-segunda versión no nombraba: `parametros:ver` es `false` para el rol Cliente, y
-cerrar esas cuatro lecturas le quita el informe de tramo salvo que un
+**C5 · Cerrar las dieciocho lecturas sin permiso (§3.7, §6).** Dieciocho y no
+veinte: A1 borró una y C2 retiró otra. **La cuenta que vale es
+`READ_GATE_NOT_APPLICABLE` en `routeGuards.test.ts`**, no esta frase.
+
+Después de C2, y el motivo original ya no es el que era: decía que
+`ReportTramoSec` pedía cuatro catálogos dentro del mismo `try` que el informe,
+así que un 403 en un desplegable mataba el informe entero. C2 cambió eso — los
+catálogos se piden al montar y por una sola dirección, con su propio manejo del
+403 —, y con ello **C5 se vuelve más simple, no menos necesaria**: las cinco
+pantallas migradas ya saben distinguir «no tiene permiso» de «no se pudo
+cargar», así que cerrar una lectura les da una frase en pantalla en vez de un
+desplegable vacío.
+
+Lo que sigue intacto: rompe a cualquier rol que no tenga el permiso, así que se
+comprueba contra los roles sembrados antes del corte. Y la decisión de datos que
+la segunda versión no nombraba: `parametros:ver` es `false` para el rol Cliente,
+y cerrar esas cuatro lecturas le quita el informe de tramo salvo que un
 administrador marque la casilla o una migración de datos lo haga. Se decide
 antes de C5, no durante.
 
@@ -1641,6 +1764,7 @@ el documento sigue teniendo razón.
 | 3.9 entrada | ✅ `requestShape.test.ts` y `responseShape.test.ts`, ya escritos |
 | 4.1 / 4.2 cliente | Test en `web`: un 403, un 500 y un fallo de red producen `status` 403, 500 y 0; el auto-logout sigue disparando con 401; **y la ventana de step-up sigue abriéndose con un 403 con `code`** — el segundo interceptor que la segunda versión no sabía que existía |
 | 5.4 autores | ✅ `bitacora.autores.test.ts` en `api` —el literal gana al paramétrico porque `getBitacora` no corre, el `where` es un semi-join que nombra la columna cualificada, y las columnas se leen contra `USUARIO_AS_AUTHOR`— y en `web` dos ficheros: `index.test.tsx` comprueba que la pantalla **no** vuelve a pedir el directorio de personal y que filtra por el `id` de la opción, y `BitacoraPanel.test.tsx` que «no hay actividad», «no tiene permiso» y «no se pudo cargar» son tres respuestas y no una |
+| 5.5 cliente | ✅ Siete ficheros nuevos en `web`: `opciones.api.test.ts` (la dirección anclada al final de cada una, los bloques por su nombre, `lat`/`lng` y `id_tipoObs` **leídos por valor**, el rechazo que no se traga, y el espejo que lee el controlador del otro repositorio); `useTramoNeighbors.test.ts` (las dos direcciones del mapa, y que el hook no pide nada); siete de pantalla y una del exportador, que comprueban lo que ninguna otra cosa ve — que los catálogos viejos **no** se siguen llamando, que `ReportTramoSec` se niega a generar sin ellos, que `EventoSheet` sigue mostrando la incidencia cuando le niegan las observaciones, y que la edición en línea dice por qué su menú está vacío. Las veintitrés mutaciones probadas se detectan — medición a mano, no reproducible desde el repositorio: aquí no hay mutation testing montado |
 | 5 opciones | ✅ `opciones.test.ts`, por endpoint y por bloque: qué bloques devuelve, con qué columnas **exactas pedidas a la base de datos** —leídas del espía y no de la respuesta, porque los modelos están mockeados y las filas serían las del propio test— y que el paramétrico no le robó la ruta, comprobado porque `findOne` no se llamó. Los tres endpoints |
 
 ---

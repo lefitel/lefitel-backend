@@ -735,7 +735,6 @@ const READ_GATE_NOT_APPLICABLE = [
   "GET /api/obs/",
   "GET /api/poste/",
   "GET /api/poste/:id",
-  "GET /api/poste/tramos",
   "GET /api/propietario/",
   "GET /api/revision/:id_evento",
   "GET /api/rol/",
@@ -879,8 +878,8 @@ const PARAMETROS_GATES: Record<string, string> = {
  * rewrite any of them — and nothing in the suite would say a word. The chain of
  * names says a gate is *there*; only a table says which.
  *
- * The three reads on this router that carry no gate at all — `GET /`,
- * `/tramos`, `/:id` — are named in `READ_GATE_NOT_APPLICABLE`, which is where an
+ * The two reads on this router that carry no gate at all — `GET /`,
+ * `/:id` — are named in `READ_GATE_NOT_APPLICABLE`, which is where an
  * ungated route's reason belongs. `/opciones` is the one gated read.
  */
 const POSTES_GATES: Record<string, string> = {

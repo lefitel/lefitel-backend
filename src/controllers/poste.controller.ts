@@ -95,25 +95,27 @@ export const getPoste = handler("getPoste", async (req: Request, res: Response) 
   });
 });
 
-export const getTramos = handler("getTramos", async (_req: Request, res: Response) => {
-  const rows = await PosteModel.findAll({
-    attributes: ["id_ciudadA", "id_ciudadB"],
-    group: ["id_ciudadA", "id_ciudadB"],
-    raw: true,
-  }) as unknown as { id_ciudadA: number; id_ciudadB: number }[];
-  // Tramos bidireccionales: dedup (a,b) y (b,a) usando min/max como clave.
-  const seen = new Set<string>();
-  const result: { id_ciudadA: number; id_ciudadB: number }[] = [];
-  for (const { id_ciudadA, id_ciudadB } of rows) {
-    const minId = Math.min(id_ciudadA, id_ciudadB);
-    const maxId = Math.max(id_ciudadA, id_ciudadB);
-    const key = `${minId}-${maxId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push({ id_ciudadA: minId, id_ciudadB: maxId });
-  }
-  return res.status(200).json(result);
-});
+// `getTramos` and its route `GET /api/poste/tramos` were removed with C2.
+//
+// It served the distinct city pairs poles run between, and its only caller
+// anywhere was `useTramoNeighbors` in the client, which now reads the same
+// pairs from the `tramos` block of `GET /api/reporte/opciones` — a block that
+// additionally drops pairs naming an archived city, which this handler
+// returned and no combobox could render.
+//
+// **Two repositories, so two commits, and this is the first task in the arc
+// that does not tolerate half of it.** §11 asks that both shores of a task ship
+// in the same *cut*, not the same commit — which is impossible across repos.
+// C1 and C3 leave tolerating code behind them; this one does not: an `api` that
+// has dropped the route beside a `web` that still calls it answers 404, and the
+// stretch comboboxes on all three report screens go empty. The pair to ship
+// together is named in the C2 entry of §9.
+//
+// It buys no privacy, and saying otherwise would contradict §6 of the standard,
+// which already says this in as many words: `GET /api/poste/` is ungated too and
+// projects `id_ciudadA`/`id_ciudadB` on every row, so any live session
+// reconstructs exactly the same pairs with one request. One address fewer, one
+// dead handler fewer, and nothing closed. C5 is what closes it.
 
 export const createPoste = handler("createPoste", async (req: Request, res: Response) => {
   const { adss_ids, ...posteBody } = req.body;

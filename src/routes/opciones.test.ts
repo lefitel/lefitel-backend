@@ -356,8 +356,8 @@ describe("the tramos block, which is computed and not selected", () => {
     // `ciudad` block beside it. `PosteModel.findAll` is paranoid about poles and
     // says nothing about their cities, so without the filter this response can
     // offer a neighbour the combobox cannot render and the line cannot be drawn
-    // to. `getTramos`, the endpoint this logic came from, still does that — it
-    // has a live consumer and changing it belongs to the task that retires it.
+    // to. `GET /api/poste/tramos`, the endpoint this logic came from, did
+    // exactly that; C2 retired it, and this block is now the only source.
     expect(nombradas.filter((id) => !ciudadesServidas.has(id))).toEqual([]);
     expect(nombradas).not.toContain(ARCHIVADA);
   });

@@ -108,19 +108,26 @@ const lista = (model: Catalogo, columnas: readonly string[]) =>
 /**
  * The distinct city pairs poles actually run between.
  *
- * The dedupe is the same one `getTramos` has done since before this endpoint
+ * The dedupe is the one `GET /api/poste/tramos` did before this endpoint
  * existed: a tramo is bidirectional, so `(3,7)` and `(7,3)` are one entry, keyed
- * by min/max.
+ * by min/max. **C2 retired that route** — this block is now the only place the
+ * pairs come from, and `useTramoNeighbors` reads them from here.
  *
- * **What is deliberately different from `getTramos`: pairs naming a city that is
- * no longer live are dropped.** `PosteModel.findAll` is paranoid and excludes
- * archived *poles*, but says nothing about their cities, so the old endpoint can
- * and does return a pair whose city is absent from the `ciudad` block of this
- * same response — a neighbour the combobox cannot render and the line cannot be
- * drawn to. Filtering against the cities actually being served is what makes the
- * two blocks consistent with each other. `getTramos` is left alone on purpose:
- * it has a live consumer (`useTramoNeighbors`) and changing what it returns
- * belongs to the task that retires it, not to this one.
+ * **What is deliberately different from what that route returned: pairs naming a
+ * city that is no longer live are dropped.** `PosteModel.findAll` is paranoid
+ * and excludes archived *poles*, but says nothing about their cities, so the old
+ * endpoint could return a pair whose city is absent from the `ciudad` block of
+ * this same response — a neighbour the combobox cannot render and the line
+ * cannot be drawn to. Filtering against the cities actually being served is what
+ * makes the two blocks consistent with each other.
+ *
+ * It is a visible change, and small: a city whose only neighbour is archived
+ * drops out of the "Tramo desde" combobox on the three report screens. Today it
+ * is offered and leads nowhere — picking it leaves "Tramo hasta" empty.
+ *
+ * What it does **not** do is hide the network's topology, and §6 says so: the
+ * same pairs come straight out of `GET /api/poste/?export=true`, which carries
+ * no permission at all until C5.
  */
 async function tramosEntre(ciudadesVivas: Set<number>) {
   const filas = await PosteModel.findAll({
@@ -156,20 +163,33 @@ async function tramosEntre(ciudadesVivas: Set<number>) {
  * four of them (five while editing, counting `getAdssPoste`) and the inline
  * editing in `poste/index.tsx` two more.
  *
- * **`ver` is not what either screen is gated by, and C2 needs to know.** Both
- * render behind `postes.editar` or `postes.crear` — `PermissionGuard` in the
- * sheet, `can(rol, "postes", "editar")` around the fetch in the list — so a
- * custom role holding `editar` without `ver` reaches the form and gets 403 from
- * here, and `poste/index.tsx` swallows it with an empty `.catch`: the dropdowns
- * simply never populate. No seeded role is in that position (all three have `ver`
- * wherever they have `editar`), but the matrix editor can make one. The same
- * sentence the audit made about the role list, for the same reason — and the
- * reason that endpoint was dropped.
+ * **`ver` is not what every caller is gated by, and this paragraph used to name
+ * the wrong screens.** It said `poste/index.tsx` and `PosteSheet` render behind
+ * `editar`/`crear` and not `ver`; C2's audit measured it and both actually hang
+ * off `<ModuleRoute modulo="postes">`, which already demands `postes.ver` and
+ * redirects without it. Neither is reachable by the role the paragraph
+ * described. The two places where the gap is real are:
+ *
+ *   - **the home screen**, which requires `eventos.ver` and opens `PosteSheet`
+ *     behind `postes.editar` alone. A role with those two and without
+ *     `postes.ver` used to fill the form and now cannot;
+ *   - **`EventoSheet` opened from the pole screens**, for the same shape of
+ *     reason against `/api/evento/opciones`.
+ *
+ * No seeded role is in either position — all three have `ver` wherever they have
+ * `editar`. And the seed is proof for now, which is worth stating precisely
+ * because the first version of this paragraph overstated it: production runs
+ * `master`, where the permission matrix does not exist at all — the roles are
+ * three constants compiled into the client bundle — so no custom role can exist
+ * out there today. What changes that is the cut (§11), which ships the matrix
+ * editor; from then on anybody can make one of these roles in two clicks. Both
+ * screens now say what happened instead of showing an empty form: see
+ * `estadoOpciones` in each.
  *
  * Worth knowing beside it: this is the **only gated read on that router**.
- * `GET /api/poste/`, `/tramos` and `/:id` carry no permission at all — they are
- * named in `READ_GATE_NOT_APPLICABLE` — so C2 can only ever tighten what a role
- * may see here, never widen it.
+ * `GET /api/poste/` and `/:id` carry no permission at all — they are named in
+ * `READ_GATE_NOT_APPLICABLE` — so C2 can only ever tighten what a role may see
+ * here, never widen it.
  */
 export const getOpcionesPoste = handler("getOpcionesPoste", async (_req: Request, res: Response) => {
   const [adss, material, propietario, ciudad] = await Promise.all([
