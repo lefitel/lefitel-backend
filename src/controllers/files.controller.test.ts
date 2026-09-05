@@ -44,7 +44,7 @@ const fila = (values: Record<string, unknown>) => ({ dataValues: values, update:
 
 const reqOf = () => ({ user: { id: 1, id_rol: 1 } }) as unknown as Request;
 const resOf = () => {
-  const res = { status: vi.fn(), json: vi.fn(), sendStatus: vi.fn() };
+  const res = { status: vi.fn(), json: vi.fn(), sendStatus: vi.fn(), end: vi.fn() };
   res.status.mockReturnValue(res);
   return res as unknown as Response & { json: ReturnType<typeof vi.fn> };
 };

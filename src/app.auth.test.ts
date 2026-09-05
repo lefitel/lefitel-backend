@@ -2333,12 +2333,13 @@ describe("requireStepUp, mounted on the real routes", () => {
           .set(DEL_FRONTEND)
           .send({ stepup_password: "la-de-verdad" });
 
-        expect(res.status).toBe(200);
-        // The discriminator this test exists for: a 200 here is ambiguous by
-        // itself — it is also what a gate that silently failed to read the
+        expect(res.status).toBe(204);
+        // The discriminator this test exists for: a success here is ambiguous
+        // by itself — it is also what a gate that silently failed to read the
         // body at all would answer, by falling through to the same skip the
         // test above exercises on purpose. Asserting the skip did *not* fire
-        // is what proves this 200 came from a verified password instead.
+        // is what proves this 204 came from a verified password instead.
+        // (204 and not 200 since C4: archiving a role reports nothing.)
         expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
       } finally {
         puede = false;

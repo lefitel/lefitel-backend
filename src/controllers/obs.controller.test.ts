@@ -28,7 +28,7 @@ const reqOf = (body: unknown, params: Record<string, string> = {}) =>
   ({ body, params, user: { id: 7, id_rol: 1 } }) as unknown as Request;
 
 const resOf = () =>
-  ({ status: vi.fn().mockReturnThis(), json: vi.fn(), sendStatus: vi.fn() }) as unknown as Response;
+  ({ status: vi.fn().mockReturnThis(), json: vi.fn(), sendStatus: vi.fn(), end: vi.fn() }) as unknown as Response;
 
 describe("PUT /api/obs/:id", () => {
   beforeEach(() => {

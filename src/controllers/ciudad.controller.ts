@@ -29,7 +29,7 @@ export const getCiudad = handler("getCiudad", async (req: Request, res: Response
 export const createCiudad = handler("createCiudad", async (req: Request, res: Response) => {
   const TempCiudad = await CiudadModel.create(assignable(req.body));
   logAction({ id_usuario: req.user?.id, action: "CREATE_CIUDAD", entity: "Ciudad", entity_id: TempCiudad.dataValues.id as number, detail: `Creó ciudad ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
-  res.status(200).json(TempCiudad);
+  res.status(201).json(TempCiudad);
 });
 export const updateCiudad = handler("updateCiudad", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -65,12 +65,12 @@ export const desarchivarCiudad = handler("desarchivarCiudad", async (req: Reques
 
   await CiudadModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_CIUDAD", entity: "Ciudad", entity_id: Number(id), detail: `Desarchivó ciudad #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const deleteCiudad = handler("deleteCiudad", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   await CiudadModel.destroy({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "DELETE_CIUDAD", entity: "Ciudad", entity_id: Number(id), detail: `Archivó ciudad #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });

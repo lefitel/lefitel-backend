@@ -60,6 +60,7 @@ function res() {
     status: vi.fn().mockReturnThis(),
     json: vi.fn().mockReturnThis(),
     sendStatus: vi.fn().mockReturnThis(),
+    end: vi.fn().mockReturnThis(),
   };
   return r as unknown as Response & typeof r;
 }

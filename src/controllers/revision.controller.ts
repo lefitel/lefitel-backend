@@ -45,7 +45,7 @@ export const createRevision = handler("createRevision", async (req: Request, res
   const revision = await RevisionModel.create(authoredBy(req.body, req));
   const evRef = await eventoRef(req.body.id_evento);
   logAction({ id_usuario: req.user?.id, action: "ADD_REVISION", entity: "Revisión", entity_id: Number(req.body.id_evento), detail: `Agregó revisión al Evento #${req.body.id_evento}`, metadata: { after: { id_evento: evRef, description: req.body.description } }, severity: 'info' });
-  res.status(200).json(revision);
+  res.status(201).json(revision);
 });
 
 // No `updateRevision` and no `deleteRevision`. Their routes had no caller ever,

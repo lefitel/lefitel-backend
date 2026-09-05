@@ -394,7 +394,7 @@ export const createUsuario = handler("createUsuario", async (req: Request, res: 
     const payload = creatableFrom(req.body);
     const TempUsuario = await UsuarioModel.create(payload);
     logAction({ id_usuario: req.user?.id, action: "CREATE_USUARIO", entity: "Usuario", entity_id: TempUsuario.dataValues.id as number, detail: `Creó usuario @${req.body.user}`, metadata: { after: { user: req.body.user } }, severity: 'info' });
-    res.status(200).json(withoutPass(TempUsuario));
+    res.status(201).json(withoutPass(TempUsuario));
   } catch (error) {
     if (isUsernameUniqueViolation(error)) {
       return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });
@@ -1050,7 +1050,7 @@ export const deleteUsuario = handler("deleteUsuario", async (req: Request, res: 
     return { sesiones, dispositivos };
   });
   logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, metadata: { sesiones_revocadas: revocadas.sesiones, dispositivos_revocados: revocadas.dispositivos }, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 /**
  * Lets a locked account back in.
@@ -1097,7 +1097,7 @@ export const desbloquearUsuario = handler("desbloquearUsuario", async (req: Requ
   // lockout was, so the entry says what was undone and not merely that
   // something was.
   logAction({ id_usuario: req.user?.id, action: "ACCOUNT_UNLOCKED", entity: "Usuario", entity_id: Number(id), detail: `Desbloqueó la cuenta del usuario #${id}`, metadata: { before: antes }, severity: 'critical', ip_address: req.ip ?? null });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 /**
  * `POST /usuario/:id/mfa/reset` — the in-app half of §8's "vía de escape":
@@ -1209,7 +1209,7 @@ export const desarchivarUsuario = handler("desarchivarUsuario", async (req: Requ
 
     await UsuarioModel.restore({ where: { id } });
     logAction({ id_usuario: req.user?.id, action: "RESTORE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Desarchivó usuario #${id}`, severity: 'info' });
-    return res.sendStatus(200);
+    return res.status(204).end();
   } catch (error) {
     if (isUsernameUniqueViolation(error)) {
       return res.status(409).json({ message: USERNAME_TAKEN_MESSAGE });

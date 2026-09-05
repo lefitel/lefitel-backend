@@ -49,6 +49,9 @@ function fakeRes() {
     status(code: number) { this.statusCode = code; return this; },
     json(payload: unknown) { this.body = payload; return this; },
     sendStatus(code: number) { this.statusCode = code; return this; },
+    // A 204 ends the response instead of writing one. Without this the
+    // handler throws inside `makeHandler` and the test reads 500.
+    end() { return this; },
   };
   // An arbitrary JSON body, read straight off (`body.cuentas`, `body.message`)
   // rather than through a cast at each assertion. `unknown` would need one every
@@ -116,7 +119,7 @@ describe("deleteRol", () => {
     await deleteRol(req({ id: "4" }), res);
 
     expect(destroy).toHaveBeenCalledOnce();
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(204);
   });
 
   it("logs the archive as critical, and says archived rather than deleted", async () => {
@@ -155,7 +158,7 @@ describe("desarchivarRol", () => {
     await desarchivarRol(req({ id: "4" }), res);
 
     expect(rolRestore).toHaveBeenCalledWith({ where: { id: "4" } });
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(204);
     expect(logAction.mock.calls[0][0].action).toBe("RESTORE_ROL");
   });
 });

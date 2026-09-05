@@ -39,7 +39,7 @@ export const createRol = handler("createRol", async (req: Request, res: Response
   // Every cell starts denied, which is both safe and editable.
   await seedRolePermissions(TempRol.dataValues.id as number);
   logAction({ id_usuario: req.user?.id, action: "CREATE_ROL", entity: "Rol", entity_id: TempRol.dataValues.id as number, detail: `Creó rol "${req.body.name}"`, metadata: { after: { name: req.body.name } }, severity: 'info' });
-  res.status(200).json(TempRol);
+  res.status(201).json(TempRol);
 });
 
 export const updateRol = handler("updateRol", async (req: Request, res: Response) => {
@@ -101,7 +101,7 @@ export const deleteRol = handler("deleteRol", async (req: Request, res: Response
 
   await rol.destroy();
   logAction({ id_usuario: req.user?.id, action: "DELETE_ROL", entity: "Rol", entity_id: Number(id), detail: `Archivó rol #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 
 export const desarchivarRol = handler("desarchivarRol", async (req: Request, res: Response) => {
@@ -109,5 +109,5 @@ export const desarchivarRol = handler("desarchivarRol", async (req: Request, res
 
   await RolModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_ROL", entity: "Rol", entity_id: Number(id), detail: `Desarchivó rol #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });

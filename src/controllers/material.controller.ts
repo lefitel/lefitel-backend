@@ -50,7 +50,7 @@ export const getMaterial = handler("getMaterial", async (req: Request, res: Resp
 export const createMaterial = handler("createMaterial", async (req: Request, res: Response) => {
   const TempMaterial = await MaterialModel.create(assignable(req.body));
   logAction({ id_usuario: req.user?.id, action: "CREATE_MATERIAL", entity: "Material", entity_id: TempMaterial.dataValues.id as number, detail: `Creó material ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
-  res.status(200).json(TempMaterial);
+  res.status(201).json(TempMaterial);
 });
 export const updateMaterial = handler("updateMaterial", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -74,12 +74,12 @@ export const deleteMaterial = handler("deleteMaterial", async (req: Request, res
 
   await MaterialModel.destroy({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "DELETE_MATERIAL", entity: "Material", entity_id: Number(id), detail: `Archivó material #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const desarchivarMaterial = handler("desarchivarMaterial", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   await MaterialModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_MATERIAL", entity: "Material", entity_id: Number(id), detail: `Desarchivó material #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });

@@ -101,6 +101,7 @@ const resOf = () => {
     status(code: number) { res.statusCode = code; return res; },
     json(body: unknown) { res.payload = body; return res; },
     sendStatus(code: number) { res.statusCode = code; return res; },
+    end() { return res; },
   };
   return res as unknown as Response & { statusCode: number; payload: unknown };
 };

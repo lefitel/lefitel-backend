@@ -39,7 +39,7 @@ export const createObs = handler("createObs", async (req: Request, res: Response
   const tipoRow = req.body.id_tipoObs != null ? await TipoObsModel.findByPk(req.body.id_tipoObs, { attributes: ["id", "name"], paranoid: false }) : null;
   const tipoRef = tipoRow ? { id: tipoRow.dataValues.id, name: tipoRow.dataValues.name } : (req.body.id_tipoObs ?? null);
   logAction({ id_usuario: req.user?.id, action: "CREATE_OBS", entity: "Obs", entity_id: TempObs.dataValues.id as number, detail: `Creó observación ${req.body.name}`, metadata: { after: { name: req.body.name, id_tipoObs: tipoRef } }, severity: 'info' });
-  res.status(200).json(TempObs);
+  res.status(201).json(TempObs);
 });
 export const updateObs = handler("updateObs", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -84,12 +84,12 @@ export const deleteObs = handler("deleteObs", async (req: Request, res: Response
 
   await ObsModel.destroy({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "DELETE_OBS", entity: "Obs", entity_id: Number(id), detail: `Archivó observación #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const desarchivarObs = handler("desarchivarObs", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   await ObsModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_OBS", entity: "Obs", entity_id: Number(id), detail: `Desarchivó observación #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });

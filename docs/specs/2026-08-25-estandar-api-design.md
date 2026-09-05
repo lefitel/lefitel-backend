@@ -505,30 +505,73 @@ descuidos:
 `201` al crear, `200` al leer y al actualizar, `204` al archivar.
 
 **Qué cuenta como crear**, porque «201 al crear» sin lista no es aplicable: `201`
-cuando la respuesta representa una fila nueva, y son quince — los doce `create*`
-más `postReporte`, `postDuplicar` y `UploadImage`. `POST /:id/resolver` y
-`POST /:id/reopen` son `200`: cambian el estado de algo que ya existía. (Hoy sólo
-dos de esas quince responden `201`.)
+cuando la respuesta representa una fila nueva, y son quince — los **once**
+`create*` (eran doce hasta que `e8cf5f6` borró `createSolucion`), más
+`postReporte`, `postDuplicar`, `UploadImage` y `registerVerify`, que ya lo hacía.
+De esas quince, **doce cambiaron en C4** y tres ya contestaban `201`.
 
-**`204` sólo donde el archivado no informa de nada:** el `DELETE` de las diez
-entidades con papelera. **`DELETE /api/files/orphans` y `/broken-refs` se quedan
-en `200` con su cuerpo**, porque devuelven cuántos ficheros limpiaron y esa cifra
-es la única salida de la pantalla de Archivos — un `204` no puede llevar cuerpo, y
-la pantalla diría «undefined referencias limpiadas».
+`POST /:id/resolver` no está entre ellas aunque **sí** inserta una fila —una
+solución, dentro de su transacción—, y el motivo no es el que decía la primera
+versión: no es que «cambie el estado de algo que ya existía», es que lo que
+contesta no lleva nada de esa fila. Un `201` con el cuerpo vacío le habla al
+cliente de un recurso que no puede leer.
+
+**`204` donde la escritura no informa de nada**, y son veinticuatro, no diez: el
+`DELETE` de las diez entidades con papelera, **los diez `desarchivar`**, el
+desbloqueo de una cuenta, el borrado de un fichero, y `resolver` y `reabrir`.
+Esos dos últimos los decidió Isaias el 5 de septiembre, porque §3.5 («son 200»)
+y §9 («las 24 respuestas vacías pasan a 204») se contradecían y las dos rutas
+estaban en las dos listas. Ganó la regla: no devuelven nada, así que contestan
+`204`.
+
+**Se escribe `res.status(204).end()`, nunca `res.sendStatus(204)`.** Medido
+contra el Express instalado: `sendStatus` calcula el `ETag` **antes** de quitar
+el cuerpo para un 204 y no quita esa cabecera, así que las veinticuatro
+respuestas saldrían con el mismo validador, calculado sobre la cadena `"No
+Content"`. `statusCodes.test.ts` lo comprueba en la respuesta real y prohíbe
+`sendStatus` para cualquier 2xx en un controlador.
+
+**`DELETE /api/files/orphans` y `/broken-refs` se quedan en `200` con su
+cuerpo**, porque devuelven cuántos ficheros limpiaron y esa cifra es la única
+salida de la pantalla de Archivos — un `204` no puede llevar cuerpo, y la
+pantalla diría «undefined referencias limpiadas». Y una tercera, que la primera
+versión no conocía: `DELETE /api/generador/reportes/:id` archiva un informe y
+contesta una frase que su cliente está tipado para recibir.
 
 **Un `500` nunca devuelve `error.message`.** Responde el mensaje neutro que ya
 usa el manejador global, y el real va al log con su identificador de petición,
 que `httpLogger` ya escribe. No se pierde diagnóstico: se mueve a donde sólo lo
 ve quien administra.
 
-**Pero el error esperado no se silencia con el inesperado.** En los quince
-controladores afectados todo fallo cae en el mismo `catch`, incluidos los que son
-culpa de quien escribe: una criticidad fuera de rango es una `ValidationError` de
-Sequelize que hoy llega con texto legible y mañana llegaría como «Ocurrió un
-error». El patrón correcto ya está escrito en casa — `handleError` en
+**Pero el error esperado no se silencia con el inesperado — y eso ya estaba
+pasando.** La primera versión lo escribió como un riesgo futuro: «hoy llega con
+texto legible y mañana llegaría como Ocurrió un error». Al medirlo resultó ser
+al revés. Todo fallo cae en el mismo `catch` desde que existe `makeHandler`, y
+la fuga de texto se cerró en `7faa178`, así que **una criticidad fuera de rango
+o una ciudad sin coordenadas contestaban ya un `500` mudo**: el cuerpo que
+mandó el que llama, devuelto como si el servidor estuviera roto.
+
+C4 lo arregla en `utils/handler.ts`, que es el único sitio por donde pasan los
+74 manejadores: una `ValidationError`, una violación de clave ajena, una de
+unicidad o una excepción de datos (SQLSTATE clase 22) contestan `400` o `409`
+con una frase, y **se registran como `warn`, no como `error`** — un campo que
+falta no es una incidencia y no debe compartir cubo con las que sí lo son.
+
+Dos cosas que la implementación aprendió y conviene no volver a descubrir:
+
+- **Nombrar la columna sólo vale en la rama de validación.** En Postgres el
+  error de clave ajena llega siempre con `fields: null` —está a fuego en el
+  driver—, así que esa frase se queda genérica; y la de unicidad no nombra nada
+  a propósito, porque «ya existe un registro con ese correo» es una forma de
+  preguntar si una dirección tiene cuenta.
+- **El valor nunca viaja.** `err.errors[*].value` es el dato que falló la
+  validación, y una contraseña demasiado corta sigue siendo la contraseña.
+  `logger.ts` ya lo censura en el log; aquí se queda fuera de la respuesta.
+
+El patrón viene de casa — `handleError` en
 [`generador.controller.ts`](../../src/controllers/generador.controller.ts) mapea
 errores tipados a `400`/`413`/`429` con su propia frase y deja lo demás en
-neutro. Se extiende, no se inventa.
+neutro. Se extendió, no se inventó.
 
 **Los dos códigos se quedan (decisión del 3 de septiembre).** Se planteó quitar
 el `204` —es de donde salen los ocho «No se pudo archivar» falsos— y se
@@ -1709,21 +1752,57 @@ Y el cliente gana lo que §1 diagnostica y §4 nunca prescribió: **un solo tipo
 cd api && npx vitest run src/routes/listShape.test.ts src/middleware/limit.test.ts
 ```
 
-**C4 · `201`/`204` y la capa cliente (§3.5, §4.1).** La tarea más grande de las
-catorce, y **cliente primero**: un código de estado no admite paso intermedio en
-el servidor. La cuenta ha vuelto a crecer —83 comparaciones literales con `200`
-en 32 ficheros de `web/src` el 3 de septiembre; la cifra vive en el test—, pero
-lo que rompe de verdad está contado: ocho «No se pudo archivar» falsos con el
-`204` y cuatro «No se pudo crear» con el `201`, con el riesgo de que el usuario
-reintente y duplique. El peor es `AddRevisionSheet`: su propio comentario
-registra que ese fallo ya costó una inspección de campo, **y su test mockea
-`200` como éxito, así que seguiría verde con la pantalla rota**. Se arregla el
-test con la pantalla. La otra mitad de esta tarea es §4.1: 39 funciones de
-`web/src/api` devuelven un número con `.catch(() => 400)`, y son los mismos
-sitios. Y una convención que faltaba en §3: **una escritura que no devuelve nada
-responde `204`, nunca `sendStatus(200)`**, que manda `"OK"` como `text/plain`
-desde una API JSON — hay 24. Choca con `http.ts` y `SesionProvider.tsx`, de la
-sesión de autenticación, y con `RolesPanel.tsx` y `Rol.api.ts`, de la de roles.
+**C4 · `201`/`204` y la capa cliente (§3.5, §4.1).** ✅ Hecha el 2026-09-05, y
+fue la más grande de las catorce. Las dos orillas en el mismo trabajo, que es lo
+que la ficha llamaba «cliente primero»: un código de estado no admite paso
+intermedio, así que o cambian juntas o el corte enseña «no se pudo» sobre cosas
+que sí se hicieron.
+
+**El daño era dos veces y media el contado.** La ficha decía ocho «No se pudo
+archivar» y cuatro «No se pudo crear». Son **treinta** sitios: la cuenta original
+miró los diez archivados y se dejó fuera los **diez desarchivados**, el
+desbloqueo de una cuenta, y reabrir y resolver una incidencia. Las 83
+comparaciones literales sí eran 83 —una era un comentario—, y hoy quedan 46 en
+el árbol: 35 de autenticación, que están fuera de este arco, y once de deuda
+declarada.
+
+**Un defecto vivo que la ficha describía como riesgo futuro.** Ver §3.5: los
+once controladores de alta contestaban ya `500 «Ocurrió un error»` cuando el
+fallo era del que escribe. Medido antes de tocar nada.
+
+**La ficha se equivocaba al citar `AddRevisionSheet`.** El comentario de ese
+fichero registra el fallo **contrario** —un éxito falso que perdió una
+inspección—, no el que C4 provocaba. Lo que C4 habría provocado ahí es una
+revisión **duplicada**: la hoja se queda abierta con el texto dentro y la
+persona vuelve a darle a Guardar. Y sí era verdad que su test simulaba `200`
+como éxito y habría seguido en verde con la pantalla rota; ahora no simula
+ningún número.
+
+**Lo que quedó sin terminar, y por qué.** Cinco funciones de `web/src/api`
+—`createCiudad`, `editCiudad`, `createPoste`, `editPoste`, `reabrirEvento`—
+siguen devolviendo un número, porque al menos un llamante de cada una vive en un
+fichero que la sesión de MapLibre está reescribiendo (`CiudadSheet.tsx`,
+`PosteSheet.tsx`, `EventoDetallePage.tsx`). Cada una lleva su nota en el código
+y **resuelve 200 en el éxito sea cual sea el código real**, que es lo que
+mantiene correctas esas once comparaciones. `statusComparisons.test.ts` las
+lista y falla si la lista se queda vieja en cualquiera de las dos direcciones.
+Coste declarado: crear o editar un poste o una ciudad **sigue diciendo «no se
+pudo» sin decir por qué**, y son las dos entidades más usadas del producto.
+
+**Choques con las otras sesiones, corregidos respecto a lo que decía la ficha.**
+`http.ts` sí se toca —es donde va el traductor de fallos—, `SesionProvider.tsx`
+**no** hacía falta tocarlo, y `/api/rol` con su pantalla sí entró, por decisión
+de Isaias (ver §12).
+
+**Dos cosas medidas que conviene no volver a razonar:**
+
+- `res.sendStatus(204)` deja un `ETag` calculado sobre `"No Content"`; se usa
+  `res.status(204).end()`. Está en §3.5.
+- El traductor de fallos de `http.ts` rechaza con el `AxiosError` **original**
+  enriquecido, y eso —no el orden de registro— es lo que mantiene vivos el
+  cierre de sesión por 401 y los treinta lectores de `error.response`. El orden
+  es defensa para el día que alguien cambie con qué rechaza. La primera versión
+  de este documento atribuía cada cosa a la contraria.
 
 ```
 cd web && npx vitest run src/api/statusPropagation.test.ts
@@ -2011,7 +2090,8 @@ el documento sigue teniendo razón.
 | 3.3 sobre | Test con la **lista escrita a mano** de los listados. Derivarlo es imposible: `res.json(x)` no revela la forma de `x`, y ése fue el error de la primera versión. La lista se cuenta al empezar C3, no ahora: A1 ya borró uno, así que la cuenta de la primera versión sobra |
 | 3.3 techo y centinela | Test del centinela sobre una colección por encima y por debajo del tope —`422`, no `413`—, más un caso del valor que el servidor viejo interpretaba como `50`, y el lector único de `limit` con sus tres clamps |
 | 3.4 nombres | Test que recorre **la tabla montada** —no los ficheros— y falla si un segmento tiene mayúsculas, o si un verbo u operación no está en inglés, o si un sustantivo de la lista de negocio no está en español |
-| 3.5 códigos | Test por método sobre las rutas que crean y archivan |
+| 3.5 códigos | ✅ `statusCodes.test.ts`: registro de las **85 escrituras** montadas con el código que contesta cada una, leído del árbol de rutas real y contrastado contra el código fuente de su controlador; falla en las dos direcciones (una ruta sin clasificar, una entrada sin ruta) y fija las cuentas 15/24/46. Más cinco peticiones de verdad: que el `201` lleva la fila, que el `204` no lleva cuerpo **ni `Content-Type` ni `ETag`**, y que un cuerpo inválido contesta `400` con una frase que no es la neutra |
+| 3.5 comparaciones en el cliente | ✅ `statusComparisons.test.ts` en `web`: **ninguna pantalla compara contra un número** salvo las que están en una de las dos listas escritas —autenticación, y la deuda que dejó el trabajo del mapa—, con la cuenta por fichero para que una nueva no se cuele en un fichero que ya estaba. La primera versión de §10 no tenía fila para esto, y es donde estaba todo el daño |
 | 3.5 `error.message` | Test que lo prohíbe **en cualquier parte del cuerpo de un `catch` que responde**, no sólo dentro del `res.json` — la forma con variable intermedia es la mayoritaria. Acotado al `500`: el generador lo devuelve a propósito en `400`/`413`/`429`, y son frases escritas para el usuario |
 | 3.6 formato de error | ✅ `app.notfound.test.ts`: una dirección inexistente responde 404 en JSON con `message`, la frase habla de la dirección y no de un error, el cuerpo **no** refleja la ruta pedida —que es lo que hacía `finalhandler`—, una ruta montada sigue llegando a su router, y un cuerpo mal formado sigue saliendo por el manejador terminal, que es lo que se rompe si alguien le pone cuatro parámetros a este manejador |
 | 3.7 permisos | `routeGuards.test.ts`, que ya existe — con la excepción de `express.static` escrita **con la verdad de hoy** (§6): detrás de sesión, sin permiso por objeto |
@@ -2055,7 +2135,21 @@ día; lo que no, espera al siguiente y entonces sí paga maniobra.
 **Todo cambio de contrato hecho antes del corte no necesita maniobra**, porque
 no hay cliente viejo que proteger: ya está roto por la autenticación. Eso
 convierte C1, C3, C4 y D1 en trabajo mecánico en dos repositorios, sin
-despliegues intermedios. La propuesta de agrupar «las retiradas» de todas las
+despliegues intermedios.
+
+🔴 **Ese argumento cubre el corte y nada más. Desde C4, `web` deja de poder
+volver atrás sola.** Las dos orillas se despliegan por caminos independientes
+—Coolify para `api`, Vercel para `web`— y Vercel deshace un despliegue con un
+clic. Con el servidor nuevo y un cliente anterior a C4, cada alta correcta
+enseña «no se pudo crear» sobre una fila que existe, y la persona lo reintenta:
+ciudades, postes e incidencias duplicadas. Las dos consecuencias prácticas:
+
+1. `api` y `web` van juntos al corte o no va ninguno; si la construcción de
+   `web` falla después de que `api` haya subido, no hay degradación, hay caída
+   —el despliegue anterior es el cliente de `master`, que ya no sabe
+   autenticarse.
+2. Después del corte, deshacer sólo `web` reabre esa ventana sobre producción.
+   Un `revert` de C4 son las dos orillas a la vez. La propuesta de agrupar «las retiradas» de todas las
 tareas C en un solo despliegue final se retiró el mismo día: sólo C1 y C3 dejan
 código de tolerancia, y sin ventana no hay nada que tolerar.
 
@@ -2111,7 +2205,11 @@ optimizaciones. **La lectura de `limit` sí cambia** (§3.3) — la primera vers
 declaraba intocable toda la paginación en una sección y la modificaba en otra.
 
 Y no cambia nada de lo que llevan las otras dos sesiones: las catorce rutas de
-autenticación, y `/api/rol` con su pantalla de roles.
+autenticación. **`/api/rol` sí cambió, en C4 y por decisión de Isaias del 5 de
+septiembre**: es una de las diez entidades con papelera, así que archivar y
+desarchivar un rol contestan `204`, y tres sitios de `RolesPanel.tsx` leían un
+`200`. Dejarlo fuera habría sido dejar la pantalla de roles diciendo «no se pudo
+archivar el rol» sobre un rol archivado. La sesión de roles tiene que saberlo.
 
 ---
 

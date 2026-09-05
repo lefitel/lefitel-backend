@@ -50,7 +50,7 @@ export const getAdss = handler("getAdss", async (req: Request, res: Response) =>
 export const createAdss = handler("createAdss", async (req: Request, res: Response) => {
   const TempAdss = await AdssModel.create(assignable(req.body));
   logAction({ id_usuario: req.user?.id, action: "CREATE_ADSS", entity: "Adss", entity_id: TempAdss.dataValues.id as number, detail: `Creó ferretería ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
-  res.status(200).json(TempAdss);
+  res.status(201).json(TempAdss);
 });
 export const updateAdss = handler("updateAdss", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -74,12 +74,12 @@ export const deleteAdss = handler("deleteAdss", async (req: Request, res: Respon
 
   await AdssModel.destroy({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "DELETE_ADSS", entity: "Adss", entity_id: Number(id), detail: `Archivó ferretería #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const desarchivarAdss = handler("desarchivarAdss", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   await AdssModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_ADSS", entity: "Adss", entity_id: Number(id), detail: `Desarchivó ferretería #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });

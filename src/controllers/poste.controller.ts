@@ -389,7 +389,7 @@ export const createPoste = handler("createPoste", async (req: Request, res: Resp
     metadata: { after: { name: posteBody.name, ...(adssLabel ? { adss: adssLabel } : {}) } },
     severity: 'info',
   });
-  res.status(200).json(TempPoste);
+  res.status(201).json(TempPoste);
 });
 export const searchPoste = handler("searchPoste", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -526,12 +526,12 @@ export const deletePoste = handler("deletePoste", async (req: Request, res: Resp
 
   await PosteModel.destroy({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "DELETE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Archivó Poste #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const desarchivarPoste = handler("desarchivarPoste", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   await PosteModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Desarchivó Poste #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });

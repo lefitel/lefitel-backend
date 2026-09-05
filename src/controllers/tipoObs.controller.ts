@@ -50,7 +50,7 @@ export const getTipoObs = handler("getTipoObs", async (req: Request, res: Respon
 export const createTipoObs = handler("createTipoObs", async (req: Request, res: Response) => {
   const TempTipoObs = await TipoObsModel.create(assignable(req.body));
   logAction({ id_usuario: req.user?.id, action: "CREATE_TIPO_OBS", entity: "TipoObs", entity_id: TempTipoObs.dataValues.id as number, detail: `Creó tipo de observación ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
-  res.status(200).json(TempTipoObs);
+  res.status(201).json(TempTipoObs);
 });
 export const updateTipoObs = handler("updateTipoObs", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -74,12 +74,12 @@ export const deleteTipoObs = handler("deleteTipoObs", async (req: Request, res: 
 
   await TipoObsModel.destroy({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "DELETE_TIPO_OBS", entity: "TipoObs", entity_id: Number(id), detail: `Archivó tipo de observación #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const desarchivarTipoObs = handler("desarchivarTipoObs", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   await TipoObsModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_TIPO_OBS", entity: "TipoObs", entity_id: Number(id), detail: `Desarchivó tipo de observación #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });

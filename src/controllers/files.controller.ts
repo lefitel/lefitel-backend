@@ -129,7 +129,7 @@ export const deleteFile = handler("deleteFile", async (req: Request, res: Respon
 
   fs.unlinkSync(fullPath);
   logAction({ id_usuario: req.user?.id, action: "DELETE_FILE", entity: "File", entity_id: null, detail: `Eliminó archivo ${name}`, metadata: { filename: name }, severity: 'critical' });
-  res.sendStatus(200);
+  res.status(204).end();
 });
 
 export const getEntityImageStats = handler("getEntityImageStats", async (req: Request, res: Response) => {

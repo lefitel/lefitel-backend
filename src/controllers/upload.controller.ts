@@ -87,5 +87,5 @@ export async function UploadImage(req: Request, res: Response) {
   }
 
   logAction({ id_usuario: req.user?.id, action: "UPLOAD_IMAGE", entity: "File", entity_id: null, detail: `Subió imagen ${path}`, metadata: { after: { path } }, severity: 'info' });
-  return res.status(200).json({ path });
+  return res.status(201).json({ path });
 }

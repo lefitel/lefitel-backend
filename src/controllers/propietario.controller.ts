@@ -80,7 +80,7 @@ export const getPropietario = handler("getPropietario", async (req: Request, res
 export const createPropietario = handler("createPropietario", async (req: Request, res: Response) => {
   const TempPropietario = await PropietarioModel.create(assignable(req.body));
   logAction({ id_usuario: req.user?.id, action: "CREATE_PROPIETARIO", entity: "Propietario", entity_id: TempPropietario.dataValues.id as number, detail: `Creó propietario ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
-  res.status(200).json(TempPropietario);
+  res.status(201).json(TempPropietario);
 });
 export const updatePropietario = handler("updatePropietario", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -104,12 +104,12 @@ export const deletePropietario = handler("deletePropietario", async (req: Reques
 
   await PropietarioModel.destroy({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "DELETE_PROPIETARIO", entity: "Propietario", entity_id: Number(id), detail: `Archivó propietario #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const desarchivarPropietario = handler("desarchivarPropietario", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   await PropietarioModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_PROPIETARIO", entity: "Propietario", entity_id: Number(id), detail: `Desarchivó propietario #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });

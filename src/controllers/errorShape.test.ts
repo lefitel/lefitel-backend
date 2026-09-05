@@ -54,7 +54,19 @@ const here = dirname(fileURLToPath(import.meta.url));
  */
 const NOT_OURS: string[] = [];
 
-/** The controller files this test is responsible for. */
+/**
+ * The controller files this test is responsible for.
+ *
+ * **And the half it cannot see.** This scanner reads `src/controllers` and
+ * judges only 500 answers. Since C4 there is a second place where text derived
+ * from an exception could reach the browser — the classifier in
+ * `src/utils/handler.ts`, which turns a failure the caller caused into a 400 or
+ * a 409 with a sentence of its own. It is outside this directory and outside
+ * the 500 rule, so nothing here would notice it leaking. That half is asserted
+ * behaviourally in `src/utils/handler.test.ts` ("never repeats what Postgres
+ * said, whatever the status"). Two places, one rule; if you widen one, widen
+ * the other.
+ */
 const escaneados = () =>
   readdirSync(here).filter((f) => f.endsWith(".controller.ts") && !NOT_OURS.includes(f));
 

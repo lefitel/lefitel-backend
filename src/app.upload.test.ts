@@ -114,7 +114,7 @@ describe("POST /api/upload with a real multipart body", () => {
       .set(DEL_FRONTEND)
       .attach("file", imagen, "Foto del Poste 42.png");
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
 
     // The name is ours, not theirs: spaces to underscores, extension replaced.
     expect(res.body.path).toMatch(/^\/\d+_Foto_del_Poste_42\.webp$/);

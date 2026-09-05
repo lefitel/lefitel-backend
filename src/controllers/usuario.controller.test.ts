@@ -170,11 +170,18 @@ function call(
       this.body = payload;
       return this;
     },
-    // deleteUsuario and desarchivarUsuario answer success with `res.sendStatus`
-    // rather than `res.status().json()`. Nothing exercised that path until the
-    // restore tests below, which is why this was missing.
+    // deleteUsuario, desarchivarUsuario and desbloquearUsuario answer success
+    // with no body at all, so they never reach `json`. `sendStatus` is what
+    // that used to look like; `end` is what a 204 looks like, and leaving it
+    // off is not a quiet gap — the call throws, `makeHandler` files it as a
+    // 500, and the test reads "expected 500 to be 200" for a handler that is
+    // working. A double missing a method the real `res` has is a double that
+    // lies about which of the two is broken.
     sendStatus(code: number) {
       this.statusCode = code;
+      return this;
+    },
+    end() {
       return this;
     },
   };
@@ -662,7 +669,7 @@ describe("what a creation request may set", () => {
     );
     await createUsuario(c.req, c.res);
 
-    expect(c.status).toBe(200);
+    expect(c.status).toBe(201);
     expect(create.mock.calls[0][0]).toEqual({
       user: "nuevo",
       pass: "hashed",
@@ -682,7 +689,7 @@ describe("what a creation request may set", () => {
     );
     await createUsuario(c.req, c.res);
 
-    expect(c.status).toBe(200);
+    expect(c.status).toBe(201);
     expect(create.mock.calls[0][0]).toMatchObject({ id_rol: TECNICO });
   });
 });
@@ -963,7 +970,7 @@ describe("lifting a lockout", () => {
     const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
     await desbloquearUsuario(c.req, c.res);
 
-    expect(c.status).toBe(200);
+    expect(c.status).toBe(204);
     expect(written(stored.set)).toEqual({ failed_attempts: 0, locked_until: null });
     expect(stored.save).toHaveBeenCalled();
   });
@@ -1219,7 +1226,7 @@ describe("username collisions", () => {
       const c = call({ id: ADMIN, id_rol: ADMIN }, { body: { user: "nuevo", pass: "una-clave-de-prueba" } });
       await createUsuario(c.req, c.res);
 
-      expect(c.status).toBe(200);
+      expect(c.status).toBe(201);
       expect(create).toHaveBeenCalledOnce();
     });
 
@@ -1372,7 +1379,7 @@ describe("username collisions", () => {
       await desarchivarUsuario(c.req, c.res);
 
       expect(restore).toHaveBeenCalledWith({ where: { id: "7" } });
-      expect(c.status).toBe(200);
+      expect(c.status).toBe(204);
     });
 
     it("refuses with 409, and never restores, when the name was given away while archived", async () => {
@@ -1734,7 +1741,7 @@ describe("archiving an account ends its sessions and its remembered devices", ()
     const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
     await deleteUsuario(c.req, c.res);
 
-    expect(c.status).toBe(200);
+    expect(c.status).toBe(204);
     expect(transaction).toHaveBeenCalledTimes(1);
     // All three writes, and all three carrying the *same* transaction. Any of
     // them outside it would commit on its own, which is precisely the half-done
@@ -1756,7 +1763,7 @@ describe("archiving an account ends its sessions and its remembered devices", ()
     const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
     await deleteUsuario(c.req, c.res);
 
-    expect(c.status).toBe(200);
+    expect(c.status).toBe(204);
     // The account's own id, as a number — the same argument `revokeAllSessionsOf`
     // gets. Whose devices these are is this table's entire security property.
     expect(revokeAllRememberedDevicesOf).toHaveBeenCalledWith(OTHER, expect.anything());
@@ -1826,7 +1833,7 @@ describe("archiving an account ends its sessions and its remembered devices", ()
     const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
     await deleteUsuario(c.req, c.res);
 
-    expect(c.status).toBe(200);
+    expect(c.status).toBe(204);
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(destroy).toHaveBeenCalledWith({ where: { id: String(OTHER) }, transaction: TRANSACCION });
   });

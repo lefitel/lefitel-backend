@@ -571,7 +571,7 @@ export const createEvento = handler("createEvento", async (req: Request, res: Re
     },
     severity: 'info',
   });
-  res.status(200).json(TempEvento);
+  res.status(201).json(TempEvento);
 });
 export const updateEvento = handler("updateEvento", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -708,7 +708,7 @@ export const reabrirEvento = handler("reabrirEvento", async (req: Request, res: 
   if (solucionImage) void deleteImageIfUnreferenced(solucionImage);
 
   logAction({ id_usuario: req.user?.id, action: "REABRIR_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Reabrió Evento #${id}`, metadata: { before: { state: true }, after: { state: false } }, severity: 'warning' });
-  res.sendStatus(200);
+  res.status(204).end();
 });
 
 export const deleteEvento = handler("deleteEvento", async (req: Request, res: Response) => {
@@ -716,14 +716,14 @@ export const deleteEvento = handler("deleteEvento", async (req: Request, res: Re
 
   await EventoModel.destroy({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "DELETE_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Archivó Evento #${id}`, severity: 'critical' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const desarchivarEvento = handler("desarchivarEvento", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   await EventoModel.restore({ where: { id } });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Desarchivó Evento #${id}`, severity: 'info' });
-  return res.sendStatus(200);
+  return res.status(204).end();
 });
 export const resolverEvento = handler("resolverEvento", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -759,5 +759,5 @@ export const resolverEvento = handler("resolverEvento", async (req: Request, res
     severity: 'info',
   });
 
-  res.sendStatus(200);
+  res.status(204).end();
 });
