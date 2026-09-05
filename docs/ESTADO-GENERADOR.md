@@ -1031,19 +1031,78 @@ pulsando «Cobertura por ciudad».
 `buildCatalogView` — meterlas ahí habría recursado hasta agotar la pila, en la
 primera petición.
 
+### La pantalla, rehecha los días 4 y 5 de septiembre
+
+Todo esto salió de que Isaias **por fin usó la pantalla** y fue diciendo lo que
+veía. Vale la pena listarlo porque casi nada era predecible desde el código.
+
+**Ayuda, y no un tutorial.** Se propuso un asistente de bienvenida y se
+descartó: llega antes de que exista la duda, se ve una vez, y hay que decidir
+dónde se guarda «ya lo vio». En su lugar, la explicación va pegada a lo que
+explica — la regla de agrupar aparece en el panel de columnas *mientras el
+reporte agrupa*, el selector de campos dice qué es un «Contar…» sólo si hay
+alguno a la vista — más un icono ⓘ por tarjeta y otro en el título de la
+pantalla. Ver `PageHelp.tsx` y `CardHelp.tsx`.
+
+**Las plantillas, en un sitio y no en dos.** Empezaron en una galería grande en
+el panel de resultados. Costó tres pasadas entender que lo que molestaba era
+verlas repetidas: primero se separaron en dos grupos, luego en dos pestañas
+—que dejan de *verse* a la vez pero siguen siendo dos listas—, y al final la
+galería se quitó entera. Viven en la pestaña «Plantillas» de la tarjeta «Abrir
+un reporte», con su descripción y su «una fila por…». El panel de resultados
+vacío dice dónde están en vez de enseñarlas otra vez.
+
+**Cuatro controles que faltaban.** Filas por página (era el único dato de la
+configuración que nadie podía elegir, y el servidor ya mandaba usarlo en un
+mensaje de error); tooltip en el interruptor «Auto»; «Quitar todos» los filtros;
+y elegir si el fichero exportado trae el reporte entero o sólo la página, que
+antes siempre traía todo desde la fila 1 sin decirlo.
+
+**La maqueta, girada.** La configuración era una columna de 320–400px a la
+izquierda. Ahora son cuatro paneles en banda arriba —dos columnas desde `md`,
+cuatro desde `xl`— y la tabla ocupa todo el ancho. Cada panel tiene su tope de
+altura y su propio scroll.
+
+**Las columnas se reordenan arrastrando** (dnd-kit, elegido sobre el arrastre
+nativo porque el nativo no existe en táctil). Las flechas ↑↓ se quitaron y su
+única función irremplazable —reordenar con teclado— la cubre el sensor de
+teclado de la librería.
+
+**Tres trampas que costaron encontrar y conviene no repetir:**
+
+1. `templatesFor` llama a `pruneConfig`, y `pruneConfig` llama a
+   `buildCatalogView`. Meter las plantillas dentro de `buildCatalogView` recursa
+   hasta agotar la pila en la primera petición: se ensamblan en el controlador.
+2. Una petición sin `limit` recibe **500** del constructor mientras el cliente
+   manda **100**. Las plantillas nacieron sin `limit`, así que el mismo reporte
+   paginaba distinto según cómo lo hubieras abierto.
+3. El `guard` del export recibe el total del reporte entero, porque es lo que
+   contesta la consulta de conteo. Para un fichero de una sola página hay que
+   acotarlo o rechaza ficheros por un tamaño que nunca alcanzarán.
+
+**Lo que no se puede probar automáticamente, dicho:** el gesto de arrastrar. La
+librería mide geometría real y el entorno de pruebas no dibuja nada. Por eso la
+lógica del reordenado vive fuera del componente, en `moveColumnByKey`, que sí
+está probada a fondo. Lo mismo con la maqueta: hay dos pruebas que leen nombres
+de clase (`min-w-0`, el tope de altura) porque no hay forma de preguntar cuánto
+mide algo.
+
 ### Pendiente
 
-1. 🔴 **Aplicar la migración de autoría.** El código está escrito y probado; lo
-   que falta es ejecutarla contra `osefi_local` (`npm run migrate`), que es un
-   permiso que hay que dar a mano. Ver la sección siguiente.
-2. **Pregunta sin contestar:** hoy cualquiera ve todos los reportes marcados
+1. **Pregunta sin contestar:** hoy cualquiera ve todos los reportes marcados
    «compartido», venga de quien venga. Si un coordinador comparte un análisis
    interno, el rol Cliente lo ve en su lista. ¿«Compartido» debería significar
    «con mi equipo» y no con los clientes?
-3. **Isaias todavía no ha usado la pantalla.** Sigue siendo lo que más vale, y
-   ahora hay más que probar: el refresco automático, el contador, ordenar desde
-   la cabecera y las tres raíces nuevas.
-4. Lo que ya estaba abierto y sigue: la cancelación de exportación se comprueba
+2. **Dos pasadas de la suite del api fallaron 1–2 pruebas** que nunca llegaron a
+   decir su nombre, el 4 de septiembre, mientras otra sesión escribía en el mismo
+   árbol. No se reprodujo en las cinco pasadas siguientes ni con los tres
+   ficheros que tocan base de datos ejecutados juntos. Queda apuntado sin cerrar.
+3. **El PDF sigue sin llevar fotografías.** Ahora al menos lo dice el panel de
+   ayuda; el fichero en sí no lo advierte y la columna de fotos sale como una
+   columna de «Sí».
+4. Avisar de un decimal en un filtro de enteros exige que el servidor publique
+   qué campos los aceptan: es ampliar el contrato del catálogo.
+5. Lo que ya estaba abierto y sigue: la cancelación de exportación se comprueba
    entre pasos y no dentro de uno; el tope de peso se mide después de construir;
    nadie mira el aviso de la clase 22; `IMAGES_DIR` apunta a `C:/images` con 17
    ficheros frente a 1.514 fotos referenciadas.
