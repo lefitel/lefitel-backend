@@ -345,10 +345,12 @@ Lo que una descarga promete, y lo que la prueba mide:
 **Y son `POST`, para una descarga.** `requireSameOrigin` sólo guarda los verbos
 que escriben, así que un `GET` que arma una hoja de cálculo es algo que
 cualquier página de internet puede hacer ejecutar al navegador de un empleado con
-sesión, veinte veces seguidas, desde un `<img>` que nunca llega a leer. No se
+sesión, una vez por navegación de primer nivel —que es lo único que la cookie
+`Lax` acompaña; un `<img>` no la lleva— y sin llegar a leer la respuesta. No se
 lleva nada: gasta memoria ajena y la única plaza que el proceso tiene para armar
-documentos. Es la misma puerta abierta que `reporte.routes.ts` dejó anotada como
-deuda de B3 para los seis informes; estas tres nacen sin ella. Los filtros viajan
+documentos. Es la misma puerta que `reporte.routes.ts` tuvo anotada como deuda
+de B3 para los seis informes hasta que B3 les puso el cubo del generador, que la
+acota; estas tres nacen sin ella. Los filtros viajan
 igualmente en la cadena de consulta, porque son los del listado y los lee la
 misma función — una segunda forma de decir «filtrado por nombre» es una segunda
 cosa que se desincroniza.
@@ -1342,17 +1344,91 @@ cd web && npx vitest run src/api/Bitacora.api.test.ts src/pages/menu/bitacora/in
 ```
 
 **B3 · Los limitadores del generador a su propio fichero, y aplicados a los seis
-informes.** *(C1 le añadió urgencia: al pasar los seis a `GET` salieron de
-`requireSameOrigin`, y este router no tiene ningún cubo. El escenario es CPU
-ajena, no fuga —CORS impide leer la respuesta—, pero hoy nada lo acota.)* Hoy son `const` sin `export` dentro de `generador.routes.ts`. Se
-mudan a `src/middleware/reportLimiters.ts` sin cambiar sus números. **Decisión
-pendiente:** si los seis informes fijos comparten cubo con
-`POST /generador/consulta` —y entonces tirar informes se come el presupuesto del
-generador— o tienen cubo propio con el mismo caudal. Se elige antes de empezar la
-tarea.
+informes.** ✅ Hecha. *(C1 le añadió urgencia: al pasar los seis a `GET` salieron
+de `requireSameOrigin`, y este router no tenía ningún cubo.)* Los cuatro viven en
+`src/middleware/limiters.ts` —el fichero que C3 ya había creado para `perUser` y
+el cubo de exportación, así que el nombre `reportLimiters.ts` que decía esta
+ficha no se usó: un solo fichero para todo cubo que cuenta por persona— con sus
+números intactos: 30, 120, 10 y 60 por minuto.
+
+**Las dos decisiones de Isaias, del 4 de septiembre.** Los seis informes fijos
+**comparten cubo** con `POST /generador/consulta`: lo que se raciona es el tiempo
+de la base de datos en un solo proceso, y un cubo por ruta dejaría a una persona
+gastarlo siete veces rotando entre ellas. Y el dashboard de inicio
+(`GET /api/dashboard/`), que la auditoría previa señaló como la lectura más
+pesada sin medir de la API —el registro entero, sin filtro ni límite—, **queda
+fuera de B3 y apuntado aquí**: meterlo en el cubo de los informes haría fallar la
+pantalla de inicio por lo que alguien hizo en el generador, y un cubo propio es
+un número nuevo que merece su propia decisión. Lo mismo, y sin decisión aún,
+para `GET /api/files/{orphans,broken-refs,entity-stats}`. `routeGuards.test.ts`
+deja escrito que `/reporte/opciones` y el dashboard siguen sin cubo a propósito.
+
+**Lo que la auditoría previa cambió, y hay que saber.** Primero, el cubo
+**acota, no cierra**, la exposición que C1 abrió: la cookie es `SameSite=Lax`,
+que sólo viaja en una navegación de primer nivel —no en un `<img>`, no en un
+`fetch`—, así que una página ajena fuerza un informe por navegación visible, no
+en bucle. Lo que el cubo sí acota es una sesión legítima, o robada, haciendo
+scripting. Segundo, «30 por minuto» tiene **dos consumidores de distinta clase**:
+un informe gasta una unidad por clic y nunca pregunta solo; el generador relanza
+la consulta 700 ms después de cada cambio de configuración y cada «Siguiente» es
+otra unidad. Quien monta un informe en el generador puede vaciar el cubo y dejar
+Informes contestando «espere un momento» el resto del minuto sin haberlo tocado;
+al revés no ocurre a ningún ritmo que produzca una mano. Isaias lo mantuvo
+compartido sabiéndolo, y está escrito junto al número en `limiters.ts`.
+
+**La otra orilla, que no estaba en la letra.** Las seis pantallas de Informes
+tiraban la frase del servidor y decían «Error al generar el reporte», que es la
+frase que manda a la persona de vuelta al botón. Ahora enseñan la del 429. Y un
+defecto que el 429 volvía rutina: General, Tramo y Recorrido conservaban la lista
+anterior cuando Generar fallaba, y el botón de exportar leía las fechas de los
+selectores, no las del informe en pantalla —genera enero, mueve a febrero, recibe
+429, pulsa Excel: cabecera de febrero, filas de enero, camino del cliente—. La
+auditoría posterior encontró la otra mitad del mismo defecto un campo más allá:
+en Por Tramo la cabecera «Tramo:» del fichero, y en Recorrido la etiqueta, los
+marcadores y el nombre del CSV, se leían de los desplegables vivos. Las tres
+pantallas guardan ahora **el filtro entero con el que se generaron las filas**
+—fechas, tramo y el interruptor de «solo nuevas»— y todo lo que describe las
+filas lee de ahí. Un fallo de Generar limpia la lista, como ya hacía el
+generador con su Generar; y en Recorrido, cuyos dos relanzamientos automáticos
+(tras resolver o revisar una incidencia desde el mapa) son justo el caso en que
+el generador decidió **conservar** la tabla, un fallo de esos relanzamientos la
+conserva, y un guardián de secuencia impide que un fallo tardío borre un éxito
+fresco, porque los dos pueden solaparse.
+
+**Verificado.** `limiters.test.ts` (cada cubo, su número y su frase, escritos a
+mano), `routeGuards.test.ts` (dónde está montado cada cubo, por identidad de
+función y con la ruta completa —la relativa al router no distinguía tres
+`/export`—; detrás de la puerta de permiso en las dieciséis rutas; y las dos
+lecturas fuera a propósito), `reporte.contract.test.ts` (el informe 31 contesta
+429 sin consultar, un 403 no gasta, y el cubo es uno con el generador **en las
+dos direcciones**, con un cortafuegos sobre `sequelize.query` porque la base es
+copia de producción; ese fichero gastaba 32 unidades de 30 y necesitaba el
+reset). En web, `ReportEstadoRedSec.test.tsx` —la única pantalla cuyo Generar no
+pide fecha—, la ampliación de `ReportGeneralSec.test.tsx` con un selector de
+fechas simulado, porque ningún test del repo maneja el calendario, y
+`fallos.test.ts` sobre las seis a nivel de texto; tras la auditoría posterior,
+`ReportTramoSec.test.tsx` cubre el tramo y el PDF por posición, y `fallos.test.ts`
+el relanzamiento que conserva. Once mutaciones en api y once en web, cada una
+muerta por el test que la nombra. Lo que la auditoría posterior tumbó de lo
+mío y se arregló: tres frases falsas en la cabecera de `limiters.ts` —la regla
+«todo cubo por persona vive aquí» no era cierta, el prefijo del cubo de fotos no
+es lo que separa los contadores, y la librería no rechaza compartir almacén, lo
+avisa—, y dos mutaciones que sobrevivían en las cabeceras del 429 (draft-7 y
+las `X-RateLimit-*` antiguas), ahora cubiertas.
+
+**Queda, y no es de esta tarea.** `generador/page.test.tsx` («shows the
+server's own message when the export is refused») rechaza con un `Error` plano y
+sólo mira que el toast sea de error: pasa con el lector borrado. Fichero de la
+sesión del generador. (Los dos comentarios de `generador/index.tsx` que decían
+que los treinta eran del generador solo se corrigieron en el árbol y salieron
+con el commit `eef95d4` de esa sesión.) Y el selector de fechas real
+(`components/ui/date-picker.tsx`) no tiene nombre accesible: la etiqueta de al
+lado no está asociada al botón, y ningún test puede verlo porque el simulado sí
+lo tiene.
 
 ```
-cd api && npx vitest run src/middleware/reportLimiters.test.ts
+cd api && npx vitest run src/middleware/limiters.test.ts src/routes/routeGuards.test.ts src/routes/reporte.contract.test.ts
+cd web && npx vitest run src/pages/menu/reportes
 ```
 
 ### Familia C — las dos orillas
@@ -1403,9 +1479,10 @@ salen de ella: pierden la comprobación de `Origin` y la cabecera de cliente a l
 vez, y la cookie es `SameSite=Lax`, que una navegación de primer nivel lleva. Una
 página ajena puede hacer que el navegador de alguien con sesión ejecute la
 consulta más cara del producto. **No puede leer la respuesta** —CORS— así que es
-CPU ajena, no una fuga. Y este router no tiene limitador ninguno. El arreglo es
-un cubo, que es **B3**, cuya decisión sigue pendiente: no se inventa aquí. Lo que
-sí lleva C1 es `Cache-Control: no-store` en los seis, que con `PUT` sobraba.
+CPU ajena, no una fuga. Este router no tenía limitador ninguno; **B3** le puso el
+del generador, que **acota** esa exposición —una sesión haciendo scripting— y no
+la cierra: la ficha de B3 dice hasta dónde llega. Lo que sí lleva C1 es
+`Cache-Control: no-store` en los seis, que con `PUT` sobraba.
 
 ```
 cd api && npx vitest run src/routes/reporte.contract.test.ts src/controllers/reporteFiltro.test.ts
@@ -1774,7 +1851,7 @@ de configuración; con la cadena falsa arranca y no conecta—.
 
 **E4 · La actualización deja de ser opcional, y la versión del cliente viaja en
 cada escritura** (decisión del 3 de septiembre). ✅ Hecha, con **una desviación
-que Isaias debe confirmar o revertir**, y es de una línea.
+que Isaias confirmó el 4 de septiembre**: se queda como está.
 
 `X-Osefi-Client` pasa de `"web"` a `web/<versión del build>`: el servidor sólo
 comprueba que no esté vacía, así que no rompe nada, y con la cabecera en el log
@@ -1800,8 +1877,9 @@ letra:
 - El aviso se queda como salida inmediata para quien la quiera ya, y es el único
   camino que puede perder trabajo, así que sigue diciéndolo.
 
-Si Isaias prefiere la letra, es cambiar `"prompt"` por `"autoUpdate"` y borrar el
-efecto que mira la navegación.
+Confirmada el 4 de septiembre, con el coste sobre la mesa: se queda. Volver a la
+letra sería cambiar `"prompt"` por `"autoUpdate"` y borrar el efecto que mira la
+navegación, y no se hace.
 
 **E5 · `migrate:deploy` en Coolify, confirmado y escrito.** El servidor no
 migra al arrancar; lo hace un *pre-deployment command* que vive en el panel de
@@ -1872,10 +1950,10 @@ cambio de contrato. Dos hechos la tumban:
   este servidor.** El primer despliegue es un corte, y ninguna maniobra lo
   convierte en otra cosa.
 - **En producción no hay service worker todavía.** Lo trae esta rama. La ventana
-  «de semanas» no existe aún: empieza el día que se despliegue esto, y con
-  `registerType: "autoUpdate"` (E4) queda acotada a un arranque de la
-  aplicación. Elegirlo antes del primer despliegue es la única vez que sale
-  gratis.
+  «de semanas» no existe aún: empieza el día que se despliegue esto, y con la
+  actualización automática de E4 —la versión nueva se aplica sola en el primer
+  cambio de pantalla— queda acotada a un clic. Elegirlo antes del primer
+  despliegue es la única vez que sale gratis.
 
 ### El corte
 
@@ -1930,7 +2008,9 @@ Las familias A, B y E no necesitan nada de esto: no cambian ningún contrato.
 
 El formato de error `{ message }` y su manejador global. `requireSelfOrPermission`
 y que la propiedad no sea un permiso. Los cuatro limitadores del generador y sus
-números —cambia dónde viven, no cuánto dejan pasar (B3)—. Los `separate: true`
+números —B3 cambió dónde viven, no cuánto dejan pasar; lo que sí cambió es
+**quién gasta** el de consultas: los seis informes fijos beben de él desde
+entonces—. Los `separate: true`
 que evitan el producto cartesiano y la subconsulta de eventos pendientes. Los
 permisos como `modulo` y `accion` en español y en la base de datos. Y
 `routeGuards.test.ts`, que no se sustituye: se le quitan tres entradas en A1, se

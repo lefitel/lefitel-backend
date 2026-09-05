@@ -46,10 +46,21 @@ const { RevisionModel } = await import("../models/revision.model.js");
 const { SolucionModel } = await import("../models/solucion.model.js");
 const { EventoObsModel } = await import("../models/eventoObs.model.js");
 const { Op } = await import("sequelize");
+const { consultaLimiter } = await import("../middleware/limiters.js");
+const { sequelize } = await import("../database/sequelize.js");
+const { allowedOrigins, CSRF_CLIENT_HEADER } = await import("../config/security.js");
 
 const sesionFindOne = vi.spyOn(SesionModel, "findOne");
 const sesionUpdate = vi.spyOn(SesionModel, "update");
 const usuarioFindByPk = vi.spyOn(UsuarioModel, "findByPk");
+// Tripwires, not fixtures. Nothing in this file may reach the database, and the
+// shared-budget block at the end asks the generator's query route — refused by
+// the budget and never run, but if the budget were not shared it would try to.
+// `buildQuery` refuses an empty configuration before any SQL, so this is a
+// tripwire behind a tripwire; it stays, because the database is a copy of
+// production.
+const sequelizeQuery = vi.spyOn(sequelize, "query");
+const sequelizeTransaction = vi.spyOn(sequelize, "transaction");
 
 const eventoFindAll = vi.spyOn(EventoModel, "findAll");
 const posteFindAll = vi.spyOn(PosteModel, "findAll");
@@ -98,6 +109,19 @@ beforeEach(() => {
   solucionFindAll.mockResolvedValue([{ dataValues: { id_evento: 1 } }] as never);
   eventoObsFindAll.mockResolvedValue([] as never);
   sesionUpdate.mockRejectedValue(new Error("touchSession corrió: habría escrito en la base de datos") as never);
+  sequelizeQuery.mockRejectedValue(new Error("sequelize.query corrió: habría consultado la base de datos") as never);
+  sequelizeTransaction.mockRejectedValue(new Error("sequelize.transaction corrió: habría consultado la base de datos") as never);
+
+  // 🔴 The budget is thirty a minute (B3), and everything here asks as user 7.
+  // Before the B3 block at the end existed, this file charged 32 requests and
+  // the first 429 landed on the second line of the anti-vacuity test: the
+  // failure read "posteFindAll was not called" — the wrong cause, named with
+  // confidence. With that block the file charges 126, and three of its tests
+  // spend exactly thirty before asserting the refusal, so there is no margin
+  // inside them: the reset is per test, not per file. Reset rather than
+  // mocked, as `listShape.test.ts` does with `exportLimiter`: that the budget
+  // really is mounted is what the last block measures.
+  consultaLimiter.resetKey(`u:${YO}`);
 });
 
 const pedir = (ruta: string, filtro = RANGO) =>
@@ -367,5 +391,90 @@ describe("nothing reached the database", () => {
     expect(posteFindAll).toHaveBeenCalled();
     expect(eventoObsFindAll).toHaveBeenCalled();
     expect(sesionUpdate, "touchSession intentó escribir la sesión").not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The budget — B3.
+ *
+ * `consultaLimiter` is the generator's thirty a minute, and since B3 the six
+ * reports draw from it too, by decision. These three tests are that decision
+ * made measurable through the real stack, and each names what it is for. The
+ * first pins the number and that a refused request runs no query. The second
+ * pins the order, and is only meaningful next to the first: an unmounted budget
+ * would also "not be spent" by a 403. The third pins the sharing in both
+ * directions, because a `/consulta` that answered 429 whatever happened would
+ * satisfy one direction alone.
+ *
+ * Thirty, written by hand every time. Read off the limiter it would only prove
+ * the code agrees with itself.
+ */
+describe("the budget the six share with the generator (B3)", () => {
+  const AVISO = "Demasiadas consultas seguidas. Espere un momento e intente de nuevo.";
+  /** What `requireSameOrigin` asks of a POST; the origin is the configured one. */
+  const DEL_FRONTEND = {
+    Origin: allowedOrigins(process.env.CORS_ORIGIN, process.env.NODE_ENV)[0],
+    [CSRF_CLIENT_HEADER]: "web",
+  };
+  /**
+   * The generator's query, as the front end sends it and with nothing in it.
+   * Empty on purpose: if the budget were not shared this would reach the
+   * handler, and an empty configuration is refused before any SQL. A valid one
+   * would run against the configured database.
+   */
+  const consultaDelGenerador = () =>
+    request(app).post("/api/generador/consulta").set("Cookie", COOKIE).set(DEL_FRONTEND).send({});
+
+  it("answers the thirty-first report 429 with the sentence, and runs no query for it", async () => {
+    for (let i = 0; i < 30; i++) {
+      const res = await pedir("general");
+      expect(res.status, `la consulta ${i + 1} de 30`).toBe(200);
+    }
+    expect(eventoFindAll).toHaveBeenCalledTimes(30);
+
+    const res = await pedir("general");
+
+    expect(res.status).toBe(429);
+    expect(res.body).toEqual({ message: AVISO });
+    // "Runs no query" is half the sentence: a handler that queried first and
+    // refused after would pass the two lines above.
+    expect(eventoFindAll).toHaveBeenCalledTimes(30);
+    // `sinCache` runs first, so even the refusal is not for keeping.
+    expect(res.headers["cache-control"]).toBe("no-store");
+  });
+
+  it("does not charge a permission refusal: the budget sits behind the gate", async () => {
+    puede = false;
+    for (const [ruta, filtro] of LOS_SEIS) {
+      expect((await pedir(ruta, filtro)).status, ruta).toBe(403);
+    }
+    puede = true;
+
+    // Same `it`, no reset in between: that is what makes the thirtieth 200
+    // mean "the six refusals cost nothing" rather than "the budget was fresh".
+    for (let i = 0; i < 30; i++) {
+      const res = await pedir("general");
+      expect(res.status, `la consulta ${i + 1} de 30, tras seis rechazos`).toBe(200);
+    }
+    expect((await pedir("general")).status).toBe(429);
+  });
+
+  it("is one budget with the generator's query, in both directions", async () => {
+    for (let i = 0; i < 30; i++) await pedir("general");
+
+    // Spent on reports, refused on the generator: the decision itself.
+    const refusal = await consultaDelGenerador();
+    expect(refusal.status, JSON.stringify(refusal.body)).toBe(429);
+    expect(refusal.body).toEqual({ message: AVISO });
+
+    // The other direction, without which a `/consulta` answering 429 no matter
+    // what would pass: with the budget reset, the same request reaches the
+    // handler, which refuses the empty configuration — 400, not 429, and still
+    // no SQL.
+    consultaLimiter.resetKey(`u:${YO}`);
+    const fresh = await consultaDelGenerador();
+    expect(fresh.status, JSON.stringify(fresh.body)).toBe(400);
+    expect(sequelizeQuery).not.toHaveBeenCalled();
+    expect(sequelizeTransaction).not.toHaveBeenCalled();
   });
 });

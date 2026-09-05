@@ -9,6 +9,7 @@ import {
 } from "../controllers/reporte.controller.js";
 import { getOpcionesReporte } from "../controllers/opciones.controller.js";
 import { requirePermission } from "../middleware/requirePermission.js";
+import { consultaLimiter } from "../middleware/limiters.js";
 
 const router = Router();
 
@@ -42,20 +43,34 @@ const sinCache = (_req: Request, res: Response, next: NextFunction) => {
 // whole filter is five scalars that fit in a URL. A `PUT` that changes nothing is
 // a lie told to every cache, proxy and retry in the path.
 //
-// **What the change costs, and is not paid here.** `requireSameOrigin` in
+// **What the change costs, and what bounds it.** `requireSameOrigin` in
 // `app.ts` only guards the four writing verbs, so as `GET` these six leave it:
-// they lose the `Origin` check and the client header at once, and the session
-// cookie is `SameSite=Lax`, which a top-level navigation carries. A page on
-// another site can therefore make somebody's browser run the most expensive
-// query in the product with their session. It cannot read the answer — CORS sees
-// to that — so this is somebody else's CPU, not a leak. There is no rate limiter
-// on this router at all. The fix belongs to B3, whose bucket decision is Isaias's
-// and still open; it is written up in §9 of the spec rather than invented here.
-router.get("/general",         sinCache, requirePermission("reportes", "ver"), getReporteGeneral);
-router.get("/tramo",           sinCache, requirePermission("reportes", "ver"), getReporteTramo);
-router.get("/recorrido",       sinCache, requirePermission("reportes", "ver"), getReporteRecorrido);
-router.get("/estado-red",      sinCache, requirePermission("reportes", "ver"), getEstadoRed);
-router.get("/obs-frecuencia",  sinCache, requirePermission("reportes", "ver"), getObsFrecuencia);
-router.get("/tiempos-resumen", sinCache, requirePermission("reportes", "ver"), getTiemposResumen);
+// they lose the `Origin` check and the client header at once. The session
+// cookie is `SameSite=Lax`, which rides a top-level navigation and nothing else
+// — not an `<img>`, not a frame, not a `fetch` — so what a page on another site
+// can do is make somebody's browser run one of these per visible navigation,
+// with their session, and never read the answer (CORS sees to that). Somebody
+// else's CPU, one query at a time: not a leak, and not a loop. No budget closes
+// that; it is written here as the exposure it is.
+//
+// What the budget does bound is the caller who *is* logged in — a script with a
+// live session, or a stolen cookie — asking these six in a loop.
+// `consultaLimiter` is the generator's thirty a minute: one bucket for the seven
+// routes that run a heavy query, by decision (B3, 2026-09-04) and for the reason
+// its file gives. It goes **after** the permission gate, so a refusal spends
+// nothing of the budget. What a refused or a rate-limited request still costs
+// is `authenticate`, which the budget has to sit behind in order to key on the
+// user: a session read, a user read and, once per touch window, the session
+// slide it writes along with its `Set-Cookie`. A script sitting on refusals
+// keeps its session alive. `/opciones` stays outside it on purpose: it is asked once
+// per visit to a report tab, and metering it would make switching tabs spend
+// the report budget.
+const conPresupuesto = [sinCache, requirePermission("reportes", "ver"), consultaLimiter];
+router.get("/general",         conPresupuesto, getReporteGeneral);
+router.get("/tramo",           conPresupuesto, getReporteTramo);
+router.get("/recorrido",       conPresupuesto, getReporteRecorrido);
+router.get("/estado-red",      conPresupuesto, getEstadoRed);
+router.get("/obs-frecuencia",  conPresupuesto, getObsFrecuencia);
+router.get("/tiempos-resumen", conPresupuesto, getTiemposResumen);
 
 export default router;

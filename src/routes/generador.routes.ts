@@ -1,5 +1,4 @@
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
 import {
   getCatalogo,
   postConteo,
@@ -13,78 +12,33 @@ import {
   postDuplicar,
 } from "../controllers/generador.controller.js";
 import { requirePermission } from "../middleware/requirePermission.js";
-// `perUser` and the export budget moved to `middleware/limiters.ts` when the
-// pole, incident and user lists gained exports of their own. The budget is
-// **shared with them by design**, not merely reused: what it rations is the one
-// slot in the process that assembles a document, so four separate budgets would
-// let one person hold that slot four times over.
-import { exportLimiter, perUser } from "../middleware/limiters.js";
+// Every budget this router mounts lives in `middleware/limiters.ts`, with its
+// number and its reason. Two of them are **shared with other routers by
+// decision**, not merely reused: `exportLimiter` with the three list downloads,
+// because what it rations is the one slot in the process that assembles a
+// document; and `consultaLimiter` with the six fixed reports under
+// `/api/reporte`, because what it rations is the database's time. That file
+// says what the sharing costs, and it is not nothing: this router's auto-run
+// and its paging spend the same thirty a minute the report screens use.
+import {
+  consultaLimiter,
+  conteoLimiter,
+  exportLimiter,
+  writeLimiter,
+} from "../middleware/limiters.js";
 
 const router = Router();
-
-/**
- * Running a report is the only endpoint here that can hold a database
- * connection for seconds at a time, so it gets the tightest budget.
- */
-const consultaLimiter = rateLimit({
-  windowMs: 60_000,
-  limit: 30,
-  // Keyed on the user, not the IP. Behind a reverse proxy every request shares
-  // the proxy's address, so an IP-keyed budget of 30 would be 30 for the entire
-  // installation, and one person paging through a long report would lock
-  // everyone else out.
-  //
-  // The fallback runs the address through ipKeyGenerator, which folds IPv6 into
-  // its /56 block. A raw address let one holder of an IPv6 prefix walk through
-  // billions of distinct keys and spend the budget as many times over.
-  // Namespaced so a user id can never collide with an address.
-  keyGenerator: perUser,
-  message: { message: "Demasiadas consultas seguidas. Espere un momento e intente de nuevo." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-/**
- * Counting is asked while somebody types a filter value, so it needs a budget an
- * order of magnitude larger than running the report — and it can afford one: it
- * reads no rows, only an aggregate over the filtered set.
- */
-const conteoLimiter = rateLimit({
-  windowMs: 60_000,
-  limit: 120,
-  keyGenerator: perUser,
-  message: { message: "Demasiadas comprobaciones seguidas. Espere un momento." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-/**
- * Saving, editing, archiving and copying a report.
- *
- * These were left unlimited on the grounds that they "share the global one" —
- * and there is no global one: `app.ts` rate-limits the login endpoint and
- * nothing else. So the cheapest write in the system was also the only
- * unbounded one, and each row it creates carries a configuration document. A
- * loop could fill the table as fast as the network allows.
- *
- * Sixty a minute is far more than anyone pressing Guardar, and low enough that
- * a script cannot use it to grow the database.
- */
-const writeLimiter = rateLimit({
-  windowMs: 60_000,
-  limit: 60,
-  keyGenerator: perUser,
-  message: { message: "Demasiados cambios seguidos. Espere un momento e intente de nuevo." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
 // The module used to gate itself in one line for all three roles. Now each
 // route asks for what it actually does, so an administrator can hand out
 // running reports without handing out saving them. The catalog is still
 // trimmed per role on top of this, and a saved report is still only reachable
 // by its owner — that is ownership, not a permission.
+//
+// Each budget goes **after** its permission gate, so a refusal spends nothing.
 router.get("/catalogo", requirePermission("generador", "ver"), getCatalogo);
+// Running a report is the only endpoint here that can hold a database
+// connection for seconds at a time, so it gets the tightest budget.
 router.post("/consulta", requirePermission("generador", "ver"), consultaLimiter, postConsulta);
 router.post("/conteo", requirePermission("generador", "ver"), conteoLimiter, postConteo);
 // Building a file costs far more than answering a query, and only one runs at a

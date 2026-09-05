@@ -60,6 +60,12 @@ const {
   passwordlessVerifyLimiter,
   loginRateLimit,
 } = await import("../middleware/loginLimiters.js");
+const {
+  consultaLimiter,
+  conteoLimiter,
+  exportLimiter,
+  writeLimiter,
+} = await import("../middleware/limiters.js");
 const { puedeAlcanzar } = await import("../auth/sessionState.js");
 (express.application as unknown as { use: unknown }).use = realUse;
 
@@ -105,6 +111,13 @@ interface MountedRoute {
   permissions: string[];
   /** The options the step-up gate on this route was mounted with, if any. */
   stepUp?: OpcionesGate;
+  /**
+   * The same chain as the functions themselves, in the same order.
+   *
+   * A budget from `express-rate-limit` is an anonymous function, so `chain`
+   * shows it as `""` and cannot tell one from another. Identity can.
+   */
+  handles: unknown[];
 }
 
 function mountedRoutes(): MountedRoute[] {
@@ -120,6 +133,7 @@ function mountedRoutes(): MountedRoute[] {
   // above under the same path, in the order they were written. So anything seen
   // under a prefix before the router itself is a gate that guards it.
   const beforeRouter = new Map<string, string[]>();
+  const beforeRouterHandles = new Map<string, unknown[]>();
 
   for (const layer of stack) {
     // `undefined` for a layer that was not mounted on a path: the global
@@ -139,13 +153,17 @@ function mountedRoutes(): MountedRoute[] {
         ...(key === undefined ? [] : beforeRouter.get(key) ?? []),
         ...layer.route.stack.map((s) => s.handle.name),
       ];
+      const handles: unknown[] = [
+        ...(key === undefined ? [] : beforeRouterHandles.get(key) ?? []),
+        ...layer.route.stack.map((s) => s.handle),
+      ];
       const permissions = layer.route.stack
         .map((s) => s.handle.permission)
         .filter((p): p is string => typeof p === "string");
       const stepUp = layer.route.stack.map((s) => s.handle.opciones).find((o) => o !== undefined);
       for (const method of Object.keys(layer.route.methods)) {
         routes.push({
-          method: method.toUpperCase(), path: layer.route.path, chain, permissions, stepUp,
+          method: method.toUpperCase(), path: layer.route.path, chain, permissions, stepUp, handles,
         });
       }
       continue;
@@ -160,9 +178,13 @@ function mountedRoutes(): MountedRoute[] {
       // report builder does. Those are pathless layers inside the router's own
       // stack, and they cover every route declared after them.
       const routerWide: string[] = [];
+      const routerWideHandles: unknown[] = [];
       for (const inner of layer.handle.stack) {
         if (!inner.route) {
-          if (inner.slash) routerWide.push(inner.handle.name);
+          if (inner.slash) {
+            routerWide.push(inner.handle.name);
+            routerWideHandles.push(inner.handle);
+          }
           continue;
         }
         const chain = [
@@ -170,18 +192,24 @@ function mountedRoutes(): MountedRoute[] {
           ...routerWide,
           ...inner.route.stack.map((s) => s.handle.name),
         ];
+        const handles: unknown[] = [
+          ...(beforeRouterHandles.get(key) ?? []),
+          ...routerWideHandles,
+          ...inner.route.stack.map((s) => s.handle),
+        ];
         const permissions = inner.route.stack
           .map((s) => s.handle.permission)
           .filter((p): p is string => typeof p === "string");
         const stepUp = inner.route.stack.map((s) => s.handle.opciones).find((o) => o !== undefined);
         for (const method of Object.keys(inner.route.methods)) {
           routes.push({
-            method: method.toUpperCase(), path: prefix + inner.route.path, chain, permissions, stepUp,
+            method: method.toUpperCase(), path: prefix + inner.route.path, chain, permissions, stepUp, handles,
           });
         }
       }
     } else if (key !== undefined) {
       beforeRouter.set(key, [...(beforeRouter.get(key) ?? []), layer.handle.name]);
+      beforeRouterHandles.set(key, [...(beforeRouterHandles.get(key) ?? []), layer.handle]);
     }
   }
   return routes;
@@ -1199,6 +1227,91 @@ describe("el presupuesto de las ceremonias de passkey", () => {
   // router, así que `/login` es la de `auth.routes.ts`.
   it("no monta el cubo del login con contraseña en las rutas sin contraseña", () => {
     expect(rutasCon(loginRateLimit)).toEqual(["/login"]);
+  });
+});
+
+/**
+ * Los cubos por persona de `middleware/limiters.ts` — B3.
+ *
+ * Por identidad de la función, como el bloque de arriba: un limitador de
+ * `express-rate-limit` no tiene nombre y `chain` no lo distingue de otro. Aquí
+ * se lee `handles`, que es la misma cadena como referencias, y la ruta completa
+ * con su verbo — el bloque de arriba lee la ruta relativa al router, y con
+ * `exportLimiter` eso serían tres `/export` indistinguibles: mover el cubo de la
+ * descarga de usuarios a una ruta nueva `/api/ciudad/export` dejaría esa lista
+ * igual.
+ */
+describe("los cubos por persona de limiters.ts", () => {
+  const CUBOS = [consultaLimiter, conteoLimiter, exportLimiter, writeLimiter];
+  const rutasCon = (cubo: unknown) =>
+    routes.filter((r) => r.handles.includes(cubo)).map((r) => `${r.method} ${r.path}`).sort();
+
+  // Un solo cubo de treinta para las siete rutas que ejecutan una consulta
+  // pesada: decisión de Isaias del 2026-09-04, y el motivo está en el fichero
+  // del cubo. Exacta en las dos direcciones — que falte un informe es un
+  // informe sin tope; que sobre una ruta es una ruta pagando un presupuesto
+  // que no es el suyo.
+  it("el cubo de consultas cubre /consulta y los seis informes fijos, y nada más", () => {
+    expect(rutasCon(consultaLimiter)).toEqual([
+      "GET /api/reporte/estado-red",
+      "GET /api/reporte/general",
+      "GET /api/reporte/obs-frecuencia",
+      "GET /api/reporte/recorrido",
+      "GET /api/reporte/tiempos-resumen",
+      "GET /api/reporte/tramo",
+      "POST /api/generador/consulta",
+    ]);
+  });
+
+  it("el cubo de exportación cubre las cuatro descargas, cada una por su nombre", () => {
+    expect(rutasCon(exportLimiter)).toEqual([
+      "POST /api/evento/export",
+      "POST /api/generador/exportar",
+      "POST /api/poste/export",
+      "POST /api/usuario/export",
+    ]);
+  });
+
+  it("el de conteo y el de escritura se quedan en el generador", () => {
+    expect(rutasCon(conteoLimiter)).toEqual(["POST /api/generador/conteo"]);
+    expect(rutasCon(writeLimiter)).toEqual([
+      "DELETE /api/generador/reportes/:id",
+      "POST /api/generador/reportes",
+      "POST /api/generador/reportes/:id/duplicar",
+      "PUT /api/generador/reportes/:id",
+    ]);
+  });
+
+  // Estar montado no es estar bien montado: un cubo delante de la puerta de
+  // permiso cobra los 403, y las listas de arriba no lo verían.
+  // `reporte.contract.test.ts` mide lo mismo por HTTP en los seis informes;
+  // esto se lo pide a las dieciséis rutas de una vez.
+  it("cada cubo va detrás de la puerta de permiso de su ruta", () => {
+    const conCubo = routes.filter((r) => r.handles.some((h) => CUBOS.includes(h as never)));
+    expect(conCubo.length, "cambió cuántas rutas llevan cubo").toBe(16);
+    for (const r of conCubo) {
+      const puerta = r.chain.indexOf("requirePermissionGate");
+      const cubo = r.handles.findIndex((h) => CUBOS.includes(h as never));
+      expect(puerta, `${r.method} ${r.path} no tiene puerta de permiso`).toBeGreaterThanOrEqual(0);
+      expect(cubo, `${r.method} ${r.path}: ${r.chain.join(" -> ")}`).toBeGreaterThan(puerta);
+    }
+  });
+
+  // Dos lecturas caras que se quedan SIN cubo a propósito. `/opciones` se pide
+  // una vez por visita a cada pestaña de informes, y medirla haría que cambiar
+  // de pestaña gastara el presupuesto de los informes. El dashboard devuelve el
+  // registro entero sin filtro ni límite y es la lectura más pesada sin medir
+  // de la API — Isaias lo dejó fuera de B3 el 2026-09-04: meterlo en el cubo
+  // de los informes haría fallar la pantalla de inicio por lo que alguien hizo
+  // en el generador, y un cubo propio es un número nuevo que merece su propia
+  // decisión. Está apuntado en el §9 del spec. Que cambiar esto sea una
+  // decisión y no un accidente.
+  it("deja fuera, a propósito, /reporte/opciones y el dashboard", () => {
+    for (const ruta of ["GET /api/reporte/opciones", "GET /api/dashboard/"]) {
+      const r = routes.find((x) => `${x.method} ${x.path}` === ruta);
+      expect(r, `${ruta} ya no existe`).toBeDefined();
+      expect(r?.handles.some((h) => CUBOS.includes(h as never)), `${ruta} lleva un cubo`).toBe(false);
+    }
   });
 });
 
