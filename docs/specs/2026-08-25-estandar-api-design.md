@@ -193,9 +193,10 @@ para poder vaciar la lista de excepciones de lectura — y eso hay que acordarlo
 con ellos, porque el comentario que hoy encabeza ese controlador dice
 explícitamente lo contrario.
 
-**De los tres** — `routeGuards.test.ts`. Este documento le quita tres entradas en
-A1 y le vacía la lista en C5; la sesión de autenticación le añade rutas en su
-Plan 4. Cualquier cambio ahí se avisa.
+**De los tres** — `routeGuards.test.ts`. Este documento le quitó tres entradas en
+A1 y le vació la lista de lecturas en C5, que además lo llevó de siete routers
+bajo comprobación de completitud a diecisiete; la sesión de autenticación le
+añade rutas en su Plan 4. Cualquier cambio ahí se avisa.
 
 ---
 
@@ -601,7 +602,11 @@ la primera versión sólo miraba la primera — con lo que no se habría enterad
 que `/api/upload/` seguía sin puerta.
 
 **Criterio de terminado:** `READ_GATE_NOT_APPLICABLE` queda vacía de todo lo que
-no sea autenticación. Lo comprueba el test que ya existe.
+no sea autenticación. Lo comprueba el test que ya existe. ✅ Cumplido en C5: sólo
+quedan las cuatro que contestan sobre quien pregunta. Y el criterio se quedaba
+corto —lo dice la propia auditoría previa—: vaciar la lista prueba que hay
+puerta, no que pida lo que debe, así que C5 añadió once routers a la
+comprobación de completitud para que el **par** quede fijado en las dieciocho.
 
 ### 3.8 La propiedad no es un permiso
 
@@ -641,9 +646,14 @@ columna `archivar` de la matriz era decorativa para quien pudiera editar.
 cualquier cuenta. La bitácora mandaba el nombre de cuenta de cada persona
 saltándose la constante que existe para eso.
 
-**Queda pendiente la mitad ancha de esta regla:** veinticinco `include` siguen
-devolviendo la fila completa de ciudad, material o propietario donde la pantalla
-sólo usa el nombre. Eso es peso, no fuga de datos de autoría, y va en C5.
+**Queda pendiente la mitad ancha de esta regla, y C5 no la hizo:** veinticinco
+`include` siguen devolviendo la fila completa de ciudad, material o propietario
+donde la pantalla sólo usa el nombre. Esta ficha decía que iba «en el mismo
+tramo» que C5, y se dejó fuera a propósito el 2026-09-05: es **peso, no fuga de
+autoría** —lo dice esta misma línea—, mientras que C5 es autorización; y
+recortar veinticinco proyecciones cambia la forma de las respuestas que leen
+muchas pantallas, así que necesita su propia pasada y su propia auditoría de qué
+campo lee cada una. Tarea propia, no un añadido.
 
 ---
 
@@ -877,17 +887,30 @@ camino hacia un dato que ningún endpoint de opciones sirve todavía:
 
 ---
 
-## 6. Cómo quedan las dieciocho lecturas
+## 6. Cómo quedaron las dieciocho lecturas
+
+✅ **Hecho en C5, el 2026-09-05.** Las dieciocho llevan puerta. Lo que sigue es
+lo que se construyó, no lo que se planeaba.
 
 **Con las direcciones de hoy**, porque este cierre es C5 y los
 sub-recursos son D1 — la primera versión las nombraba ya renombradas y
 obligaba a traducir la tabla de vuelta.
 
-Eran veinte cuando se escribió esta sección. Hoy son **dieciocho**, y no porque
-se hayan cerrado: A1 borró `GET /api/solucion/` y C2 retiró
+Eran veinte cuando se escribió esta sección. Fueron **dieciocho** al hacerlo, y
+no porque se hubieran cerrado: A1 borró `GET /api/solucion/` y C2 retiró
 `GET /api/poste/tramos`. La cuenta viva está en `READ_GATE_NOT_APPLICABLE`, en
-`routeGuards.test.ts`, que es lo que hay que mirar al empezar C5 — no este
-párrafo.
+`routeGuards.test.ts`, donde hoy quedan sólo las cuatro exenciones de verdad —
+las cuatro que contestan sobre quien pregunta y sobre nadie más.
+
+**Y desde C5 el par queda fijado, no sólo la presencia de la puerta.** Antes,
+`MODULOS_TABULADOS` sujetaba siete routers; ahora sujeta diecisiete, que son
+aquéllos más los once que C5 cerró. Sin eso, once de las dieciocho puertas
+habrían quedado comprobadas como «existe una puerta» y nunca como «pide lo que
+debe»: poner `bitacora:ver` en `GET /api/ciudad/` —un par declarado, así que el
+vocabulario lo acepta— habría dejado la batería entera en verde. Para
+conseguirlo, `PARAMETROS_GATES` dejó de ser parcial a propósito: nombra las
+treinta rutas con puerta de sus cinco routers, y hay una tabla nueva para
+ciudades.
 
 | Permiso | Rutas |
 |---|---|
@@ -905,26 +928,43 @@ podía recorrer `/api/usuario/1/eventos` … `/api/usuario/20/eventos` y armar e
 expediente de actividad de cada empleado — y ese controlador no declara
 `attributes`, así que devuelve la fila entera de cada evento. La misma pregunta
 «qué ha hecho esta persona» ya tiene dos respuestas en el código y ninguna es
-`eventos:ver`: el generador marca la entidad `usuario` como `staffOnly` contra
-`seguridad.ver`, y la bitácora usa `requireSelfOrPermission("bitacora","ver",…)`.
+`eventos:ver`: el generador no deja hacer informes con las personas como raíz
+sin `seguridad.ver`, y la bitácora usa
+`requireSelfOrPermission("bitacora","ver",…)`.
 
-**Cuatro advertencias sobre lo que este cierre no consigue**, para no vender
-humo. Las dos primeras estaban desde la primera versión; las dos últimas las
-encontró la auditoría del 26 de agosto, y la cuarta es la más incómoda.
+🔴 **Y el tercer argumento no es opcional.** `requireSelfOrPermission` recibe el
+nombre del parámetro de la ruta y **por defecto vale `"id"`**, mientras que ésta
+se llama `:id_usuario`. Sin pasarlo, la rama de «es tu propia fila» compara
+contra `undefined`, nunca casa, y la puerta degrada a permiso puro: todo el que
+no sea administrador pierde su propio historial, en silencio, porque la pantalla
+de perfil se traga el fallo e imprime «Eventos atendidos: 0». Ya pasó una vez en
+la bitácora. Ni `routeGuards.test.ts` puede verlo —lee el par de la cadena
+montada y no hace peticiones— ni `listShape.test.ts` —simula todos los permisos
+a `true`, así que contesta la otra rama—. `evento.self.test.ts` existe para esa
+línea, y pide sin el permiso: la tuya devuelve 200, la de otro 403, y con el
+permiso la de otro devuelve 200.
+
+**Cinco advertencias sobre lo que este cierre no consigue**, para no vender
+humo. Las dos primeras estaban desde la primera versión; la tercera y la cuarta
+las encontró la auditoría del 26 de agosto; la quinta, la previa de C5. Dicho de
+una vez y en una frase: **C5 quita alcance ambiental, no cierra los datos.**
 
 - **Gatear la topología de la red no la cierra**, y la advertencia ha cambiado
   de dirección sin cambiar de fondo. Se escribió sobre `GET /api/poste/tramos`,
   que C2 retiró; los mismos pares viajan hoy por dos sitios: el bloque `tramos`
   de `GET /api/reporte/opciones`, bajo `reportes:ver` —que el rol Cliente
   tiene—, y `GET /api/poste/`, que proyecta `id_ciudadA`/`id_ciudadB` en cada
-  fila y **no lleva permiso ninguno** hasta que C5 se lo ponga. Y por debajo
-  sigue el generador: el rol Cliente tiene `generador: TODO`, y sirve `ciudad`
-  con `lat`/`lng` sin marca de staff. Se cierra por coherencia, no porque
-  proteja.
+  fila y que C5 puso bajo `postes:ver`. Y por debajo sigue el generador: el rol
+  Cliente tiene `generador: TODO`, y sirve `ciudad` con `lat`/`lng` sin marca de
+  personal. Se cierra por coherencia, no porque proteja.
 - **`parametros:ver` sobre los cinco catálogos esconde poco** mientras
   `searchPoste` y `searchEvento` incluyan material, propietario y ciudades sin
-  `attributes`. Por eso los veinticinco `include` de §3.9 van en el mismo tramo:
-  cerrar la puerta principal y dejar la de servicio abierta no es cerrar.
+  `attributes`. Esta línea decía que por eso los veinticinco `include` de §3.9
+  iban «en el mismo tramo»; C5 los dejó fuera a propósito y §3.9 explica por qué:
+  aquello es peso y esto es autorización, y recortar veinticinco proyecciones
+  cambia la forma de lo que leen muchas pantallas. Sigue siendo verdad que
+  cerrar la puerta principal y dejar la de servicio abierta no es cerrar — por
+  eso está escrito aquí y no borrado.
 - **Y los propios endpoints de opciones vuelven a servir esos catálogos bajo
   otros permisos.** `/api/poste/opciones` entrega adss, material y propietario
   con `postes:ver`; `/api/evento/opciones` entrega obs y tipoObs con
@@ -937,6 +977,16 @@ encontró la auditoría del 26 de agosto, y la cuarta es la más incómoda.
   se cierra: la vista de administración, con `description`, las marcas de tiempo
   y el `?archived=true`. No los nombres. §1 lo vendía como un cambio de capacidad
   y para los roles de hoy no lo es.
+- **Y hay dos segundas direcciones más grandes que las dieciocho, que siguen
+  abiertas.** `GET /api/dashboard/` pide `eventos:ver` y devuelve **el registro
+  entero de postes** sin `where` ni `limit`, así que `postes:ver` sobre
+  `GET /api/poste/` no es una frontera: quien pueda ver incidencias ve todos los
+  postes. Y el generador sirve `evento`, `poste`, `ciudad`, `revision`,
+  `eventoObs` y `solucion` como niveles de detalle a quien tenga
+  `generador:ver`, que los tres roles sembrados tienen entero. Seis de las
+  dieciocho tienen ahí una segunda puerta. Ninguna de las dos es motivo para no
+  hacer C5; las dos son motivo para no decir que C5 cerró los datos de postes o
+  de incidencias.
 - **La lectura más grande de la API no está en esta lista y el test no puede
   verla.** Las fotografías se sirven con `express.static`, que es un middleware
   sin ruta, y `routeGuards.test.ts` sólo enumera rutas. **Lo que la segunda
@@ -1680,45 +1730,84 @@ cd web && npx vitest run src/api/statusPropagation.test.ts
 cd api && npx vitest run src/routes/statusCodes.test.ts
 ```
 
-**C5 · Cerrar las dieciocho lecturas sin permiso (§3.7, §6).** Dieciocho y no
-veinte: A1 borró una y C2 retiró otra. **La cuenta que vale es
-`READ_GATE_NOT_APPLICABLE` en `routeGuards.test.ts`**, no esta frase.
+**C5 · Cerrar las dieciocho lecturas sin permiso (§3.7, §6).** ✅ Hecha el
+2026-09-05. Dieciocho y no veinte: A1 borró una y C2 retiró otra. El reparto de
+permisos es el de la tabla de §6, y la lista viva sigue siendo
+`READ_GATE_NOT_APPLICABLE`, donde ya sólo quedan las cuatro exenciones de
+verdad.
 
-Después de C2, y el motivo original ya no es el que era: decía que
-`ReportTramoSec` pedía cuatro catálogos dentro del mismo `try` que el informe,
-así que un 403 en un desplegable mataba el informe entero. C2 cambió eso — los
-catálogos se piden al montar y por una sola dirección, con su propio manejo del
-403 —, y con ello **C5 se vuelve más simple, no menos necesaria**: las cinco
-pantallas migradas ya saben distinguir «no tiene permiso» de «no se pudo
-cargar», así que cerrar una lectura les da una frase en pantalla en vez de un
-desplegable vacío.
+**La decisión de datos que esta ficha reservaba a Isaias se había disuelto
+sola.** Decía que `parametros:ver` es `false` para el rol Cliente y que cerrar
+los cinco catálogos le quitaría el informe de tramo. C2 lo cambió sin que esta
+ficha se enterara: hoy esos cinco endpoints sólo los llama la pantalla de
+Parámetros, que ya estaba cerrada con ese mismo permiso en el navegador, y los
+informes piden sus listas por `/api/reporte/opciones`. Ningún rol sembrado pierde
+nada. Lo que sí conviene no repetir es el motivo que la auditoría previa corrigió:
+no se salva por la puerta del navegador, sino porque **los mismos catálogos se
+sirven bajo otros tres permisos** (`postes:ver`, `eventos:ver`, `reportes:ver`),
+que el Cliente tiene. O sea que el permiso nuevo ordena; no esconde.
 
-Lo que sigue intacto: rompe a cualquier rol que no tenga el permiso, así que se
-comprueba contra los roles sembrados antes del corte. Y la decisión de datos que
-la segunda versión no nombraba: `parametros:ver` es `false` para el rol Cliente,
-y cerrar esas cuatro lecturas le quita el informe de tramo salvo que un
-administrador marque la casilla o una migración de datos lo haga. Se decide
-antes de C5, no durante.
+**Lo que la auditoría previa cambió del plan, y hay que saber:**
 
-Tres cosas que la auditoría corrigió aquí:
-
+- **Sólo siete de las dieciocho habrían quedado con el par fijado.** Las once
+  restantes viven en routers que la comprobación de completitud no sujetaba, y
+  ahí `requirePermission("bitacora","ver")` sobre `GET /api/ciudad/` deja la
+  batería entera en verde. Se extendió `MODULOS_TABULADOS` de siete routers a
+  diecisiete y `PARAMETROS_GATES` dejó de ser parcial, que es una decisión y no
+  un efecto: treinta entradas para cinco routers, más una tabla nueva de
+  ciudades.
 - **`GET /api/evento/usuario/:id_usuario` va con `requireSelfOrPermission`, no
-  con `requirePermission`.** §6 le asignaba `seguridad:ver` a secas, y esa ruta
-  la llama **la página de perfil del propio usuario**: con la puerta simple, todo
-  el que no sea administrador se quedaba sin su historial, en silencio, en todas
-  las versiones del cliente. §3.8 ya decía cómo se escribe; §6 no lo aplicaba.
-- **La excepción de `express.static` se escribe con la verdad de hoy**, no con
-  la frase de la segunda versión: las fotos están detrás de sesión desde
-  `a90ff35`; lo que queda es que cualquier sesión ve cualquier foto (§6).
-- **`GET /api/evento/` y `GET /api/poste/` siguen mandando `id_usuario` y el
-  nombre del autor en cada fila** aunque `64431bf` cerró la autoría en los
-  includes anidados: `responseShape.test.ts` sólo mira modelos dentro de un
-  `include`, nunca la raíz. Cerrar `/evento/usuario/:id` para que un Cliente no
-  arme el expediente de un empleado no sirve de nada si `/evento/?limit=all` le
-  da los mismos datos con un filtro en el navegador. C5 lo cierra o lo dice.
+  con `requirePermission`** —§3.8 ya decía cómo se escribe—, **y con el nombre
+  del parámetro como tercer argumento**, que es la parte que ningún test del
+  repositorio podía ver. Está contado en §6.
+- **Dos de las dieciocho quedan sin ninguna prueba por HTTP**:
+  `GET /api/ciudad/:id` y `GET /api/solucion/evento/:id_evento`. Están
+  clasificadas en `listShape.test.ts` pero ese fichero nunca las pide, así que
+  su puerta está fijada por el registro de rutas y por nada más.
+
+**La autoría: decisión de Isaias del 2026-09-05, y corrige una premisa de este
+documento.** La versión anterior de esta ficha decía que `GET /api/evento/` y
+`GET /api/poste/` «siguen mandando el nombre del autor» como si fuera una fuga
+que `responseShape.test.ts` no puede ver. Las dos mitades eran inexactas: el
+`id_usuario` de la raíz sí es invisible para ese test, pero el nombre viaja en un
+`include` que ese mismo test **inspecciona y aprueba** contra
+`USUARIO_AS_AUTHOR`. Y, sobre todo, ya no es deuda: Isaias decidió que **la
+autoría es procedencia**. Quien puede ver un poste puede ver quién lo registró y
+quién ha trabajado en él; lo que sigue cerrado es preguntar *por persona*. Así
+que la columna «Creador» se queda en las dos listas, y el generador —que era más
+estricto que las pantallas— se abrió en el mismo sentido: `Registrado por`,
+`Revisado por` y `Resuelto por` dejan de ser sólo para personal, y con ellas el
+nombre y el apellido; el usuario de acceso, el teléfono, el rol, los contadores y
+**hacer informes con las personas como raíz** siguen pidiendo `seguridad:ver`.
+Se sigue de ahí, y se dice: con el nombre como columna filtrable, alguien puede
+preguntar «los eventos que registró Juan». La lista ya contesta eso con
+`limit=all` y un filtro en el navegador, así que negarlo en el generador sería
+esconder en un sitio lo que otro entrega.
+
+**La excepción de `express.static` se escribe con la verdad de hoy**, no con la
+frase de la segunda versión: las fotos están detrás de sesión desde `a90ff35`;
+lo que queda es que cualquier sesión ve cualquier foto (§6).
+
+**La otra orilla.** Cerrar dieciocho puertas hace visible lo que pasa cuando una
+se cierra, y ninguna de las pantallas afectadas distinguía un rechazo de un
+fallo de red. Cinco sitios lo hacían mal de forma que la persona no se enteraba:
+la hoja de usuario se quedaba en un esqueleto **para siempre** —el `await` no
+tenía `catch`, así que el indicador de carga nunca se apagaba y la cuenta no se
+podía guardar—, el botón de editar un poste desde el mapa de inicio no hacía
+nada, la hoja de incidencia culpaba a la red, el guardián de archivar un poste
+decía «ocurrió un error», y la hoja de postes daba dos mensajes que se
+contradecían. Arreglados los cinco, más el informe de recorrido, cuyo
+`Promise.all` dejaba que un rechazo de postes anulara un informe que había
+llegado bien.
+
+**Verificado.** api: 2.517 comprobaciones en 137 ficheros. web: 978 en 74. Tipos
+y estilo limpios en los dos. Once averías metidas a propósito, y las once las
+detecta el test que las nombra — entre ellas la de la puerta con el par
+equivocado, que antes de esta tarea habría sobrevivido.
 
 ```
-cd api && npx vitest run src/routes/routeGuards.test.ts
+cd api && npx vitest run src/routes/routeGuards.test.ts src/routes/evento.self.test.ts
+cd web && npx vitest run src/components/dialogs/upsert/UsuarioSheet.test.tsx
 ```
 
 ### Familia D — al final
@@ -2013,9 +2102,9 @@ números —B3 cambió dónde viven, no cuánto dejan pasar; lo que sí cambió 
 entonces—. Los `separate: true`
 que evitan el producto cartesiano y la subconsulta de eventos pendientes. Los
 permisos como `modulo` y `accion` en español y en la base de datos. Y
-`routeGuards.test.ts`, que no se sustituye: se le quitan tres entradas en A1, se
-le vacía la lista de excepciones en C5, y desde el 3 de septiembre tiene seis
-routers bajo comprobación de completitud en vez de tres.
+`routeGuards.test.ts`, que no se sustituye: se le quitaron tres entradas en A1,
+se le vació la lista de excepciones de lectura en C5, y la comprobación de
+completitud pasó de tres routers a seis el 3 de septiembre y a diecisiete en C5.
 
 De la paginación de postes y eventos no cambian el tope de 100 por página ni sus
 optimizaciones. **La lectura de `limit` sí cambia** (§3.3) — la primera versión

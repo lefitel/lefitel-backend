@@ -16,7 +16,7 @@ router.post("/", requirePermission("parametros", "crear"), createTipoObs);
 router.put("/:id", requirePermission("parametros", "editar"), updateTipoObs);
 router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarTipoObs);
 router.get("/stats", requirePermission("parametros", "ver"), getTipoObsStats);
-router.get("/", getTipoObs);
+router.get("/", requirePermission("parametros", "ver"), getTipoObs);
 router.delete("/:id", requirePermission("parametros", "archivar"), deleteTipoObs);
 
 export default router;

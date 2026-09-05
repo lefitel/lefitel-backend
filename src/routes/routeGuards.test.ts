@@ -742,32 +742,20 @@ const READ_GATE_NOT_APPLICABLE = [
   // sería pedirte que demuestres algo antes de dejarte ver qué tienes.
   "GET /api/auth/webauthn/credentials",
 
-  // ── Everything below is the debt ────────────────────────────────────────
-  // Reads that any logged-in account may call, whatever its role. The count is
-  // deliberately not written here any more: it was «twenty», and A1 deleted
-  // `GET /api/solucion/` out from under it. A number in a comment ages in
-  // silence; the test below is what keeps this list honest.
-  // `GET /api/dashboard/` used to be one of these and the worst of them — no
-  // `where`, no `limit`, the whole asset register in one response — which is why
-  // it was gated first.
-  "GET /api/adss/",
-  "GET /api/adssposte/:id_poste",
-  "GET /api/ciudad/",
-  "GET /api/ciudad/:id",
-  "GET /api/evento/",
-  "GET /api/evento/:id",
-  "GET /api/evento/poste/:id_poste",
-  "GET /api/evento/usuario/:id_usuario",
-  "GET /api/eventoObs/:id_evento",
-  "GET /api/material/",
-  "GET /api/obs/",
-  "GET /api/poste/",
-  "GET /api/poste/:id",
-  "GET /api/propietario/",
-  "GET /api/revision/:id_evento",
-  "GET /api/rol/",
-  "GET /api/solucion/evento/:id_evento",
-  "GET /api/tipoObs/",
+  // ── The debt was here, and C5 paid it ───────────────────────────────────
+  // Eighteen reads that any logged-in account could call, whatever its role.
+  // They now carry the permission §6 of the spec assigns each, and their pairs
+  // are written in the tables above — which is the half that matters, because a
+  // gate asking for the wrong module is a gate. `GET /api/dashboard/` was the
+  // worst of them and was closed first, one arc earlier.
+  //
+  // What C5 removed is ambient reach, not the data: the dashboard still hands
+  // the whole pole register to anyone with `eventos.ver`, and the report
+  // generator serves poles, incidents and cities to `generador.ver`, which both
+  // non-administrator roles hold. §6 says so rather than claiming a leak
+  // closed. What is left below asks for no permission because there is no
+  // permission to ask for: each one answers about the caller and nobody else.
+  //
   // Cuántos códigos de recuperación te quedan. Un número sobre tu propia
   // cuenta, tomado de `req.user`, y nunca un código. Pedir un permiso para
   // verlo sería fricción sin defensa; enterarte de que te quedan dos el día
@@ -880,6 +868,19 @@ const EVENTOS_GATES: Record<string, string> = {
   // one and the endpoint is a 403 for everybody, the administrator included,
   // with no checkbox anywhere to fix it.
   "POST /api/evento/export": "eventos.ver",
+
+  // ── The reads C5 closed ─────────────────────────────────────────────────
+  // Six of the eighteen. Three live on other routers — an incident's
+  // observations, its inspections and its repair — and they ask about the
+  // incident, so they ask what the incident asks. `GET /api/evento/usuario/:id`
+  // is the seventh and is **not** here: it asks about a person, so it is in
+  // `SEGURIDAD_GATES`.
+  "GET /api/evento/": "eventos.ver",
+  "GET /api/evento/:id": "eventos.ver",
+  "GET /api/evento/poste/:id_poste": "eventos.ver",
+  "GET /api/eventoObs/:id_evento": "eventos.ver",
+  "GET /api/revision/:id_evento": "eventos.ver",
+  "GET /api/solucion/evento/:id_evento": "eventos.ver",
 };
 
 /**
@@ -907,6 +908,63 @@ const PARAMETROS_GATES: Record<string, string> = {
   "GET /api/material/stats": "parametros.ver",
   "GET /api/obs/stats": "parametros.ver",
   "GET /api/tipoObs/stats": "parametros.ver",
+
+  // ── Complete since C5, and that is a change of kind ──────────────────────
+  // This table used to name the five `/stats` reads and nothing else, and said
+  // so: the plain list reads were open and the writes beside them went
+  // unwritten because demanding completeness of a partial table asserts the
+  // opposite of what it decided. C5 closed the five list reads, so the reason
+  // to stay partial is gone, and the five routers join `MODULOS_TABULADOS`
+  // below — which means every gated route on them has to be here. Thirty
+  // entries for five routers that are the same six lines each; the repetition
+  // is the point, because a table generated from a pattern would agree with
+  // whatever the routers say.
+  "GET /api/adss/": "parametros.ver",
+  "POST /api/adss/": "parametros.crear",
+  "PUT /api/adss/:id": "parametros.editar",
+  "DELETE /api/adss/:id": "parametros.archivar",
+  "PATCH /api/adss/:id/desarchivar": "parametros.archivar",
+
+  "GET /api/material/": "parametros.ver",
+  "POST /api/material/": "parametros.crear",
+  "PUT /api/material/:id": "parametros.editar",
+  "DELETE /api/material/:id": "parametros.archivar",
+  "PATCH /api/material/:id/desarchivar": "parametros.archivar",
+
+  "GET /api/obs/": "parametros.ver",
+  "POST /api/obs/": "parametros.crear",
+  "PUT /api/obs/:id": "parametros.editar",
+  "DELETE /api/obs/:id": "parametros.archivar",
+  "PATCH /api/obs/:id/desarchivar": "parametros.archivar",
+
+  "GET /api/tipoObs/": "parametros.ver",
+  "POST /api/tipoObs/": "parametros.crear",
+  "PUT /api/tipoObs/:id": "parametros.editar",
+  "DELETE /api/tipoObs/:id": "parametros.archivar",
+  "PATCH /api/tipoObs/:id/desarchivar": "parametros.archivar",
+
+  "GET /api/propietario/": "parametros.ver",
+  "POST /api/propietario/": "parametros.crear",
+  "PUT /api/propietario/:id": "parametros.editar",
+  "DELETE /api/propietario/:id": "parametros.archivar",
+  "PATCH /api/propietario/:id/desarchivar": "parametros.archivar",
+};
+
+/**
+ * The city catalogue, which had no table of its own until C5 gave it two gated
+ * reads and a reason to be held to completeness.
+ *
+ * Its own module rather than a sixth parameter: a city is not a dropdown value,
+ * it is one end of a tramo, and every pole in the system is placed by the pair
+ * it stands between. The Cliente role holds `ciudades.ver` and no write.
+ */
+const CIUDADES_GATES: Record<string, string> = {
+  "GET /api/ciudad/": "ciudades.ver",
+  "GET /api/ciudad/:id": "ciudades.ver",
+  "POST /api/ciudad/": "ciudades.crear",
+  "PUT /api/ciudad/:id": "ciudades.editar",
+  "DELETE /api/ciudad/:id": "ciudades.archivar",
+  "PATCH /api/ciudad/:id/desarchivar": "ciudades.archivar",
 };
 
 /**
@@ -940,6 +998,13 @@ const POSTES_GATES: Record<string, string> = {
   // one and the endpoint is a 403 for everybody, the administrator included,
   // with no checkbox anywhere to fix it.
   "POST /api/poste/export": "postes.ver",
+
+  // ── The reads C5 closed ─────────────────────────────────────────────────
+  // The register, one pole of it, and the ADSS hanging off one — the last on
+  // its own router, asking what the pole asks because that is what it is about.
+  "GET /api/poste/": "postes.ver",
+  "GET /api/poste/:id": "postes.ver",
+  "GET /api/adssposte/:id_poste": "postes.ver",
 };
 
 /**
@@ -1022,6 +1087,30 @@ const SEGURIDAD_GATES: Record<string, string> = {
   // one and the endpoint is a 403 for everybody, the administrator included,
   // with no checkbox anywhere to fix it.
   "POST /api/usuario/export": "seguridad.ver",
+
+  // ── The one read of the eighteen that is about a person ──────────────────
+  // The incidents of one account, and the only one C5 closed with
+  // `requireSelfOrPermission` rather than a plain gate. Two reasons, and both
+  // matter.
+  //
+  // **`seguridad.ver` and not `eventos.ver`**: the Cliente role holds
+  // `eventos.ver`, so with the obvious pair it could walk `/usuario/1` …
+  // `/usuario/20` and assemble each employee's activity record. That question
+  // already answers to `seguridad.ver` elsewhere — the generator refuses to
+  // make a person a level of detail without it.
+  //
+  // **Self-or-permission**: this is what the person's own profile screen calls.
+  // A plain gate would take every non-administrator's own history away, and the
+  // screen swallows the failure and prints "Eventos atendidos: 0", so nobody
+  // would report it.
+  //
+  // 🔴 This table cannot see the half that breaks. It reads the pair off the
+  // mounted chain and never sends a request, so the third argument of
+  // `requireSelfOrPermission` — the parameter name, which defaults to `"id"`
+  // while this route's is `:id_usuario` — is invisible here, and
+  // `listShape.test.ts` mocks every permission to true so it passes either way.
+  // `evento.self.test.ts` is the file that measures it.
+  "GET /api/evento/usuario/:id_usuario": "seguridad.ver",
 };
 
 /**
@@ -1039,12 +1128,16 @@ const SEGURIDAD_GATES: Record<string, string> = {
  * it can do is grant those cells to some other role, and `roles.editar` is the
  * only thing deciding who may.
  *
- * `GET /api/rol/` is deliberately not here: it carries no gate at all, because
- * every screen that shows a person needs the name of their role. It is named in
- * `READ_GATE_NOT_APPLICABLE` above, which is where an ungated route's reason
- * belongs.
+ * `GET /api/rol/` was deliberately not here while it carried no gate at all, on
+ * the grounds that "every screen that shows a person needs the name of their
+ * role". C5 closed it and the grounds did not survive the check: a role's name
+ * travels inside the user payload, which is what those screens render. The list
+ * itself has two callers, the permissions panel and the role picker in the
+ * create/edit user sheet, and both are about handing out authority. The server
+ * already demanded `roles.editar` on the other half of that same flow.
  */
 const ROLES_GATES: Record<string, string> = {
+  "GET /api/rol/": "roles.ver",
   "POST /api/rol/": "roles.crear",
   "PUT /api/rol/:id": "roles.editar",
   "DELETE /api/rol/:id": "roles.archivar",
@@ -1091,7 +1184,8 @@ const BITACORA_GATES: Record<string, string> = {
  * which live on other routers; the check below is per router prefix, so those
  * two are simply not held to completeness.
  */
-const MODULOS_TABULADOS = /^\/api\/(usuario|rol|permisos|poste|evento|reporte|bitacora)\b/;
+const MODULOS_TABULADOS =
+  /^\/api\/(usuario|rol|permisos|poste|evento|reporte|bitacora|adss|adssposte|ciudad|eventoObs|material|obs|propietario|revision|solucion|tipoObs)\b/;
 
 describe("which permission each gate asks for", () => {
   it("asks for the one the route is about, not merely for one", () => {
@@ -1100,6 +1194,7 @@ describe("which permission each gate asks for", () => {
       ...GENERADOR_GATES,
       ...EVENTOS_GATES,
       ...PARAMETROS_GATES,
+      ...CIUDADES_GATES,
       ...POSTES_GATES,
       ...REPORTES_GATES,
       ...SEGURIDAD_GATES,
@@ -1126,17 +1221,25 @@ describe("which permission each gate asks for", () => {
     // between them they create accounts, archive them, rewrite the permission
     // matrix itself, and serve the record of everything anybody has ever done.
     //
-    // Not every router in the file, because not every table here is written as a
-    // complete description. `PARAMETROS_GATES` is deliberately partial and says
-    // so: it names the five `/stats` reads and none of the `parametros.crear`,
-    // `editar` and `archivar` writes sitting beside them on those same five
-    // routers, so demanding completeness of it would assert the opposite of what
-    // its own comment decided. `GENERADOR_GATES` is the one table that happens to
-    // name every gated route of its own today without being held to it.
+    // Seven routers until C5, and seventeen after it. The eleven that joined
+    // are the ones C5 gated, and joining was the point: without completeness a
+    // table only catches a pair that changed under a route somebody already
+    // wrote down, so eleven of the eighteen new gates would have been asserted
+    // to exist and never to be the right one. Concretely, `GET /api/ciudad/`
+    // could have asked `bitacora.ver` — a declared pair, so `vocabulary.test.ts`
+    // accepts it — with this whole suite green.
+    //
+    // `PARAMETROS_GATES` stopped being partial to make that possible, which is a
+    // decision and not a side effect: it now names the thirty gated routes of its
+    // five routers instead of the five `/stats` reads. `GENERADOR_GATES` is the
+    // one table that happens to name every gated route of its own today without
+    // being held to it.
     const tabuladas = new Set([
       ...Object.keys(SEGURIDAD_GATES),
       ...Object.keys(ROLES_GATES),
       ...Object.keys(EVENTOS_GATES),
+      ...Object.keys(PARAMETROS_GATES),
+      ...Object.keys(CIUDADES_GATES),
       ...Object.keys(POSTES_GATES),
       ...Object.keys(REPORTES_GATES),
       ...Object.keys(BITACORA_GATES),

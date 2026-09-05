@@ -13,8 +13,16 @@ const router = Router();
 
 // Its own module, not part of Seguridad. Managing user accounts and handing out
 // authority are different powers: whoever can edit a user must not thereby be
-// able to promote themselves. `GET /` stays open to any session because every
-// screen that shows a person needs the name of their role.
+// able to promote themselves.
+//
+// C5 closed `GET /`, which used to answer any session on the grounds that
+// "every screen that shows a person needs the name of their role". That was not
+// true: a role's name travels inside the user payload, which is what every such
+// screen actually renders, and this list has two callers — the permissions
+// panel and the picker in the create/edit user sheet. Both are about handing
+// out authority, so both ask `roles.ver`. The server already demanded a `roles`
+// permission on the other half of that same flow: creating a user, or changing
+// one's role, is refused without `roles.editar`.
 //
 // The gate sits behind the permission on every write, never in front — see
 // `middleware/requireStepUp.ts`. Reads carry neither.
@@ -37,7 +45,7 @@ const conContrasena = () => requireStepUp({ exigeContrasena: true });
 // Routes
 router.post("/", requirePermission("roles", "crear"), conContrasena(), createRol);
 router.put("/:id", requirePermission("roles", "editar"), conContrasena(), updateRol);
-router.get("/", getRol);
+router.get("/", requirePermission("roles", "ver"), getRol);
 router.delete("/:id", requirePermission("roles", "archivar"), conContrasena(), deleteRol);
 router.patch(
   "/:id/desarchivar",

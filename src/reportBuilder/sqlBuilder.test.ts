@@ -906,15 +906,30 @@ describe("buildQuery — role isolation", () => {
   });
 
   it("lets an administrator read user fields", () => {
-    expect(() => buildQuery(base({ columns: [{ path: "usuario.name" }] }), ADMIN)).not.toThrow();
+    expect(() => buildQuery(base({ columns: [{ path: "usuario.user" }] }), ADMIN)).not.toThrow();
   });
 
-  it("denies the operative role the same field", () => {
+  /**
+   * Authorship is provenance, and provenance is open — Isaias, 2026-09-05.
+   *
+   * These four used to assert the opposite, and the rule they asserted was too
+   * wide: a coordinator could not put "Registrado por" in a report about their
+   * own team's work while the incident list on screen showed them that same
+   * name in a column called *Creador*. What stays shut is the directory and the
+   * person as a level of detail, which the block below sweeps.
+   */
+  it("lets the operative role read the name of whoever registered the work", () => {
     expect(() => buildQuery(base({ columns: [{ path: "usuario.name" }] }), OPERATIVO))
-      .toThrow(/permiso/);
+      .not.toThrow();
+    expect(() => buildQuery(base({ columns: [{ path: "usuario.lastname" }] }), OPERATIVO))
+      .not.toThrow();
   });
 
-  it("denies the operative role a filter on a restricted field", () => {
+  it("lets it filter and sort by that name too", () => {
+    // Not a concession: a column you cannot filter is a column you scroll. And
+    // the list endpoint already answers "the events registered by Juan" with
+    // `limit=all` and a filter in the browser, so refusing it here would hide
+    // in one place what another hands over.
     expect(() =>
       buildQuery(
         base({
@@ -922,42 +937,81 @@ describe("buildQuery — role isolation", () => {
         }),
         OPERATIVO,
       ),
-    ).toThrow(/permiso/);
-  });
-
-  it("denies sorting by a restricted field", () => {
+    ).not.toThrow();
     expect(() =>
       buildQuery(base({ sort: [{ path: "usuario.name", dir: "asc" }] }), OPERATIVO),
-    ).toThrow(/permiso/);
+    ).not.toThrow();
   });
 
-  it("hides every field of the staff directory, not the four somebody remembered", () => {
-    // Written as a sweep because the leak was not one forgotten field: it was a
-    // hand-written list of role numbers that disagreed with the permission
-    // matrix, so *everything* it protected was handed to role 2 — names,
-    // surnames, login usernames, telephones and the name of their role. Asking
-    // one path would keep passing the day a fifth column is added.
-    const forbidden = buildCatalogView(ADMIN).roots.flatMap((root) =>
-      root.fields.map((f) => ({ root: root.key, path: f.path })),
-    ).filter(({ path }) => /(^|\.)usuario(\.|$)|(^|\.)rol(\.|$)/.test(path));
+  it("still refuses the directory half of the same record", () => {
+    // The half that is not provenance: one of the two halves of a credential,
+    // a way to reach somebody at home, and what they are allowed to do.
+    for (const path of ["usuario.user", "usuario.phone", "usuario.id", "usuario.rol.name"]) {
+      expect(
+        () => buildQuery(base({ columns: [{ path }] }), OPERATIVO),
+        `${path} no debe ser legible sin seguridad.ver`,
+      ).toThrow(/permiso/);
+    }
+  });
 
-    // If this is zero the sweep is testing nothing, which is how a green test
-    // ends up proving the opposite of what it claims.
-    expect(forbidden.length).toBeGreaterThan(4);
+  it("still refuses to make a person a level of detail", () => {
+    // The question this does not open, and the reason the entity keeps its
+    // flag: "give me everything Juan has done" asks about a person rather than
+    // about the work. `GET /api/evento/usuario/:id_usuario` is the same
+    // question over HTTP, and C5 shuts it with the same permission.
+    expect(() => buildQuery({ root: "usuario", columns: [{ path: "name" }] }, OPERATIVO))
+      .toThrow(/permiso/);
+    expect(() => buildQuery({ root: "usuario", columns: [{ path: "name" }] }, ADMIN))
+      .not.toThrow();
+    // And it is not offered as one either.
+    expect(buildCatalogView(OPERATIVO).roots.map((r) => r.key)).not.toContain("usuario");
+    expect(buildCatalogView(ADMIN).roots.map((r) => r.key)).toContain("usuario");
+  });
 
-    for (const { root, path } of forbidden) {
+  it("draws the line between provenance and the directory on every path, not the four somebody remembered", () => {
+    // Written as a sweep because the leak this replaced was not one forgotten
+    // field: it was a hand-written list of role numbers that disagreed with the
+    // permission matrix, so *everything* it protected was handed to role 2.
+    // Asking one path would keep passing the day a fifth column is added — and
+    // now that two of them are open on purpose, a hand-written list would also
+    // stop saying which two.
+    const personales = buildCatalogView(ADMIN).roots
+      .flatMap((root) => root.fields.map((f) => ({ root: root.key, path: f.path })))
+      // A person as the root is the other block's subject, not this one's.
+      .filter(({ root, path }) => root !== "usuario"
+        && /(^|\.)usuario(\.|$)|(^|\.)rol(\.|$)/.test(path));
+
+    const esProcedencia = (path: string) => /(^|\.)usuario\.(name|lastname)$/.test(path);
+    const abiertos = personales.filter(({ path }) => esProcedencia(path));
+    const cerrados = personales.filter(({ path }) => !esProcedencia(path));
+
+    // If either side is empty the sweep is testing nothing, which is how a
+    // green test ends up proving the opposite of what it claims. Four
+    // relations carry an author — pole, event, inspection, repair — so both
+    // sides are several paths wide.
+    expect(abiertos.length).toBeGreaterThan(3);
+    expect(cerrados.length).toBeGreaterThan(3);
+
+    for (const { root, path } of cerrados) {
       expect(
         () => buildQuery({ root, columns: [{ path }] }, OPERATIVO),
         `${root}.${path} no debe ser legible sin seguridad.ver`,
       ).toThrow(/permiso/);
     }
+    for (const { root, path } of abiertos) {
+      expect(
+        () => buildQuery({ root, columns: [{ path }] }, OPERATIVO),
+        `${root}.${path} es procedencia y debe ser legible`,
+      ).not.toThrow();
+    }
 
-    // And the picker never offers what the builder would refuse: a field the
-    // client cannot see is a field it cannot ask for by accident.
-    const offered = buildCatalogView(OPERATIVO).roots.flatMap((root) =>
-      root.fields.map((f) => f.path),
-    );
-    expect(offered.filter((path) => /(^|\.)usuario(\.|$)|(^|\.)rol(\.|$)/.test(path))).toEqual([]);
+    // And the picker offers exactly what the builder allows: neither a field
+    // the client cannot ask for, nor one it can ask for and never sees.
+    const ofrecidos = buildCatalogView(OPERATIVO).roots
+      .flatMap((root) => root.fields.map((f) => f.path))
+      .filter((path) => /(^|\.)usuario(\.|$)|(^|\.)rol(\.|$)/.test(path));
+    expect(ofrecidos.every(esProcedencia), `ofrece ${ofrecidos.join(", ")}`).toBe(true);
+    expect(new Set(ofrecidos)).toEqual(new Set(abiertos.map(({ path }) => path)));
   });
 });
 
@@ -1351,13 +1405,22 @@ describe("buildCountQuery checks what its comment says it checks", () => {
   const CLIENTE: Viewer = { role: 3, staff: false };
 
   it("refuses a column this viewer may not see", () => {
+    // `usuario.user` and not `usuario.name`: the name is provenance and open to
+    // anybody who may read the inspection it hangs off, so it stopped being an
+    // example of a hidden column on 2026-09-05. The login username is still one.
     const config = {
       root: "revision",
-      columns: [{ path: "usuario.name" }],
+      columns: [{ path: "usuario.user" }],
     } as unknown as ReportConfig;
 
     expect(() => buildQuery(config, CLIENTE)).toThrow();
     expect(() => buildCountQuery(config, CLIENTE)).toThrow();
+
+    // The other direction, so this cannot pass by refusing everything: the
+    // provenance column reaches the count as readily as it reaches the query.
+    const procedencia = { root: "revision", columns: [{ path: "usuario.name" }] } as unknown as ReportConfig;
+    expect(() => buildQuery(procedencia, CLIENTE)).not.toThrow();
+    expect(() => buildCountQuery(procedencia, CLIENTE)).not.toThrow();
   });
 
   it("refuses a column that does not exist", () => {

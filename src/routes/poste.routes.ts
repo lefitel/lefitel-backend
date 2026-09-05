@@ -41,9 +41,13 @@ router.put("/:id", requirePermission("postes", "editar"), updatePoste);
  */
 router.post("/export", requirePermission("postes", "ver"), exportLimiter, exportarPostes);
 router.get("/opciones", requirePermission("postes", "ver"), getOpcionesPoste);
-router.get("/", getPoste);
+// C5: the register and one pole of it. Both answered any session until now,
+// whatever its role. What this removes is ambient reach, not the data — the
+// dashboard still hands the whole register to anyone with `eventos.ver`, and
+// the generator serves poles to `generador.ver`. §6 of the spec says so.
+router.get("/", requirePermission("postes", "ver"), getPoste);
 
-router.get("/:id", searchPoste);
+router.get("/:id", requirePermission("postes", "ver"), searchPoste);
 router.delete("/:id", requirePermission("postes", "archivar"), deletePoste);
 router.patch("/:id/desarchivar", requirePermission("postes", "archivar"), desarchivarPoste);
 

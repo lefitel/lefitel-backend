@@ -13,7 +13,7 @@ import {
   updateEvento,
 } from "../controllers/evento.controller.js";
 import { getOpcionesEvento } from "../controllers/opciones.controller.js";
-import { requirePermission } from "../middleware/requirePermission.js";
+import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
 import { exportLimiter } from "../middleware/limiters.js";
 
 const router = Router();
@@ -47,10 +47,40 @@ router.put("/:id", requirePermission("eventos", "editar"), updateEvento);
  */
 router.post("/export", requirePermission("eventos", "ver"), exportLimiter, exportarEventos);
 router.get("/opciones", requirePermission("eventos", "ver"), getOpcionesEvento);
-router.get("/", getEvento);
-router.get("/poste/:id_poste", getEvento_poste);
-router.get("/usuario/:id_usuario", getEvento_usuario);
-router.get("/:id", searchEvento);
+// C5: these four answered any session until now, whatever its role.
+router.get("/", requirePermission("eventos", "ver"), getEvento);
+router.get("/poste/:id_poste", requirePermission("eventos", "ver"), getEvento_poste);
+/**
+ * The incidents of one person, and the only one of the eighteen that is not a
+ * plain `requirePermission`.
+ *
+ * **`seguridad.ver`, not `eventos.ver`**, because the question is about a
+ * person and not about the work: the Cliente role holds `eventos.ver`, so with
+ * the obvious gate it could walk `/usuario/1` … `/usuario/20` and assemble each
+ * employee's activity record. The same question already answers to
+ * `seguridad.ver` in the generator, where `usuario` is a level of detail nobody
+ * without it may root a report on.
+ *
+ * **And `requireSelfOrPermission`, because this is what the person's own
+ * profile screen calls.** With the plain gate every non-administrator would
+ * silently lose their own history — the profile swallows the failure and prints
+ * "Eventos atendidos: 0".
+ *
+ * 🔴 The third argument is not optional. It defaults to `"id"`, this route's
+ * parameter is `:id_usuario`, and with the default the ownership branch
+ * compares `undefined` against the caller's id and never matches — the gate
+ * degrades to permission-only and the screen above goes quiet. That defect has
+ * already shipped once on the bitácora route, which is why the middleware's own
+ * comment records it. `routeGuards.test.ts` cannot catch it (it never sends a
+ * request) and neither can `listShape.test.ts` (it mocks every permission to
+ * true); `evento.self.test.ts` exists for this one line.
+ */
+router.get(
+  "/usuario/:id_usuario",
+  requireSelfOrPermission("seguridad", "ver", "id_usuario"),
+  getEvento_usuario,
+);
+router.get("/:id", requirePermission("eventos", "ver"), searchEvento);
 
 router.delete("/:id", requirePermission("eventos", "archivar"), deleteEvento);
 router.patch("/:id/desarchivar", requirePermission("eventos", "archivar"), desarchivarEvento);

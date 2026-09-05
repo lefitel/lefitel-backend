@@ -16,7 +16,7 @@ router.post("/", requirePermission("parametros", "crear"), createPropietario);
 router.put("/:id", requirePermission("parametros", "editar"), updatePropietario);
 router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarPropietario);
 router.get("/stats", requirePermission("parametros", "ver"), getPropietarioStats);
-router.get("/", getPropietario);
+router.get("/", requirePermission("parametros", "ver"), getPropietario);
 router.delete("/:id", requirePermission("parametros", "archivar"), deletePropietario);
 
 export default router;

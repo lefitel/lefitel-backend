@@ -18,7 +18,7 @@ const router = Router();
 // the button, wrote the inspection, and got a 403 the interface reported as
 // success. See AddRevisionSheet on the other side of that.
 router.post("/", requirePermission("eventos", "editar"), createRevision);
-router.get("/:id_evento", getRevision);
+router.get("/:id_evento", requirePermission("eventos", "ver"), getRevision);
 
 // No PUT and no DELETE. Neither ever had a caller — not once in the history of
 // `web` — and an inspection that cannot be corrected is a product decision

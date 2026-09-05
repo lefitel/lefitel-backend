@@ -204,10 +204,14 @@ export const getOpcionesPoste = handler("getOpcionesPoste", async (_req: Request
 /**
  * `eventos:ver`, for both incident forms.
  *
- * Deliberately without a `poste` block. `AddEventoPageSheet` does need the list
- * of poles, and it gets it today through `?export=true`, which C3 retires —
- * but serving the pole register under `eventos.ver` would be a worse problem
- * than the one it solves. §5.5 leaves that decision to C3.
+ * Deliberately without a `poste` block, and C5 sharpened the reason rather than
+ * retiring it. `AddEventoPageSheet` does need the list of poles, and it asks
+ * `GET /api/poste/?limit=all` for it — which since C5 costs `postes.ver`.
+ * Folding the register in here would serve it under `eventos.ver` instead,
+ * which is now not merely untidy: it would hand the whole pole register to a
+ * role that C5 just decided may not read it, through the back door of a form's
+ * dropdown. The two loads stay separate, and the sheet says which one was
+ * refused.
  */
 export const getOpcionesEvento = handler("getOpcionesEvento", async (_req: Request, res: Response) => {
   const [obs, tipoObs] = await Promise.all([

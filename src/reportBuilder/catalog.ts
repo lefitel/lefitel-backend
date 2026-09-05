@@ -152,12 +152,34 @@ const obs: EntityDef = {
 };
 
 /**
- * A person, and therefore personal data end to end.
+ * A person: partly provenance, partly the staff directory, and the line between
+ * them is what this entity's flags draw.
  *
- * `staffOnly` on the entity is what hides it as a *root*: the fields already
- * carried the flag, but a root with every field hidden is a level of detail
- * that offers nothing, which is worse than not offering it. Reached through
- * `evento.usuario` the per-field flags still do the work.
+ * **Authorship is provenance, and provenance is not personal data.** Whoever may
+ * see a pole may see who registered it and who has worked on it — decision of
+ * Isaias, 2026-09-05, correcting a rule that was too wide. The flag used to sit
+ * on `name` and `lastname` too, which meant a coordinator could not put
+ * "Registrado por" in a report about their own team's work, while the incident
+ * list on screen showed them that same name in a column called *Creador*. The
+ * client screens are what set the line: they print the person's name as
+ * provenance and nothing else about them.
+ *
+ * So `name` and `lastname` are open, and the rest of the record is not: `user`
+ * is a credential half, `phone` is a way to reach somebody, `rol` is what they
+ * are allowed to do, and the counts are a productivity ranking. Those are the
+ * staff directory, which `seguridad.ver` administers.
+ *
+ * **`staffOnly` on the entity is what still hides it as a *root*.** That is the
+ * question this does not open: "give me everything Juan has done" is asking
+ * about a person rather than about the work, and it is the same question
+ * `GET /api/evento/usuario/:id_usuario` asks — closed in C5 with the same
+ * permission. Reached through `evento.usuario` the per-field flags do the work,
+ * and they now let the name through.
+ *
+ * Said plainly, because it follows and is not hidden: with the name readable as
+ * a column and filterable, a reader can ask "the events registered by Juan".
+ * The list endpoint already answers that with `limit=all` and a filter in the
+ * browser, so refusing it here would hide in one place what another hands over.
  *
  * As a root it answers "who has been registering what", and since the
  * authorship migration that includes inspections and repairs, which are the
@@ -184,8 +206,13 @@ const usuario: EntityDef = {
   staffOnly: true,
   fields: {
     id: { column: "id", kind: "number", label: "ID del usuario", staffOnly: true },
-    name: { column: "name", kind: "string", label: "Nombre del usuario", staffOnly: true },
-    lastname: { column: "lastname", kind: "string", label: "Apellido del usuario", staffOnly: true },
+    // The two that carry provenance, and the only two the client screens print
+    // as one: "Creador", on the incident and pole lists. Open to whoever may
+    // read the record they hang off.
+    name: { column: "name", kind: "string", label: "Nombre del usuario" },
+    lastname: { column: "lastname", kind: "string", label: "Apellido del usuario" },
+    // The directory half, and it stays shut: `user` is one of the two halves of
+    // a credential, `phone` is a way to reach somebody at home.
     user: { column: "user", kind: "string", label: "Usuario", staffOnly: true },
     phone: { column: "phone", kind: "string", label: "Teléfono", staffOnly: true },
   },
@@ -279,7 +306,6 @@ const solucion: EntityDef = {
     // before the bitácora would vanish from every count, silently.
     usuario: {
       kind: "toOne", target: "usuario", label: "Resuelto por", localKey: "id_usuario",
-      staffOnly: true,
     },
   },
 };
@@ -320,7 +346,7 @@ const poste: EntityDef = {
     material: { kind: "toOne", target: "material", label: "Material", localKey: "id_material" },
     ciudadA: { kind: "toOne", target: "ciudad", label: "Ciudad A", localKey: "id_ciudadA" },
     ciudadB: { kind: "toOne", target: "ciudad", label: "Ciudad B", localKey: "id_ciudadB" },
-    usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario", staffOnly: true },
+    usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario" },
     eventos: { kind: "toMany", target: "evento", label: "Eventos", foreignKey: "id_poste" },
   },
   calculated: {
@@ -390,7 +416,7 @@ const evento: EntityDef = {
   },
   relations: {
     poste: { kind: "toOne", target: "poste", label: "Poste", localKey: "id_poste" },
-    usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario", staffOnly: true },
+    usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario" },
     // Modelled as hasMany in Sequelize, but every existing report renders a
     // single solution. Resolved with LATERAL so it behaves as a plain column.
     solucion: { kind: "toOneLatest", target: "solucion", label: "Solución", foreignKey: "id_evento", latestBy: "date" },
@@ -486,7 +512,6 @@ const revision: EntityDef = {
     // 1.071 repairs.
     usuario: {
       kind: "toOne", target: "usuario", label: "Revisado por", localKey: "id_usuario",
-      staffOnly: true,
     },
   },
 };

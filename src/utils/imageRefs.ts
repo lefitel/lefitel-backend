@@ -8,8 +8,10 @@
 // could set their own `image` to the name of any photograph in the system, and
 // on their next edit the server would delete it as "the old one". The profile
 // route is reachable by every account for its own row, and file names travel in
-// responses that ask for no permission at all. Found by the audit of 3
-// September.
+// responses across the API. Found by the audit of 3 September. (Those responses
+// asked for no permission at all until C5 gave the eighteen reads one; the
+// defect never depended on that, since the rule below is about what a row may
+// claim and not about who may read it.)
 //
 // The rule now is the one the Archivos screen already applies when it looks for
 // orphans: a file is in use while any row in any of the five tables names it —

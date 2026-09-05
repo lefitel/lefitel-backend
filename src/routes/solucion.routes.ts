@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getSolucion_evento } from "../controllers/solucion.controller.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
@@ -14,6 +15,6 @@ const router = Router();
 // silent: both callers in `web` wrap it in `.catch(() => null)`, so a 404 here
 // would paint every resolved event as pending with nothing in the console. The
 // mount itself goes away in D1, when this becomes `GET /api/evento/:id/solucion`.
-router.get("/evento/:id_evento", getSolucion_evento);
+router.get("/evento/:id_evento", requirePermission("eventos", "ver"), getSolucion_evento);
 
 export default router;
