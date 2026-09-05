@@ -19,6 +19,18 @@ import { pruneConfig } from "./prune.js";
 import type { ReportConfig } from "./types.js";
 import type { Viewer } from "./viewer.js";
 
+/**
+ * How many rows one page of a template holds.
+ *
+ * Written into every one of them, and not left out: a request that carries no
+ * `limit` is given 500 by the builder, while the client's own default is 100.
+ * The six shipped without one, so a report opened from a template paged in
+ * five-hundreds and the identical report built by hand paged in hundreds, on
+ * the same screen, with nothing saying so. The test beside this file refuses a
+ * template that forgets it again.
+ */
+export const PAGE_SIZE = 100;
+
 export interface ReportTemplate {
   /** Stable id. The client keys on it; never reuse one for a different report. */
   key: string;
@@ -58,6 +70,7 @@ export const TEMPLATES: ReportTemplate[] = [
         { path: "state" },
         { path: "date" },
       ],
+      limit: PAGE_SIZE,
       filters: { op: "and", conditions: [] },
       groupBy: [],
       sort: [{ path: "date", dir: "desc" }],
@@ -76,6 +89,7 @@ export const TEMPLATES: ReportTemplate[] = [
         // the minimum is the sharpest thing a group of events can be asked.
         { path: "criticidad", agg: "min", label: "Más crítico" },
       ],
+      limit: PAGE_SIZE,
       filters: { op: "and", conditions: [{ path: "state", operator: "eq", value: false }] },
       groupBy: ["poste.tramo"],
       sort: [{ path: "id", agg: "count", dir: "desc" }],
@@ -93,6 +107,7 @@ export const TEMPLATES: ReportTemplate[] = [
         { path: "evento.description" },
         { path: "description" },
       ],
+      limit: PAGE_SIZE,
       filters: { op: "and", conditions: [] },
       groupBy: [],
       sort: [{ path: "date", dir: "desc" }],
@@ -110,6 +125,7 @@ export const TEMPLATES: ReportTemplate[] = [
         { path: "evento.description" },
         { path: "description" },
       ],
+      limit: PAGE_SIZE,
       filters: { op: "and", conditions: [] },
       groupBy: [],
       sort: [{ path: "date", dir: "desc" }],
@@ -127,6 +143,7 @@ export const TEMPLATES: ReportTemplate[] = [
         { path: "numEventos" },
         { path: "numPendientes" },
       ],
+      limit: PAGE_SIZE,
       filters: { op: "and", conditions: [] },
       groupBy: [],
       // Ascending on purpose: the cities with nothing installed are the answer
@@ -147,6 +164,7 @@ export const TEMPLATES: ReportTemplate[] = [
       ],
       // Only the resolved ones have a resolution time; without this the average
       // is taken over a column that is null for everything still open.
+      limit: PAGE_SIZE,
       filters: { op: "and", conditions: [{ path: "state", operator: "eq", value: true }] },
       groupBy: ["poste.tramo"],
       sort: [{ path: "tiempoResolucion", agg: "avg", dir: "desc" }],

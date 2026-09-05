@@ -320,7 +320,7 @@ export async function postExportar(req: Request, res: Response) {
   try {
     const body = req.body as {
       config?: ReportConfig; format?: string; title?: string;
-      subtitle?: string | null; photos?: boolean;
+      subtitle?: string | null; photos?: boolean; scope?: string;
     };
 
     const format = FORMATS.find((f) => f === body.format);
@@ -355,6 +355,9 @@ export async function postExportar(req: Request, res: Response) {
       title,
       subtitle,
       photos: body.photos === true,
+      // Anything but the exact word means the whole report, which is what this
+      // endpoint has always done and what every existing caller expects.
+      scope: body.scope === "page" ? "page" : "all",
       signal: abort.signal,
     }));
 

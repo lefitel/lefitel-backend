@@ -152,6 +152,20 @@ export interface ExportRequest {
   /** Ignored for PDF: two thousand photographs in a tabular document are unreadable. */
   photos?: boolean;
   /**
+   * How much of the report the file holds.
+   *
+   * `"all"` — the default and what this always did — reads the whole report from
+   * the first row, whichever page the caller happens to be looking at. Nothing
+   * on the screen said so, so somebody on page 4 pressing Excel got a file
+   * starting at row 1 with no explanation.
+   *
+   * `"page"` honours the configuration's own `limit` and `offset`, which is the
+   * page on screen. Everything the file says about itself is counted from the
+   * rows it actually holds, so a one-page export announces its own hundred and
+   * not the report's forty thousand.
+   */
+  scope?: "all" | "page";
+  /**
    * Aborted when the caller hangs up. Checked between the steps of the build —
    * the query, the rows, the photographs, the rendering — which is where the
    * time goes, so an abandoned export stops at the next boundary instead of
@@ -188,13 +202,26 @@ export async function buildExport(request: ExportRequest): Promise<ExportOutput>
   // memory the limit exists to protect — and it comes from the same read as the
   // rows, so the count in the header always describes the rows underneath it.
   const width = Array.isArray(config.columns) ? config.columns.length : 0;
-  const result = await runReport({ ...config, offset: 0, limit: MAX_EXPORT_ROWS }, viewer, {
-    guard: (total) => {
-      if (exceedsExportLimits(total, width, format)) {
-        throw new ExportTooLargeError(total, width, format);
-      }
+  const paged = request.scope === "page";
+  const limit = Math.max(1, Math.trunc(Number(config.limit)) || MAX_EXPORT_ROWS);
+  const offset = Math.max(0, Math.trunc(Number(config.offset)) || 0);
+  const result = await runReport(
+    paged ? config : { ...config, offset: 0, limit: MAX_EXPORT_ROWS },
+    viewer,
+    {
+      guard: (total) => {
+        // `guard` is handed the whole report's count, because that is what the
+        // count query answers. For one page that is the wrong number to judge
+        // the file by: a single page of a forty-thousand-row report would be
+        // refused for a size it could never reach. What is written is the page,
+        // and the last one is shorter than the rest.
+        const rows = paged ? Math.min(Math.max(0, total - offset), limit) : total;
+        if (exceedsExportLimits(rows, width, format)) {
+          throw new ExportTooLargeError(rows, width, format);
+        }
+      },
     },
-  });
+  );
   stopIfAbandoned();
   // Grouping changes what a row is, so the root's noun stops being true: over a
   // report grouped by tramo it said "89 eventos" about 89 tramos. `catalogView`

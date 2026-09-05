@@ -368,3 +368,73 @@ describe.skipIf(!dbAvailable)("what an export refuses, and when it gives up", ()
     expect(message).toContain("peso máximo por archivo");
   });
 });
+
+describe.skipIf(!dbAvailable)("exporting one page instead of the whole report", () => {
+  it("writes the page the caller is looking at, not the first one", async () => {
+    // The default reads from row 1 whatever page is on screen, and nothing on
+    // the screen said so: somebody on page 4 pressing Excel got a file starting
+    // at the beginning with no explanation.
+    const page = { ...generalConfig, limit: 25, offset: 50 };
+    const whole = await buildExport({
+      config: page, viewer: ADMIN, format: "excel", title: "Todo",
+    });
+    const only = await buildExport({
+      config: page, viewer: ADMIN, format: "excel", title: "Una página", scope: "page",
+    });
+
+    expect(only.rows).toBe(25);
+    // The whole report is bigger than one page of it, which is what makes the
+    // two files different at all; if the fixture ever shrinks below 75 rows
+    // this stops testing anything and says so here rather than passing.
+    expect(whole.rows).toBeGreaterThan(75);
+
+    const read = async (buffer: Buffer) => {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer as never);
+      const sheet = workbook.worksheets[0];
+      // Data starts on row 5; column 3 is "Descripción".
+      return sheet.getCell(5, 3).value;
+    };
+    expect(await read(only.buffer)).not.toEqual(await read(whole.buffer));
+  });
+
+  it("counts the file by the rows it holds, not by the report behind it", async () => {
+    // Everything the strip says is counted from the rows written, so a
+    // one-page export announces its own hundred and not the report's total.
+    const output = await buildExport({
+      config: { ...generalConfig, limit: 10, offset: 0 },
+      viewer: ADMIN, format: "excel", title: "Diez", scope: "page",
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(output.buffer as never);
+    const sheet = workbook.worksheets[0];
+    expect(output.rows).toBe(10);
+    expect(sheet.rowCount).toBe(4 + 10);
+
+    const strip = (sheet.getCell(3, 1).value as ExcelJS.CellRichTextValue)
+      .richText.map((run) => run.text).join("");
+    expect(strip).toContain("10 eventos");
+  });
+
+  it("judges the size cap by the page, not by the whole report", async () => {
+    // `guard` is handed the whole report's count, because that is what the
+    // count query answers. Judging a one-page file by it would refuse a file
+    // for a size it could never reach.
+    const output = await buildExport({
+      config: { ...generalConfig, limit: 5, offset: 0 },
+      viewer: ADMIN, format: "pdf", title: "Cinco", scope: "page",
+    });
+    expect(output.rows).toBe(5);
+  });
+
+  it("still reads the whole report when nothing asks otherwise", async () => {
+    // The default has to stay the default: every existing caller sends no
+    // scope at all and expects the report entire.
+    const output = await buildExport({
+      config: { ...generalConfig, limit: 5, offset: 0 }, viewer: ADMIN,
+      format: "excel", title: "Todo",
+    });
+    expect(output.rows).toBeGreaterThan(5);
+  });
+});

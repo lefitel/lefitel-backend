@@ -16,7 +16,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { sequelize } from "../database/sequelize.js";
 import { buildQuery, buildCountQuery } from "./sqlBuilder.js";
 import { pruneConfig } from "./prune.js";
-import { TEMPLATES, templatesFor } from "./templates.js";
+import { PAGE_SIZE, TEMPLATES, templatesFor } from "./templates.js";
 import type { FilterCondition } from "./types.js";
 import type { Viewer } from "./viewer.js";
 
@@ -54,6 +54,16 @@ describe("every template is a report the builder can actually build", () => {
     const keys = TEMPLATES.map((t) => t.key);
     expect(new Set(keys).size).toBe(keys.length);
     for (const key of keys) expect(key).toMatch(/^[a-z0-9-]+$/);
+  });
+
+  it("every template says how many rows a page holds", () => {
+    // The one they all forgot. A request with no `limit` is given 500 by the
+    // builder while the client's own default is 100, so a report opened from a
+    // template paged in five-hundreds and the same report built by hand paged
+    // in hundreds — same screen, nothing saying so.
+    for (const template of TEMPLATES) {
+      expect(template.config.limit, template.key).toBe(PAGE_SIZE);
+    }
   });
 
   it("every template says what it is for", () => {
