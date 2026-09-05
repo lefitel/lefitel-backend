@@ -12,6 +12,7 @@ import {
 import { exportSlot, ExportBusyError } from "../reportBuilder/export/queue.js";
 import { buildQuery } from "../reportBuilder/sqlBuilder.js";
 import { pruneConfig } from "../reportBuilder/prune.js";
+import { templatesFor } from "../reportBuilder/templates.js";
 import type { Viewer } from "../reportBuilder/viewer.js";
 import { can } from "../permissions/store.js";
 import { ReportConfigError, type ReportConfig } from "../reportBuilder/types.js";
@@ -179,7 +180,12 @@ function handleError(error: unknown, res: Response) {
 
 export async function getCatalogo(req: Request, res: Response) {
   try {
-    res.status(200).json(buildCatalogView(await viewerOf(req)));
+    const viewer = await viewerOf(req);
+    // Assembled here rather than inside `buildCatalogView`, and not by taste:
+    // `templatesFor` prunes each template through `pruneConfig`, which calls
+    // `buildCatalogView` itself. Putting the templates in there would have
+    // recursed until the stack ran out, on the first request.
+    res.status(200).json({ ...buildCatalogView(viewer), templates: templatesFor(viewer) });
   } catch (error) {
     handleError(error, res);
   }

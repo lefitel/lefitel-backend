@@ -992,18 +992,44 @@ Orden que no rompe la pantalla en ningún momento: (1) los cinco arreglos comune
 la lista de la izquierda de a poco; (4) colapsar el panel, último, cuando ya no
 quede casi nada dentro.
 
-### Las seis plantillas propuestas (pendiente de que Isaias las confirme)
+### Las seis plantillas — construidas el 4 de septiembre (`258deb4`)
 
-1. **General de eventos** — el que ya se entrega: poste, propietario,
-   descripción, criticidad, estado, fecha. Existe como `generalConfig` en
-   `export.integration.test.ts`.
-2. **Pendientes por tramo** — agrupado por tramo, nº de eventos y criticidad
-   mínima. Son 438 pendientes.
-3. **Trabajos hechos** — raíz Solución. Imposible antes del 22 de agosto.
-4. **Revisiones del mes** — raíz Revisión, 7.741 filas, el volumen real del
-   trabajo.
-5. **Cobertura por ciudad** — raíz Ciudad, con las 13 que no tienen ni un poste.
-6. **Tiempos de resolución** — promedio de días del evento a su última revisión.
+Aprobadas por Isaias y vivas en `src/reportBuilder/templates.ts`, servidas con el
+catálogo en `GET /catalogo`. Medidas contra `osefi_local`:
+
+| # | Plantilla | Raíz | Devuelve |
+|---|---|---|---|
+| 1 | General de eventos | evento | 1.376 |
+| 2 | Pendientes por tramo | evento, agrupado | 59 tramos |
+| 3 | Trabajos hechos | solución | 943 |
+| 4 | Revisiones recientes | revisión | 7.337 |
+| 5 | Cobertura por ciudad | ciudad | 98 ciudades |
+| 6 | Tiempos de resolución | evento, agrupado | 85 tramos |
+
+**Un cambio sobre lo propuesto.** La cuarta iba a llamarse «Revisiones del mes» y
+no puede: los operadores de fecha son `between`, `gte`, `lte`, `isnull` y
+`notnull`, ninguno relativo. Filtrarla «al mes» la habría dejado filtrada a un
+mes fijo para siempre mientras seguía llamándose «del mes». Se ordena por fecha,
+que no caduca, y se llama «Revisiones recientes».
+
+**Dos reglas que cumplen las seis, y que `templates.test.ts` no deja romper:**
+ninguna fecha absoluta, y ningún campo de personal — así las seis sobreviven
+enteras a `pruneConfig` para todo rol que pueda abrir la pantalla, incluido
+Cliente. Una plantilla que pierde una columna para el Cliente es peor que una que
+no se ofrece: es un ejemplo que contradice al ejemplo que vio otro.
+
+**Por qué en el servidor y no en el cliente.** Una plantilla son rutas del
+catálogo, o sea conocimiento del catálogo; una copia en el repo web es la misma
+duplicación entre lados que puso dos formas de escribir «máximo» y dos copias de
+los topes. Aquí catálogo y plantillas cambian en el mismo commit, y son las
+únicas configuraciones del producto que nadie mantiene usándolas: un campo
+renombrado rompería una en silencio y el primero en enterarse sería un cliente
+pulsando «Cobertura por ciudad».
+
+**Trampa que costó encontrar:** el ensamblado va en el controlador y **no** en
+`buildCatalogView`. `templatesFor` llama a `pruneConfig`, y `pruneConfig` llama a
+`buildCatalogView` — meterlas ahí habría recursado hasta agotar la pila, en la
+primera petición.
 
 ### Pendiente
 
