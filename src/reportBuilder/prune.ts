@@ -5,7 +5,7 @@
 // configuration verbatim, so a report shared by an administrator told every
 // reader the paths of the fields the catalog hides from them — `usuario.user`
 // among them — together with the values filtered against those fields. And
-// `POST /reportes/:id/duplicar` validated that same configuration against the
+// `POST /reportes/:id/duplicate` validated that same configuration against the
 // person copying it and answered 400 quoting an internal path, over a report
 // the screen had just listed as theirs to copy.
 //

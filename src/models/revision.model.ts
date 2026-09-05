@@ -33,7 +33,7 @@ export const RevisionModel: ModelDefined<IRevision, RevisionCreation> = sequeliz
  *
  * The catalog puts the author behind `seguridad.ver` (catalog.ts, the `usuario`
  * relation), and a finder with no `attributes` at all undoes that in one line:
- * the moment the column joined the model, `GET /revision/:id_evento` started
+ * the moment the column joined the model, `GET /api/evento/:id/revisiones` started
  * shipping it to every authenticated account, the Cliente role included, and
  * `GET /evento` already returns `usuario {id, name, lastname}` to join it
  * against. The generator is where authorship is exposed, gated; here it is not.

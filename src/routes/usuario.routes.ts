@@ -15,6 +15,11 @@ import {
   updateUserPass,
   updateUsuario,
 } from "../controllers/usuario.controller.js";
+// D1 (§3.2): two listings that are about a *person* now hang off that person.
+// They were `GET /api/evento/usuario/:id_usuario` and `GET /api/bitacora/:id_usuario`,
+// both under a parent that named the rows rather than the subject.
+import { getEvento_usuario } from "../controllers/evento.controller.js";
+import { getBitacora } from "../controllers/bitacora.controller.js";
 import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
 import { exportLimiter } from "../middleware/limiters.js";
 import { requireStepUp } from "../middleware/requireStepUp.js";
@@ -137,7 +142,7 @@ router.delete(
   deleteUsuario,
 );
 router.patch(
-  "/:id/desarchivar",
+  "/:id/restore",
   requirePermission("seguridad", "archivar"),
   requireStepUp({ exigeContrasena: true }),
   desarchivarUsuario,
@@ -245,6 +250,41 @@ router.get("/", requirePermission("seguridad", "ver"), getUsuario);
 // stop people changing their own password. Ownership is not a role permission
 // and has no checkbox — see requirePermission.ts.
 router.get("/:id", requireSelfOrPermission("seguridad", "ver"), searchUsuario);
+
+/**
+ * What one person did, and what was done to their account — the two listings
+ * D1 moved here from `/api/evento/usuario/:id_usuario` and
+ * `/api/bitacora/:id_usuario`.
+ *
+ * **Declared after `/user/:user` on purpose.** Both are two-segment patterns
+ * with a parametric first segment, so declared *before* it they would swallow
+ * `GET /api/usuario/user/eventos` and `/api/usuario/user/bitacora` — the search
+ * for an account whose username is literally "eventos" or "bitacora". `id`
+ * would be the string `"user"`, `Number("user")` is `NaN`, and the caller gets
+ * a 403 or, with the permission, a 500 from Postgres refusing the cast.
+ * `routeOrder.test.ts` would not catch it: it compares declared patterns
+ * against each other, and neither of these covers `/user/:user` entirely.
+ *
+ * **The pairs are of the other module on purpose.** Asking about a person is
+ * `seguridad.ver` and asking about their audit trail is `bitacora.ver`; the
+ * parent mount does not decide the question. §3.7 of the spec allows it and
+ * `routeGuards.test.ts` files them under the module that answers.
+ *
+ * 🔴 **The third argument of `requireSelfOrPermission` is not optional, and it
+ * changed with the move.** It defaults to `"id"`, which is now correct — these
+ * parameters used to be `:id_usuario`, and the argument named them. Copy the
+ * old line across with `"id_usuario"` still in it and the ownership branch
+ * compares `undefined` against the caller's id, never matches, and the gate
+ * degrades to permission-only: everyone without the module silently loses their
+ * own history and their own audit trail. Both screens swallow it —
+ * `usePerfilData.ts` catches into `[]` — so it shows up as an empty list and
+ * "Eventos atendidos: 0", never as an error. `evento.self.test.ts` and
+ * `bitacora.self.test.ts` exist for these two lines; nothing else in the
+ * repository can see them, because reading the chain never sends a request and
+ * every other suite mocks `can` to true.
+ */
+router.get("/:id/eventos", requireSelfOrPermission("seguridad", "ver"), getEvento_usuario);
+router.get("/:id/bitacora", requireSelfOrPermission("bitacora", "ver"), getBitacora);
 //
 // 🔴 **D6 reaches these three too, and the plan had left them off.** Editing an
 // account, renaming it, changing its password: for somebody *else's* account

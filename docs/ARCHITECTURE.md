@@ -18,22 +18,40 @@ lleva [`specs/2026-08-25-estandar-api-design.md`](specs/2026-08-25-estandar-api-
 |--------|------|-------------|
 | GET | `/api/dashboard` | Página de inicio. **No es ligero** — ver abajo |
 | GET | `/api/poste` | Lista paginada de postes |
-| GET | `/api/poste?export=true` | Todos los postes sin paginación (para exports) |
-| GET | `/api/evento` | Lista paginada de eventos |
-| GET | `/api/evento?export=true` | Todos los eventos sin paginación (para exports) |
+| GET | `/api/poste/:id/eventos` | Las incidencias de un poste |
+| GET | `/api/evento` | Lista paginada de incidencias |
+| GET | `/api/evento/:id/obs` | Las observaciones de una incidencia |
+| PATCH | `/api/poste/:id/restore` | Desarchivar. Contesta `204` |
 
-Los montajes son **singulares**. Este documento los escribió en plural durante
-meses, describiendo direcciones que no existen y nunca han existido. El
-renombrado de rutas del estándar (tarea D1) va en la otra dirección:
-`/api/dashboard` pasará a `/api/inicio`, no al revés.
+Los montajes de negocio son **singulares** — `/api/poste`, `/api/evento`,
+`/api/permiso` — y este documento los escribió en plural durante meses,
+describiendo direcciones que no existen y nunca han existido. «Singular» no es la
+regla entera, y decirlo así choca con `/api/files` dos líneas más abajo: §3.4 del
+estándar lo dice bien, **el número lo decide el idioma**. Un sustantivo del
+negocio conserva el número con el que lo dice el cliente; una colección inglesa
+va en plural, que es lo correcto en inglés; una operación va en singular.
 
-Falta a propósito `/api/bitacora`, que también pagina — pero **con otras reglas**:
-sin mínimo (`limit=1` devuelve una fila, no quince) y con un sobre distinto,
-`{data, total}` sin `page` ni `totalPages`. Quien tome el apartado siguiente como
-la norma de la casa se equivocará con ella. Unificar los sobres es la tarea C3.
+**D1 dejó tres reglas de nombres, y este párrafo decía lo contrario de una de
+ellas.** Los sustantivos del negocio van en español y los verbos y operaciones
+en inglés (`/restore`, `/reopen`, `/query`); un listado que sólo existe respecto
+a una fila cuelga de esa fila; y los segmentos se escriben en minúsculas con
+guion (`/api/tipo-obs`). `/api/dashboard` **se queda como está** — es vocabulario
+de la API y no de la red eléctrica, igual que `/files` — y la versión anterior de
+este documento anunciaba que D1 lo pasaría a `/api/inicio`, que es justo la
+decisión que el estándar retiró. `naming.test.ts` es lo que fija las tres reglas
+sobre la tabla montada, no sobre los ficheros fuente.
 
-`?export=true` desaparece en esa misma tarea. Cuando eso pase, hay que volver a
-esta tabla.
+Falta a propósito `/api/bitacora`, que pagina con las mismas reglas que el resto
+desde C3: sobre `{data, total, page, limit}` y un solo lector de `limit`. Lo
+que este documento decía —«sin mínimo, `limit=1` devuelve una fila, no
+quince»— se resolvió al revés de lo que sugería: C3 quitó el suelo de quince a
+**todos**, no se lo puso a la bitácora, así que `?limit=1` devuelve una fila en
+los diecisiete listados. La bitácora
+de **una persona** ya no está aquí: es `GET /api/usuario/:id/bitacora`, porque en
+un registro sobre personas el identificador no nombra el registro.
+
+`?export=true` ya no existe: C3 lo sustituyó por `POST /api/{poste,evento,usuario}/export`,
+que construye el fichero en el servidor.
 
 ---
 
@@ -44,11 +62,15 @@ esta tabla.
 | Param | Default | Descripción |
 |-------|---------|-------------|
 | `page` | 1 | Número de página |
-| `limit` | 50 (**mín 15**, máx 100) | Registros por página |
+| `limit` | 50 (**mín 1**, máx 100) | Registros por página |
 | `filterColumn` | — | Columna a filtrar |
 | `filterValue` | — | Valor del filtro. **ILIKE sólo en algunas columnas** — ver debajo |
 | `archived` | false | Registros archivados (paranoid) |
-| `export` | false | Devuelve todos sin paginación |
+| `limit=all` | — | Sin paginar, con techo de 5.000 filas y `422` si se pasa |
+
+El `?export=true` que esta tabla listaba se retiró en C3, junto con el resto
+del camino: el fichero lo construye el servidor en
+`POST /api/{poste,evento,usuario}/export`.
 
 **`filterColumn` no acepta cualquier columna, y lo que no acepta lo ignora en
 silencio.** En `/api/evento` sólo `description` y `poste` son ILIKE; `state`,
@@ -57,10 +79,17 @@ silencio.** En `/api/evento` sólo `description` y `poste` son ILIKE; `state`,
 honra `name`: cualquier otra columna devuelve la primera página **sin filtrar y
 sin error**, que es peor que un fallo porque parece que funcionó.
 
-El mínimo es 15, no 10: `Math.min(100, Math.max(15, Number(limit) || 50))` en
-`poste.controller.ts` y `evento.controller.ts`. Y ese `|| 50` es la razón por la
-que el estándar descartó `limit=0` como centinela de «sin paginar» — el cero es
-*falsy* y devolvería cincuenta filas en silencio.
+**El mínimo es 1, y este párrafo decía 15 citando código que ya no existe.** La
+expresión `Math.min(100, Math.max(15, Number(limit) || 50))` estaba en
+`poste.controller.ts` y en `evento.controller.ts`, cada uno con su copia; C3 dejó
+un solo lector, `leerPaginacion` (`utils/paginacion.ts`), y su suelo es
+`Math.max(1, n)` — `?limit=1` devuelve una fila, en los diecisiete listados.
+`paginacion.test.ts` lo fija.
+
+Lo que sí sobrevive del párrafo viejo es el motivo por el que el estándar
+descartó `limit=0` como centinela de «sin paginar»: el cero es *falsy*, así que
+caía en el valor por defecto y devolvía cincuenta filas en silencio. El centinela
+es `limit=all`.
 
 Respuesta paginada, con cifras de ejemplo:
 
@@ -69,10 +98,15 @@ Respuesta paginada, con cifras de ejemplo:
   "data": [...],
   "total": 1470,
   "page": 1,
-  "totalPages": 30,
   "limit": 50
 }
 ```
+
+Cuatro claves, y `totalPages` **no** es una de ellas — este documento la
+incluía. C3 unificó el sobre de los diecisiete listados y lo dejó en estas
+cuatro exactas; `listShape.test.ts` las compara en las dos direcciones, así que
+una de más es tan roja como una de menos. El número de páginas se calcula en el
+cliente, que es donde se usa.
 
 ---
 
@@ -125,7 +159,9 @@ los eventos en el frontend.
 
 La mayoría de los includes especifican solo las columnas necesarias. **No todos:**
 la auditoría del estándar contó unos veinticinco sin `attributes`, que mandan la
-fila entera. Se cierran en la tarea C5. Lo que sí está cerrado es la autoría —
+fila entera. **No los cierra ninguna tarea del arco**: están aplazados a
+propósito en §3.9 del estándar, y este documento decía que los cerraba C5, que
+es otra cosa — las dieciocho lecturas sin permiso. Lo que sí está cerrado es la autoría —
 ningún include filtra ya quién creó una fila, y `responseShape.test.ts` lo
 vigila.
 

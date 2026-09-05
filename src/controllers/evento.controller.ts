@@ -305,7 +305,7 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
  *
  * No author column, and no `id_usuario`. The listing sends both in every row;
  * the screen draws neither, and a file naming the employee behind each of
- * 1.514 incidents is the report §6 closed `/api/evento/usuario/:id` to prevent.
+ * 1.514 incidents is the report §6 closed `/api/usuario/:id/eventos` to prevent.
  */
 const COLUMNAS_EVENTO: readonly Columna[] = [
   { key: "n", label: "#", kind: "number" },
@@ -453,12 +453,12 @@ export const exportarEventos = handler("exportarEventos", async (req: Request, r
 });
 
 export const getEvento_poste = handler("getEvento_poste", async (req: Request, res: Response) => {
-  const { id_poste } = req.params;
+  const { id } = req.params;
   const paginacion = leerPaginacion(req.query);
   if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
   const listado = await listar(EventoModel, {
-    where: { id_poste },
+    where: { id_poste: id },
     order: [["id", "DESC"]],
   }, paginacion);
   if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
@@ -466,7 +466,7 @@ export const getEvento_poste = handler("getEvento_poste", async (req: Request, r
 });
 
 export const getEvento_usuario = handler("getEvento_usuario", async (req: Request, res: Response) => {
-  const { id_usuario } = req.params;
+  const { id } = req.params;
   const paginacion = leerPaginacion(req.query);
   if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
@@ -475,7 +475,7 @@ export const getEvento_usuario = handler("getEvento_usuario", async (req: Reques
   // percentage from `length`, so a truncated list did not look truncated — it
   // looked like an appraisal.
   const listado = await listar(EventoModel, {
-    where: { id_usuario },
+    where: { id_usuario: id },
     order: [["id", "DESC"]],
     include: [{ model: PosteModel, attributes: ["id", "name"] }],
   }, paginacion);
@@ -584,7 +584,7 @@ export const updateEvento = handler("updateEvento", async (req: Request, res: Re
   // `state` is dropped before anything reads the body, not overwritten after.
   //
   // Whether an event is resolved is kept in step with its `solucions` row by
-  // `/resolver` and `/reabrir`, and by nothing else. Letting a PUT move it
+  // `/resolve` and `/reopen`, and by nothing else. Letting a PUT move it
   // broke that pairing in both directions: the priority toggle in the events
   // table sends the whole row it had loaded (`{ ...evento, priority }`), so a
   // stale `state: false` reopened an event somebody had just resolved and
@@ -667,7 +667,7 @@ export const updateEvento = handler("updateEvento", async (req: Request, res: Re
   // No RESOLVE_EVENTO branch here any more, and there has not been a reachable
   // one since `state` started being destructured out of the body above: the
   // condition read `bodyWithoutObs.state`, which is `undefined` by construction.
-  // Resolving is `POST /:id/resolver`, which logs it itself.
+  // Resolving is `POST /:id/resolve`, which logs it itself.
   if (Object.keys(beforeMeta).some(k => beforeMeta[k] !== afterMeta[k])) {
     logAction({ id_usuario: req.user?.id, action: "UPDATE_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Editó Evento #${id}`, metadata: { before: beforeMeta, after: afterMeta }, severity: 'warning' });
   }

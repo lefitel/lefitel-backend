@@ -310,7 +310,7 @@ export function requireStepUp({
       //
       // **This refuses somebody for real, on one route today.** It used to be
       // unreachable — every mount lived under `/api/usuario`, `/api/rol` or
-      // `/api/permisos`, none of which the `parcial` or `onboarding`
+      // `/api/permiso`, none of which the `parcial` or `onboarding`
       // allowlists in `auth/sessionState.ts` open, so `authenticate` had
       // already answered 401 or 403 before this gate ran. `DELETE
       // /api/auth/sessions/:id` changed that: `ONBOARDING_EXTRA` opens

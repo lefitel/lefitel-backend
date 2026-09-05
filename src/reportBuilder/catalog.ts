@@ -172,7 +172,7 @@ const obs: EntityDef = {
  * **`staffOnly` on the entity is what still hides it as a *root*.** That is the
  * question this does not open: "give me everything Juan has done" is asking
  * about a person rather than about the work, and it is the same question
- * `GET /api/evento/usuario/:id_usuario` asks — closed in C5 with the same
+ * `GET /api/usuario/:id/eventos` asks — closed in C5 with the same
  * permission. Reached through `evento.usuario` the per-field flags do the work,
  * and they now let the name through.
  *

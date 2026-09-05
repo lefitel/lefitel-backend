@@ -59,7 +59,7 @@ export const PERMISSIONS = {
   seguridad: ["ver", "crear", "editar", "archivar"],
   roles: ["ver", "crear", "editar", "archivar"],
 
-  // `crear` is absent rather than forgotten: uploading is `POST /api/upload`,
+  // `crear` is absent rather than forgotten: uploading is `POST /api/files`,
   // which is a declared exception in `routeGuards.test.ts` and passes through
   // no gate at all. Giving `archivos` a `crear` is how that route gets closed,
   // and it changes who may upload field photographs — its own decision.

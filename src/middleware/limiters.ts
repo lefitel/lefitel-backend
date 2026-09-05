@@ -53,7 +53,7 @@ export const perUser = (req: { user?: { id?: number }; ip?: string }) =>
  * Thirty heavy queries a minute, per person — one budget for every route that
  * runs one.
  *
- * Mounted on `POST /api/generador/consulta` and on the six fixed reports under
+ * Mounted on `POST /api/generator/query` and on the six fixed reports under
  * `/api/reporte`. **Shared by decision** (Isaias, 2026-09-04): the cost is the
  * database's time in this one process, and a person can spend it from seven
  * addresses. A budget per route would let one person run 210 of these a minute
@@ -105,7 +105,7 @@ export const conteoLimiter = rateLimit({
 /**
  * Ten files a minute, per person, across every endpoint that builds one.
  *
- * Mounted on `POST /api/generador/exportar` and on the three list downloads
+ * Mounted on `POST /api/generator/export` and on the three list downloads
  * (`POST /api/{poste,evento,usuario}/export`). **One budget, deliberately
  * shared.** The cost being limited is not "a report" or "a pole list", it is
  * assembling a document in memory — and only one of those runs at a time in

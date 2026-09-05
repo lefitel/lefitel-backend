@@ -124,7 +124,7 @@ describe("reading the matrix", () => {
   });
 
   // `getMisPermisos` was asserted here — "reports only the caller's own
-  // permissions on the personal route" — until `GET /api/permisos/mias` was
+  // permissions on the personal route" — until `GET /api/permiso/mias` was
   // retired and the handler went with it. Nothing called that route: the matrix
   // travels in `GET /api/auth/me`'s answer now, and what pins *that* is
   // `auth.controller.test.ts`'s "reads the role from the database and not from

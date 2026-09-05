@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { getAllBitacora, getAutoresBitacora, getBitacora } from "../controllers/bitacora.controller.js";
-import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
+import { getAllBitacora, getAutoresBitacora } from "../controllers/bitacora.controller.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
 
@@ -10,19 +10,16 @@ const router = Router();
 // other people's private reports, their authors, and the shape of every
 // execution.
 router.get("/", requirePermission("bitacora", "ver"), getAllBitacora);
-// Before `/:id_usuario`, and this is the ordering rule of the standard's 3.2
-// rather than a preference. Express matches in declaration order, so declared
-// after, `/autores` never runs: the parametric route takes it, queries the log
-// for `id_usuario = "autores"`, and Postgres refuses the comparison — a 500 on a
-// route that looks correct in the file. `routeOrder.test.ts` holds every router
-// in the API to this generically.
-router.get("/autores", requirePermission("bitacora", "ver"), getAutoresBitacora);
-// A user may review their own activity; anything else needs the module.
+// D1: `/authors` rather than `/autores`. A collection with no business noun in
+// it goes in English and in the plural, like `/files` and `/orphans` — §3.4.
+// This route was written after that table, which is why it was not in it.
 //
-// The parameter is named explicitly because it is `:id_usuario` here, not `:id`.
-// The previous middleware read "id" unconditionally, so this comparison was
-// always against undefined and this route was administration-only in practice,
-// whatever the line above it claimed.
-router.get("/:id_usuario", requireSelfOrPermission("bitacora", "ver", "id_usuario"), getBitacora);
+// There is no longer a parametric sibling for it to be shadowed by: one
+// person's audit trail moved to `GET /api/usuario/:id/bitacora` in the same
+// change, because in a log about people `:id_usuario` does not identify the
+// log. The ordering rule of §3.2 still holds generically and
+// `routeOrder.test.ts` still enforces it; it simply has nothing to catch here
+// now.
+router.get("/authors", requirePermission("bitacora", "ver"), getAutoresBitacora);
 
 export default router;

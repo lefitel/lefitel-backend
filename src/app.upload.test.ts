@@ -57,7 +57,7 @@ const DEL_FRONTEND = {
   [CSRF_CLIENT_HEADER]: "web",
 };
 
-/** The declared ceiling in `upload.routes.ts`, written out so a change to it fails here. */
+/** The declared ceiling in `files.routes.ts`, written out so a change to it fails here. */
 const LIMITE_BYTES = 5 * 1024 * 1024;
 
 let imagen: Buffer;
@@ -106,10 +106,10 @@ beforeEach(async () => {
 /** The files sitting in the redirected images directory right now. */
 const stored = () => fs.readdir(directory);
 
-describe("POST /api/upload with a real multipart body", () => {
+describe("POST /api/files with a real multipart body", () => {
   it("parses the file, converts it and writes it inside the images directory", async () => {
     const res = await request(app)
-      .post("/api/upload")
+      .post("/api/files")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
       .attach("file", imagen, "Foto del Poste 42.png");
@@ -136,7 +136,7 @@ describe("POST /api/upload with a real multipart body", () => {
     const grande = Buffer.alloc(LIMITE_BYTES + 1024);
 
     const res = await request(app)
-      .post("/api/upload")
+      .post("/api/files")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
       .attach("file", grande, "enorme.png");
@@ -154,7 +154,7 @@ describe("POST /api/upload with a real multipart body", () => {
 
   it("refuses a file sent under a field name the route does not declare", async () => {
     const res = await request(app)
-      .post("/api/upload")
+      .post("/api/files")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
       .attach("imagen", imagen, "otro-campo.png");
@@ -165,7 +165,7 @@ describe("POST /api/upload with a real multipart body", () => {
 
   it("answers a multipart body carrying no file at all, without crashing", async () => {
     const res = await request(app)
-      .post("/api/upload")
+      .post("/api/files")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
       .field("nada", "nada");
@@ -178,7 +178,7 @@ describe("POST /api/upload with a real multipart body", () => {
 
   it("refuses a file that is not an image, without blaming the server", async () => {
     const res = await request(app)
-      .post("/api/upload")
+      .post("/api/files")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
       .attach("file", Buffer.from("esto es texto plano, no una imagen"), "mentira.png");
@@ -192,7 +192,7 @@ describe("POST /api/upload with a real multipart body", () => {
 
   it("is behind the session cookie like every other write", async () => {
     const res = await request(app)
-      .post("/api/upload")
+      .post("/api/files")
       .set(DEL_FRONTEND)
       .attach("file", imagen, "sin-sesion.png");
 

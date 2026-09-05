@@ -1,14 +1,20 @@
-// `GET /api/bitacora/autores`, through the real Express stack.
+// `GET /api/bitacora/authors`, through the real Express stack.
 //
-// Sibling of `opciones.test.ts` and built the same way, for the same reason:
-// the layer list can say a route exists and sits before `/:id_usuario`, but not
-// which layer Express's matcher actually picks. Express 5 compiles a path into
-// closures over a pattern nothing exposes. So the proof that the literal won is
-// not the 200 — it is that `BitacoraModel.findAll`, the query `getBitacora`
-// makes, was **never called**, and is left rejecting so that a shadowed route
-// fails loudly here instead of reaching for the configured database. Declared
-// after the parametric route, this endpoint would ask Postgres for
-// `id_usuario = 'autores'` and answer 500.
+// Sibling of `opciones.test.ts` and built the same way. It was also the file
+// that proved this literal was not swallowed by the `/:id_usuario` declared
+// below it — and **D1 moved that sibling out of this router**, to
+// `GET /api/usuario/:id/bitacora`. Two of the assertions here were about that
+// race, and a literal cannot lose a race to a route that is not there: they
+// would have stayed green for ever while measuring nothing. One was rewritten
+// into the property that is still real — this endpoint reads accounts and must
+// never read the log — and the other became the envelope check on `GET /`,
+// which is the route of this router that still pages. The moved route's own
+// gate is measured in `bitacora.self.test.ts`, and its envelope by the
+// `LISTADOS` block of `listShape.test.ts`.
+//
+// `BitacoraModel.findAll` is still left rejecting. It is no longer a shadowing
+// guard; it is the assertion that this endpoint never reaches for the log, on a
+// machine whose configured database is a copy of production.
 //
 // **What is asserted off the spy, and what that is worth.** The model is not
 // mocked — the rows in a response would be this file's own fixtures, so their
@@ -132,7 +138,7 @@ beforeEach(() => {
   usuarioFindAll.mockResolvedValue(AUTORES as never);
   bitacoraFindAndCountAll.mockResolvedValue({ count: 0, rows: [] } as never);
   bitacoraFindAll.mockRejectedValue(
-    new Error("getBitacora corrió: /autores quedó tapada por /:id_usuario") as never,
+    new Error("el listador de la bitácora corrió: /authors leyó el log") as never,
   );
   sesionUpdate.mockRejectedValue(
     new Error("touchSession corrió: este test habría escrito en la base de datos") as never,
@@ -156,39 +162,39 @@ const consulta = (spy: { mock: { calls: unknown[][] } }) =>
 const sqlDe = (where: unknown) => String((where as { val?: unknown } | undefined)?.val ?? "");
 
 describe("the route is reachable at all", () => {
-  it("answers /api/bitacora/autores without ever reaching getBitacora", async () => {
-    const res = await request(app).get("/api/bitacora/autores").set("Cookie", COOKIE);
+  it("answers /api/bitacora/authors by reading accounts and never the log", async () => {
+    const res = await request(app).get("/api/bitacora/authors").set("Cookie", COOKIE);
 
     expect(res.status).toBe(200);
-    // The assertion this endpoint exists for. `/:id_usuario` is declared seven
-    // lines below `/autores`; declared seven lines above, this spy is what runs
-    // — and it rejects, so the request would answer 500.
-    // `/autores` reads `UsuarioModel` and nothing else, so touching the bitácora
-    // model at all means `/:id_usuario` swallowed the literal.
-    expect(bitacoraFindAndCountAll, "el literal /autores no ganó al paramétrico /:id_usuario")
+    // Not a shadowing check any more — D1 moved the parametric sibling to
+    // `/api/usuario/:id/bitacora`, so there is nothing left in this router that
+    // could swallow the literal. What it still measures is real and is what the
+    // endpoint is for: the author list is built from accounts that have entries,
+    // read off `UsuarioModel`, and reading the log itself would be both slower
+    // and a different answer. `bitacoraFindAll` rejects, so a handler that
+    // reached for it fails here rather than querying a copy of production.
+    expect(bitacoraFindAndCountAll, "/authors leyó la bitácora en vez de las cuentas")
       .not.toHaveBeenCalled();
   });
 
-  it("still serves the parametric route it was declared in front of", async () => {
-    // The other direction, and not symmetry for its own sake: declaring a
-    // literal first is only correct while it does not swallow the parametric
-    // route in turn. A single-segment literal cannot, but this is what would
-    // notice a future `/autores/:algo`, or `/:id_usuario` accidentally removed.
+  it("leaves the full log at GET / answering the envelope", async () => {
+    // The other route of this router, and the reason `/authors` being a literal
+    // still matters: both are declared on the same mount and a future
+    // `/authors/:algo` would put them back in a race. It also pins the envelope
+    // C3 gave this listing, which it did not have.
     bitacoraFindAndCountAll.mockResolvedValue({ count: 1, rows: [{ id: 1, action: "login" }] } as never);
 
-    const res = await request(app).get(`/api/bitacora/${YO}`).set("Cookie", COOKIE);
+    const res = await request(app).get("/api/bitacora/").set("Cookie", COOKIE);
 
     expect(res.status).toBe(200);
     expect(bitacoraFindAndCountAll).toHaveBeenCalled();
-    // And in the envelope every listing answers with, since C3. This route used
-    // to hand back a bare array with a `limit` that had no floor at all.
     expect(Object.keys(res.body).sort()).toEqual(["data", "limit", "page", "total"]);
   });
 });
 
 describe("what it asks the database for", () => {
   it("asks only for accounts that have entries", async () => {
-    await request(app).get("/api/bitacora/autores").set("Cookie", COOKIE);
+    await request(app).get("/api/bitacora/authors").set("Cookie", COOKIE);
 
     // The whole endpoint, in one property. Without a `where` this is the staff
     // directory — every account, including the ones that never touched the
@@ -203,7 +209,7 @@ describe("what it asks the database for", () => {
   });
 
   it("asks for the author columns and nothing else", async () => {
-    await request(app).get("/api/bitacora/autores").set("Cookie", COOKIE);
+    await request(app).get("/api/bitacora/authors").set("Cookie", COOKIE);
 
     // Against the constant, not against three strings: what this pins is that
     // the projection is the shared author shape plus the one column this screen
@@ -213,7 +219,7 @@ describe("what it asks the database for", () => {
   });
 
   it("includes archived accounts, which is the half a plain query would lose", async () => {
-    await request(app).get("/api/bitacora/autores").set("Cookie", COOKIE);
+    await request(app).get("/api/bitacora/authors").set("Cookie", COOKIE);
 
     // `UsuarioModel` is paranoid, so the default query hides exactly the people
     // whose entries somebody is most likely to be looking for: the ones who have
@@ -224,7 +230,7 @@ describe("what it asks the database for", () => {
   });
 
   it("orders the list for a person reading it", async () => {
-    await request(app).get("/api/bitacora/autores").set("Cookie", COOKIE);
+    await request(app).get("/api/bitacora/authors").set("Cookie", COOKIE);
 
     // Alphabetical, and deliberately not the `id DESC` of the catalogue
     // endpoints: that order exists so an export's columns stay put between runs,
@@ -236,10 +242,10 @@ describe("what it asks the database for", () => {
 
 describe("what it answers with", () => {
   it("answers a bare list, not an envelope", async () => {
-    const res = await request(app).get("/api/bitacora/autores").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/bitacora/authors").set("Cookie", COOKIE);
 
     // §3.3: the envelope is for paginated collections. This is a block of
-    // id/name pairs, like the three `/opciones` responses, and the client reads
+    // id/name pairs, like the three `/options` responses, and the client reads
     // it straight into a dropdown.
     expect(Array.isArray(res.body), `contestó ${JSON.stringify(res.body).slice(0, 80)}`).toBe(true);
     expect(res.body).toHaveLength(AUTORES.length);
@@ -264,7 +270,7 @@ describe("who may call it", () => {
   it("refuses an account without the permission", async () => {
     puede = false;
 
-    const res = await request(app).get("/api/bitacora/autores").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/bitacora/authors").set("Cookie", COOKIE);
 
     expect(res.status).toBe(403);
     // And it refused before asking: a 403 that still ran the query would have
@@ -273,7 +279,7 @@ describe("who may call it", () => {
   });
 
   it("refuses a request with no session at all", async () => {
-    const res = await request(app).get("/api/bitacora/autores");
+    const res = await request(app).get("/api/bitacora/authors");
 
     expect(res.status).toBe(401);
   });
@@ -283,7 +289,7 @@ describe("who may call it", () => {
     // `undefined` — which several of the expectations above would accept if one
     // were ever loosened. This is the guard the four source-level tests in
     // `src/controllers/` all carry, in the form this file needs it.
-    await request(app).get("/api/bitacora/autores").set("Cookie", COOKIE);
+    await request(app).get("/api/bitacora/authors").set("Cookie", COOKIE);
     await request(app).get("/api/bitacora/").set("Cookie", COOKIE);
 
     expect(usuarioFindAll).toHaveBeenCalled();

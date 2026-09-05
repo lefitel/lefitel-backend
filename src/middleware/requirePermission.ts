@@ -119,10 +119,18 @@ export function requirePermission(modulo: Module, accion: Action) {
  * to other people's rows", and this answers "is this your own row".
  *
  * `param` names the route parameter holding the user id. It defaults to "id",
- * but the bitácora route calls it `:id_usuario` — and the old version of this
- * middleware read "id" unconditionally, so on that route the ownership check
- * compared against `undefined` and never matched. "A user may review their own
- * activity" has been a comment describing a 403 ever since it was written.
+ * which every route using this middleware now matches: D1 moved the two that
+ * did not — the audit trail and the incidents of one person — under
+ * `/api/usuario/:id`, and their parameters were renamed with them.
+ *
+ * 🔴 The argument stays because the failure it guards is silent and has
+ * happened. An older version of this middleware read "id" unconditionally
+ * while the bitácora route's parameter was `:id_usuario`, so the ownership
+ * check compared against `undefined` and never matched: "a user may review
+ * their own activity" described a 403 for as long as the sentence existed,
+ * and the profile screen swallowed it into an empty list. Passing a name that
+ * no route declares does the same thing today. `evento.self.test.ts` and
+ * `bitacora.self.test.ts` are the only two places that can see it.
  */
 export function requireSelfOrPermission(modulo: Module, accion: Action, param = "id") {
   const requireSelfOrPermissionGate = async (

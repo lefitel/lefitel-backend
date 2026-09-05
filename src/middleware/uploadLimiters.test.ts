@@ -1,6 +1,6 @@
 // A budget on the one write that costs disk.
 //
-// `POST /api/upload/` is deliberately not gated by module — its router explains
+// `POST /api/files/` is deliberately not gated by module — its router explains
 // why, and the reason holds: it serves an event photograph, a pole photograph
 // and your own portrait, so tying it to one module would either stop a Cliente
 // changing their picture or hand a Cliente the right to attach photographs to
@@ -119,17 +119,44 @@ describe("the upload budget", () => {
   // and every test above would stay green while the endpoint went back to being
   // unmetered. Source-level because the route needs a session to reach through
   // `authenticate`, and standing one up would test the login rather than this.
-  it("is mounted on the route it exists for", () => {
+  it("is mounted on the route it exists for, and on the route rather than the router", () => {
+    // D1 folded the upload into `files.routes.ts`, which is why this reads that
+    // file now. The move is also what makes the second half of this test worth
+    // writing: sharing a router with six other routes, `uploadLimiter` is one
+    // careless tidy-up away from becoming `router.use(uploadLimiter)` — and then
+    // the thirty requests a minute that exist to ration writing files to disk
+    // would be spent by the Archivos screen, which costs three of them every
+    // time somebody opens it.
     const here = dirname(fileURLToPath(import.meta.url));
-    const router = readFileSync(join(here, "..", "routes", "upload.routes.ts"), "utf8");
+    const fuente = readFileSync(join(here, "..", "routes", "files.routes.ts"), "utf8");
+    // Comments stripped before anything is matched. That file warns about the
+    // mistake below *in prose*, quoting the very call it forbids, and a source
+    // test that reads its own warning as the offence is a test that cannot be
+    // written about carefully.
+    const router = fuente.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-    const at = router.indexOf("router.post(");
+    // `router.post("/"` and not `router.post(`: the search used to take whichever
+    // POST came first in the file, which was right only while there was one. D1
+    // merged three routers into this one; a POST added above the upload would
+    // have silently pointed every assertion below at the wrong route.
+    const at = router.indexOf('router.post("/"');
     const post = at === -1 ? undefined : router.slice(at, router.indexOf(";", at));
 
-    expect(post, "upload.routes.ts ya no declara un POST").toBeDefined();
+    expect(post, "files.routes.ts ya no declara un POST").toBeDefined();
     expect(
       post,
       `el POST de subida no pasa por uploadLimiter: ${post}`,
     ).toContain("uploadLimiter");
+    // Ahead of multer, and that order is the point: `memoryStorage` reads the
+    // whole file into memory before any handler runs, so a request already over
+    // budget has to be turned away in front of it.
+    expect(
+      post!.indexOf("uploadLimiter") < post!.indexOf("upload.single"),
+      `uploadLimiter va detrás de multer: ${post}`,
+    ).toBe(true);
+    expect(
+      router,
+      "uploadLimiter se montó en el router: gastaría el cubo de subida navegando archivos",
+    ).not.toMatch(/router\.use\(\s*uploadLimiter/);
   });
 });

@@ -1386,7 +1386,7 @@ describe("username collisions", () => {
       // DELETE /usuario/7 archives "isaias" → POST /usuario creates a second
       // "isaias" (createUsuario's own guard above is what actually stops this
       // now, but this is the scenario the constraint alone could not survive)
-      // → PATCH /usuario/7/desarchivar must not 500 forever on the same retry.
+      // → PATCH /usuario/7/restore must not 500 forever on the same retry.
       findOne.mockResolvedValueOnce(archivedUser({ id: 7, user: "isaias" }).model);
       findOne.mockResolvedValueOnce(storedUser({ id: 8, user: "isaias" }).model);
 

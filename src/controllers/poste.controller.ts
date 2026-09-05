@@ -332,7 +332,7 @@ export const exportarPostes = handler("exportarPostes", async (req: Request, res
 //
 // It served the distinct city pairs poles run between, and its only caller
 // anywhere was `useTramoNeighbors` in the client, which now reads the same
-// pairs from the `tramos` block of `GET /api/reporte/opciones` — a block that
+// pairs from the `tramos` block of `GET /api/reporte/options` — a block that
 // additionally drops pairs naming an archived city, which this handler
 // returned and no combobox could render.
 //

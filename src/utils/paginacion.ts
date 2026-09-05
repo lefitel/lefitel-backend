@@ -33,7 +33,7 @@ import type { Request } from "express";
 // **default, floor, ceiling, truncation and finiteness.**
 //
 // **What it deliberately does not unify.** The report generator's two readers
-// (`generador.controller.ts`) stay where they are: `GET /api/generador/reportes`
+// (`generador.controller.ts`) stay where they are: `GET /api/generator/reportes`
 // pages by `offset` and answers `{rows, total, limit, offset}`, which §3.3
 // exempts on purpose, and its clamps are pinned by its own tests.
 

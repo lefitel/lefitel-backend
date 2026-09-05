@@ -895,11 +895,11 @@ describe("who the cookie says I am", () => {
     // this one: that router mounts no `authenticate` of its own — `POST
     // /auth/login` cannot ask for a credential it is there to produce — so each
     // of its routes declares the middleware itself and a path that matches none
-    // of them never authenticates at all. `/api/permisos` is mounted the
+    // of them never authenticates at all. `/api/permiso` is mounted the
     // ordinary way, with `authenticate` in front of the whole router, which is
     // how every other router in this app is mounted and therefore what this has
     // to be true of.
-    const res = await request(app).get("/api/permisos/no-existe").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/permiso/no-existe").set("Cookie", COOKIE);
 
     expect(res.status).toBe(404);
     expect(res.headers[CABECERA_VENCIMIENTO]).toBe(SESION_EXPIRA_FILA.toISOString());
@@ -2136,7 +2136,7 @@ describe("requireStepUp, mounted on the real routes", () => {
     puede = true;
     try {
       const res = await request(app)
-        .put("/api/permisos/3")
+        .put("/api/permiso/3")
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND)
         .send({});
@@ -2159,7 +2159,7 @@ describe("requireStepUp, mounted on the real routes", () => {
     puede = true;
     try {
       const res = await request(app)
-        .put("/api/permisos/3")
+        .put("/api/permiso/3")
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND)
         .send({ stepup_password: "no-es-la-mia" });
@@ -2463,7 +2463,7 @@ describe("what a database outage costs the office's login budget", () => {
  * `GET /api/login` verified a signed JWT off the `Authorization` header and
  * answered with the account's role and permissions — a second copy of what
  * `authenticate` does, with no session row behind it and nothing that could
- * revoke it. `GET /api/permisos/mias` answered with the caller's own permission
+ * revoke it. `GET /api/permiso/mias` answered with the caller's own permission
  * matrix. Both were replaced by `GET /api/auth/me`, which sends the account and
  * the matrix in one answer off the session cookie, and `web` stopped calling
  * either of them two plans ago.
@@ -2473,7 +2473,7 @@ describe("what a database outage costs the office's login budget", () => {
  * credential; a 404 says "there is nothing at this address", which is the truth.
  * Getting that wrong is not hypothetical here: `authenticate` is mounted in
  * front of `permisoRoutes` in `app.ts`, so an *anonymous* request to
- * `/api/permisos/mias` answers 401 whether the route exists or not — a test
+ * `/api/permiso/mias` answers 401 whether the route exists or not — a test
  * written without a credential would have passed identically before and after
  * the removal and asserted nothing at all.
  *
@@ -2543,8 +2543,8 @@ describe("the addresses this arc retired", () => {
     expect(post.status).toBe(200);
   });
 
-  it("has nothing at GET /api/permisos/mias, and 401 there without a cookie", async () => {
-    const res = await request(app).get("/api/permisos/mias").set("Cookie", COOKIE);
+  it("has nothing at GET /api/permiso/mias, and 401 there without a cookie", async () => {
+    const res = await request(app).get("/api/permiso/mias").set("Cookie", COOKIE);
     expect(res.status).toBe(404);
 
     // The half that makes the line above mean anything, and the reason this test
@@ -2556,14 +2556,14 @@ describe("the addresses this arc retired", () => {
     // 401 keeps that premise from being quietly withdrawn: take `authenticate`
     // off that mount and this line fails, and the 404 above stops proving what
     // it claims to.
-    const anonima = await request(app).get("/api/permisos/mias");
+    const anonima = await request(app).get("/api/permiso/mias");
     expect(anonima.status).toBe(401);
 
     // The sibling read on the same router, with the same cookie: 403, because
     // `can` is mocked false in this file and the route asks for `roles.ver`. That
     // is what separates "this address is gone" from "this whole router stopped
     // being mounted", which would answer 404 here too.
-    const matriz = await request(app).get("/api/permisos/").set("Cookie", COOKIE);
+    const matriz = await request(app).get("/api/permiso/").set("Cookie", COOKIE);
     expect(matriz.status).toBe(403);
   });
 });

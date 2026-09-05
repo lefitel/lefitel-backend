@@ -50,15 +50,12 @@ import { requireSameOrigin, requireVerifiedOrigin } from "./middleware/csrf.js";
 import { allowedOrigins, HSTS_MAX_AGE_SECONDS, ROLE_HEADER, SESSION_EXPIRES_HEADER } from "./config/security.js";
 
 // Import routes
-import uploadRoutes from "./routes/upload.routes.js";
 import filesRoutes from "./routes/files.routes.js";
 
 import adssRoutes from "./routes/adss.routes.js";
-import adssPosteRoutes from "./routes/adssPoste.routes.js";
 
 import rolRoutes from "./routes/rol.routes.js";
 
-import solucionRoutes from "./routes/solucion.routes.js";
 import revisionRoutes from "./routes/revision.routes.js";
 
 import eventoRoutes from "./routes/evento.routes.js";
@@ -66,7 +63,6 @@ import eventoRoutes from "./routes/evento.routes.js";
 import posteRoutes from "./routes/poste.routes.js";
 import bitacoraRoutes from "./routes/bitacora.routes.js";
 import ciudadRoutes from "./routes/ciudad.routes.js";
-import eventoObsRoutes from "./routes/eventoObs.routes.js";
 import materialRoutes from "./routes/material.routes.js";
 import obsRoutes from "./routes/obs.routes.js";
 import propietarioRoutes from "./routes/propietario.routes.js";
@@ -307,28 +303,37 @@ app.use("/api/auth/webauthn/passwordless", requireVerifiedOrigin(ORIGINS), webau
 // reachable by nobody who has a session to be in a list with.
 app.use("/api/auth/webauthn", webauthnRoutes);
 
-app.use("/api/upload", authenticate, uploadRoutes);
+// D1 (§3.2, §3.4). Four mounts fewer than before this change:
+//
+// - `/api/adssposte`, `/api/eventoObs` and `/api/solucion` were root resources
+//   for listings that only exist with respect to one row. They hang off their
+//   parent now — `/api/poste/:id/adss`, `/api/evento/:id/obs`,
+//   `/api/evento/:id/solucion` — and their routers are gone.
+// - `/api/upload` was a verb mounted as a root resource. Storing a file is
+//   `POST /api/files/`, in the router that already manages them.
+//
+// And three renamed: `/api/generador` → `/api/generator` and `/api/permisos`
+// → `/api/permiso` (the mount is the noun, in the singular), `/api/tipoObs`
+// → `/api/tipo-obs` (kebab-case; this and `eventoObs` were the only two
+// segments with a capital letter in the whole API).
 app.use("/api/reporte", authenticate, reporteRoutes);
-app.use("/api/generador", authenticate, generadorRoutes);
+app.use("/api/generator", authenticate, generadorRoutes);
 app.use("/api/dashboard", authenticate, dashboardRoutes);
 
 app.use("/api/adss", authenticate, adssRoutes);
-app.use("/api/adssposte", authenticate, adssPosteRoutes);
 
 app.use("/api/bitacora", authenticate, bitacoraRoutes);
 app.use("/api/ciudad", authenticate, ciudadRoutes);
-app.use("/api/eventoObs", authenticate, eventoObsRoutes);
 app.use("/api/evento", authenticate, eventoRoutes);
 app.use("/api/material", authenticate, materialRoutes);
 app.use("/api/obs", authenticate, obsRoutes);
 app.use("/api/poste", authenticate, posteRoutes);
 app.use("/api/propietario", authenticate, propietarioRoutes);
 app.use("/api/revision", authenticate, revisionRoutes);
-app.use("/api/solucion", authenticate, solucionRoutes);
-app.use("/api/tipoObs", authenticate, tipoObsRoutes);
+app.use("/api/tipo-obs", authenticate, tipoObsRoutes);
 app.use("/api/rol", authenticate, rolRoutes);
 app.use("/api/usuario", authenticate, usuarioRoutes);
-app.use("/api/permisos", authenticate, permisoRoutes);
+app.use("/api/permiso", authenticate, permisoRoutes);
 // The gate is inside files.routes.ts now, one per action: listing the folder and
 // emptying it are not the same permission.
 app.use("/api/files", authenticate, filesRoutes);

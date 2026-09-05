@@ -13,14 +13,15 @@ const revisionLog = log("revision");
 const handler = makeHandler(revisionLog);
 
 export const getRevision = handler("getRevision", async (req: Request, res: Response) => {
-  const { id_evento } = req.params;
+  const { id } = req.params;
   const paginacion = leerPaginacion(req.query);
   if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
   const listado = await listar(RevisionModel, {
-    where: { id_evento },
-    // Not the whole row: this route is authenticated and nothing more, and
-    // the author belongs to the generator's gate. See the attribute list.
+    where: { id_evento: id },
+    // Not the whole row: `eventos.ver` is the permission to read the work,
+    // not to know who did it — the author belongs to the generator's gate.
+    // See the attribute list.
     attributes: [...REVISION_PUBLIC_ATTRIBUTES],
     order: [["id", "DESC"]],
   }, paginacion);

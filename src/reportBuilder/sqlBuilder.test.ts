@@ -957,7 +957,7 @@ describe("buildQuery — role isolation", () => {
   it("still refuses to make a person a level of detail", () => {
     // The question this does not open, and the reason the entity keeps its
     // flag: "give me everything Juan has done" asks about a person rather than
-    // about the work. `GET /api/evento/usuario/:id_usuario` is the same
+    // about the work. `GET /api/usuario/:id/eventos` is the same
     // question over HTTP, and C5 shuts it with the same permission.
     expect(() => buildQuery({ root: "usuario", columns: [{ path: "name" }] }, OPERATIVO))
       .toThrow(/permiso/);

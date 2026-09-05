@@ -14,7 +14,7 @@ const router = Router();
 // Routes
 router.post("/", requirePermission("ciudades", "crear"), createCiudad);
 router.put("/:id", requirePermission("ciudades", "editar"), updateCiudad);
-router.patch("/:id/desarchivar", requirePermission("ciudades", "archivar"), desarchivarCiudad);
+router.patch("/:id/restore", requirePermission("ciudades", "archivar"), desarchivarCiudad);
 router.get("/", requirePermission("ciudades", "ver"), getCiudad);
 router.get("/:id", requirePermission("ciudades", "ver"), searchCiudad);
 router.delete("/:id", requirePermission("ciudades", "archivar"), deleteCiudad);

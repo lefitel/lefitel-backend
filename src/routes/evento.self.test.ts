@@ -1,22 +1,24 @@
 // "Your own history" — the one gate of C5 that no other test in this repository
 // can measure, and the one whose failure is silent.
 //
-// `GET /api/evento/usuario/:id_usuario` answered any session until C5. It asks
-// about a *person*, not about the work, so the pair is `seguridad.ver` and not
-// `eventos.ver`: the Cliente role holds `eventos.ver`, and with the obvious gate
-// it could walk `/usuario/1` … `/usuario/20` and assemble each employee's
-// activity record. But it is also what the profile screen calls for the person
-// looking at it, so a plain gate would take every non-administrator's own
-// history away.
+// `GET /api/usuario/:id/eventos` answered any session until C5, at the address
+// `/api/evento/usuario/:id_usuario` it had until D1. It asks about a *person*,
+// not about the work, so the pair is `seguridad.ver` and not `eventos.ver`: the
+// Cliente role holds `eventos.ver`, and with the obvious gate it could walk
+// `/usuario/1` … `/usuario/20` and assemble each employee's activity record.
+// But it is also what the profile screen calls for the person looking at it, so
+// a plain gate would take every non-administrator's own history away.
 //
 // Hence `requireSelfOrPermission`, and hence this file. That middleware takes
 // the name of the route parameter as its **third argument, defaulting to
-// `"id"`** — while this route's parameter is `:id_usuario`. Omit it and the
-// ownership branch compares `undefined` against the caller's id, never matches,
-// and the gate quietly degrades to permission-only. It is not a hypothetical:
-// the middleware's own comment records that this shipped once on the bitácora
-// route, where "a user may review their own activity" described a 403 for as
-// long as the sentence existed.
+// `"id"`**. D1 renamed this route's parameter to `:id`, so the default is now
+// the correct one and the argument is gone — carry the old `"id_usuario"`
+// across with the line and the ownership branch compares `undefined` against
+// the caller's id, never matches, and the gate quietly degrades to
+// permission-only. It is not a hypothetical: the middleware's own comment
+// records that this shipped once on the bitácora route, where "a user may
+// review their own activity" described a 403 for as long as the sentence
+// existed. `bitacora.self.test.ts` is the twin of this file for that route.
 //
 // **Why nothing else catches it.** `routeGuards.test.ts` reads the pair off the
 // mounted chain and never sends a request, so the argument is invisible to it.
@@ -85,8 +87,10 @@ beforeEach(() => {
   );
 });
 
-const pedir = (id: number) =>
-  request(app).get(`/api/evento/usuario/${id}`).set("Cookie", COOKIE);
+/** The one place the address is written. */
+const direccion = (id: number | string) => `/api/usuario/${id}/eventos`;
+
+const pedir = (id: number | string) => request(app).get(direccion(id)).set("Cookie", COOKIE);
 
 describe("the incidents of one person", () => {
   it("lets somebody read their own history without the permission", async () => {
@@ -125,7 +129,7 @@ describe("the incidents of one person", () => {
   });
 
   it("refuses a session-less request before either branch", async () => {
-    const res = await request(app).get(`/api/evento/usuario/${YO}`);
+    const res = await request(app).get(direccion(YO));
 
     expect(res.status).toBe(401);
     expect(eventoFindAndCountAll).not.toHaveBeenCalled();
@@ -135,7 +139,7 @@ describe("the incidents of one person", () => {
     // `Number("abc")` is `NaN`, and `NaN === 7` is false — so this is a 403 and
     // not the neutral 500 the controller used to answer, because the gate now
     // stops it before Postgres is asked to cast it.
-    const res = await request(app).get("/api/evento/usuario/abc").set("Cookie", COOKIE);
+    const res = await pedir("abc");
 
     expect(res.status).toBe(403);
     expect(eventoFindAndCountAll).not.toHaveBeenCalled();

@@ -147,7 +147,7 @@ describe("the author of an inspection", () => {
 });
 
 describe("the author of a repair", () => {
-  it("is the session on PUT /evento/:id/resolver, which writes the repair inline", async () => {
+  it("is the session on POST /evento/:id/resolve, which writes the repair inline", async () => {
     // 342 of the 513 attributable repairs came in through this door, not
     // through POST /solucion — which is exactly why the backfill had to read
     // RESOLVE_EVENTO and why this path needed stamping too.

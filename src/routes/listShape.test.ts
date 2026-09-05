@@ -111,34 +111,34 @@ const exportsMontados = (): string[] => {
  * a handful of rows" is exactly the weak criterion this arc exists to remove,
  * and two of the five are not bounded at all: the profile screen and the staff
  * detail screen both compute a resolution percentage from the length of
- * `/evento/usuario/:id`, so a truncated list did not look truncated — it looked
+ * `/api/usuario/:id/eventos`, so a truncated list did not look truncated — it looked
  * like an appraisal.
  */
 const LISTADOS = [
   "/api/adss/",
-  "/api/adssposte/:id_poste",
   "/api/bitacora/",
-  "/api/bitacora/:id_usuario",
   "/api/ciudad/",
   "/api/evento/",
-  "/api/evento/poste/:id_poste",
-  "/api/evento/usuario/:id_usuario",
-  "/api/eventoObs/:id_evento",
+  "/api/evento/:id/obs",
+  "/api/evento/:id/revisiones",
   "/api/material/",
   "/api/obs/",
   "/api/poste/",
+  "/api/poste/:id/adss",
+  "/api/poste/:id/eventos",
   "/api/propietario/",
-  "/api/revision/:id_evento",
   "/api/rol/",
-  "/api/tipoObs/",
+  "/api/tipo-obs/",
   "/api/usuario/",
+  "/api/usuario/:id/bitacora",
+  "/api/usuario/:id/eventos",
 ];
 
 /** One row, answered as the object — and **404** when there is no row. */
 const DETALLES = [
   "/api/ciudad/:id",
   "/api/evento/:id",
-  "/api/generador/reportes/:id",
+  "/api/generator/reportes/:id",
   "/api/poste/:id",
   "/api/usuario/:id",
   "/api/usuario/user/:user",
@@ -148,37 +148,39 @@ const DETALLES = [
  * Neither a listing nor a detail: an object whose shape its own screen fixes.
  *
  * Each of these is exempt for a reason written in §3.3, and the two worth
- * repeating here are the ones a tidy-up would get wrong. `/solucion/evento/:id`
- * answers the object **or `null`**, and `null` is the ordinary case — an
- * unresolved incident; wrapping it would make `{data: null}`, which is truthy,
- * and **every pending incident would read as solved**. And `/generador/reportes`
- * pages by `offset` with `rows`, which its own client and a thousand lines of
- * its tests depend on.
+ * repeating here are the ones a tidy-up would get wrong.
+ * `/api/evento/:id/solucion` answers the object **or `null`**, and `null` is the
+ * ordinary case — an unresolved incident; wrapping it would make `{data: null}`,
+ * which is truthy, and **every pending incident would read as solved**. That one
+ * is also requested for real, by `solucion.evento.test.ts`: this file lists it
+ * and never asks for it, which left the address with no coverage at all until
+ * D1 moved it. And `/api/generator/reportes` pages by `offset` with `rows`,
+ * which its own client and a thousand lines of its tests depend on.
  */
 const AGREGADAS = [
   "/api/adss/stats",
-  "/api/bitacora/autores",
+  "/api/bitacora/authors",
   "/api/dashboard/",
-  "/api/evento/opciones",
+  "/api/evento/:id/solucion",
+  "/api/evento/options",
   "/api/files/broken-refs",
   "/api/files/entity-stats",
   "/api/files/orphans",
-  "/api/generador/catalogo",
-  "/api/generador/reportes",
+  "/api/generator/catalog",
+  "/api/generator/reportes",
   "/api/material/stats",
   "/api/obs/stats",
-  "/api/permisos/",
-  "/api/poste/opciones",
+  "/api/permiso/",
+  "/api/poste/options",
   "/api/propietario/stats",
   "/api/reporte/estado-red",
+  "/api/reporte/frecuencia-obs",
   "/api/reporte/general",
-  "/api/reporte/obs-frecuencia",
-  "/api/reporte/opciones",
+  "/api/reporte/options",
   "/api/reporte/recorrido",
-  "/api/reporte/tiempos-resumen",
+  "/api/reporte/resumen-tiempos",
   "/api/reporte/tramo",
-  "/api/solucion/evento/:id_evento",
-  "/api/tipoObs/stats",
+  "/api/tipo-obs/stats",
 ];
 
 /** Outside this document altogether: §2 stops at the authentication module. */
@@ -267,21 +269,21 @@ const sesionUpdate = vi.spyOn(SesionModel, "update");
 /** Every model a listing reads, by the address that reads it. */
 const MODELOS = {
   "/api/adss/": AdssModel,
-  "/api/adssposte/:id_poste": AdssPosteModel,
+  "/api/poste/:id/adss": AdssPosteModel,
   "/api/bitacora/": BitacoraModel,
-  "/api/bitacora/:id_usuario": BitacoraModel,
+  "/api/usuario/:id/bitacora": BitacoraModel,
   "/api/ciudad/": CiudadModel,
   "/api/evento/": EventoModel,
-  "/api/evento/poste/:id_poste": EventoModel,
-  "/api/evento/usuario/:id_usuario": EventoModel,
-  "/api/eventoObs/:id_evento": EventoObsModel,
+  "/api/poste/:id/eventos": EventoModel,
+  "/api/usuario/:id/eventos": EventoModel,
+  "/api/evento/:id/obs": EventoObsModel,
   "/api/material/": MaterialModel,
   "/api/obs/": ObsModel,
   "/api/poste/": PosteModel,
   "/api/propietario/": PropietarioModel,
-  "/api/revision/:id_evento": RevisionModel,
+  "/api/evento/:id/revisiones": RevisionModel,
   "/api/rol/": RolModel,
-  "/api/tipoObs/": TipoObsModel,
+  "/api/tipo-obs/": TipoObsModel,
   "/api/usuario/": UsuarioModel,
 } as const;
 
@@ -434,12 +436,16 @@ describe("the three details that used to answer 200 with nothing", () => {
  * segment of its path. A future endpoint that returns a file from some other
  * address is invisible to it. That is a real gap and the alternative is worse
  * — there is no way to ask a mounted handler what it will send — so the
- * convention is the contract: a download is called `/export`. §3.4 already
- * fixes that spelling in English; `POST /api/generador/exportar` predates it
- * and is the one the rename in D1 is for.
+ * convention is the contract: a download is called `/export`. §3.4 fixes that
+ * spelling in English, and until D1 the generator's own download was
+ * `POST /api/generador/exportar`: the oldest of the four, the one the other
+ * three were modelled on, and the only one this sweep could not see. It is the
+ * fourth entry below now, and it arrived here by being renamed rather than by
+ * anyone remembering to add it — which is the whole argument for sweeping.
  */
 const DESCARGAS = [
   "POST /api/evento/export",
+  "POST /api/generator/export",
   "POST /api/poste/export",
   "POST /api/usuario/export",
 ];
@@ -451,7 +457,7 @@ describe("the ledger of every download", () => {
 
     // Anti-vacuity: an empty capture would satisfy both directions below, and
     // this file has already been fooled once by exactly that.
-    expect(montadas.size).toBe(3);
+    expect(montadas.size).toBe(4);
 
     expect(
       [...montadas].filter((r) => !clasificadas.has(r)),
@@ -494,8 +500,48 @@ const MODELOS_DESCARGA = {
   "POST /api/usuario/export": UsuarioModel,
 } as const;
 
+/**
+ * The one download this file classifies and does not request, named rather than
+ * quietly missing.
+ *
+ * The other three are a listing turned into a file: the request below is the
+ * screen's own filters plus `?format=csv`, and the rows come from one model.
+ * The generator's export is a different animal — it takes a whole report
+ * configuration in the body, resolves it against the catalogue, and reads
+ * whatever roots that configuration names, so there is no single model to open
+ * `findAll` on and no meaningful request to make without inventing one. It is
+ * covered where that configuration is: `reporte.contract.test.ts` and the
+ * generator's own suite.
+ *
+ * It stays in `DESCARGAS` because the sweep above must keep seeing it. Dropping
+ * it from the ledger to avoid this exception is what would make the sweep
+ * silent again — which is the exact state D1 found it in, spelled `/exportar`.
+ */
+const SIN_PETICION = new Set(["POST /api/generator/export"]);
+
 describe("every download answers a file, and never an envelope", () => {
-  for (const entrada of DESCARGAS) {
+  it("requests every download it classifies, bar the one named exception", () => {
+    // Both directions, so the exception cannot grow by accident: an address
+    // added to `SIN_PETICION` that is not a download fails here too.
+    expect([...SIN_PETICION].filter((r) => !DESCARGAS.includes(r))).toEqual([]);
+    expect(
+      DESCARGAS.filter((r) => !SIN_PETICION.has(r) && !(r in MODELOS_DESCARGA)),
+      "esta descarga no se pide y no está en la lista de excepciones",
+    ).toEqual([]);
+    // 🔴 And the exception costs a line **here** as well, which is the point.
+    // Without this, a new `POST /api/<lo-que-sea>/export` joined the ledger by
+    // adding itself to `SIN_PETICION` — one line — and was then never requested:
+    // no `text/csv`, no `Content-Disposition`, no `no-store`, no CSRF barrier,
+    // no line in the audit log. Measured on a real route, and the whole api
+    // suite stayed green. Raising this number is a decision, and the sentence
+    // above says what it costs.
+    expect(
+      SIN_PETICION.size,
+      "sólo una descarga puede quedar sin pedirse, y su motivo está escrito arriba",
+    ).toBe(1);
+  });
+
+  for (const entrada of DESCARGAS.filter((r) => !SIN_PETICION.has(r))) {
     it(`${entrada}`, async () => {
       const ruta = entrada.split(" ")[1];
       // `findAll` is rejected for every listing model by the tripwire above,

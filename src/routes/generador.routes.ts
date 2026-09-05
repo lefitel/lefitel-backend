@@ -36,14 +36,14 @@ const router = Router();
 // by its owner — that is ownership, not a permission.
 //
 // Each budget goes **after** its permission gate, so a refusal spends nothing.
-router.get("/catalogo", requirePermission("generador", "ver"), getCatalogo);
+router.get("/catalog", requirePermission("generador", "ver"), getCatalogo);
 // Running a report is the only endpoint here that can hold a database
 // connection for seconds at a time, so it gets the tightest budget.
-router.post("/consulta", requirePermission("generador", "ver"), consultaLimiter, postConsulta);
-router.post("/conteo", requirePermission("generador", "ver"), conteoLimiter, postConteo);
+router.post("/query", requirePermission("generador", "ver"), consultaLimiter, postConsulta);
+router.post("/count", requirePermission("generador", "ver"), conteoLimiter, postConteo);
 // Building a file costs far more than answering a query, and only one runs at a
 // time, so its budget is a fraction of the query one.
-router.post("/exportar", requirePermission("generador", "ver"), exportLimiter, postExportar);
+router.post("/export", requirePermission("generador", "ver"), exportLimiter, postExportar);
 
 router.get("/reportes", requirePermission("generador", "ver"), getReportes);
 router.get("/reportes/:id", requirePermission("generador", "ver"), getReporte);
@@ -53,7 +53,7 @@ router.delete(
   "/reportes/:id", requirePermission("generador", "archivar"), writeLimiter, deleteReporte,
 );
 router.post(
-  "/reportes/:id/duplicar", requirePermission("generador", "crear"), writeLimiter, postDuplicar,
+  "/reportes/:id/duplicate", requirePermission("generador", "crear"), writeLimiter, postDuplicar,
 );
 
 export default router;

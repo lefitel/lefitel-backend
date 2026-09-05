@@ -196,7 +196,7 @@ export async function getCatalogo(req: Request, res: Response) {
 /**
  * What a single answer may weigh.
  *
- * `/exportar` refuses more than 200.000 cells and `/consulta` — the endpoint
+ * `/export` refuses more than 200.000 cells and `/query` — the endpoint
  * the screen actually uses — refused nothing: 50.000 rows × 60 columns is three
  * million cells, fifteen times the export cap, serialised by `res.json` into
  * one string that is held in memory twice while it is written. The limiter caps
@@ -277,7 +277,7 @@ export async function postConsulta(req: Request, res: Response) {
 /**
  * How many rows the report would return, and nothing else.
  *
- * Split from `/consulta` because the two are asked at completely different
+ * Split from `/query` because the two are asked at completely different
  * rates. A person wants to know that a filter leaves 118 rows and not 40.000
  * *while they are still typing it*, which is many times a minute — and asking
  * the full query that often would burn the 30-per-minute budget that exists to

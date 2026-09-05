@@ -318,8 +318,9 @@ const GATE_NOT_APPLICABLE = [
   // Logging in cannot require a permission: it is what produces one.
   "POST /api/login/",
   // Serves three screens at once, one of which is your own profile photograph.
-  // See upload.routes.ts.
-  "POST /api/upload/",
+  // See files.routes.ts, where the argument lives now: this was
+  // `POST /api/upload/` until D1, on a mount of its own.
+  "POST /api/files/",
 
   // ── The session endpoints ───────────────────────────────────────────────
   // Same reason for all four, and it is not "we did not get round to it":
@@ -535,7 +536,7 @@ const STEP_UP_GATED = [
   // usuario.routes.ts — eight.
   "POST /api/usuario/",
   "DELETE /api/usuario/:id",
-  "PATCH /api/usuario/:id/desarchivar",
+  "PATCH /api/usuario/:id/restore",
   // The one that was outside this list until an audit read its reason again.
   // See the paragraph above, and the rewritten comment beside the route.
   // Also one of the two mounts below carrying `exigeContrasena: true` since
@@ -558,9 +559,9 @@ const STEP_UP_GATED = [
   "POST /api/rol/",
   "PUT /api/rol/:id",
   "DELETE /api/rol/:id",
-  "PATCH /api/rol/:id/desarchivar",
+  "PATCH /api/rol/:id/restore",
   // permiso.routes.ts — one. The screen that edits who may do what.
-  "PUT /api/permisos/:id_rol",
+  "PUT /api/permiso/:id_rol",
   // auth.routes.ts — one of the two entries with no permission above them.
   // «Step-up. Solo filas propias» in §5 of the design, and until this task
   // only the second half was true: an audit closed every other session of an
@@ -727,7 +728,7 @@ const READ_GATE_NOT_APPLICABLE = [
   // Who you are and what you may do. Gating this would need a permission to
   // learn which permissions you hold, and it is what the frontend asks on every
   // reload before it knows what the account may do. Three lines stood here
-  // until `GET /api/login/` and `GET /api/permisos/mias` were retired: this
+  // until `GET /api/login/` and `GET /api/permiso/mias` were retired: this
   // endpoint replaced both of them, answering in one round trip what they
   // answered in two.
   "GET /api/auth/me",
@@ -801,16 +802,16 @@ describe("who may read data", () => {
  * duplicating is `crear` and not `editar`.
  */
 const GENERADOR_GATES: Record<string, string> = {
-  "GET /api/generador/catalogo": "generador.ver",
-  "POST /api/generador/consulta": "generador.ver",
-  "POST /api/generador/conteo": "generador.ver",
-  "POST /api/generador/exportar": "generador.ver",
-  "GET /api/generador/reportes": "generador.ver",
-  "GET /api/generador/reportes/:id": "generador.ver",
-  "POST /api/generador/reportes": "generador.crear",
-  "PUT /api/generador/reportes/:id": "generador.editar",
-  "DELETE /api/generador/reportes/:id": "generador.archivar",
-  "POST /api/generador/reportes/:id/duplicar": "generador.crear",
+  "GET /api/generator/catalog": "generador.ver",
+  "POST /api/generator/query": "generador.ver",
+  "POST /api/generator/count": "generador.ver",
+  "POST /api/generator/export": "generador.ver",
+  "GET /api/generator/reportes": "generador.ver",
+  "GET /api/generator/reportes/:id": "generador.ver",
+  "POST /api/generator/reportes": "generador.crear",
+  "PUT /api/generator/reportes/:id": "generador.editar",
+  "DELETE /api/generator/reportes/:id": "generador.archivar",
+  "POST /api/generator/reportes/:id/duplicate": "generador.crear",
 };
 
 /**
@@ -829,21 +830,21 @@ const GENERADOR_GATES: Record<string, string> = {
  * job anybody has.
  *
  * `POST /api/revision/` asked for `crear` until this list was written, while
- * `POST /api/evento/:id/resolver` two files over asked for `editar` for the same
+ * `POST /api/evento/:id/resolve` two files over asked for `editar` for the same
  * kind of act, and every button in the interface asked the browser for `editar`.
  * The interface and the server disagreed, and nothing here noticed.
  */
 const EVENTOS_GATES: Record<string, string> = {
   "POST /api/evento/": "eventos.crear",
   "PUT /api/evento/:id": "eventos.editar",
-  "POST /api/evento/:id/resolver": "eventos.editar",
-  "POST /api/evento/:id/reabrir": "eventos.editar",
+  "POST /api/evento/:id/resolve": "eventos.editar",
+  "POST /api/evento/:id/reopen": "eventos.editar",
   "DELETE /api/evento/:id": "eventos.archivar",
   // Missing until A1's audit went looking, while two comments in this file
   // claimed this table named every gated route it had. Unlisted, changing this
   // line to `eventos.ver` would let an account that may only look at incidents
   // unarchive any of them, with the suite green.
-  "PATCH /api/evento/:id/desarchivar": "eventos.archivar",
+  "PATCH /api/evento/:id/restore": "eventos.archivar",
   "POST /api/revision/": "eventos.editar",
   // The one read on this list, and the reason the read test above has an
   // exception list instead of nothing: it hands over every incident and every
@@ -855,7 +856,7 @@ const EVENTOS_GATES: Record<string, string> = {
   // The audit of 3 September caught it: re-gating this line to `seguridad.ver`
   // left 1.421 tests green. Now `MODULOS_TABULADOS` below holds this router to
   // completeness too, so the next one cannot repeat it.
-  "GET /api/evento/opciones": "eventos.ver",
+  "GET /api/evento/options": "eventos.ver",
   // The permission §6 assigns to the listing this export is built from, which
   // for poles and incidents is **stricter than the listing itself asks today**:
   // those two `GET /` carry no gate at all and sit in
@@ -877,10 +878,10 @@ const EVENTOS_GATES: Record<string, string> = {
   // `SEGURIDAD_GATES`.
   "GET /api/evento/": "eventos.ver",
   "GET /api/evento/:id": "eventos.ver",
-  "GET /api/evento/poste/:id_poste": "eventos.ver",
-  "GET /api/eventoObs/:id_evento": "eventos.ver",
-  "GET /api/revision/:id_evento": "eventos.ver",
-  "GET /api/solucion/evento/:id_evento": "eventos.ver",
+  "GET /api/poste/:id/eventos": "eventos.ver",
+  "GET /api/evento/:id/obs": "eventos.ver",
+  "GET /api/evento/:id/revisiones": "eventos.ver",
+  "GET /api/evento/:id/solucion": "eventos.ver",
 };
 
 /**
@@ -907,7 +908,7 @@ const PARAMETROS_GATES: Record<string, string> = {
   "GET /api/adss/stats": "parametros.ver",
   "GET /api/material/stats": "parametros.ver",
   "GET /api/obs/stats": "parametros.ver",
-  "GET /api/tipoObs/stats": "parametros.ver",
+  "GET /api/tipo-obs/stats": "parametros.ver",
 
   // ── Complete since C5, and that is a change of kind ──────────────────────
   // This table used to name the five `/stats` reads and nothing else, and said
@@ -923,31 +924,31 @@ const PARAMETROS_GATES: Record<string, string> = {
   "POST /api/adss/": "parametros.crear",
   "PUT /api/adss/:id": "parametros.editar",
   "DELETE /api/adss/:id": "parametros.archivar",
-  "PATCH /api/adss/:id/desarchivar": "parametros.archivar",
+  "PATCH /api/adss/:id/restore": "parametros.archivar",
 
   "GET /api/material/": "parametros.ver",
   "POST /api/material/": "parametros.crear",
   "PUT /api/material/:id": "parametros.editar",
   "DELETE /api/material/:id": "parametros.archivar",
-  "PATCH /api/material/:id/desarchivar": "parametros.archivar",
+  "PATCH /api/material/:id/restore": "parametros.archivar",
 
   "GET /api/obs/": "parametros.ver",
   "POST /api/obs/": "parametros.crear",
   "PUT /api/obs/:id": "parametros.editar",
   "DELETE /api/obs/:id": "parametros.archivar",
-  "PATCH /api/obs/:id/desarchivar": "parametros.archivar",
+  "PATCH /api/obs/:id/restore": "parametros.archivar",
 
-  "GET /api/tipoObs/": "parametros.ver",
-  "POST /api/tipoObs/": "parametros.crear",
-  "PUT /api/tipoObs/:id": "parametros.editar",
-  "DELETE /api/tipoObs/:id": "parametros.archivar",
-  "PATCH /api/tipoObs/:id/desarchivar": "parametros.archivar",
+  "GET /api/tipo-obs/": "parametros.ver",
+  "POST /api/tipo-obs/": "parametros.crear",
+  "PUT /api/tipo-obs/:id": "parametros.editar",
+  "DELETE /api/tipo-obs/:id": "parametros.archivar",
+  "PATCH /api/tipo-obs/:id/restore": "parametros.archivar",
 
   "GET /api/propietario/": "parametros.ver",
   "POST /api/propietario/": "parametros.crear",
   "PUT /api/propietario/:id": "parametros.editar",
   "DELETE /api/propietario/:id": "parametros.archivar",
-  "PATCH /api/propietario/:id/desarchivar": "parametros.archivar",
+  "PATCH /api/propietario/:id/restore": "parametros.archivar",
 };
 
 /**
@@ -964,7 +965,7 @@ const CIUDADES_GATES: Record<string, string> = {
   "POST /api/ciudad/": "ciudades.crear",
   "PUT /api/ciudad/:id": "ciudades.editar",
   "DELETE /api/ciudad/:id": "ciudades.archivar",
-  "PATCH /api/ciudad/:id/desarchivar": "ciudades.archivar",
+  "PATCH /api/ciudad/:id/restore": "ciudades.archivar",
 };
 
 /**
@@ -978,14 +979,14 @@ const CIUDADES_GATES: Record<string, string> = {
  *
  * The two reads on this router that carry no gate at all — `GET /`,
  * `/:id` — are named in `READ_GATE_NOT_APPLICABLE`, which is where an
- * ungated route's reason belongs. `/opciones` is the one gated read.
+ * ungated route's reason belongs. `/options` is the one gated read.
  */
 const POSTES_GATES: Record<string, string> = {
   "POST /api/poste/": "postes.crear",
   "PUT /api/poste/:id": "postes.editar",
   "DELETE /api/poste/:id": "postes.archivar",
-  "PATCH /api/poste/:id/desarchivar": "postes.archivar",
-  "GET /api/poste/opciones": "postes.ver",
+  "PATCH /api/poste/:id/restore": "postes.archivar",
+  "GET /api/poste/options": "postes.ver",
   // The permission §6 assigns to the listing this export is built from, which
   // for poles and incidents is **stricter than the listing itself asks today**:
   // those two `GET /` carry no gate at all and sit in
@@ -1004,7 +1005,7 @@ const POSTES_GATES: Record<string, string> = {
   // its own router, asking what the pole asks because that is what it is about.
   "GET /api/poste/": "postes.ver",
   "GET /api/poste/:id": "postes.ver",
-  "GET /api/adssposte/:id_poste": "postes.ver",
+  "GET /api/poste/:id/adss": "postes.ver",
 };
 
 /**
@@ -1016,13 +1017,13 @@ const POSTES_GATES: Record<string, string> = {
  * move to `GET` in C1 of the API standard; the method changes here with them.
  */
 const REPORTES_GATES: Record<string, string> = {
-  "GET /api/reporte/opciones": "reportes.ver",
+  "GET /api/reporte/options": "reportes.ver",
   "GET /api/reporte/general": "reportes.ver",
   "GET /api/reporte/tramo": "reportes.ver",
   "GET /api/reporte/recorrido": "reportes.ver",
   "GET /api/reporte/estado-red": "reportes.ver",
-  "GET /api/reporte/obs-frecuencia": "reportes.ver",
-  "GET /api/reporte/tiempos-resumen": "reportes.ver",
+  "GET /api/reporte/frecuencia-obs": "reportes.ver",
+  "GET /api/reporte/resumen-tiempos": "reportes.ver",
 };
 
 /**
@@ -1058,7 +1059,7 @@ const SEGURIDAD_GATES: Record<string, string> = {
   // they live behind the same screen.
   "POST /api/usuario/": "seguridad.crear",
   "DELETE /api/usuario/:id": "seguridad.archivar",
-  "PATCH /api/usuario/:id/desarchivar": "seguridad.archivar",
+  "PATCH /api/usuario/:id/restore": "seguridad.archivar",
   // `editar` and not `archivar`, and the reason is written beside the route:
   // lifting a lockout is the same kind of act as resetting a password, which is
   // the other way out of one. It is the one pair on this table that a reader
@@ -1106,11 +1107,18 @@ const SEGURIDAD_GATES: Record<string, string> = {
   //
   // 🔴 This table cannot see the half that breaks. It reads the pair off the
   // mounted chain and never sends a request, so the third argument of
-  // `requireSelfOrPermission` — the parameter name, which defaults to `"id"`
-  // while this route's is `:id_usuario` — is invisible here, and
+  // `requireSelfOrPermission` — the parameter name — is invisible here, and
   // `listShape.test.ts` mocks every permission to true so it passes either way.
   // `evento.self.test.ts` is the file that measures it.
-  "GET /api/evento/usuario/:id_usuario": "seguridad.ver",
+  //
+  // D1 turned that danger around and it is worth saying which way it points
+  // now: this route's parameter used to be `:id_usuario`, so the argument had
+  // to be passed; today the parameter is `:id` and the default is right, so the
+  // mistake is **carrying the old argument across** rather than omitting it.
+  // Either way the symptom is the same and it is silent — the ownership branch
+  // compares `undefined`, everyone without the module loses their own history,
+  // and the profile screen prints "Eventos atendidos: 0".
+  "GET /api/usuario/:id/eventos": "seguridad.ver",
 };
 
 /**
@@ -1122,7 +1130,7 @@ const SEGURIDAD_GATES: Record<string, string> = {
  * thing this table protects — a single mistyped module name here would quietly
  * merge the two, and every other test in the repository would go on passing.
  *
- * The matrix editor is the sharpest entry. `PUT /api/permisos/:id_rol` writes
+ * The matrix editor is the sharpest entry. `PUT /api/permiso/:id_rol` writes
  * who may do what for the role it names — `putPermisos` refuses your own role
  * with a 409, so the one thing it cannot do is promote the caller directly. What
  * it can do is grant those cells to some other role, and `roles.editar` is the
@@ -1141,9 +1149,9 @@ const ROLES_GATES: Record<string, string> = {
   "POST /api/rol/": "roles.crear",
   "PUT /api/rol/:id": "roles.editar",
   "DELETE /api/rol/:id": "roles.archivar",
-  "PATCH /api/rol/:id/desarchivar": "roles.archivar",
-  "GET /api/permisos/": "roles.ver",
-  "PUT /api/permisos/:id_rol": "roles.editar",
+  "PATCH /api/rol/:id/restore": "roles.archivar",
+  "GET /api/permiso/": "roles.ver",
+  "PUT /api/permiso/:id_rol": "roles.editar",
 };
 
 /**
@@ -1158,7 +1166,7 @@ const ROLES_GATES: Record<string, string> = {
  * set of people who can read the audit log would quietly have become a different
  * set.
  *
- * `GET /api/bitacora/:id_usuario` is an ownership route, and it sits here on the
+ * `GET /api/usuario/:id/bitacora` is an ownership route, and it sits here on the
  * same footing as the rest: the pair is what a *stranger* needs. The other half
  * of that gate — "or it is your own row" — is ownership rather than a checkbox,
  * and is asserted in `requirePermission.test.ts`, where a request can actually be
@@ -1166,8 +1174,8 @@ const ROLES_GATES: Record<string, string> = {
  */
 const BITACORA_GATES: Record<string, string> = {
   "GET /api/bitacora/": "bitacora.ver",
-  "GET /api/bitacora/autores": "bitacora.ver",
-  "GET /api/bitacora/:id_usuario": "bitacora.ver",
+  "GET /api/bitacora/authors": "bitacora.ver",
+  "GET /api/usuario/:id/bitacora": "bitacora.ver",
 };
 
 /**
@@ -1183,24 +1191,72 @@ const BITACORA_GATES: Record<string, string> = {
  * `EVENTOS_GATES` also names `POST /api/revision/` and `GET /api/dashboard/`,
  * which live on other routers; the check below is per router prefix, so those
  * two are simply not held to completeness.
+ *
+ * 🔴 **A name here that no longer names a mount takes its whole router out of
+ * the completeness check, in silence.** This is not hypothetical and it is not
+ * rare: D1 renamed `/api/permisos` to `/api/permiso` and `/api/tipoObs` to
+ * `/api/tipo-obs`, and either would have dropped out of the alternation while
+ * the suite stayed green. Worse, it fails in the order that hides it — the
+ * per-router tables *do* go red, whoever fixes them is led straight to the half
+ * that does not matter, and the list here keeps the old spelling. So the list
+ * is a named array now and `every prefix here is really mounted` below is what
+ * makes a rename loud. Three names left with D1: `adssposte`, `eventoObs` and
+ * `solucion` are not mounts any more.
  */
-const MODULOS_TABULADOS =
-  /^\/api\/(usuario|rol|permisos|poste|evento|reporte|bitacora|adss|adssposte|ciudad|eventoObs|material|obs|propietario|revision|solucion|tipoObs)\b/;
+const TABULADOS = [
+  "usuario", "rol", "permiso", "poste", "evento", "reporte", "bitacora",
+  "adss", "ciudad", "material", "obs", "propietario", "revision", "tipo-obs",
+] as const;
+
+const MODULOS_TABULADOS = new RegExp(`^\\/api\\/(${TABULADOS.join("|")})\\b`);
+
+/** The nine tables, kept as a list so they can be counted as well as merged. */
+const TABLAS = [
+  ["GENERADOR_GATES", GENERADOR_GATES],
+  ["EVENTOS_GATES", EVENTOS_GATES],
+  ["PARAMETROS_GATES", PARAMETROS_GATES],
+  ["CIUDADES_GATES", CIUDADES_GATES],
+  ["POSTES_GATES", POSTES_GATES],
+  ["REPORTES_GATES", REPORTES_GATES],
+  ["SEGURIDAD_GATES", SEGURIDAD_GATES],
+  ["ROLES_GATES", ROLES_GATES],
+  ["BITACORA_GATES", BITACORA_GATES],
+] as const;
+
+const TODAS_LAS_PUERTAS = Object.assign({}, ...TABLAS.map(([, t]) => t)) as Record<string, string>;
 
 describe("which permission each gate asks for", () => {
+  it("declares each route in one table only", () => {
+    // 🔴 The nine tables are merged with a spread, and a key written in two of
+    // them is not an error — the last one silently wins and the other entry
+    // asserts nothing for ever. It is not a theoretical risk: D1 moved seven
+    // listings between routers, and `GET /api/usuario/:id/bitacora` is exactly
+    // the kind of address somebody writes into `SEGURIDAD_GATES` because of its
+    // mount and into `BITACORA_GATES` because of its subject, with a different
+    // pair each time. `listShape.test.ts` has a "keeps the three groups apart";
+    // this file had no equivalent.
+    const vistas = new Map<string, string>();
+    const repetidas: string[] = [];
+    for (const [nombre, tabla] of TABLAS) {
+      for (const clave of Object.keys(tabla)) {
+        const antes = vistas.get(clave);
+        if (antes) repetidas.push(`${clave} → ${antes} y ${nombre}`);
+        else vistas.set(clave, nombre);
+      }
+    }
+    expect(repetidas, `rutas declaradas en dos tablas:\n  ${repetidas.join("\n  ")}`).toEqual([]);
+    // A second assertion stood here, comparing the size of the merged object
+    // against the sum of the nine tables. It was true by construction —
+    // `TODAS_LAS_PUERTAS` is built *from* `TABLAS`, so it could only fail when
+    // the loop above had already failed — and its comment claimed to catch a
+    // table added to the merge and forgotten, which cannot happen when there is
+    // one list and no second merge. Removed rather than reworded: an assertion
+    // that cannot fail is the thing this file warns about elsewhere.
+  });
+
   it("asks for the one the route is about, not merely for one", () => {
     const wrong: string[] = [];
-    for (const [route, expected] of Object.entries({
-      ...GENERADOR_GATES,
-      ...EVENTOS_GATES,
-      ...PARAMETROS_GATES,
-      ...CIUDADES_GATES,
-      ...POSTES_GATES,
-      ...REPORTES_GATES,
-      ...SEGURIDAD_GATES,
-      ...ROLES_GATES,
-      ...BITACORA_GATES,
-    })) {
+    for (const [route, expected] of Object.entries(TODAS_LAS_PUERTAS)) {
       const [method, path] = route.split(" ");
       const found = routes.find((r) => r.method === method && r.path === path);
       if (!found) {
@@ -1244,8 +1300,17 @@ describe("which permission each gate asks for", () => {
       ...Object.keys(REPORTES_GATES),
       ...Object.keys(BITACORA_GATES),
     ]);
-    const faltan = routes
-      .filter((r) => MODULOS_TABULADOS.test(r.path))
+    const alcanzadas = routes.filter((r) => MODULOS_TABULADOS.test(r.path));
+    // Anti-vacuity, and the specific vacuity this check is prone to: the filter
+    // has no floor, so a router that stops matching the expression leaves the
+    // set without any assertion noticing. Every name dropping out at once would
+    // otherwise leave `faltan` empty and this test green over nothing.
+    expect(
+      alcanzadas.length,
+      "el filtro de routers tabulados dejó de alcanzar casi nada",
+    ).toBeGreaterThan(60);
+
+    const faltan = alcanzadas
       .filter((r) => r.chain.some((name) => GATES.includes(name)))
       .map((r) => `${r.method} ${r.path}`)
       .filter((r) => !tabuladas.has(r))
@@ -1254,6 +1319,53 @@ describe("which permission each gate asks for", () => {
     expect(
       faltan,
       `rutas con puerta y sin permiso declarado; añádelas a la tabla de su router:\n  ${faltan.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  it("every prefix it claims to tabulate is really mounted, and every mounted one is claimed", () => {
+    // The half that makes the bound above worth having. A renamed mount does not
+    // shrink the set to nothing — it removes one router — so a floor alone would
+    // not see it. This names each prefix and asks whether anything answers there.
+    const huerfanos = TABULADOS.filter(
+      (nombre) => !routes.some((r) => r.path.startsWith(`/api/${nombre}/`) || r.path === `/api/${nombre}`),
+    );
+
+    expect(
+      huerfanos,
+      `estos prefijos ya no son montajes, así que su router salió de la comprobación de completitud sin avisar: ${huerfanos.join(", ")}`,
+    ).toEqual([]);
+
+    // 🔴 And the direction that was missing, which is the one that costs. With
+    // only the check above, deleting two names from `TABULADOS` left twenty-seven
+    // routes out of the completeness check and every test in this file green —
+    // measured, not imagined: a new `GET /api/usuario/:id/nuevo-listado` gated
+    // with the *bitácora* module then passed unnoticed. The floor of sixty did
+    // not bite either, because sixty-three remained.
+    //
+    // So every mounted prefix is either tabulated or excused in writing. The
+    // excuses are few and each one is a sentence somebody has to defend.
+    const SIN_TABULAR: Record<string, string> = {
+      auth: "el módulo de autenticación, que §2 deja fuera de este documento",
+      login: "ídem",
+      generator: "sus puertas están en GENERADOR_GATES, pero el router no se somete a completitud: es el único cuyo vocabulario de permisos vive en el propio generador",
+      dashboard: "una sola ruta, gateada, y §9 la deja anotada como pendiente de acotar",
+      files: "sus seis puertas están en el propio fichero y una ruta es excepción declarada (§3.7)",
+    };
+    const montados = [...new Set(routes.map((r) => r.path.split("/")[2]).filter(Boolean))];
+    const sinExcusa = montados
+      .filter((p) => !(TABULADOS as readonly string[]).includes(p) && !(p in SIN_TABULAR))
+      .sort();
+
+    expect(
+      sinExcusa,
+      `estos montajes no están tabulados ni excusados; una ruta con puerta añadida ahí no la vería nadie:\n  ${sinExcusa.join("\n  ")}`,
+    ).toEqual([]);
+
+    // Y las excusas tampoco crecen solas: una que ya no nombre un montaje sobra.
+    const excusasMuertas = Object.keys(SIN_TABULAR).filter((p) => !montados.includes(p));
+    expect(
+      excusasMuertas,
+      `excusas de routers que ya no existen: ${excusasMuertas.join(", ")}`,
     ).toEqual([]);
   });
 
@@ -1354,34 +1466,34 @@ describe("los cubos por persona de limiters.ts", () => {
   // del cubo. Exacta en las dos direcciones — que falte un informe es un
   // informe sin tope; que sobre una ruta es una ruta pagando un presupuesto
   // que no es el suyo.
-  it("el cubo de consultas cubre /consulta y los seis informes fijos, y nada más", () => {
+  it("el cubo de consultas cubre /query y los seis informes fijos, y nada más", () => {
     expect(rutasCon(consultaLimiter)).toEqual([
       "GET /api/reporte/estado-red",
+      "GET /api/reporte/frecuencia-obs",
       "GET /api/reporte/general",
-      "GET /api/reporte/obs-frecuencia",
       "GET /api/reporte/recorrido",
-      "GET /api/reporte/tiempos-resumen",
+      "GET /api/reporte/resumen-tiempos",
       "GET /api/reporte/tramo",
-      "POST /api/generador/consulta",
+      "POST /api/generator/query",
     ]);
   });
 
   it("el cubo de exportación cubre las cuatro descargas, cada una por su nombre", () => {
     expect(rutasCon(exportLimiter)).toEqual([
       "POST /api/evento/export",
-      "POST /api/generador/exportar",
+      "POST /api/generator/export",
       "POST /api/poste/export",
       "POST /api/usuario/export",
     ]);
   });
 
   it("el de conteo y el de escritura se quedan en el generador", () => {
-    expect(rutasCon(conteoLimiter)).toEqual(["POST /api/generador/conteo"]);
+    expect(rutasCon(conteoLimiter)).toEqual(["POST /api/generator/count"]);
     expect(rutasCon(writeLimiter)).toEqual([
-      "DELETE /api/generador/reportes/:id",
-      "POST /api/generador/reportes",
-      "POST /api/generador/reportes/:id/duplicar",
-      "PUT /api/generador/reportes/:id",
+      "DELETE /api/generator/reportes/:id",
+      "POST /api/generator/reportes",
+      "POST /api/generator/reportes/:id/duplicate",
+      "PUT /api/generator/reportes/:id",
     ]);
   });
 
@@ -1400,7 +1512,7 @@ describe("los cubos por persona de limiters.ts", () => {
     }
   });
 
-  // Dos lecturas caras que se quedan SIN cubo a propósito. `/opciones` se pide
+  // Dos lecturas caras que se quedan SIN cubo a propósito. `/options` se pide
   // una vez por visita a cada pestaña de informes, y medirla haría que cambiar
   // de pestaña gastara el presupuesto de los informes. El dashboard devuelve el
   // registro entero sin filtro ni límite y es la lectura más pesada sin medir
@@ -1409,8 +1521,8 @@ describe("los cubos por persona de limiters.ts", () => {
   // en el generador, y un cubo propio es un número nuevo que merece su propia
   // decisión. Está apuntado en el §9 del spec. Que cambiar esto sea una
   // decisión y no un accidente.
-  it("deja fuera, a propósito, /reporte/opciones y el dashboard", () => {
-    for (const ruta of ["GET /api/reporte/opciones", "GET /api/dashboard/"]) {
+  it("deja fuera, a propósito, /reporte/options y el dashboard", () => {
+    for (const ruta of ["GET /api/reporte/options", "GET /api/dashboard/"]) {
       const r = routes.find((x) => `${x.method} ${x.path}` === ruta);
       expect(r, `${ruta} ya no existe`).toBeDefined();
       expect(r?.handles.some((h) => CUBOS.includes(h as never)), `${ruta} lleva un cubo`).toBe(false);
@@ -1565,7 +1677,7 @@ const STEP_UP_OPTIONS: Record<string, OpcionesGate> = {
   // siempre, se haya entrado como se haya entrado. Once monturas.
   "POST /api/usuario/": FACTOR_Y_CONTRASENA,
   "DELETE /api/usuario/:id": FACTOR_Y_CONTRASENA,
-  "PATCH /api/usuario/:id/desarchivar": FACTOR_Y_CONTRASENA,
+  "PATCH /api/usuario/:id/restore": FACTOR_Y_CONTRASENA,
   "PATCH /api/usuario/:id/desbloquear": FACTOR_Y_CONTRASENA,
   "PUT /api/usuario/:id": FACTOR_Y_CONTRASENA,
   "PUT /api/usuario/username/:id": FACTOR_Y_CONTRASENA,
@@ -1574,8 +1686,8 @@ const STEP_UP_OPTIONS: Record<string, OpcionesGate> = {
   "POST /api/rol/": FACTOR_Y_CONTRASENA,
   "PUT /api/rol/:id": FACTOR_Y_CONTRASENA,
   "DELETE /api/rol/:id": FACTOR_Y_CONTRASENA,
-  "PATCH /api/rol/:id/desarchivar": FACTOR_Y_CONTRASENA,
-  "PUT /api/permisos/:id_rol": FACTOR_Y_CONTRASENA,
+  "PATCH /api/rol/:id/restore": FACTOR_Y_CONTRASENA,
+  "PUT /api/permiso/:id_rol": FACTOR_Y_CONTRASENA,
   // ── Las dos que se quedan sólo con el factor, y por qué. Cerrar otra sesión
   // propia es una operación sobre la sesión, no sobre la cuenta; y el correo
   // es la puerta por la que `onboarding` sale de `onboarding`.
@@ -1635,7 +1747,21 @@ describe("which options each step-up gate was mounted with", () => {
     // here is narrower — the three routers that mint accounts, hand out roles
     // and rewrite the matrix — and reusing the wider regex would demand a
     // password on every pole edit, which is not what D6 decided.
-    const ADMINISTRATIVOS = /^\/api\/(usuario|rol|permisos)\b/;
+    //
+    // 🔴 **A name here that stops naming a mount takes its router out of D6, and
+    // the count below would not notice.** D1 renamed `/api/permisos` to
+    // `/api/permiso`: with the old spelling left in place, `PUT /api/permiso/:id_rol`
+    // — the write that rewrites the permission matrix of every role — would
+    // simply not be in `escrituras`, and the floor of ten would still be met by
+    // the twelve that remain. So the prefixes are named and checked against the
+    // mounted table before they are used.
+    const PREFIJOS = ["usuario", "rol", "permiso"] as const;
+    const sinMontar = PREFIJOS.filter((p) => !routes.some((r) => r.path.startsWith(`/api/${p}/`)));
+    expect(
+      sinMontar,
+      `estos routers salieron de la exigencia de contraseña de D6 sin avisar: ${sinMontar.join(", ")}`,
+    ).toEqual([]);
+    const ADMINISTRATIVOS = new RegExp(`^\\/api\\/(${PREFIJOS.join("|")})\\b`);
     /**
      * The one route on these three routers whose verb is a write and whose
      * effect is not.

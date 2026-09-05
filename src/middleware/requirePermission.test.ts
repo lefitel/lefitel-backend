@@ -166,7 +166,7 @@ describe("requireSelfOrPermission", () => {
   });
 
   it("reads the parameter the route actually declared", async () => {
-    // The bitácora route calls it `:id_usuario`. The previous middleware read
+    // the bitácora route called it `:id_usuario` until D1. The previous middleware read
     // "id" unconditionally, compared undefined to the caller's id, and so
     // answered 403 to a user asking for their own activity — while the comment
     // above it promised the opposite.

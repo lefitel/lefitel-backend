@@ -14,7 +14,7 @@ const router = Router();
 // Routes
 router.post("/", requirePermission("parametros", "crear"), createAdss);
 router.put("/:id", requirePermission("parametros", "editar"), updateAdss);
-router.patch("/:id/desarchivar", requirePermission("parametros", "archivar"), desarchivarAdss);
+router.patch("/:id/restore", requirePermission("parametros", "archivar"), desarchivarAdss);
 router.get("/stats", requirePermission("parametros", "ver"), getAdssStats);
 router.get("/", requirePermission("parametros", "ver"), getAdss);
 router.delete("/:id", requirePermission("parametros", "archivar"), deleteAdss);

@@ -3,7 +3,7 @@
 // There were four readers before this, none of them agreeing, and two of them
 // answering a **500** to a request a stranger can send. Those two are the first
 // tests below, and they are not hypothetical: `?limit=-5` on
-// `GET /api/bitacora/:id_usuario` is reachable by any live session, since that
+// `GET /api/usuario/:id/bitacora` is reachable by any live session, since that
 // route is gated by `requireSelfOrPermission` — anybody may read their own log.
 //
 // The rest of the file is about the value that must never be silently replaced

@@ -625,10 +625,15 @@ Todo el diseño es una vista de equipo. Nada dice qué le toca o qué ha hecho *
 la única pregunta que un técnico trae al abrir la app. Y está todo listo, con los permisos ya
 resueltos:
 
-- `GET /api/bitacora/:id_usuario` está protegido por
-  `requireSelfOrPermission("bitacora","ver","id_usuario")` (`api/src/routes/bitacora.routes.ts:19`):
+- `GET /api/usuario/:id/bitacora` está protegido por
+  `requireSelfOrPermission("bitacora","ver")` (`api/src/routes/usuario.routes.ts`):
   **cualquiera puede leer su propia actividad sin necesitar `bitacora.ver`**.
-- `GET /api/evento/usuario/:id_usuario` existe (`api/src/routes/evento.routes.ts:25`).
+  *(D1, 2026-09-05: la ruta era `GET /api/bitacora/:id_usuario` y el middleware
+  llevaba un tercer argumento nombrando ese parámetro; al mudarse bajo
+  `/api/usuario/:id` el valor por omisión pasó a ser el correcto, así que hoy
+  poner el argumento es lo que rompe la rama de propiedad.)*
+- `GET /api/usuario/:id/eventos` existe (`api/src/routes/usuario.routes.ts`), con
+  la misma puerta y el mismo aviso.
 - `logAction` ya registra `ADD_REVISION`, `RESOLVE_EVENTO` y `CREATE_EVENTO` con severidad, y la
   Bitácora ya tiene etiquetas y colores para todas (`web/src/constants/bitacora.ts`).
 

@@ -48,7 +48,7 @@ router.put("/:id", requirePermission("roles", "editar"), conContrasena(), update
 router.get("/", requirePermission("roles", "ver"), getRol);
 router.delete("/:id", requirePermission("roles", "archivar"), conContrasena(), deleteRol);
 router.patch(
-  "/:id/desarchivar",
+  "/:id/restore",
   requirePermission("roles", "archivar"),
   conContrasena(),
   desarchivarRol,

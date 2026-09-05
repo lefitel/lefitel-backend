@@ -1,7 +1,7 @@
 // Whether an event is resolved is not a field on the edit form.
 //
 // `state` is the flag that says "this incident is closed", and the only two
-// operations entitled to move it are `/resolver` and `/reabrir`, because they
+// operations entitled to move it are `/resolve` and `/reopen`, because they
 // are the ones that keep the `solucions` row in step with it. `updateEvento`
 // used to spread the whole request body into `set`, so a PUT could move it too
 // — with nothing on the other side creating or destroying the solution.

@@ -11,12 +11,12 @@ const eventoObsLog = log("eventoObs");
 const handler = makeHandler(eventoObsLog);
 
 export const getEventoObs = handler("getEventoObs", async (req: Request, res: Response) => {
-  const { id_evento } = req.params;
+  const { id } = req.params;
   const paginacion = leerPaginacion(req.query);
   if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
   const listado = await listar(EventoObsModel, {
-    where: { id_evento },
+    where: { id_evento: id },
     order: [["id", "DESC"]],
     // This feeds the event detail screen's observation chips. Sending the name
     // without `criticality` is why that screen showed no severity at all: you

@@ -1,4 +1,4 @@
-// The budget on `POST /api/upload/`.
+// The budget on `POST /api/files/`.
 //
 // That endpoint is deliberately outside the permission matrix, and its router
 // holds the argument: it serves an event photograph, a pole photograph and the

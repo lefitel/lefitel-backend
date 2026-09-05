@@ -12,7 +12,7 @@ import { QueryInterface, Op } from "sequelize";
 // so the Seguridad screen has been showing the administrator eight ticked boxes
 // that grant nothing — and, worse, offering them to be ticked for other roles.
 // Left in place they are a permission waiting to happen: the day `archivos`
-// gains a `crear` to close `POST /api/upload`, whatever was ticked here starts
+// gains a `crear` to close `POST /api/files`, whatever was ticked here starts
 // meaning yes, and nobody will remember ticking it.
 //
 // Two things stop them coming straight back, and both live in the same commit as

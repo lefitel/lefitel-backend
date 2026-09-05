@@ -1,13 +1,13 @@
 // The dropdown lists each form needs, one response per form.
 //
-// Three endpoints and not one `/api/catalogo`, and §5.1 of the API standard spec
+// Three endpoints and not one `/api/catalog`, and §5.1 of the API standard spec
 // explains why at length: `routeGuards.test.ts` decides whether a route is
 // protected by reading a stamp of a single `modulo.accion` pair, so a single
 // address serving eight blocks could not declare a permission at all. The real
 // case was never "one catalogue" — it was "forms need lists", and that is one
 // address per form.
 //
-// Three and not four. §5 first planned a `GET /api/usuario/opciones` serving
+// Three and not four. §5 first planned a `GET /api/usuario/options` serving
 // the role list under `roles:editar`, and the audit of 3 September took it off
 // the table: `GET /api/rol/` already serves exactly `{id, name}` to the same
 // screen, and gating the same list at a second address under a *different*
@@ -174,7 +174,7 @@ async function tramosEntre(ciudadesVivas: Set<number>) {
  *     behind `postes.editar` alone. A role with those two and without
  *     `postes.ver` used to fill the form and now cannot;
  *   - **`EventoSheet` opened from the pole screens**, for the same shape of
- *     reason against `/api/evento/opciones`.
+ *     reason against `/api/evento/options`.
  *
  * No seeded role is in either position — all three have `ver` wherever they have
  * `editar`. And the seed is proof for now, which is worth stating precisely

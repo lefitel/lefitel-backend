@@ -261,15 +261,30 @@ Postgres: la ruta nueva disparando la fuga que §3.5 arregla.
 **La justificación de esta sección cambia cuando se lee junto con §7.** La
 primera versión la apoyaba en que `GET /api/revision/5` devuelve las revisiones
 *del evento* 5 mientras `DELETE /api/revision/5` borra *la revisión* 5. Cierto —
-pero §7 borra ese `DELETE` y ese `PUT` por no tener cliente, así que para cuando
-llegue D1, el renombrado, la trampa ya no existe. Lo que queda en pie es más
+pero §7 borró ese `DELETE` y ese `PUT` por no tener cliente, así que para cuando
+llegó D1, el renombrado, la trampa ya no existía. Lo que queda en pie es más
 sencillo y menos dramático: siete direcciones que se leen solas frente a cuatro
 convenciones que hay que memorizar.
 
-Desaparecen **tres** montajes, no dos: `/api/adssposte` y `/api/eventoObs` dejan
-de ser recursos raíz, y `/api/solucion` se queda sin rutas al mover la suya y
-borrar las otras cuatro (§7). De 23 montajes a 20. Los modelos siguen todos en
-pie: los usan otros controladores.
+Desaparecen **cuatro** montajes y no tres. Los tres que decía esta sección
+—`/api/adssposte` y `/api/eventoObs` dejan de ser recursos raíz, y
+`/api/solucion` se queda sin rutas al mover la suya y borrar las otras cuatro
+(§7)— más `/api/upload`, que era un verbo montado como recurso raíz: guardar un
+fichero es `POST /api/files/`, en el router que ya los gestiona (§3.4).
+
+**Y las cifras que traía eran otras.** Medido sobre `app.ts` al cerrar D1: **17
+montajes fuera de autenticación**, 24 contando los de `/api/auth` y `/api/login`.
+La frase «de 23 a 20» describía un árbol de hace dos semanas. Los modelos siguen
+todos en pie: los usan otros controladores.
+
+✅ **Hecho en D1.** Las siete direcciones son las de la columna «Después», con el
+parámetro renombrado a `:id` en las siete y en sus controladores. Dos de ellas
+—la bitácora de una persona y sus incidencias— pasan por `requireSelfOrPermission`,
+cuyo tercer argumento nombra el parámetro: al moverlas, `evento.self.test.ts` y
+`bitacora.self.test.ts` son lo único capaz de ver que la rama de propiedad se
+rompe, porque leer la cadena de middlewares no manda ninguna petición y las demás
+suites simulan el permiso a `true`. La segunda no existía y se escribió primero,
+contra la dirección vieja.
 
 ### 3.3 Una URL, una forma
 
@@ -300,17 +315,17 @@ nadie las envuelva por parecerse a un listado:
 
 | Ruta | Por qué no es un listado |
 |---|---|
-| `GET /api/solucion/evento/:id_evento` | Relación 1:1. Devuelve el objeto **o `null`**, y `null` es el caso normal — un evento sin resolver. Envolverla haría `{data: null}`, que es *truthy*, y **todo evento pendiente aparecería como resuelto**. La dirección de esta fila decía `GET /api/evento/:id/solucion`, que es la que tendrá después de D1 y no la que tiene: hoy el módulo está montado aparte y `listShape.test.ts` la clasifica con su nombre real |
+| `GET /api/evento/:id/solucion` | Relación 1:1. Devuelve el objeto **o `null`**, y `null` es el caso normal — un evento sin resolver. Envolverla haría `{data: null}`, que es *truthy*, y **todo evento pendiente aparecería como resuelto**. Ésta es ya la dirección de D1; era `/api/solucion/evento/:id_evento`, con su propio montaje. `solucion.evento.test.ts` afirma el `null` **en el cable** (`res.text === "null"`), no sólo tras parsearlo: `{"data":null}` también se lee como algo falso en una aserción descuidada, y ésta es la única ruta donde esa distinción decide si una incidencia abierta se pinta como arreglada |
 | `GET /api/dashboard/` | Dos colecciones nombradas en un objeto |
-| `GET /api/permisos/` | Cuatro colecciones paralelas |
-| los tres `/opciones` (§5) | Varias colecciones nombradas en un objeto, cada una con su proyección — la misma forma que `/api/permisos/`. Faltaban en esta tabla y ya estaban montados |
-| `GET /api/bitacora/autores` (B2) | Una lista de `{id, name, lastname, deletedAt}`; sin sobre, como los bloques de opciones. `deletedAt` porque los archivados van en la lista y la pantalla los marca |
+| `GET /api/permiso/` | Cuatro colecciones paralelas |
+| los tres `/options` (§5) | Varias colecciones nombradas en un objeto, cada una con su proyección — la misma forma que `/api/permiso/`. Faltaban en esta tabla y ya estaban montados |
+| `GET /api/bitacora/authors` (B2) | Una lista de `{id, name, lastname, deletedAt}`; sin sobre, como los bloques de opciones. `deletedAt` porque los archivados van en la lista y la pantalla los marca |
 | `GET /api/files/orphans`, `/broken-refs` | Diagnóstico de la pantalla de Archivos; su forma la fija esa pantalla |
-| los cinco `/stats` | Un resumen. **No es el mismo en los cinco**: adss, material y tipoObs devuelven `{ total, mostUsed, empty }`; obs devuelve `{ total, unclassified, critical }` y propietario `{ total, mostPostes, mostPendientes }`. La segunda versión afirmaba uno solo |
+| los cinco `/stats` | Un resumen. **No es el mismo en los cinco**: adss, material y tipo-obs devuelven `{ total, mostUsed, empty }`; obs devuelve `{ total, unclassified, critical }` y propietario `{ total, mostPostes, mostPendientes }`. La segunda versión afirmaba uno solo |
 | `GET /api/files/entity-stats` | Un objeto de objetos |
-| `GET /api/generador/catalogo` | Un árbol |
+| `GET /api/generator/catalog` | Un árbol |
 | los seis de `/api/reporte/` | Su forma la fija la pantalla de informes y no cambia en este arco. **Tres de los seis sí devuelven filas de `eventos`** con sus includes —general, tramo y recorrido—, así que la justificación de la segunda versión («filas calculadas») era falsa para la mitad. Se quedan sin sobre porque ninguno pagina; acotarlos es trabajo aparte (§9, familia E) |
-| `GET /api/generador/reportes` | Pagina por `offset`, y su cliente también. Conserva `rows`/`offset` |
+| `GET /api/generator/reportes` | Pagina por `offset`, y su cliente también. Conserva `rows`/`offset` |
 
 **Cuarta categoría: la descarga.** Un `POST` cuya respuesta es un fichero. No
 existía cuando se escribió esta sección porque no había ninguna fuera del
@@ -449,7 +464,7 @@ cable de fibra que no traduce a nada.
 **La regla, entera y sin desempate (decisión del 3 de septiembre): los
 sustantivos del negocio van en español; los verbos y las operaciones van en
 inglés. Sin excepciones en ninguno de los dos lados.** `/api/evento/5/reopen`,
-`/api/poste/5/restore`, `/api/generador/query`.
+`/api/poste/5/restore`, `/api/generator/query`.
 
 La segunda versión tenía aquí un «criterio de desempate» —«si el cliente usa la
 palabra cuando habla del sistema, va en español»— y la auditoría demostró que
@@ -486,10 +501,39 @@ en singular (`export`, `count`, `query`).
 | `/obs-frecuencia` | `/frecuencia-obs` | Sigue en español, con el orden correcto |
 | `/tipoObs` | `/tipo-obs` | Español, kebab-case |
 | `/permisos` | `/permiso` | Montaje de negocio: singular |
-| `/dashboard` | sin cambio | Vocabulario de la API, no de la red: con la regla de arriba se queda en inglés. La segunda versión lo traducía a `/inicio` por el desempate que ya no existe |
-| `/upload` | sin cambio | Verbo inglés como raíz, y chirría — pero renombrarlo toca seis diálogos para ganar coherencia y nada más. Queda anotado, no hecho |
-| `/files`, `/orphans`, `/broken-refs`, `/stats` | sin cambio | Inglés, y correctos |
+| `/opciones` (×3) | `/options` | **Añadida en D1.** Son las listas de los desplegables de un formulario: vocabulario de la API y no de la red, el mismo argumento con el que esta tabla traduce `/catalogo`. §5 las describe entera y nunca las pasó por esta regla |
+| `/bitacora/autores` | `/bitacora/authors` | **Añadida en D1.** La creó B2 después de escribirse esta tabla. Colección inglesa, en plural como `/files` y `/orphans` |
+| `/tiempos-resumen` | `/resumen-tiempos` | **Añadida en D1.** La misma inversión que `/obs-frecuencia`, y no estaba listada: en español es «resumen de tiempos» |
+| `/generador` | `/generator` | **Añadida en D1.** Nombre de una funcionalidad de la aplicación, no de la red — la misma categoría que `/dashboard`. Dejarlo habría sido un montaje en español con cinco de sus seis rutas en inglés |
+| `/dashboard` | sin cambio | Vocabulario de la API, no de la red: con la regla de arriba se queda en inglés. La segunda versión lo traducía a `/inicio` por el desempate que ya no existe, y `docs/ARCHITECTURE.md` seguía anunciando esa traducción hasta D1 |
+| `/upload` | **fundido** en `POST /api/files/` | Cambió de decisión en D1. Era un verbo montado como recurso raíz al lado del sustantivo que gestiona los mismos ficheros, y renombrarlo por renombrarlo no arreglaba eso. Cuesta ocho llamadas en `web`, todas dentro de `uploadImage`. Su exención de permiso viaja con él — ver §3.7 |
+| `/files`, `/orphans`, `/broken-refs`, `/stats` | sin cambio | Inglés, y correctos. `/stats` son los cinco de adss, material, obs, propietario y tipo-obs; el módulo de archivos tiene `/entity-stats`, que esta tabla confundía con ellos |
+| `/desbloquear` | sin cambio | Verbo en español, y a propósito: §2 deja fuera las catorce rutas de autenticación y ésta es una de ellas. `naming.test.ts` la exime **por su dirección**, escrita una a una, para que no parezca un descuido |
 | `/poste`, `/evento`, `/adss`, `/bitacora` | sin cambio | Sustantivos del negocio |
+
+✅ **Hecho en D1**, y la cuenta de esta tabla era otra: la ficha de la tarea decía
+«los doce renombrados» y aquí había **once** filas de cambio. Con las cuatro
+añadidas arriba son **quince renombrados**, y con la fusión de la subida —que no
+es un renombrado— **dieciséis** filas de cambio en total, más las siete mudanzas
+de §3.2. La ficha de §9 dice quince porque cuenta sólo los renombrados; esta
+tabla las lista todas.
+
+**Lo que fija la regla es `naming.test.ts`, y lee la tabla montada.** Escrito
+sobre `src/routes/*.ts` habría certificado el trabajo sin mirarlo: los dos únicos
+segmentos con mayúscula de toda la API —`eventoObs` y `tipoObs`— eran prefijos de
+montaje de `app.ts`, que ningún fichero de router contiene, así que ese test
+habría pasado el día antes de empezar D1 y habría seguido pasando si D1 no se
+hubiera hecho nunca. Clasifica cada segmento literal en una de tres listas
+—sustantivo del negocio en español, inglés, o nombre de informe— en las dos
+direcciones, y afirma aparte que ninguna dirección lleva un verbo en español.
+`web/src/api/rutas.test.ts` es su espejo en el cliente: ejecuta las funciones y
+mira la dirección que axios recibió de verdad.
+
+**Lo que D1 no toca, dicho para que no parezca olvido:** los nombres de las
+funciones de controlador. `desarchivarEvento` sigue llamándose así aunque sirva
+`/restore`. Esta sección regula la superficie HTTP; renombrar setenta funciones
+internas no cambia nada para quien usa la API y son sesenta ediciones más en dos
+repositorios. Si se quiere, es tarea propia.
 
 **Dos excepciones conscientes**, escritas para que no aparezcan luego como
 descuidos:
@@ -633,11 +677,27 @@ ser de otra forma:
 - `GET /api/auth/me` — es de donde salen los permisos; pedir un permiso para
   saber qué permisos tienes no se sostiene.
 - `GET /api/auth/sessions` — son las tuyas: el identificador sale de `req.user`.
-- **`POST /api/upload/`** — sirve tres pantallas a la vez y una es la fotografía
+- **`POST /api/files/`** — sirve tres pantallas a la vez y una es la fotografía
   de tu propio perfil, así que atarla a un módulo dejaría fuera a alguna. Su
   router lo argumenta. **No es de autenticación y está dentro de las 104**, así
   que la primera versión, leída como norma, ordenaba cerrarla contra el
   razonamiento escrito en su propio fichero.
+
+  D1 la trajo aquí desde `POST /api/upload/` y la excepción **se conserva
+  entera**, que es lo que hace que la fusión no cueste nada: se monta sin
+  `requirePermission` dentro de un router donde las otras seis rutas sí lo
+  llevan, y eso está marcado en el fichero. Dos cosas medidas antes de moverla,
+  por si alguien intenta «uniformarla»: el rol Coordinador y el rol Cliente **no
+  tienen** el módulo `archivos`, así que ponerle esa puerta deja sin subir
+  fotografías justo a quien las toma en campo; y la acción `archivos.crear` **no
+  existe** —la migración `20260826000004` borró esas filas— así que pedirla es un
+  403 para todos los roles, administrador incluido.
+
+  Lo que sí la protege es el cubo de 30 por minuto y por cuenta, y va **en la
+  línea de la ruta y no en el router**: como `router.use(uploadLimiter)` lo
+  gastaría la pantalla de Archivos, que consume cuatro peticiones cada vez que se
+  abre. `uploadLimiters.test.ts` lo comprueba leyendo el fuente, y también que
+  siga por delante de multer.
 
 **Hay dos listas de exenciones, no una.** `READ_GATE_NOT_APPLICABLE` para
 lecturas y `GATE_NOT_APPLICABLE` para escrituras, y el criterio de terminado de
@@ -658,12 +718,22 @@ contraseña y tu bitácora se alcanzan sin permiso de módulo, porque exigirlo
 impediría que alguien cambiase su propia contraseña. No tiene casilla en la
 matriz y no debe tenerla.
 
-**Y se escribe con el tercer argumento.** El middleware lee `req.params["id"]`
-por omisión, y su docstring documenta esta trampa como ya cometida una vez: en
-una ruta cuyo parámetro se llama de otra forma, la comprobación de propiedad
-compara contra `undefined` y no coincide nunca. `GET /api/bitacora/:id_usuario`
-lleva hoy `requireSelfOrPermission("bitacora", "ver", "id_usuario")` y las rutas
-nuevas se escriben igual.
+**Y el tercer argumento tiene que nombrar el parámetro que la ruta declara.** El
+middleware lee `req.params["id"]` por omisión, y su docstring documenta esta
+trampa como ya cometida una vez: en una ruta cuyo parámetro se llama de otra
+forma, la comprobación de propiedad compara contra `undefined` y no coincide
+nunca, así que la puerta degrada a permiso-solo y todo el que no tenga el módulo
+pierde su propia ficha sin que nadie se entere.
+
+🔴 **D1 le dio la vuelta al peligro, y este párrafo decía lo contrario.** Decía
+que `GET /api/bitacora/:id_usuario` lleva el argumento «y las rutas nuevas se
+escriben igual» — instrucción que hoy produce el fallo. Las dos rutas que lo
+necesitaban se movieron bajo `/api/usuario/:id` (§3.2), así que sus parámetros se
+llaman `id` y el valor por omisión es el correcto: **hoy la equivocación es
+arrastrar el `"id_usuario"` viejo, no omitirlo.** Lo miden `evento.self.test.ts` y
+`bitacora.self.test.ts`, y no puede medirlo nada más: leer la cadena de
+middlewares no manda ninguna petición, y las demás suites simulan el permiso a
+`true`, con lo que la otra rama contesta primero.
 
 ### 3.9 Lo que entra también tiene forma — *ya hecho*
 
@@ -750,17 +820,17 @@ Tres endpoints, uno por formulario que necesita listas para sus desplegables.
 Cada uno con **un** permiso. **Hechos y montados** (B1, `6f31a26`).
 
 ```
-GET /api/poste/opciones     → postes:ver
+GET /api/poste/options     → postes:ver
     { adss, material, propietario, ciudad }
 
-GET /api/evento/opciones    → eventos:ver
+GET /api/evento/options    → eventos:ver
     { obs, tipoObs }
 
-GET /api/reporte/opciones   → reportes:ver
+GET /api/reporte/options   → reportes:ver
     { ciudad, adss, material, propietario, obs, tramos }
 ```
 
-Eran cuatro. El cuarto, `GET /api/usuario/opciones → roles:editar { rol }`, se
+Eran cuatro. El cuarto, `GET /api/usuario/options → roles:editar { rol }`, se
 descartó el 3 de septiembre: ver §5.3.
 
 ### 5.1 Por qué tres y no uno
@@ -803,11 +873,11 @@ consumir:
 
 | Endpoint | Bloque | Campos |
 |---|---|---|
-| `/api/poste/opciones` | `ciudad` | `id, name, lat, lng` — el formulario dibuja un mapa |
+| `/api/poste/options` | `ciudad` | `id, name, lat, lng` — el formulario dibuja un mapa |
 | | `adss`, `material`, `propietario` | `id, name` |
-| `/api/evento/opciones` | `obs` | `id, name, id_tipoObs` — el selector agrupa por tipo |
+| `/api/evento/options` | `obs` | `id, name, id_tipoObs` — el selector agrupa por tipo |
 | | `tipoObs` | `id, name` |
-| `/api/reporte/opciones` | `tramos` | `id_ciudadA, id_ciudadB` — pares, no filas |
+| `/api/reporte/options` | `tramos` | `id_ciudadA, id_ciudadB` — pares, no filas |
 | | `ciudad` | `id, name, lat, lng` — **`ReportRecorrido` traza la línea con ellas**; sin `lat`/`lng` la guarda sale por la primera línea y la pantalla se dibuja sin recorrido |
 | | resto | `id, name` |
 
@@ -817,7 +887,7 @@ código compartido.
 
 ### 5.3 El cuarto endpoint, descartado
 
-La segunda versión tenía `GET /api/usuario/opciones → roles:editar { rol }`, y
+La segunda versión tenía `GET /api/usuario/options → roles:editar { rol }`, y
 razonaba el permiso: quien asigna un rol necesita `roles:editar`, y sin él
 `createUsuario` responde 403 y escribe `ROLE_CHANGE_DENIED` con severidad
 `critical` en la bitácora. Eso sigue siendo cierto y sigue estando en
@@ -836,10 +906,15 @@ manejador que ya estaba escrito se borró en `7faa178`.
 ### 5.4 La bitácora sirve sus propios autores
 
 ```
-GET /api/bitacora/autores    → bitacora:ver
+GET /api/bitacora/authors    → bitacora:ver
 ```
 
-Declarado **antes** de `GET /:id_usuario` (§3.2). Devuelve id y nombre de quien
+Declarado **antes** de `GET /:id_usuario` cuando se escribió esta sección (§3.2)
+— **ese hermano paramétrico ya no está en este router**: D1 lo movió a
+`GET /api/usuario/:id/bitacora`, así que hoy `/authors` no compite con nada y su
+antiguo test de sombra medía una carrera que ya no existe. La regla de §3.2 sigue
+en pie de forma general y `routeOrder.test.ts` la vigila; aquí simplemente no
+tiene nada que atrapar. Devuelve id y nombre de quien
 tiene entradas.
 
 ✅ **Hecha.** La pantalla rellenaba su filtro llamando a `GET /api/usuario/`,
@@ -906,7 +981,7 @@ de `<ModuleRoute modulo="postes">`, que ya exige `postes.ver` y redirige sin él
 así que el rol descrito no llega ni a montarlas. Los dos huecos reales son otros:
 la **pantalla de inicio**, que pide `eventos.ver` y abre `PosteSheet` sólo tras
 `postes.editar`; y **`EventoSheet` abierto desde las pantallas de postes**, por
-lo mismo contra `/api/evento/opciones`. Ninguno afecta a un rol sembrado, pero la
+lo mismo contra `/api/evento/options`. Ninguno afecta a un rol sembrado, pero la
 matriz se edita en producción desde el 18 de agosto, así que la siembra ya no es
 prueba de nada.
 
@@ -923,7 +998,7 @@ camino hacia un dato que ningún endpoint de opciones sirve todavía:
   única fuente, **C2 retira `GET /api/poste/tramos`**: se quedaba sin un solo
   llamante en los dos repositorios.
 - `AddEventoPageSheet` pide el listado de postes con `exportPostes()`, o sea con
-  `?export=true`, que C3 borra. `/api/evento/opciones` cubre sus otros dos
+  `?export=true`, que C3 borra. `/api/evento/options` cubre sus otros dos
   catálogos pero no los postes, y **añadir un bloque de postes ahí sería servir
   el registro de postes bajo `eventos:ver`, que es peor que el problema.** Queda
   como decisión de C3, no de C2, y hay que tomarla antes de quitar `export=true`.
@@ -935,9 +1010,11 @@ camino hacia un dato que ningún endpoint de opciones sirve todavía:
 ✅ **Hecho en C5, el 2026-09-05.** Las dieciocho llevan puerta. Lo que sigue es
 lo que se construyó, no lo que se planeaba.
 
-**Con las direcciones de hoy**, porque este cierre es C5 y los
-sub-recursos son D1 — la primera versión las nombraba ya renombradas y
-obligaba a traducir la tabla de vuelta.
+**Con las direcciones que tenían al cerrarse C5**, que es cuando se escribió esta
+tabla: siete de ellas las movió D1 el mismo día, y las nuevas están en §3.2. Se
+dejan como estaban a propósito — esta sección cuenta lo que hizo C5, y traducirla
+al vocabulario de la tarea siguiente es lo que hacía la primera versión, que
+obligaba a traducir de vuelta para comprobar nada.
 
 Eran veinte cuando se escribió esta sección. Fueron **dieciocho** al hacerlo, y
 no porque se hubieran cerrado: A1 borró `GET /api/solucion/` y C2 retiró
@@ -995,7 +1072,7 @@ una vez y en una frase: **C5 quita alcance ambiental, no cierra los datos.**
 - **Gatear la topología de la red no la cierra**, y la advertencia ha cambiado
   de dirección sin cambiar de fondo. Se escribió sobre `GET /api/poste/tramos`,
   que C2 retiró; los mismos pares viajan hoy por dos sitios: el bloque `tramos`
-  de `GET /api/reporte/opciones`, bajo `reportes:ver` —que el rol Cliente
+  de `GET /api/reporte/options`, bajo `reportes:ver` —que el rol Cliente
   tiene—, y `GET /api/poste/`, que proyecta `id_ciudadA`/`id_ciudadB` en cada
   fila y que C5 puso bajo `postes:ver`. Y por debajo sigue el generador: el rol
   Cliente tiene `generador: TODO`, y sirve `ciudad` con `lat`/`lng` sin marca de
@@ -1009,9 +1086,9 @@ una vez y en una frase: **C5 quita alcance ambiental, no cierra los datos.**
   cerrar la puerta principal y dejar la de servicio abierta no es cerrar — por
   eso está escrito aquí y no borrado.
 - **Y los propios endpoints de opciones vuelven a servir esos catálogos bajo
-  otros permisos.** `/api/poste/opciones` entrega adss, material y propietario
-  con `postes:ver`; `/api/evento/opciones` entrega obs y tipoObs con
-  `eventos:ver`; `/api/reporte/opciones` entrega cuatro de los cinco con
+  otros permisos.** `/api/poste/options` entrega adss, material y propietario
+  con `postes:ver`; `/api/evento/options` entrega obs y tipoObs con
+  `eventos:ver`; `/api/reporte/options` entrega cuatro de los cinco con
   `reportes:ver`. El rol Cliente tiene los tres. O sea que para los tres roles
   sembrados hoy, **cerrar `parametros:ver` no le quita a nadie el acceso a los
   nombres de los catálogos.** Eso no invalida el diseño —una pantalla que puede
@@ -1381,7 +1458,7 @@ dejó intacto hasta la tarea que lo retirase, que acabó siendo C2.
 cd api && npx vitest run src/routes/opciones.test.ts src/routes/routeOrder.test.ts
 ```
 
-**B2 · `GET /api/bitacora/autores` (§5.4).** ✅ Hecha. La trampa de §3.2 era la
+**B2 · `GET /api/bitacora/authors` (§5.4).** ✅ Hecha. La trampa de §3.2 era la
 misma que en B1 —el literal antes de `/:id_usuario`— y está probada en las dos
 formas que hacen falta: `routeOrder.test.ts` la vigila genéricamente, y una
 petición real comprueba que `getBitacora` **no** corrió.
@@ -1445,7 +1522,7 @@ ficha no se usó: un solo fichero para todo cubo que cuenta por persona— con s
 números intactos: 30, 120, 10 y 60 por minuto.
 
 **Las dos decisiones de Isaias, del 4 de septiembre.** Los seis informes fijos
-**comparten cubo** con `POST /generador/consulta`: lo que se raciona es el tiempo
+**comparten cubo** con `POST /generator/query`: lo que se raciona es el tiempo
 de la base de datos en un solo proceso, y un cubo por ruta dejaría a una persona
 gastarlo siete veces rotando entre ellas. Y el dashboard de inicio
 (`GET /api/dashboard/`), que la auditoría previa señaló como la lectura más
@@ -1820,7 +1897,7 @@ sola.** Decía que `parametros:ver` es `false` para el rol Cliente y que cerrar
 los cinco catálogos le quitaría el informe de tramo. C2 lo cambió sin que esta
 ficha se enterara: hoy esos cinco endpoints sólo los llama la pantalla de
 Parámetros, que ya estaba cerrada con ese mismo permiso en el navegador, y los
-informes piden sus listas por `/api/reporte/opciones`. Ningún rol sembrado pierde
+informes piden sus listas por `/api/reporte/options`. Ningún rol sembrado pierde
 nada. Lo que sí conviene no repetir es el motivo que la auditoría previa corrigió:
 no se salva por la puerta del navegador, sino porque **los mismos catálogos se
 sirven bajo otros tres permisos** (`postes:ver`, `eventos:ver`, `reportes:ver`),
@@ -1891,40 +1968,79 @@ cd web && npx vitest run src/components/dialogs/upsert/UsuarioSheet.test.tsx
 
 ### Familia D — al final
 
-**D1 · Los nombres y los sub-recursos (§3.2, §3.4).** Cosmético, el que más
-ficheros toca, y desde el 3 de septiembre **sin coste de despliegue** porque va
-antes del corte. Con la regla nueva de §3.4 los doce renombrados van todos:
-`/restore` ×9 (los diez de la segunda versión incluían `/api/rol`, que §2 deja
-fuera), `/reopen`, `/resolve`, `/export`, `/query`, `/count`, `/duplicate`,
-`/catalog`, `/frecuencia-obs`, `/tipo-obs`, `/permiso`. Y las siete rutas
-anidadas de §3.2; con la de solución desaparece el montaje de `/api/solucion`.
+✅ **D1 · Los nombres y los sub-recursos (§3.2, §3.4).** Hecho el 2026-09-05, las
+dos orillas. Quince renombrados y siete mudanzas; cuatro montajes menos.
 
-Tres trampas que la auditoría encontró y que la segunda versión no decía:
+**Lo que la auditoría previa cambió del plan, y fue bastante:**
 
-- **`/api/permisos` → `/api/permiso` desarma un test de seguridad si nadie
-  toca la expresión regular.** `MODULOS_TABULADOS` en `routeGuards.test.ts` dice
-  `permisos`; renombrar el montaje saca ese router de la comprobación de
-  completitud sin ponerla en rojo. Se cambia la expresión en el mismo commit.
-- **`/api/bitacora/:id_usuario` → `/api/usuario/:id/bitacora` cambia el nombre
-  del parámetro**, y `requireSelfOrPermission` lo lee por nombre: escribirla
-  «igual» que hoy, con `"id_usuario"`, deja a todo el que no sea administrador
-  sin su propia bitácora. El tercer argumento pasa a `"id"` — o se omite, que es
-  lo mismo. Y esa ruta y `/api/usuario/:id/eventos` entran bajo
-  `MODULOS_TABULADOS`, así que van a `SEGURIDAD_GATES` con su par, aunque el par
-  sea de otro módulo.
-- **C1 termina antes de que D1 empiece.** Si el `PUT` de los informes siguiera
-  montado cuando D1 renombra `/obs-frecuencia`, serían cuatro registros por
-  informe.
+- **Eran quince cambios de nombre, no doce.** La ficha decía doce y a
+  continuación listaba once. Aparecieron cuatro direcciones que el documento
+  describe en otras secciones y nunca pasó por §3.4: los tres `/opciones` que
+  creó C2, el `/autores` que creó B2, `/tiempos-resumen` —la misma inversión que
+  `/obs-frecuencia`, sin listar— y el montaje `/api/generador`. Isaias las metió
+  todas.
+- **Los `/restore` son diez y no nueve.** `/api/rol` entra por decisión suya, con
+  aviso a la sesión de roles. Y eso ahorra una exención: un `naming.test.ts` con
+  nueve habría nacido teniendo que exceptuar por escrito el único `/desarchivar`
+  que quedaba en español.
+- **`/api/upload` se funde en `POST /api/files/`** en vez de quedarse anotado. La
+  decisión cambió cuando se midió el coste: son ocho llamadas, todas dentro de
+  `uploadImage`. Lo que **no** cambia es su exención de permiso — ver §3.7, donde
+  está medido a quién dejaría fuera ponerle puerta.
+
+**Las trampas, y hay una más de la que decía esta ficha:**
+
+- **`MODULOS_TABULADOS` desarma la comprobación de completitud de dos routers, no
+  de uno.** La ficha avisaba de `permisos` → `permiso`; `tipoObs` → `tipo-obs`
+  tiene el mismo defecto y no estaba escrito. Y falla en el orden que lo esconde:
+  las tablas por router **sí** se ponen rojas, quien las arregla queda satisfecho
+  y la expresión conserva el nombre viejo.
+- 🔴 **Hay una segunda expresión regular, y nadie la había mirado.**
+  `ADMINISTRATIVOS` (`routeGuards.test.ts`) es la puerta de la decisión D6:
+  contraseña en toda escritura sobre cuentas, roles y permisos. Con `permisos`
+  dentro y `/api/permiso` fuera, `PUT /api/permiso/:id_rol` —la escritura que
+  reescribe la matriz de permisos de todos los roles— se cae del conjunto, y la
+  cota anti-vacuidad del bloque es `> 10`: de trece escrituras quedan doce y
+  **pasa**. Las dos expresiones son ahora listas con nombre, y un `it` comprueba
+  que cada prefijo sigue siendo un montaje.
+- **Las nueve tablas de puertas se funden con spread**, así que una ruta escrita
+  en dos de ellas gana la última en silencio. Con siete rutas cambiando de router
+  era el momento exacto de que pasara. Hay guarda.
+- **`/api/bitacora/:id_usuario` → `/api/usuario/:id/bitacora` cambia el nombre del
+  parámetro**, y `requireSelfOrPermission` lo lee por nombre. Cierto, y la ficha
+  no decía la otra mitad: **`/api/evento/usuario/:id_usuario` tiene la misma
+  trampa**, y de las dos sólo una tenía test. `bitacora.self.test.ts` se escribió
+  contra la dirección vieja, se vio verde, y sólo entonces se movió la ruta.
+- **`GET /api/solucion/evento/:id` no la pedía ningún test.** Estaba clasificada
+  en `listShape.test.ts` dentro de un grupo que nunca manda peticiones, y los dos
+  llamantes del cliente la envuelven en `.catch(() => null)` — que es también su
+  respuesta normal. Rota en silencio, **cada incidencia resuelta se pinta como
+  pendiente**. `solucion.evento.test.ts` es nuevo y se escribió antes de mover.
+- **C1 termina antes de que D1 empiece.** Ya estaba: los seis informes son `GET`.
+
+**El cliente estaba casi ciego, y la primera versión de este párrafo exageró
+cuánto.** Decía que de las diecinueve direcciones sólo una tenía test; contadas
+bien eran **seis** —los tres `/opciones`, `/bitacora/autores` y dos informes—, y
+las otras trece no tenían ninguna: los diez `/restore`, los dos verbos de
+incidencia, los siete sub-recursos y las cinco rutas del generador. Lo que hace
+que ese hueco sea total y no parcial es que **cada test de pantalla simula su
+módulo `*.api` entero**, 79 veces, así que ninguno puede ver una dirección.
+`rutas.test.ts` ejecuta las funciones y mira la que axios recibió de verdad.
+
+**Y D1 cerró la deuda que dejó C4.** La sesión del mapa commiteó sus tres
+ficheros, así que las cinco funciones que resolvían un número —`createCiudad`,
+`editCiudad`, `createPoste`, `editPoste`, `reabrirEvento`— propagan como las
+otras treinta y cuatro, y sus seis pantallas leen la frase del servidor. En
+`poste/index.tsx` eso obligó a mover el revert de la actualización optimista a un
+`catch` y el identificador de «guardando» a un `finally`.
 
 `RolesPanel.tsx` y `PermisosPanel.tsx` son de la sesión de roles y `/api/permiso`
-los toca: se avisa. El test de §3.4 hay que escribirlo sobre **la tabla montada**,
-no sobre los ficheros fuente: los dos únicos segmentos con mayúsculas de toda la
-API son prefijos de montaje de `app.ts`, así que un test que recorra
-`src/routes/*.ts` pasa hoy sin cambiar nada y seguiría pasando aunque la tarea no
-se hiciera.
+los toca: se le avisa. El generador también cambia (`/query`, `/count`,
+`/catalog`, `/export`, `/duplicate`), y también se le avisa.
 
 ```
-cd api && npx vitest run src/routes/naming.test.ts
+cd api && npx vitest run src/routes/naming.test.ts src/routes/bitacora.self.test.ts src/routes/solucion.evento.test.ts
+cd web && npx vitest run src/api/rutas.test.ts
 ```
 
 ### Familia E — el corte, y lo que la auditoría dejó con nombre
@@ -2086,12 +2202,12 @@ el documento sigue teniendo razón.
 | Regla | Cómo se comprueba |
 |---|---|
 | 3.1 método | ✅ `reporte.contract.test.ts`: los seis contestan en `GET`, ninguno en `PUT`, los seis piden `reportes.ver`, y la respuesta lleva `Cache-Control: no-store`. Con él `reporteFiltro.test.ts`, que cubre cada forma en que el filtro puede venir mal — incluida la que produce un informe plausible y falso (`excludeOld=false` leído como verdadero) y la que lo ensancha en silencio (un parámetro repetido) |
-| 3.2 sub-recursos y orden de declaración | ✅ `routeOrder.test.ts`, escrito en B1. Recorre el `stack` compilado de cada router —descubiertos por directorio, no listados— y falla si un patrón declarado antes ya casa con una ruta declarada después, contando `router.all` y avisando de un `router.use` con ruta, cuyo prefijo Express 5 no expone. **Desviación consciente:** lee los módulos de router, no la tabla montada, así que cubre un router antes de que nadie lo monte y no vería una ruta declarada directamente sobre la app — eso lo ve `routeGuards.test.ts` |
+| 3.2 sub-recursos y orden de declaración | ✅ `routeOrder.test.ts`, escrito en B1, y desde D1 también `naming.test.ts` (la forma de la dirección) y `listShape.test.ts` (**seis** de las siete nuevas, pedidas de verdad — la de solución está en `AGREGADAS`, un grupo que ese fichero clasifica y nunca pide, y por eso tiene la suya en `solucion.evento.test.ts`). **El límite de `routeOrder.test.ts` importa aquí:** compara patrones declarados entre sí, así que no ve que `GET /:id/eventos` declarado antes de `GET /user/:user` se tragaría exactamente dos direcciones —la cuenta cuyo nombre de usuario fuese «eventos» o «bitacora»—. Por eso las dos rutas nuevas de `usuario.routes.ts` van declaradas después, con el motivo escrito en el fichero. Recorre el `stack` compilado de cada router —descubiertos por directorio, no listados— y falla si un patrón declarado antes ya casa con una ruta declarada después, contando `router.all` y avisando de un `router.use` con ruta, cuyo prefijo Express 5 no expone. **Desviación consciente:** lee los módulos de router, no la tabla montada, así que cubre un router antes de que nadie lo monte y no vería una ruta declarada directamente sobre la app — eso lo ve `routeGuards.test.ts` |
 | 3.3 sobre | Test con la **lista escrita a mano** de los listados. Derivarlo es imposible: `res.json(x)` no revela la forma de `x`, y ése fue el error de la primera versión. La lista se cuenta al empezar C3, no ahora: A1 ya borró uno, así que la cuenta de la primera versión sobra |
 | 3.3 techo y centinela | Test del centinela sobre una colección por encima y por debajo del tope —`422`, no `413`—, más un caso del valor que el servidor viejo interpretaba como `50`, y el lector único de `limit` con sus tres clamps |
-| 3.4 nombres | Test que recorre **la tabla montada** —no los ficheros— y falla si un segmento tiene mayúsculas, o si un verbo u operación no está en inglés, o si un sustantivo de la lista de negocio no está en español |
+| 3.4 nombres | ✅ `naming.test.ts`: recorre **la tabla montada** —no los ficheros, y ésa es la diferencia entre medir y certificar, porque los dos únicos segmentos con mayúscula eran prefijos de `app.ts`— y clasifica cada segmento literal en una de tres listas escritas, en las dos direcciones. Más: ningún verbo español en ninguna dirección, todo en minúsculas y con guion, y ninguna dirección que nombre un recurso raíz **antes** de identificar su fila, que es §3.2 dicho como forma en vez de como lista de siete. Las tres exenciones de §2 que viven en el router de usuario van por dirección, una a una; el prefijo `/api/auth` se excluye en bloque y eso es más ancho que las diez de §2, porque los planes de MFA y passkeys han montado veintiséis rutas ahí desde entonces. Su espejo en el cliente es `web/src/api/rutas.test.ts`, que ejecuta las funciones y lee la dirección que axios recibió — de las diecinueve que D1 mueve, antes había **seis** vigiladas y trece sin nada |
 | 3.5 códigos | ✅ `statusCodes.test.ts`: registro de las **85 escrituras** montadas con el código que contesta cada una, leído del árbol de rutas real y contrastado contra el código fuente de su controlador; falla en las dos direcciones (una ruta sin clasificar, una entrada sin ruta) y fija las cuentas 15/24/46. Más cinco peticiones de verdad: que el `201` lleva la fila, que el `204` no lleva cuerpo **ni `Content-Type` ni `ETag`**, y que un cuerpo inválido contesta `400` con una frase que no es la neutra |
-| 3.5 comparaciones en el cliente | ✅ `statusComparisons.test.ts` en `web`: **ninguna pantalla compara contra un número** salvo las que están en una de las dos listas escritas —autenticación, y la deuda que dejó el trabajo del mapa—, con la cuenta por fichero para que una nueva no se cuele en un fichero que ya estaba. La primera versión de §10 no tenía fila para esto, y es donde estaba todo el daño |
+| 3.5 comparaciones en el cliente | ✅ `statusComparisons.test.ts` en `web`: **ninguna pantalla compara contra un número** salvo las que están en una de las dos listas escritas —autenticación, y la deuda que dejó el trabajo del mapa—, con la cuenta por fichero para que una nueva no se cuele en un fichero que ya estaba. La primera versión de §10 no tenía fila para esto, y es donde estaba todo el daño. **Desde D1 queda una sola lista**: la deuda del trabajo del mapa se cerró, y la lista desapareció en vez de quedarse vacía, porque una lista vacía invita a rellenarla. En su lugar, la regla sin excepciones: ninguna función de `src/api` convierte su rechazo en un número, en ninguna de las **tres** formas — y la tercera, `.then(() => 200)`, es la más engañosa, porque informa de un éxito sobre un código que nadie miró |
 | 3.5 `error.message` | Test que lo prohíbe **en cualquier parte del cuerpo de un `catch` que responde**, no sólo dentro del `res.json` — la forma con variable intermedia es la mayoritaria. Acotado al `500`: el generador lo devuelve a propósito en `400`/`413`/`429`, y son frases escritas para el usuario |
 | 3.6 formato de error | ✅ `app.notfound.test.ts`: una dirección inexistente responde 404 en JSON con `message`, la frase habla de la dirección y no de un error, el cuerpo **no** refleja la ruta pedida —que es lo que hacía `finalhandler`—, una ruta montada sigue llegando a su router, y un cuerpo mal formado sigue saliendo por el manejador terminal, que es lo que se rompe si alguien le pone cuatro parámetros a este manejador |
 | 3.7 permisos | `routeGuards.test.ts`, que ya existe — con la excepción de `express.static` escrita **con la verdad de hoy** (§6): detrás de sesión, sin permiso por objeto |
@@ -2205,11 +2321,23 @@ optimizaciones. **La lectura de `limit` sí cambia** (§3.3) — la primera vers
 declaraba intocable toda la paginación en una sección y la modificaba en otra.
 
 Y no cambia nada de lo que llevan las otras dos sesiones: las catorce rutas de
-autenticación. **`/api/rol` sí cambió, en C4 y por decisión de Isaias del 5 de
-septiembre**: es una de las diez entidades con papelera, así que archivar y
-desarchivar un rol contestan `204`, y tres sitios de `RolesPanel.tsx` leían un
-`200`. Dejarlo fuera habría sido dejar la pantalla de roles diciendo «no se pudo
-archivar el rol» sobre un rol archivado. La sesión de roles tiene que saberlo.
+autenticación. **`/api/rol` y `/api/permisos` sí cambiaron, por decisión de
+Isaias del 5 de septiembre**, y en dos tareas. En C4: archivar y desarchivar un
+rol contestan `204`, y tres sitios de `RolesPanel.tsx` leían un `200` — dejarlo
+fuera habría sido dejar la pantalla de roles diciendo «no se pudo archivar el
+rol» sobre un rol archivado. En D1: `PATCH /api/rol/:id/restore`, y el montaje
+`/api/permisos` pasa a `/api/permiso`, que toca `PermisosPanel.tsx`. **La sesión
+de roles tiene que saber las dos cosas.**
+
+**Y el generador tampoco queda fuera.** D1 renombra su montaje a
+`/api/generator` y cinco de sus rutas: `/catalog`, `/query`, `/count`,
+`/export` y `/reportes/:id/duplicate`. En el cliente eso es
+`generador.api.ts` y nada más — ninguna pantalla del generador construye una
+dirección.
+
+**Lo que D1 deliberadamente no toca, para que no parezca olvido:** los nombres de
+las funciones de controlador. `desarchivarEvento` sigue sirviendo `/restore`.
+§3.4 regula la superficie HTTP, no el código de dentro.
 
 ---
 

@@ -11,7 +11,7 @@
 // test to B1 rather than to D1, because the options endpoints are the first four
 // routes in this API that step on the trap. It is written generically for that
 // reason: four assertions about four known paths would pass today and leave the
-// trap armed for the next literal anybody adds — `GET /api/bitacora/autores`
+// trap armed for the next literal anybody adds — `GET /api/bitacora/authors`
 // is already in the plan, one router over, with a `/:id_usuario` in front of it.
 //
 // **Read off the routers as Express compiled them, never off the source text.**

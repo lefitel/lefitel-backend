@@ -113,7 +113,7 @@ router.get("/sessions", authenticate, sessions);
  * that state get this far, and the recomputed `req.user.estado` — see the
  * field's own comment in `authenticate.ts` — is what the gate reads. Twelve of
  * the fourteen mounts live under `/api/usuario`, `/api/rol` and
- * `/api/permisos`, which no state below `completa` reaches at all; the
+ * `/api/permiso`, which no state below `completa` reaches at all; the
  * fourteenth is `/email/send` below, and it is the opposite case — a door
  * `onboarding` has to keep.
  *

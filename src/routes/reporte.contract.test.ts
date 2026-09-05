@@ -18,7 +18,7 @@
 //     listing reports that is the entire endpoint, and it is where the
 //     `excludeOld` trap lives;
 //   - **the aggregation**, for the two reports that had no coverage at all
-//     (`estado-red` and `obs-frecuencia`), driven by fixed rows.
+//     (`estado-red` and `frecuencia-obs`), driven by fixed rows.
 //
 // Models are spied and not mocked: `vi.mock` on a model breaks the association
 // graph for every router `app.ts` loads, which `opciones.test.ts` and
@@ -80,8 +80,8 @@ const LOS_SEIS = [
   ["tramo", RANGO],
   ["recorrido", `${RANGO}&TramoInicial=3&TramoFinal=7`],
   ["estado-red", ""],
-  ["obs-frecuencia", RANGO],
-  ["tiempos-resumen", RANGO],
+  ["frecuencia-obs", RANGO],
+  ["resumen-tiempos", RANGO],
 ] as const;
 
 beforeEach(() => {
@@ -348,7 +348,7 @@ describe("frecuencia de observaciones, which had no coverage either", () => {
       fila(2, "Cable suelto", "Eléctrico", 2),
     ] as never);
 
-    const res = await pedir("obs-frecuencia");
+    const res = await pedir("frecuencia-obs");
 
     const inclinado = (res.body as { obs: string; count: number; pct: number }[]).find((r) => r.obs === "Poste inclinado");
     expect(inclinado?.count).toBe(2);
@@ -361,7 +361,7 @@ describe("frecuencia de observaciones, which had no coverage either", () => {
     // take the report down, and it must not be silently dropped either.
     eventoObsFindAll.mockResolvedValue([fila(3, "Sin clasificar", null, null)] as never);
 
-    const res = await pedir("obs-frecuencia");
+    const res = await pedir("frecuencia-obs");
 
     expect(res.body).toHaveLength(1);
     expect(res.body[0].tipoObs).toBe("—");
@@ -374,7 +374,7 @@ describe("frecuencia de observaciones, which had no coverage either", () => {
       fila(1, "Poste inclinado", "Estructural", 3),
     ] as never);
 
-    const res = await pedir("obs-frecuencia");
+    const res = await pedir("frecuencia-obs");
 
     expect(res.body).toHaveLength(1);
     expect(res.body[0].obs).toBe("Poste inclinado");
@@ -385,7 +385,7 @@ describe("nothing reached the database", () => {
   it("used the spies on the happy path, so the assertions above are not vacuous", async () => {
     await pedir("general");
     await pedir("estado-red", "");
-    await pedir("obs-frecuencia");
+    await pedir("frecuencia-obs");
 
     expect(eventoFindAll).toHaveBeenCalled();
     expect(posteFindAll).toHaveBeenCalled();
@@ -403,7 +403,7 @@ describe("nothing reached the database", () => {
  * first pins the number and that a refused request runs no query. The second
  * pins the order, and is only meaningful next to the first: an unmounted budget
  * would also "not be spent" by a 403. The third pins the sharing in both
- * directions, because a `/consulta` that answered 429 whatever happened would
+ * directions, because a `/query` that answered 429 whatever happened would
  * satisfy one direction alone.
  *
  * Thirty, written by hand every time. Read off the limiter it would only prove
@@ -423,7 +423,7 @@ describe("the budget the six share with the generator (B3)", () => {
    * would run against the configured database.
    */
   const consultaDelGenerador = () =>
-    request(app).post("/api/generador/consulta").set("Cookie", COOKIE).set(DEL_FRONTEND).send({});
+    request(app).post("/api/generator/query").set("Cookie", COOKIE).set(DEL_FRONTEND).send({});
 
   it("answers the thirty-first report 429 with the sentence, and runs no query for it", async () => {
     for (let i = 0; i < 30; i++) {
@@ -467,7 +467,7 @@ describe("the budget the six share with the generator (B3)", () => {
     expect(refusal.status, JSON.stringify(refusal.body)).toBe(429);
     expect(refusal.body).toEqual({ message: AVISO });
 
-    // The other direction, without which a `/consulta` answering 429 no matter
+    // The other direction, without which a `/query` answering 429 no matter
     // what would pass: with the budget reset, the same request reaches the
     // handler, which refuses the empty configuration — 400, not 429, and still
     // no SQL.

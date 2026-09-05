@@ -5,28 +5,32 @@ import {
   desarchivarEvento,
   exportarEventos,
   getEvento,
-  getEvento_poste,
-  getEvento_usuario,
   reabrirEvento,
   resolverEvento,
   searchEvento,
   updateEvento,
 } from "../controllers/evento.controller.js";
+// D1 (§3.2): three listings that only exist with respect to one incident now
+// hang off it, and their own mounts are gone. The controllers stayed where they
+// were — they read one model each and moving them would buy nothing.
+import { getEventoObs } from "../controllers/eventoObs.controller.js";
+import { getRevision } from "../controllers/revision.controller.js";
+import { getSolucion_evento } from "../controllers/solucion.controller.js";
 import { getOpcionesEvento } from "../controllers/opciones.controller.js";
-import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 import { exportLimiter } from "../middleware/limiters.js";
 
 const router = Router();
 
 // Routes
 router.post("/", requirePermission("eventos", "crear"), createEvento);
-router.post("/:id/reabrir", requirePermission("eventos", "editar"), reabrirEvento);
-router.post("/:id/resolver", requirePermission("eventos", "editar"), resolverEvento);
+router.post("/:id/reopen", requirePermission("eventos", "editar"), reabrirEvento);
+router.post("/:id/resolve", requirePermission("eventos", "editar"), resolverEvento);
 router.put("/:id", requirePermission("eventos", "editar"), updateEvento);
-// Before `/:id`, and that is not style — see `routeOrder.test.ts`. `/opciones`
+// Before `/:id`, and that is not style — see `routeOrder.test.ts`. `/options`
 // is a literal, and Express matches layers in declaration order, so a literal
 // declared after a parametric sibling never runs: the request would reach
-// `searchEvento` with `id = "opciones"` instead.
+// `searchEvento` with `id = "options"` instead.
 /**
  * The list as a file.
  *
@@ -46,43 +50,34 @@ router.put("/:id", requirePermission("eventos", "editar"), updateEvento);
  * let one person hold it four times over by rotating between the routes.
  */
 router.post("/export", requirePermission("eventos", "ver"), exportLimiter, exportarEventos);
-router.get("/opciones", requirePermission("eventos", "ver"), getOpcionesEvento);
-// C5: these four answered any session until now, whatever its role.
+router.get("/options", requirePermission("eventos", "ver"), getOpcionesEvento);
+// C5: these answered any session until then, whatever its role.
 router.get("/", requirePermission("eventos", "ver"), getEvento);
-router.get("/poste/:id_poste", requirePermission("eventos", "ver"), getEvento_poste);
-/**
- * The incidents of one person, and the only one of the eighteen that is not a
- * plain `requirePermission`.
- *
- * **`seguridad.ver`, not `eventos.ver`**, because the question is about a
- * person and not about the work: the Cliente role holds `eventos.ver`, so with
- * the obvious gate it could walk `/usuario/1` … `/usuario/20` and assemble each
- * employee's activity record. The same question already answers to
- * `seguridad.ver` in the generator, where `usuario` is a level of detail nobody
- * without it may root a report on.
- *
- * **And `requireSelfOrPermission`, because this is what the person's own
- * profile screen calls.** With the plain gate every non-administrator would
- * silently lose their own history — the profile swallows the failure and prints
- * "Eventos atendidos: 0".
- *
- * 🔴 The third argument is not optional. It defaults to `"id"`, this route's
- * parameter is `:id_usuario`, and with the default the ownership branch
- * compares `undefined` against the caller's id and never matches — the gate
- * degrades to permission-only and the screen above goes quiet. That defect has
- * already shipped once on the bitácora route, which is why the middleware's own
- * comment records it. `routeGuards.test.ts` cannot catch it (it never sends a
- * request) and neither can `listShape.test.ts` (it mocks every permission to
- * true); `evento.self.test.ts` exists for this one line.
- */
-router.get(
-  "/usuario/:id_usuario",
-  requireSelfOrPermission("seguridad", "ver", "id_usuario"),
-  getEvento_usuario,
-);
 router.get("/:id", requirePermission("eventos", "ver"), searchEvento);
 
+// The three that belong to one incident. Declared after `/:id` and that is
+// safe rather than lucky: `/:id` is one segment and cannot match two, in
+// Express 4 or 5. They were `/api/eventoObs/:id_evento`, `/api/revision/:id_evento`
+// and `/api/solucion/evento/:id_evento`, three root mounts for things that only
+// exist with respect to an incident.
+//
+// 🔴 The parameter is `:id` here and the controllers were changed with the
+// routes, in the same commit. Left reading `id_evento` they build
+// `where: {id_evento: undefined}`, which Postgres refuses.
+//
+// What sees it is not the same for the three. `/obs` and `/revisiones` are in
+// the `LISTADOS` block of `listShape.test.ts`, which really does request them.
+// **`/solucion` is not** — it is filed under `AGREGADAS`, a group that file
+// lists and never asks for — so until D1 no test in either repository sent a
+// request to that address. It is also the one where breaking it is silent: both
+// callers in `web` wrap it in `.catch(() => null)`, and `null` is its ordinary
+// answer, so a 500 there paints every repaired incident as still open with
+// nothing on screen. `solucion.evento.test.ts` was written for exactly that.
+router.get("/:id/obs", requirePermission("eventos", "ver"), getEventoObs);
+router.get("/:id/revisiones", requirePermission("eventos", "ver"), getRevision);
+router.get("/:id/solucion", requirePermission("eventos", "ver"), getSolucion_evento);
+
 router.delete("/:id", requirePermission("eventos", "archivar"), deleteEvento);
-router.patch("/:id/desarchivar", requirePermission("eventos", "archivar"), desarchivarEvento);
+router.patch("/:id/restore", requirePermission("eventos", "archivar"), desarchivarEvento);
 
 export default router;

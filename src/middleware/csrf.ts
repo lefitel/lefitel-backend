@@ -24,7 +24,7 @@
 // class of request that needs no permission to arrive: an HTML form post carries
 // `application/x-www-form-urlencoded` or `multipart/form-data`, both
 // CORS-safelisted, so there is no preflight to refuse and the browser sends it
-// whatever this server would have said. `POST /api/upload` takes multipart and
+// whatever this server would have said. `POST /api/files` takes multipart and
 // was exactly that shape. Barrier 1 does read the `Origin` such a form sends, so
 // the two overlap there — and they stop overlapping wherever a header is dropped
 // in transit, or the day a future `express.urlencoded()` makes a form body

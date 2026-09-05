@@ -16,7 +16,7 @@ const router = Router();
 // The lists the three report screens fill their filters from. This router has
 // no parametric route at all, so the ordering trap of §3.2 does not apply here
 // — declared first anyway, so all three mounts read the same way.
-router.get("/opciones", requirePermission("reportes", "ver"), getOpcionesReporte);
+router.get("/options", requirePermission("reportes", "ver"), getOpcionesReporte);
 
 /**
  * Says out loud that a report must not be stored anywhere.
@@ -62,7 +62,7 @@ const sinCache = (_req: Request, res: Response, next: NextFunction) => {
 // is `authenticate`, which the budget has to sit behind in order to key on the
 // user: a session read, a user read and, once per touch window, the session
 // slide it writes along with its `Set-Cookie`. A script sitting on refusals
-// keeps its session alive. `/opciones` stays outside it on purpose: it is asked once
+// keeps its session alive. `/options` stays outside it on purpose: it is asked once
 // per visit to a report tab, and metering it would make switching tabs spend
 // the report budget.
 const conPresupuesto = [sinCache, requirePermission("reportes", "ver"), consultaLimiter];
@@ -70,7 +70,7 @@ router.get("/general",         conPresupuesto, getReporteGeneral);
 router.get("/tramo",           conPresupuesto, getReporteTramo);
 router.get("/recorrido",       conPresupuesto, getReporteRecorrido);
 router.get("/estado-red",      conPresupuesto, getEstadoRed);
-router.get("/obs-frecuencia",  conPresupuesto, getObsFrecuencia);
-router.get("/tiempos-resumen", conPresupuesto, getTiemposResumen);
+router.get("/frecuencia-obs",  conPresupuesto, getObsFrecuencia);
+router.get("/resumen-tiempos", conPresupuesto, getTiemposResumen);
 
 export default router;

@@ -10,12 +10,12 @@ const adssPosteLog = log("adssPoste");
 const handler = makeHandler(adssPosteLog);
 
 export const getAdssPoste = handler("getAdssPoste", async (req: Request, res: Response) => {
-  const { id_poste } = req.params;
+  const { id } = req.params;
   const paginacion = leerPaginacion(req.query);
   if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
   const listado = await listar(AdssPosteModel, {
-    where: { id_poste },
+    where: { id_poste: id },
     order: [["id", "DESC"]],
   }, paginacion);
   if (excedeElTecho(listado)) return responderExcede(res, listado.excede);

@@ -171,7 +171,7 @@ const dosXX = (texto: string): number[] => {
  *
  * **`201` when the response represents a row that did not exist**: the eleven
  * `create*`, the two the report generator saves, the upload, and the passkey
- * registration that was already correct. `POST /:id/resolver` is deliberately
+ * registration that was already correct. `POST /:id/resolve` is deliberately
  * not here even though it inserts a `solucions` row — what it answers carries
  * nothing of that row, and a `201` whose body is empty tells the caller about a
  * resource it cannot then read.
@@ -194,16 +194,16 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "POST /api/auth/webauthn/register/verify": 201,
   "POST /api/ciudad/": 201,
   "POST /api/evento/": 201,
-  "POST /api/generador/reportes": 201,
-  "POST /api/generador/reportes/:id/duplicar": 201,
+  "POST /api/generator/reportes": 201,
+  "POST /api/generator/reportes/:id/duplicate": 201,
   "POST /api/material/": 201,
   "POST /api/obs/": 201,
   "POST /api/poste/": 201,
   "POST /api/propietario/": 201,
   "POST /api/revision/": 201,
   "POST /api/rol/": 201,
-  "POST /api/tipoObs/": 201,
-  "POST /api/upload/": 201,
+  "POST /api/tipo-obs/": 201,
+  "POST /api/files/": 201,
   "POST /api/usuario/": 201,
 
   // ── 204: the write reports nothing ──
@@ -216,21 +216,21 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "DELETE /api/poste/:id": 204,
   "DELETE /api/propietario/:id": 204,
   "DELETE /api/rol/:id": 204,
-  "DELETE /api/tipoObs/:id": 204,
+  "DELETE /api/tipo-obs/:id": 204,
   "DELETE /api/usuario/:id": 204,
-  "PATCH /api/adss/:id/desarchivar": 204,
-  "PATCH /api/ciudad/:id/desarchivar": 204,
-  "PATCH /api/evento/:id/desarchivar": 204,
-  "PATCH /api/material/:id/desarchivar": 204,
-  "PATCH /api/obs/:id/desarchivar": 204,
-  "PATCH /api/poste/:id/desarchivar": 204,
-  "PATCH /api/propietario/:id/desarchivar": 204,
-  "PATCH /api/rol/:id/desarchivar": 204,
-  "PATCH /api/tipoObs/:id/desarchivar": 204,
-  "PATCH /api/usuario/:id/desarchivar": 204,
+  "PATCH /api/adss/:id/restore": 204,
+  "PATCH /api/ciudad/:id/restore": 204,
+  "PATCH /api/evento/:id/restore": 204,
+  "PATCH /api/material/:id/restore": 204,
+  "PATCH /api/obs/:id/restore": 204,
+  "PATCH /api/poste/:id/restore": 204,
+  "PATCH /api/propietario/:id/restore": 204,
+  "PATCH /api/rol/:id/restore": 204,
+  "PATCH /api/tipo-obs/:id/restore": 204,
+  "PATCH /api/usuario/:id/restore": 204,
   "PATCH /api/usuario/:id/desbloquear": 204,
-  "POST /api/evento/:id/reabrir": 204,
-  "POST /api/evento/:id/resolver": 204,
+  "POST /api/evento/:id/reopen": 204,
+  "POST /api/evento/:id/resolve": 204,
 
   // ── 200: an answer with something in it ──
   "DELETE /api/auth/sessions/:id": 200,
@@ -238,7 +238,7 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "DELETE /api/auth/webauthn/credentials/:id": 200,
   "DELETE /api/files/broken-refs": 200,
   "DELETE /api/files/orphans": 200,
-  "DELETE /api/generador/reportes/:id": 200,
+  "DELETE /api/generator/reportes/:id": 200,
   "POST /api/auth/email/send": 200,
   "POST /api/auth/email/verify": 200,
   "POST /api/auth/login": 200,
@@ -258,9 +258,9 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "POST /api/auth/webauthn/passwordless/verify": 200,
   "POST /api/auth/webauthn/register/options": 200,
   "POST /api/evento/export": 200,
-  "POST /api/generador/consulta": 200,
-  "POST /api/generador/conteo": 200,
-  "POST /api/generador/exportar": 200,
+  "POST /api/generator/query": 200,
+  "POST /api/generator/count": 200,
+  "POST /api/generator/export": 200,
   "POST /api/login/": 200,
   "POST /api/poste/export": 200,
   "POST /api/usuario/:id/mfa/reset": 200,
@@ -268,14 +268,14 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "PUT /api/adss/:id": 200,
   "PUT /api/ciudad/:id": 200,
   "PUT /api/evento/:id": 200,
-  "PUT /api/generador/reportes/:id": 200,
+  "PUT /api/generator/reportes/:id": 200,
   "PUT /api/material/:id": 200,
   "PUT /api/obs/:id": 200,
-  "PUT /api/permisos/:id_rol": 200,
+  "PUT /api/permiso/:id_rol": 200,
   "PUT /api/poste/:id": 200,
   "PUT /api/propietario/:id": 200,
   "PUT /api/rol/:id": 200,
-  "PUT /api/tipoObs/:id": 200,
+  "PUT /api/tipo-obs/:id": 200,
   "PUT /api/usuario/:id": 200,
   "PUT /api/usuario/username/:id": 200,
   "PUT /api/usuario/userpass/:id": 200,
@@ -505,7 +505,7 @@ describe("what actually leaves the server", () => {
   it("answers 204 with nothing at all when a row is restored", async () => {
     adssRestore.mockResolvedValue(undefined as never);
 
-    const res = await request(app).patch("/api/adss/42/desarchivar").set("Cookie", COOKIE).set(DEL_FRONTEND);
+    const res = await request(app).patch("/api/adss/42/restore").set("Cookie", COOKIE).set(DEL_FRONTEND);
 
     expect(res.status).toBe(204);
     expect(res.text).toBe("");

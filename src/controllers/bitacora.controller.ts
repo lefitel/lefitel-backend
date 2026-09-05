@@ -143,12 +143,12 @@ export const getAutoresBitacora = handler("getAutoresBitacora", async (_req: Req
   // states who did something — a fact that does not change when they leave.
   // A bare list, no envelope: §3.3 of the API standard keeps the envelope for
   // paginated collections, and this is a block of id/name pairs like the three
-  // `/opciones` responses.
+  // `/options` responses.
   res.status(200).json(autores);
 });
 
 export const getBitacora = handler("getBitacora", async (req: Request, res: Response) => {
-  const { id_usuario } = req.params;
+  const { id } = req.params;
   const paginacion = leerPaginacion(req.query);
   if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
 
@@ -157,7 +157,7 @@ export const getBitacora = handler("getBitacora", async (req: Request, res: Resp
   // `requireSelfOrPermission`, so any live session could trigger it on its own
   // log without holding a single permission.
   const listado = await listar(BitacoraModel, {
-    where: { id_usuario },
+    where: { id_usuario: id },
     order: [["id", "DESC"]],
   }, paginacion);
   if (excedeElTecho(listado)) return responderExcede(res, listado.excede);

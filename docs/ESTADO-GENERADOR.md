@@ -35,7 +35,7 @@ el servidor, no en el navegador:
 | `queue.ts` | Una exportación a la vez |
 | `index.ts` | `buildExport()`: orquesta y devuelve bytes |
 
-Endpoints en `/api/generador`: `catalogo`, `consulta`, `exportar`, y el CRUD de
+Endpoints en `/api/generator`: `catalog`, `query`, `export`, y el CRUD de
 `reportes`.
 
 **El frontend** — `lib/reportConfig.ts` concentra las reglas como funciones puras;
@@ -240,7 +240,7 @@ padre pasa funciones nuevas en cada render.
 
 *Endurecimiento.* `MAX_CONDITIONS` se aplica por grupo y no por reporte (4.000
 subconsultas en un cuerpo de 97 KB), los valores de filtro no tienen tope de
-longitud, `/consulta` no tiene tope de celdas aunque `/exportar` sí, el CRUD de
+longitud, `/query` no tiene tope de celdas aunque `/export` sí, el CRUD de
 reportes guardados no tiene limitador ni tope de tamaño, y cancelar una
 exportación no cancela nada en el servidor: sigue construyendo y reteniendo el
 hueco único.
@@ -366,7 +366,7 @@ un fallo rechazaba todas las comprobaciones a la vez. Ahora responde 500 y falla
 cerrado, y hay una red de último recurso en `index.ts` que deja escrito qué mató
 al proceso en vez de un stack pelado.
 
-**`/consulta` no tenía tope de celdas ni cola**: 50.000 filas × 60 columnas son
+**`/query` no tenía tope de celdas ni cola**: 50.000 filas × 60 columnas son
 tres millones de celdas en un JSON, quince veces el tope que sí tiene el Excel.
 Ahora hay un tope de 300.000 celdas, comprobado antes de leer las filas.
 
@@ -937,7 +937,7 @@ Cuatro commits, todos en `isaias`:
   ofrecía caminos circulares («Evento › Última revisión › Evento › Poste»), 33 de
   los 78 campos de un reporte de eventos. Un reporte de eventos pasó a **52
   campos en 12 grupos** ofreciendo tres preguntas más.
-- `api 4defb3a` — **`POST /conteo`** (cuenta sin leer filas, 120/min) y el campo
+- `api 4defb3a` — **`POST /count`** (cuenta sin leer filas, 120/min) y el campo
   `path` en cada columna del resultado.
 - `web 6656c37` — **los cinco arreglos comunes**: refresco automático con
   interruptor, contador en vivo, ordenar desde la cabecera, guardados arriba,
@@ -995,7 +995,7 @@ quede casi nada dentro.
 ### Las seis plantillas — construidas el 4 de septiembre (`258deb4`)
 
 Aprobadas por Isaias y vivas en `src/reportBuilder/templates.ts`, servidas con el
-catálogo en `GET /catalogo`. Medidas contra `osefi_local`:
+catálogo en `GET /catalog`. Medidas contra `osefi_local`:
 
 | # | Plantilla | Raíz | Devuelve |
 |---|---|---|---|

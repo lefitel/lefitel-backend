@@ -8,7 +8,7 @@
 // one fact no route table can establish.
 //
 // **The fact only a request can establish.** The layer list says
-// `GET /api/poste/opciones` exists and sits before `/:id`. It cannot say which
+// `GET /api/poste/options` exists and sits before `/:id`. It cannot say which
 // layer Express's matcher picks, because Express 5 compiles a path into closures
 // over a pattern nothing exposes — `routeGuards.test.ts`'s header comment is
 // about exactly that. So the proof here is not the 200: it is that
@@ -157,8 +157,8 @@ beforeEach(() => {
   ] as never);
   // Left rejecting: nothing in this file should reach either, and a bare spy
   // would answer `undefined` and let a shadowed route look merely empty.
-  posteFindOne.mockRejectedValue(new Error("searchPoste corrió: /opciones quedó tapada por /:id") as never);
-  eventoFindOne.mockRejectedValue(new Error("searchEvento corrió: /opciones quedó tapada por /:id") as never);
+  posteFindOne.mockRejectedValue(new Error("searchPoste corrió: /options quedó tapada por /:id") as never);
+  eventoFindOne.mockRejectedValue(new Error("searchEvento corrió: /options quedó tapada por /:id") as never);
   sesionUpdate.mockRejectedValue(new Error("touchSession corrió: este test habría escrito en la base de datos") as never);
 });
 
@@ -169,26 +169,26 @@ const consulta = (spy: { mock: { calls: unknown[][] } }, n = 0) =>
     | undefined;
 
 describe("the options endpoints are mounted where they can be reached", () => {
-  it("answers /api/poste/opciones without ever reaching searchPoste", async () => {
-    const res = await request(app).get("/api/poste/opciones").set("Cookie", COOKIE);
+  it("answers /api/poste/options without ever reaching searchPoste", async () => {
+    const res = await request(app).get("/api/poste/options").set("Cookie", COOKIE);
 
     expect(res.status).toBe(200);
     // The assertion this endpoint exists for. `/:id` is declared three lines
-    // below `/opciones`; declared three lines above, this spy is what runs.
-    expect(posteFindOne, "el literal /opciones no ganó al paramétrico /:id").not.toHaveBeenCalled();
+    // below `/options`; declared three lines above, this spy is what runs.
+    expect(posteFindOne, "el literal /options no ganó al paramétrico /:id").not.toHaveBeenCalled();
   });
 
-  it("answers /api/evento/opciones without ever reaching searchEvento", async () => {
-    const res = await request(app).get("/api/evento/opciones").set("Cookie", COOKIE);
+  it("answers /api/evento/options without ever reaching searchEvento", async () => {
+    const res = await request(app).get("/api/evento/options").set("Cookie", COOKIE);
 
     expect(res.status).toBe(200);
-    expect(eventoFindOne, "el literal /opciones no ganó al paramétrico /:id").not.toHaveBeenCalled();
+    expect(eventoFindOne, "el literal /options no ganó al paramétrico /:id").not.toHaveBeenCalled();
   });
 
-  it("answers /api/reporte/opciones", async () => {
+  it("answers /api/reporte/options", async () => {
     // No `/:id` on this router to lose to, so there is nothing to prove about
     // ordering here — only that the mount exists and the chain does not 500.
-    const res = await request(app).get("/api/reporte/opciones").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
     expect(res.status).toBe(200);
   });
 
@@ -196,7 +196,7 @@ describe("the options endpoints are mounted where they can be reached", () => {
     // The other direction, and it is not symmetry for its own sake: declaring a
     // literal first is only correct if it does not swallow the parametric route
     // in turn. A single-segment literal cannot, but this is what would notice a
-    // future `/opciones/:algo` or a `/:id` accidentally removed.
+    // future `/options/:algo` or a `/:id` accidentally removed.
     posteFindOne.mockResolvedValue({ dataValues: { id: 5, name: "P-5" } } as never);
     const res = await request(app).get("/api/poste/5").set("Cookie", COOKIE);
 
@@ -207,7 +207,7 @@ describe("the options endpoints are mounted where they can be reached", () => {
 
 describe("what each endpoint answers with", () => {
   it("gives the pole form its four lists and nothing else", async () => {
-    const res = await request(app).get("/api/poste/opciones").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/poste/options").set("Cookie", COOKIE);
 
     // Both directions: a missing block and an extra one both fail. `PosteSheet`
     // reads all four, and a block nobody asked for is a column of the database
@@ -216,7 +216,7 @@ describe("what each endpoint answers with", () => {
   });
 
   it("gives both incident forms their two lists and nothing else", async () => {
-    const res = await request(app).get("/api/evento/opciones").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/evento/options").set("Cookie", COOKIE);
 
     // Deliberately no `poste` block: `AddEventoPageSheet` does need the pole
     // list, and serving the pole register under `eventos.ver` would be worse
@@ -225,7 +225,7 @@ describe("what each endpoint answers with", () => {
   });
 
   it("gives the report screens their six lists and nothing else", async () => {
-    const res = await request(app).get("/api/reporte/opciones").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
 
     expect(Object.keys(res.body).sort())
       .toEqual(["adss", "ciudad", "material", "obs", "propietario", "tramos"]);
@@ -238,7 +238,7 @@ describe("what each block asks the database for", () => {
   // `attributes` list is what actually decides the columns.
 
   it("asks for the cities the pole form can draw", async () => {
-    await request(app).get("/api/poste/opciones").set("Cookie", COOKIE);
+    await request(app).get("/api/poste/options").set("Cookie", COOKIE);
 
     // `lat` and `lng` are the two that matter. `PosteSheet` draws a map and
     // `ReportRecorrido` traces a line with them, and both guard with
@@ -247,7 +247,7 @@ describe("what each block asks the database for", () => {
   });
 
   it("asks for the observations the incident forms can group", async () => {
-    await request(app).get("/api/evento/opciones").set("Cookie", COOKIE);
+    await request(app).get("/api/evento/options").set("Cookie", COOKIE);
 
     // `id_tipoObs` is the one that matters: both forms group with
     // `filter(o => o.id_tipoObs === …)`, and without it every group is empty —
@@ -257,7 +257,7 @@ describe("what each block asks the database for", () => {
   });
 
   it("asks the three plain catalogues for a name and nothing more", async () => {
-    await request(app).get("/api/poste/opciones").set("Cookie", COOKIE);
+    await request(app).get("/api/poste/options").set("Cookie", COOKIE);
 
     // `description` exists on adss and material and is read by the Parámetros
     // sections, which stay on the administration endpoints (§5.5). A dropdown
@@ -275,7 +275,7 @@ describe("what each block asks the database for", () => {
     // endpoint's city to `id, name` used to leave the whole suite green — and
     // `ReportRecorrido`'s `if (a?.lat && a?.lng && …)` falls out on its first
     // line, so the screen called Recorrido draws no recorrido and logs nothing.
-    await request(app).get("/api/reporte/opciones").set("Cookie", COOKIE);
+    await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
 
     expect(consulta(ciudadFindAll)?.attributes).toEqual(["id", "name", "lat", "lng"]);
     // `NOMBRE` here and `OBS_AGRUPABLE` on the incident endpoint, deliberately:
@@ -299,14 +299,14 @@ describe("what each block asks the database for", () => {
     // for. Asserted because nothing else here would notice its absence: a
     // Sequelize instance serialises to the same JSON, so the response would look
     // identical while every row arrived wrapped.
-    await request(app).get("/api/poste/opciones").set("Cookie", COOKIE);
+    await request(app).get("/api/poste/options").set("Cookie", COOKIE);
     for (const spy of [adssFindAll, ciudadFindAll, materialFindAll, propietarioFindAll]) {
       expect(consulta(spy)?.raw).toBe(true);
     }
   });
 
   it("orders every list, because an export's columns follow it", async () => {
-    await request(app).get("/api/reporte/opciones").set("Cookie", COOKIE);
+    await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
 
     // Not decoration. `ReportTramoSec` builds one table column per propietario,
     // per material, per ADSS and per observation in list order, and hands the
@@ -321,7 +321,7 @@ describe("what each block asks the database for", () => {
   });
 
   it("never asks for archived rows", async () => {
-    await request(app).get("/api/reporte/opciones").set("Cookie", COOKIE);
+    await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
 
     // §5: "los archivados no viajan". All seven models are `paranoid: true`, so
     // this is satisfied by the *absence* of `paranoid: false` — which is exactly
@@ -337,7 +337,7 @@ describe("what each block asks the database for", () => {
 
 describe("the tramos block, which is computed and not selected", () => {
   it("collapses both directions of a tramo into one entry", async () => {
-    const res = await request(app).get("/api/reporte/opciones").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
 
     // Four rows go in — (3,7), (7,3) and (3,7) again, plus one reaching an
     // archived city — and one pair comes out, keyed by min/max. A tramo is
@@ -346,7 +346,7 @@ describe("the tramos block, which is computed and not selected", () => {
   });
 
   it("drops a pair naming a city this same response does not serve", async () => {
-    const res = await request(app).get("/api/reporte/opciones").set("Cookie", COOKIE);
+    const res = await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
 
     const ciudadesServidas = new Set((res.body.ciudad as { id: number }[]).map((c) => c.id));
     const nombradas = (res.body.tramos as { id_ciudadA: number; id_ciudadB: number }[])
@@ -367,14 +367,14 @@ describe("who may call them", () => {
   it("refuses all three to an account without the permission", async () => {
     puede = false;
 
-    for (const url of ["/api/poste/opciones", "/api/evento/opciones", "/api/reporte/opciones"]) {
+    for (const url of ["/api/poste/options", "/api/evento/options", "/api/reporte/options"]) {
       const res = await request(app).get(url).set("Cookie", COOKIE);
       expect(res.status, `${url} contestó ${res.status}`).toBe(403);
     }
   });
 
   it("refuses all three to a request with no session at all", async () => {
-    for (const url of ["/api/poste/opciones", "/api/evento/opciones", "/api/reporte/opciones"]) {
+    for (const url of ["/api/poste/options", "/api/evento/options", "/api/reporte/options"]) {
       const res = await request(app).get(url);
       expect(res.status, `${url} contestó ${res.status}`).toBe(401);
     }
@@ -386,9 +386,9 @@ describe("who may call them", () => {
     // one of the expectations above were ever loosened. This is the guard the
     // four source-level tests in `src/controllers/` all carry, in the form this
     // file needs it.
-    await request(app).get("/api/poste/opciones").set("Cookie", COOKIE);
-    await request(app).get("/api/evento/opciones").set("Cookie", COOKIE);
-    await request(app).get("/api/reporte/opciones").set("Cookie", COOKIE);
+    await request(app).get("/api/poste/options").set("Cookie", COOKIE);
+    await request(app).get("/api/evento/options").set("Cookie", COOKIE);
+    await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
 
     for (const spy of [adssFindAll, ciudadFindAll, materialFindAll, obsFindAll, propietarioFindAll, tipoObsFindAll, posteFindAll]) {
       expect(spy).toHaveBeenCalled();
