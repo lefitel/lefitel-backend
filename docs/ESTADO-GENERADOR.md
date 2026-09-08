@@ -1172,6 +1172,71 @@ aprobar por vacío al mover la lista al desplegable y hubo que reescribirlas par
 que lo abrieran primero. Lo mismo con los botones apagados: «pulsarlo no
 pregunta nada» es cierto en cualquier página si el botón no se puede pulsar.
 
+### Los valores del filtro dejan de teclearse (8 de septiembre)
+
+Salió de una observación de Isaias usando la pantalla: cuando el filtro es «es
+igual a» y el campo es el propietario, los valores posibles ya están en la base.
+
+Y detrás había algo más que comodidad. Un filtro compara cadenas exactas —
+`= 'Tigo'`, ver `sqlBuilder.ts` — así que `tigo`, o un espacio detrás, **no
+casan con nada**, y el reporte vuelve vacío. La pantalla no puede distinguir eso
+de datos que de verdad no tienen ninguna fila: dice lo mismo en los dos casos.
+No dejar que el valor se teclee es lo que borra la pregunta.
+
+**Qué es lista y qué no.** Medido sobre `osefi_local`, no supuesto: propietarios
+12, materiales 3, tipos de observación 4, observaciones 32, roles 5, ciudades
+98 — 154 valores en total. Enfrente, lo que **no** es lista: `postes.name` tiene
+1.053 valores distintos en 1.541 filas y `eventos.description` 339 en 1.376. La
+regla no es «si es texto, ofrece lista», es *el nombre de una tabla que existe
+para ser un catálogo*, y se marca campo a campo con `optionList` en
+`catalog.ts`.
+
+**Viajan con el catálogo y no por demanda.** La respuesta del catálogo ya pesa
+50,6 KB para un técnico y 65,7 KB para quien ve el directorio; las seis listas
+son unos 3 KB. Pedirlas al abrir cada caja costaría un estado de carga, uno de
+error y una carrera entre respuestas, para ahorrar un 5% de algo que se descarga
+una vez. Con un tope, eso sí: por encima de 500 valores la lista no viaja y el
+campo se queda con la caja de texto de antes — `MAX_OPTION_VALUES` en
+`fieldOptions.ts`. Y si la lectura falla, tampoco viaja nada: el generador
+funcionaba sin estas listas el día anterior, así que una base que no contesta
+cuesta el desplegable y nada más.
+
+**Lo que cambia en la pantalla.** «Es igual a» y «es distinto de» pasan a un
+desplegable con buscador. «Está en la lista» pasa a casillas — y ahí está la
+mitad del valor: esa caja de comas existía *solo* porque no había lista, y su
+comentario de cabecera documenta dos maneras en que perdía lo tecleado.
+«Contiene» se queda como estaba, porque busca un fragmento a propósito.
+
+**La trampa que casi se cuela, y que solo apareció al leer la base de verdad.**
+La primera versión recortaba los espacios de cada valor, que suena a limpieza y
+era justo el fallo que esto viene a quitar, devuelto con el aval de la pantalla.
+**Diecinueve valores están guardados con un espacio al final**: 17 de las 98
+ciudades, 1 de los 12 propietarios y 1 de los 4 tipos de observación. Y no son
+filas muertas — `Yacuiba ` cuelga de 121 postes y `Palos Blancos ` de 103. Como
+el filtro compara exacto, el `Yacuiba` recortado no habría casado con ninguno:
+un valor que la pantalla ofrece y que no encuentra nada es peor que uno que
+nadie acierta a teclear. Los valores viajan ahora tal cual están guardados. El
+precio es una pareja que se lee igual — `Ventillas` y `Ventillas ` son dos
+ciudades distintas — y las dos funcionan, que es la parte que importa.
+
+Nada de esto salía en las pruebas: ahí los modelos están simulados. Salió de
+ejecutar la lectura contra `osefi_local` y mirar los valores.
+
+**Dos trampas más, las dos con prueba.** Un reporte guardado puede nombrar un
+propietario archivado desde entonces: si se cayera de la lista, la caja diría
+«Elija un valor» sobre un filtro que está puesto y corriendo, así que el valor
+se queda y se marca como lo que es. Y las claves que se piden se derivan de los
+campos que el lector *recibió*, no de una segunda lista escrita a mano: por eso
+a un técnico no le llega el listado de nombres de rol, que solo se alcanza a
+través de `usuario`.
+
+**Lo que se dejó fuera a propósito.** `usuario.name` y `usuario.lastname` no
+llevan lista, aunque son nueve. Agrupar por «Registrado por» ya enseña quién ha
+registrado algo, pero publicar el padrón entero incluye a quien no ha registrado
+nada, y eso es una decisión de Isaias y no mía. Las descripciones de los
+catálogos tampoco: son cerradas, pero un desplegable de frases largas se lee
+peor que escribir un trozo con «contiene».
+
 ### Lo que el generador todavía no hace
 
 Preguntado por Isaias el 8 de septiembre, medido sobre el código. Está completo
@@ -1203,24 +1268,40 @@ el servidor sin tocar la pantalla salvo para ofrecerlas.
    validación lo caza, pero después de pulsar Generar. Es el mismo patrón que ya
    se arregló en «Guardar» y «Nuevo»: un control cuyo único resultado posible es
    un rechazo. Ofrecido a Isaias, sin decidir.
-3. **El reporte general escrito a mano sigue llevando el logo ajeno**, y el de
+3. **Diecinueve valores de catálogo tienen un espacio al final** — 17 ciudades,
+   1 propietario y 1 tipo de observación — y una pareja de ciudades queda
+   indistinguible en la lista (`Ventillas` y `Ventillas `). El generador ya no
+   se rompe por eso, pero la lista enseña dos entradas iguales y cualquier
+   agrupación por ciudad las cuenta separadas. Limpiarlo es un `UPDATE` de una
+   línea sobre filas de producción, así que es decisión de Isaias.
+4. **¿Lleva lista el nombre de una persona?** Los nueve usuarios son una lista
+   cerrada como cualquier otra, y «Registrado por» es justo donde una errata
+   duele más. Pero la lista de valores enseña el padrón entero, incluidos los
+   que no han registrado nada, mientras que agrupar —que ya se puede— solo
+   enseña a quien sí. Es una decisión de Isaias, no técnica.
+5. **El reporte general escrito a mano sigue llevando el logo ajeno**, y el de
    tramo no. Esa incoherencia entre documentos del mismo sistema es anterior a
    todo esto; ahora está a la vista. Decisión de Isaias.
-4. **El PDF sigue sin llevar fotografías.** Lo dice el panel de ayuda; el fichero
+6. **El PDF sigue sin llevar fotografías.** Lo dice el panel de ayuda; el fichero
    en sí no lo advierte y la columna de fotos sale como una columna de «Sí».
-5. Avisar de un decimal en un filtro de enteros exige que el servidor publique
+7. Avisar de un decimal en un filtro de enteros exige que el servidor publique
    qué campos los aceptan: es ampliar el contrato del catálogo.
-6. **Las pruebas de imagen se pasan de tiempo cuando la máquina va cargada.**
+8. **Las pruebas de imagen se pasan de tiempo cuando la máquina va cargada.**
    `photos.test.ts` y `export.integration.test.ts` fallan por timeout de 5
    segundos si hay varias pasadas de vitest a la vez, y pasan solas en aislado.
    Otra sesión ya subió el margen de una de ellas a 30 segundos con la medición
    escrita. Esto explica los «1–2 fallos sin nombre» que quedaron apuntados del 4
    de septiembre.
-7. **`src/auth/mfaKeyCheck.test.ts` falla** («falla al arrancar cuando
-   MFA_ENCRYPTION_KEY_ACTIVE no resuelve»). Código commiteado, sin cambios
-   locales, sin una sola importación compartida con el generador. Huele a
-   entorno. Ajeno, no explicado.
-8. Lo que ya estaba abierto y sigue: la cancelación de exportación se comprueba
+9. **`src/auth/mfaKeyCheck.test.ts` falla, y ya se sabe por qué.** La prueba
+   comprueba qué pasa al arrancar *sin* `MFA_ENCRYPTION_KEY_ACTIVE`, y para eso
+   da por hecho que la variable no está en el entorno: solo la pone cuando la
+   quiere puesta. Pero el `.env` local la define desde el trabajo de MFA, así
+   que el caso «sin llave» no llega a darse y la comprobación acierta cuando la
+   prueba espera que falle. Medido: con `MFA_ENCRYPTION_KEY_ACTIVE=` por delante
+   del comando, las diez pasan. El arreglo es una línea —
+   `vi.stubEnv("MFA_ENCRYPTION_KEY_ACTIVE", "")` en esa prueba — y es de la otra
+   tanda, no de esta.
+10. Lo que ya estaba abierto y sigue: la cancelación de exportación se comprueba
    entre pasos y no dentro de uno; el tope de peso se mide después de construir;
    nadie mira el aviso de la clase 22; `IMAGES_DIR` apunta a `C:/images` con 17
    ficheros frente a 1.514 fotos referenciadas.

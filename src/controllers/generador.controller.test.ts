@@ -49,6 +49,23 @@ vi.mock("../reportBuilder/execute.js", () => ({
   countReport: (...args: unknown[]) => countReport(...args),
 }));
 
+/**
+ * The filter value lists, stubbed — and this one is not a convenience.
+ *
+ * `getCatalogo` asks for them, the real reader queries six tables, and the
+ * models are not mocked in this file: the catalog test would go to the database
+ * this environment is configured against. It would even pass, because a failed
+ * read is caught and answered with no lists, which is exactly the kind of green
+ * that hides a problem.
+ *
+ * A spy rather than a constant, because *which* lists are asked for is itself a
+ * rule — see the test below.
+ */
+const loadOptionLists = vi.fn(async (_keys: string[]) => ({ "propietario.name": ["Tigo"] }));
+vi.mock("../reportBuilder/fieldOptions.js", () => ({
+  loadOptionLists: (keys: string[]) => loadOptionLists(keys),
+}));
+
 const granted = new Set<string>();
 vi.mock("../permissions/store.js", () => ({
   can: (role: number, modulo: string, accion: string) =>
@@ -632,6 +649,33 @@ describe("running a report", () => {
     expect(c.status).toBe(400);
     expect(c.message).toMatch(/permiso/i);
     expect(runReport).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The lists asked for are derived from the fields the viewer actually got,
+   * so this follows from the trimming above rather than from a second rule
+   * somebody has to remember. `rol.name` is reachable only through `usuario`,
+   * which is staff-only, so a technician's response carries no roster of role
+   * names — and the owners, which everybody may see, are asked for.
+   */
+  it("no pide la lista de roles a quien no ve el directorio de personal", async () => {
+    const sin = call({ id: AUTHOR, id_rol: TECNICO });
+    await getCatalogo(sin.req, sin.res);
+    const pedidasSinPermiso = loadOptionLists.mock.calls[0][0];
+    expect(pedidasSinPermiso).toContain("propietario.name");
+    expect(pedidasSinPermiso).not.toContain("rol.name");
+
+    grant(ADMIN, "seguridad.ver");
+    const con = call({ id: AUTHOR, id_rol: ADMIN });
+    await getCatalogo(con.req, con.res);
+    expect(loadOptionLists.mock.calls[1][0]).toContain("rol.name");
+  });
+
+  it("entrega las listas de valores junto al catálogo", async () => {
+    const c = call({ id: AUTHOR, id_rol: TECNICO });
+    await getCatalogo(c.req, c.res);
+    expect((c.payload as { optionLists: unknown }).optionLists)
+      .toEqual({ "propietario.name": ["Tigo"] });
   });
 
   it("hands the catalog over trimmed to what the caller may see", async () => {

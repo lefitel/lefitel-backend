@@ -3,6 +3,7 @@ import { Op } from "sequelize";
 import { ReporteVistaModel } from "../models/reporteVista.model.js";
 import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 import { buildCatalogView } from "../reportBuilder/catalogView.js";
+import { loadOptionLists } from "../reportBuilder/fieldOptions.js";
 import { MAX_ROWS } from "../reportBuilder/catalog.js";
 import { countReport, runReport } from "../reportBuilder/execute.js";
 import {
@@ -181,11 +182,30 @@ function handleError(error: unknown, res: Response) {
 export async function getCatalogo(req: Request, res: Response) {
   try {
     const viewer = await viewerOf(req);
+    const view = buildCatalogView(viewer);
+
+    // Only the lists a field this viewer can see actually names. That is what
+    // keeps the role names out of a coordinator's response: `rol.name` is
+    // reached only through `usuario`, which is staff-only, so the field never
+    // appears and the key is never asked for. Deriving it from the built view
+    // rather than from a second list of my own is what makes that automatic
+    // instead of remembered.
+    const keys: string[] = [];
+    for (const root of view.roots) {
+      for (const field of root.fields) if (field.optionList) keys.push(field.optionList);
+    }
+
     // Assembled here rather than inside `buildCatalogView`, and not by taste:
     // `templatesFor` prunes each template through `pruneConfig`, which calls
     // `buildCatalogView` itself. Putting the templates in there would have
-    // recursed until the stack ran out, on the first request.
-    res.status(200).json({ ...buildCatalogView(viewer), templates: templatesFor(viewer) });
+    // recursed until the stack ran out, on the first request. The value lists
+    // are here for a second reason — they are a database read, and that
+    // function is pure and synchronous.
+    res.status(200).json({
+      ...view,
+      templates: templatesFor(viewer),
+      optionLists: await loadOptionLists(keys),
+    });
   } catch (error) {
     handleError(error, res);
   }

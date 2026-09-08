@@ -27,6 +27,18 @@ export interface CatalogFieldView {
    * revisions. Grouping by one is rejected, so the client should not offer it.
    */
   aggregate?: boolean;
+  /**
+   * Names the list of values this field can hold, when there is one — see
+   * `optionList` in types.ts. The lists themselves travel once, beside the
+   * roots, because the same list is reached by many paths: `propietario.name`
+   * hangs off a pole, off an event's pole, and off a revision's event's pole.
+   *
+   * A key with no list in the response is not an error and the client must
+   * handle it: the list may have outgrown the cap, or the read may have failed,
+   * and in both cases the honest answer is the free text box the field had
+   * before.
+   */
+  optionList?: string;
 }
 
 export interface CatalogRootView {
@@ -110,6 +122,10 @@ function collect(
   chain: readonly string[],
 ): void {
   const withPrefix = (name: string) => (prefix ? `${prefix}.${name}` : name);
+  // The entity being walked right now. `chain` is the ancestry with the root
+  // first, so its last link is always this one — see the initial call and the
+  // recursion below, which both append the entity they descend into.
+  const entityKey = chain[chain.length - 1];
 
   for (const [name, field] of Object.entries(entity.fields)) {
     if (!isVisible(field.staffOnly, viewer)) continue;
@@ -132,6 +148,9 @@ function collect(
         ? AGGS_BY_KIND[field.kind].filter((agg) => agg !== "sum")
         : AGGS_BY_KIND[field.kind],
       semantic: field.semantic,
+      // Keyed by entity and column, not by path: one list, however many paths
+      // reach it.
+      optionList: field.optionList === true ? `${entityKey}.${name}` : undefined,
     });
   }
 

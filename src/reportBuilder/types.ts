@@ -51,6 +51,23 @@ export interface FieldDef {
    * where that data lives. Absent means everybody who can open the generator.
    */
   staffOnly?: boolean;
+  /**
+   * Set when every value this column can hold is already in the table, and
+   * there are few enough of them to hand the whole list to the filter box.
+   *
+   * Only on the catalogue entities — the ones that exist to be a list of
+   * choices, administered by hand from Parámetros. It is a claim about the
+   * column, not about today's data: `postes.name` has 1.053 distinct values
+   * across 1.541 rows and `eventos.description` 339, and neither is a list of
+   * anything.
+   *
+   * What it buys is not convenience. A filter compares strings exactly
+   * (`= 'Tigo'`), so `tigo`, or a trailing space, matches nothing — and an
+   * empty report reads the same whether the filter is misspelled or the data
+   * really holds no such row. The screen cannot tell those apart, so the fix is
+   * not to let the value be typed.
+   */
+  optionList?: boolean;
 }
 
 /**

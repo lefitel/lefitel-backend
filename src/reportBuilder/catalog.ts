@@ -34,7 +34,7 @@ const ciudad: EntityDef = {
     // Exposed because three cities share a name: without the id, two rows of a
     // city-rooted report are indistinguishable.
     id: { column: "id", kind: "number", label: "ID de la ciudad" },
-    name: { column: "name", kind: "string", label: "Nombre" },
+    name: { column: "name", kind: "string", label: "Nombre", optionList: true },
     lat: { column: "lat", kind: "number", label: "Latitud", decimals: true },
     lng: { column: "lng", kind: "number", label: "Longitud", decimals: true },
   },
@@ -98,7 +98,7 @@ const material: EntityDef = {
   label: "Material",
   paranoid: true,
   fields: {
-    name: { column: "name", kind: "string", label: "Material" },
+    name: { column: "name", kind: "string", label: "Material", optionList: true },
     description: { column: "description", kind: "string", label: "Descripción del material" },
   },
   relations: {},
@@ -109,7 +109,7 @@ const propietario: EntityDef = {
   label: "Propietario",
   paranoid: true,
   fields: {
-    name: { column: "name", kind: "string", label: "Propietario" },
+    name: { column: "name", kind: "string", label: "Propietario", optionList: true },
   },
   relations: {},
 };
@@ -119,7 +119,7 @@ const tipoObs: EntityDef = {
   label: "Tipo de observación",
   paranoid: true,
   fields: {
-    name: { column: "name", kind: "string", label: "Tipo de observación" },
+    name: { column: "name", kind: "string", label: "Tipo de observación", optionList: true },
     description: { column: "description", kind: "string", label: "Descripción del tipo" },
   },
   relations: {},
@@ -131,7 +131,7 @@ const rol: EntityDef = {
   label: "Rol",
   paranoid: false,
   fields: {
-    name: { column: "name", kind: "string", label: "Rol" },
+    name: { column: "name", kind: "string", label: "Rol", optionList: true },
   },
   relations: {},
 };
@@ -142,7 +142,7 @@ const obs: EntityDef = {
   paranoid: true,
   fields: {
     id: { column: "id", kind: "number", label: "ID de la observación" },
-    name: { column: "name", kind: "string", label: "Observación" },
+    name: { column: "name", kind: "string", label: "Observación", optionList: true },
     description: { column: "description", kind: "string", label: "Descripción de la observación" },
     criticality: { column: "criticality", kind: "number", label: "Criticidad", semantic: "criticality" },
   },
