@@ -1087,22 +1087,140 @@ está probada a fondo. Lo mismo con la maqueta: hay dos pruebas que leen nombres
 de clase (`min-w-0`, el tope de altura) porque no hay forma de preguntar cuánto
 mide algo.
 
+### La segunda pasada por la pantalla, del 6 al 8 de septiembre
+
+Otra tanda dirigida entera por lo que Isaias veía en la pantalla. La maqueta
+cambió tres veces de forma antes de asentarse, y conviene tener el orden a mano
+porque hay razonamientos que solo se entienden encadenados.
+
+**De dos cabeceras a una.** La pantalla tenía el título con su párrafo y, debajo,
+una barra con borde. Dos franjas de cromo antes de nada. Ahora es una sola fila
+—título y una línea a la izquierda, controles a la derecha—, que es lo que
+tienen las otras cinco pantallas del sistema: Eventos, Postes, Ciudades y
+Archivos siguen todas ese patrón y el generador era el único que se salía. El
+párrafo pasó de tres frases a una.
+
+**El nivel de detalle y el reporte, en píldoras.** Ninguno de los dos es un campo
+que se rellena: uno dice qué es una fila del reporte, el otro nombra el reporte.
+Sus etiquetas van encima y no al lado.
+
+**La lista de guardados se volvió un desplegable con buscador.** Era un panel de
+la banda —un tercio del ancho, permanente, para una lista que se lee una vez al
+empezar. Dentro del desplegable se renderizan los *mismos* dos componentes que
+llenaban el panel, así que sobreviven seis de las siete cosas que llevaba: los
+tres botones por fila son la excepción y se mudaron al lado del nombre del
+reporte abierto, donde además funcionan mientras lo tienes abierto, cosa que la
+lista nunca pudo. Dos trampas del buscador, las dos con prueba: el pie tiene que
+dejar de contar la lista entera mientras se busca, y el estado vacío habla de la
+cuenta y no de la búsqueda.
+
+**La pantalla ya dice en qué reporte estás.** No lo decía: abrías uno y cambiaba
+todo menos cualquier señal de qué habías abierto. La única pista era el botón
+pasando a «Actualizar».
+
+**Guardar subió con el reporte que guarda**, porque guarda la configuración y
+nunca las filas, y estaba en la cabecera de la tabla que no guarda. «Nuevo» se le
+unió y pasó a preguntar antes de vaciar. Los dos se apagan cuando no pueden hacer
+nada: «Nuevo» en una pantalla en blanco no vaciaba nada y aun así anunciaba
+«reporte nuevo en blanco»; «Guardar» abría un formulario pidiendo nombre,
+descripción y compartir, y *después* rechazaba con «necesita al menos una
+columna».
+
+**Las columnas son píldoras apiladas.** Pasaron por nube envuelta y por popover
+antes de asentarse: los controles se fueron detrás de una pulsación cuando el
+panel medía 260 píxeles, y volvieron a la píldora en cuanto la banda quedó en dos
+paneles y hubo 640. Apiladas y no envueltas porque **este orden es el orden de
+las columnas en el Excel**: hacia abajo no admite discusión.
+
+**El orden del reporte se ve y se cambia.** Salió de una pregunta suya —«¿el
+orden de asignación cómo es?»— que destapó que la prioridad decidía el resultado
+desde el primer día y no estaba escrita en ninguna parte. Ahora los botones
+llevan palabras, el de ordenar enseña su puesto cuando hay más de uno, y una tira
+bajo las columnas lista los criterios en orden, arrastrables. `flipSort` no cicla
+a «apagado» como sí hace el botón de la columna: en una lista de criterios ya
+elegidos, darle la vuelta a uno no puede borrarlo.
+
+**Y el logo ajeno salió de los ficheros generados.** Estaba fijo, a la derecha de
+la banda azul de todos los Excel y todos los PDF, porque el generador se
+construyó para parecerse al reporte general escrito a mano. Tres cosas fallaban:
+el otro exportador a mano, en el mismo directorio, solo lleva el de la casa; hay
+doce propietarios en la base; y un reporte se filtra por uno de ellos.
+
+#### Dos fallos que ya estaban en producción y aparecieron aquí
+
+1. **Renombrar una columna era imposible.** Solo entraba la primera letra. La
+   identidad de una columna incluía su etiqueta, la lista usaba esa identidad
+   como clave de React, así que cada tecla producía una clave nueva, React tiraba
+   la fila y el input perdía el foco. Nada en pantalla lo decía. La identidad es
+   ahora *qué duplicado es*: un número que solo cambia cuando las columnas se
+   añaden, se quitan o se reordenan. Lo encontré probándolo antes de rediseñar,
+   no por casualidad.
+2. **Mis comprobaciones de tipos no corrían.** Usaba `tsc -p tsconfig.app.json` y
+   ese fichero no existe en este repo; `tsc` fallaba con TS5058 y yo filtraba la
+   salida por «generador», así que veía cero errores. **El comando bueno es
+   `npm run typecheck`**, que además pasa el `tsconfig.test.json`.
+
+#### Lo que no se puede probar aquí, otra vez
+
+El gesto de arrastrar, ni el de columnas ni el de criterios de orden: la librería
+mide geometría real y el entorno no dibuja nada. Por eso la lógica vive fuera de
+los componentes, en `moveColumnByKey` y `moveSortByKey`, que sí están probadas.
+
+Y una advertencia de método: **con la lista de guardados detrás de un control,
+toda prueba que afirme «no dice X» se cumple sola.** Cuatro pruebas empezaron a
+aprobar por vacío al mover la lista al desplegable y hubo que reescribirlas para
+que lo abrieran primero. Lo mismo con los botones apagados: «pulsarlo no
+pregunta nada» es cierto en cualquier página si el botón no se puede pulsar.
+
+### Lo que el generador todavía no hace
+
+Preguntado por Isaias el 8 de septiembre, medido sobre el código. Está completo
+para **listar y resumir**; no lo está para **analizar**.
+
+1. **Filtrar sobre un resumen.** «Tramos con más de 10 eventos» no se puede: los
+   filtros se aplican siempre antes de agrupar. Falta `HAVING`. Es la carencia
+   más grande para reportes de gestión.
+2. **Agrupar por mes o por año.** Solo por el valor exacto de la fecha, así que
+   agrupar por «Fecha del evento» da una fila por día distinto. No hay
+   truncado de fechas.
+3. **Tabla cruzada.** La agrupación es una lista plana: no hay filas × columnas.
+4. **Fila de totales** al final de la tabla.
+5. **Columnas calculadas propias.** Las que hay —criticidad, días abierto, días
+   hasta la reparación, y los conteos— están escritas en el servidor.
+6. **Comparar periodos**, **gráficos** y **programar envíos**: nada de eso existe.
+
+Las dos primeras son las que más rinden por lo que cuestan, y ambas se hacen en
+el servidor sin tocar la pantalla salvo para ofrecerlas.
+
 ### Pendiente
 
 1. **Pregunta sin contestar:** hoy cualquiera ve todos los reportes marcados
    «compartido», venga de quien venga. Si un coordinador comparte un análisis
    interno, el rol Cliente lo ve en su lista. ¿«Compartido» debería significar
    «con mi equipo» y no con los clientes?
-2. **Dos pasadas de la suite del api fallaron 1–2 pruebas** que nunca llegaron a
-   decir su nombre, el 4 de septiembre, mientras otra sesión escribía en el mismo
-   árbol. No se reprodujo en las cinco pasadas siguientes ni con los tres
-   ficheros que tocan base de datos ejecutados juntos. Queda apuntado sin cerrar.
-3. **El PDF sigue sin llevar fotografías.** Ahora al menos lo dice el panel de
-   ayuda; el fichero en sí no lo advierte y la columna de fotos sale como una
-   columna de «Sí».
-4. Avisar de un decimal en un filtro de enteros exige que el servidor publique
+2. **El select de «Resumen» se ofrece cuando el reporte no está agrupado**, y ahí
+   cualquier valor que se elija da una configuración que el servidor rechaza. La
+   validación lo caza, pero después de pulsar Generar. Es el mismo patrón que ya
+   se arregló en «Guardar» y «Nuevo»: un control cuyo único resultado posible es
+   un rechazo. Ofrecido a Isaias, sin decidir.
+3. **El reporte general escrito a mano sigue llevando el logo ajeno**, y el de
+   tramo no. Esa incoherencia entre documentos del mismo sistema es anterior a
+   todo esto; ahora está a la vista. Decisión de Isaias.
+4. **El PDF sigue sin llevar fotografías.** Lo dice el panel de ayuda; el fichero
+   en sí no lo advierte y la columna de fotos sale como una columna de «Sí».
+5. Avisar de un decimal en un filtro de enteros exige que el servidor publique
    qué campos los aceptan: es ampliar el contrato del catálogo.
-5. Lo que ya estaba abierto y sigue: la cancelación de exportación se comprueba
+6. **Las pruebas de imagen se pasan de tiempo cuando la máquina va cargada.**
+   `photos.test.ts` y `export.integration.test.ts` fallan por timeout de 5
+   segundos si hay varias pasadas de vitest a la vez, y pasan solas en aislado.
+   Otra sesión ya subió el margen de una de ellas a 30 segundos con la medición
+   escrita. Esto explica los «1–2 fallos sin nombre» que quedaron apuntados del 4
+   de septiembre.
+7. **`src/auth/mfaKeyCheck.test.ts` falla** («falla al arrancar cuando
+   MFA_ENCRYPTION_KEY_ACTIVE no resuelve»). Código commiteado, sin cambios
+   locales, sin una sola importación compartida con el generador. Huele a
+   entorno. Ajeno, no explicado.
+8. Lo que ya estaba abierto y sigue: la cancelación de exportación se comprueba
    entre pasos y no dentro de uno; el tope de peso se mide después de construir;
    nadie mira el aviso de la clase 22; `IMAGES_DIR` apunta a `C:/images` con 17
    ficheros frente a 1.514 fotos referenciadas.
