@@ -71,7 +71,6 @@ export async function buildPdf(input: PdfInput): Promise<Buffer> {
 
   const branding = await loadBranding();
   const osefi = branding.osefi ? `data:image/png;base64,${branding.osefi.toString("base64")}` : null;
-  const tigo = branding.tigo ? `data:image/png;base64,${branding.tigo.toString("base64")}` : null;
 
   const keys = rowStyleKeys(columns);
   const indicators = buildIndicators(columns, rows, input.noun);
@@ -115,12 +114,11 @@ export async function buildPdf(input: PdfInput): Promise<Buffer> {
   const partLabel = (groupIndex: number) =>
     groups.length > 1 ? `parte ${groupIndex + 1} de ${groups.length}` : null;
 
-  /** Logos, title, subtitle and the indicator strip. Once, on the first page. */
+  /** Logo, title, subtitle and the indicator strip. Once, on the first page. */
   const drawFullBand = (groupIndex: number) => {
     doc.setFillColor(...NAVY);
     doc.rect(0, 0, pageWidth, FULL_BAND_MM, "F");
     if (osefi) doc.addImage(osefi, "PNG", 8, 4, 18, 18);
-    if (tigo) doc.addImage(tigo, "PNG", pageWidth - 30, 7, 22, 12);
 
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");

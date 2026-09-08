@@ -24,11 +24,25 @@ const ASSETS = path.resolve(here, "../../assets/images");
 const LOGO_WIDTH_PX = 160;
 
 export interface Branding {
-  /** Osefi, on the left of the band. */
+  /** Osefi, on the left of the band. The only one. */
   osefi: Buffer | null;
-  /** Tigo, on the right. Fixed: pole owners are utilities, not operators. */
-  tigo: Buffer | null;
 }
+
+/*
+ * There used to be a second logo, an operator's, drawn on the right of every
+ * band. It was hard-coded: nothing at run time chose it — not the report, not
+ * the filters, not the data — and it was there because the generator was built
+ * to match the hand-written report that already carried it.
+ *
+ * Three things were wrong with that. The other hand-written report, in the same
+ * directory, carries only this one, so two documents from one system already
+ * went out branded differently. The database holds twelve pole owners. And a
+ * report can be filtered down to one of them, which handed somebody a document
+ * about another company's poles under a third company's mark.
+ *
+ * Removed by Isaias's decision on 2026-09-08. The image is in the history if a
+ * per-report choice is ever wanted.
+ */
 
 let cached: Promise<Branding> | null = null;
 
@@ -37,12 +51,9 @@ let cached: Promise<Branding> | null = null;
  * without it, and the report is still correct.
  */
 export function loadBranding(): Promise<Branding> {
-  cached ??= Promise.all([
-    compressLogo(path.join(ASSETS, "logo.png"), LOGO_WIDTH_PX),
-    compressLogo(path.join(ASSETS, "logo_tigo.png"), LOGO_WIDTH_PX),
-  ]).then(([osefi, tigo]) => {
+  cached ??= compressLogo(path.join(ASSETS, "logo.png"), LOGO_WIDTH_PX).then((osefi) => {
     if (osefi === null) log("export").warn({ ruta: ASSETS }, `no se encontró el logo en ${ASSETS}`);
-    return { osefi, tigo };
+    return { osefi };
   });
   return cached;
 }

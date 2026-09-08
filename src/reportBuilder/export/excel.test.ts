@@ -50,6 +50,21 @@ describe("buildExcel", () => {
     expect(sheet.getCell(1, 1).value).toBe("Eventos de marzo");
   });
 
+  it("carries one logo and only one", async () => {
+    // A second one, an operator's, used to be drawn on the right of the band.
+    // It was hard-coded — no report, filter or row chose it — and a report can
+    // be narrowed to one of the twelve pole owners in the database, which
+    // handed somebody a document about another company's poles under a third
+    // company's mark. Removed by Isaias's decision on 2026-09-08.
+    //
+    // Counted on the file that comes out rather than on the branding module:
+    // what matters is what reaches the reader, and the sheet is where an image
+    // could be added back without the module changing at all.
+    const sheet = await readBack(base);
+
+    expect(sheet.getImages()).toHaveLength(1);
+  });
+
   it("freezes everything above the data", async () => {
     const sheet = await readBack(base);
 

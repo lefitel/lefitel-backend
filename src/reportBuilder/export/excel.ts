@@ -2,7 +2,7 @@
 //
 // The hand-written exporters fix their column map at compile time. This one
 // receives whatever columns the user chose and lays the sheet out at run time,
-// keeping the visual language the client already recognises: navy band, logos,
+// keeping the visual language the client already recognises: navy band, logo,
 // indicator strip, frozen headings and colour by state or severity.
 
 import ExcelJS from "exceljs";
@@ -119,7 +119,7 @@ export async function buildExcel(input: ExcelInput): Promise<Buffer> {
     return width;
   });
 
-  // ── Row 1: title, with the logos floating over it ──────────────────────────
+  // ── Row 1: title, with the logo floating over it ───────────────────────────
   sheet.mergeCells(ROW.TITLE, 1, ROW.TITLE, lastCol);
   const titleCell = sheet.getCell(ROW.TITLE, 1);
   titleCell.value = input.title;
@@ -134,13 +134,6 @@ export async function buildExcel(input: ExcelInput): Promise<Buffer> {
       tl: { col: 0.2, row: 0.15 }, ext: { width: 56, height: 40 },
     });
   }
-  // Only when the sheet is wide enough for it not to land on the title.
-  if (branding.tigo && lastCol >= 3) {
-    sheet.addImage(workbook.addImage({ buffer: branding.tigo as never, extension: "png" }), {
-      tl: { col: lastCol - 0.9, row: 0.15 }, ext: { width: 56, height: 40 },
-    });
-  }
-
   // ── Row 2: subtitle ────────────────────────────────────────────────────────
   sheet.mergeCells(ROW.SUBTITLE, 1, ROW.SUBTITLE, lastCol);
   const subtitleCell = sheet.getCell(ROW.SUBTITLE, 1);
