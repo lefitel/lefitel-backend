@@ -112,6 +112,13 @@ const NEGOCIO_EN_ESPANOL = [
   "revision",
   "revisiones",
   "rol",
+  // Spanish and not English, and it is the judgement §3.4 asks for rather than
+  // an obvious case. `ruta` is what the trazado between two ciudades is called
+  // on the screens and by whoever walks it, so it is the network's word. The
+  // tempting English alternative — `routing` — names the technique, not the
+  // thing, which is exactly the distinction that kept `dashboard` in English
+  // and `recorrido` in Spanish.
+  "ruta",
   "solucion",
   "tipo-obs",
   "usuario",

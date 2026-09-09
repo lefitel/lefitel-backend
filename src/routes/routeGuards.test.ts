@@ -62,6 +62,7 @@ const {
 } = await import("../middleware/loginLimiters.js");
 const {
   consultaLimiter,
+  rutaLimiter,
   conteoLimiter,
   exportLimiter,
   writeLimiter,
@@ -357,6 +358,21 @@ const GATE_NOT_APPLICABLE = [
   // `email.controller.test.ts`, not here.
   "POST /api/auth/email/send",
   "POST /api/auth/email/verify",
+
+  // ── El trazado por carretera ────────────────────────────────────────────
+  // Un POST que no escribe nada: recibe coordenadas que quien llama ya tiene y
+  // devuelve la línea que siguen las carreteras públicas entre ellas. No hay
+  // dato de Osefi que permitir o negar, y no hay casilla en la pantalla de
+  // Seguridad que signifique «puede ver carreteras».
+  //
+  // Y elegir un permiso rompería dos de sus cuatro llamantes: el detalle de
+  // poste vive tras `postes.ver`, el de incidencia tras `eventos.ver` y el
+  // informe de recorrido tras `reportes.ver`. Un rol al que le falte el elegido
+  // se quedaría sin trazado en pantallas que sí puede abrir.
+  //
+  // Lo que sí acota la llamada es `rutaLimiter`, veinte por minuto y por
+  // persona, porque lo escaso aquí no son filas sino la cuota del proveedor.
+  "POST /api/ruta/query",
 
   // ── The way back in ────────────────────────────────────────────────────
   // A permission is something an account holds, and the whole point of these
@@ -1350,6 +1366,7 @@ describe("which permission each gate asks for", () => {
       generator: "sus puertas están en GENERADOR_GATES, pero el router no se somete a completitud: es el único cuyo vocabulario de permisos vive en el propio generador",
       dashboard: "una sola ruta, gateada, y §9 la deja anotada como pendiente de acotar",
       files: "sus seis puertas están en el propio fichero y una ruta es excepción declarada (§3.7)",
+      ruta: "una sola ruta, sin puerta de permiso a propósito: no devuelve ningún dato de Osefi y sus cuatro llamantes viven en tres módulos distintos — ver ruta.routes.ts y GATE_NOT_APPLICABLE",
     };
     const montados = [...new Set(routes.map((r) => r.path.split("/")[2]).filter(Boolean))];
     const sinExcusa = montados
@@ -1457,7 +1474,12 @@ describe("el presupuesto de las ceremonias de passkey", () => {
  * igual.
  */
 describe("los cubos por persona de limiters.ts", () => {
-  const CUBOS = [consultaLimiter, conteoLimiter, exportLimiter, writeLimiter];
+  const CUBOS = [consultaLimiter, conteoLimiter, exportLimiter, writeLimiter, rutaLimiter];
+
+  // La única ruta con cubo y sin puerta de permiso. Escrita aquí para que la
+  // segunda sea un fallo y no un descuido: el motivo de ésta —no devuelve
+  // ningún dato de Osefi— no se hereda por estar en la misma lista.
+  const CUBO_SIN_PUERTA = ["POST /api/ruta/query"];
   const rutasCon = (cubo: unknown) =>
     routes.filter((r) => r.handles.includes(cubo)).map((r) => `${r.method} ${r.path}`).sort();
 
@@ -1503,13 +1525,29 @@ describe("los cubos por persona de limiters.ts", () => {
   // esto se lo pide a las dieciséis rutas de una vez.
   it("cada cubo va detrás de la puerta de permiso de su ruta", () => {
     const conCubo = routes.filter((r) => r.handles.some((h) => CUBOS.includes(h as never)));
-    expect(conCubo.length, "cambió cuántas rutas llevan cubo").toBe(16);
+    expect(conCubo.length, "cambió cuántas rutas llevan cubo").toBe(17);
     for (const r of conCubo) {
+      if (CUBO_SIN_PUERTA.includes(`${r.method} ${r.path}`)) continue;
       const puerta = r.chain.indexOf("requirePermissionGate");
       const cubo = r.handles.findIndex((h) => CUBOS.includes(h as never));
       expect(puerta, `${r.method} ${r.path} no tiene puerta de permiso`).toBeGreaterThanOrEqual(0);
       expect(cubo, `${r.method} ${r.path}: ${r.chain.join(" -> ")}`).toBeGreaterThan(puerta);
     }
+  });
+
+  // El trazado por carretera, que lleva cubo propio y ninguna puerta. Las dos
+  // direcciones: que el cubo esté puesto, y que sea la única ruta con cubo a la
+  // que no se le pide permiso. Sin la segunda mitad, cualquier ruta futura que
+  // olvidara su puerta se colaría en `CUBO_SIN_PUERTA` sin que nadie lo notara.
+  it("el trazado por carretera lleva su propio cubo, y es el único con cubo sin puerta", () => {
+    expect(rutasCon(rutaLimiter)).toEqual(["POST /api/ruta/query"]);
+
+    const sinPuerta = routes
+      .filter((r) => r.handles.some((h) => CUBOS.includes(h as never)))
+      .filter((r) => !r.chain.includes("requirePermissionGate"))
+      .map((r) => `${r.method} ${r.path}`)
+      .sort();
+    expect(sinPuerta).toEqual(CUBO_SIN_PUERTA);
   });
 
   // Dos lecturas caras que se quedan SIN cubo a propósito. `/options` se pide

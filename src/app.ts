@@ -76,6 +76,7 @@ import recoveryCodesRoutes from "./routes/recoveryCodes.routes.js";
 import webauthnRoutes from "./routes/webauthn.routes.js";
 import webauthnPasswordlessRoutes from "./routes/webauthnPasswordless.routes.js";
 import reporteRoutes from "./routes/reporte.routes.js";
+import rutaRoutes from "./routes/ruta.routes.js";
 import generadorRoutes from "./routes/generador.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import permisoRoutes from "./routes/permiso.routes.js";
@@ -317,6 +318,11 @@ app.use("/api/auth/webauthn", webauthnRoutes);
 // → `/api/tipo-obs` (kebab-case; this and `eventoObs` were the only two
 // segments with a capital letter in the whole API).
 app.use("/api/reporte", authenticate, reporteRoutes);
+// The road-route proxy. `authenticate` and nothing else — `ruta.routes.ts`
+// carries the reasoning, and `routeGuards.test.ts` pins that the exception is
+// deliberate. It exists so the provider's key stops shipping inside the
+// frontend bundle, where Vite writes every `VITE_*` value literally.
+app.use("/api/ruta", authenticate, rutaRoutes);
 app.use("/api/generator", authenticate, generadorRoutes);
 app.use("/api/dashboard", authenticate, dashboardRoutes);
 

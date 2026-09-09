@@ -19,6 +19,7 @@ import type { Request, Response, NextFunction, RequestHandler } from "express";
 import {
   perUser,
   consultaLimiter,
+  rutaLimiter,
   conteoLimiter,
   exportLimiter,
   writeLimiter,
@@ -49,12 +50,13 @@ function probe(cubo: RequestHandler, id: number | undefined = USUARIO) {
   return app;
 }
 
-/** The four, each with the number and the sentence it was decided with. */
+/** The five, each with the number and the sentence it was decided with. */
 const CUBOS = [
   ["consultas", consultaLimiter, 30, "Demasiadas consultas seguidas. Espere un momento e intente de nuevo."],
   ["comprobaciones", conteoLimiter, 120, "Demasiadas comprobaciones seguidas. Espere un momento."],
   ["exportaciones", exportLimiter, 10, "Demasiadas exportaciones seguidas. Espere un momento e intente de nuevo."],
   ["escrituras", writeLimiter, 60, "Demasiados cambios seguidos. Espere un momento e intente de nuevo."],
+  ["trazados", rutaLimiter, 20, "Demasiados trazados seguidos. Espere un momento e intente de nuevo."],
 ] as const;
 
 beforeEach(async () => {

@@ -259,6 +259,11 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "POST /api/auth/webauthn/register/options": 200,
   "POST /api/evento/export": 200,
   "POST /api/generator/query": 200,
+  // 200 y no 201: un POST que no crea nada. Es una lectura con cuerpo, igual
+  // que la de arriba, y contesta 200 también cuando NO hay ruta — «no hay
+  // trazado» es una respuesta correcta a «¿hay trazado?», y las cuatro
+  // pantallas dibujan entonces la línea recta. El motivo viaja en el cuerpo.
+  "POST /api/ruta/query": 200,
   "POST /api/generator/count": 200,
   "POST /api/generator/export": 200,
   "POST /api/login/": 200,
@@ -317,7 +322,10 @@ describe("the ledger of every write", () => {
     // sessions share the tree.
     expect(cuenta(201), "las altas que contestan 201").toBe(15);
     expect(cuenta(204), "las escrituras que no contestan nada").toBe(24);
-    expect(cuenta(200), "el resto de las escrituras").toBe(46);
+    // 47 desde que `POST /api/ruta/query` existe: una lectura con cuerpo, que
+    // no crea ni archiva nada. Sube por el mismo motivo que subiría cualquier
+    // otra — este número se recuenta, no se estima.
+    expect(cuenta(200), "el resto de las escrituras").toBe(47);
   });
 
   it("never writes two different 2xx in one handler", () => {

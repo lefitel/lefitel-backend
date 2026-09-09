@@ -89,6 +89,41 @@ export const consultaLimiter = rateLimit({
 });
 
 /**
+ * The road-route proxy, and a bucket of its own rather than a share of the one
+ * above.
+ *
+ * The comment on `consultaLimiter` — and the assertion that pins its seven
+ * routes — say what that budget is for: a heavy query against our own database.
+ * `POST /api/ruta/query` reads no rows at all. What it spends is
+ * OpenRouteService's quota, which is somebody else's and is counted per day for
+ * the whole company. Putting it in the query bucket would make opening a pole's
+ * map eat from the reports' minute, which is precisely the "una ruta pagando un
+ * presupuesto que no es el suyo" that `routeGuards.test.ts` refuses.
+ *
+ * Twenty a minute per person: the four screens ask once each time one is
+ * opened, so twenty is far above a hand's pace and well under the provider's
+ * own forty per minute.
+ *
+ * **What this does not bound, said out loud.** It is keyed per user, and the
+ * provider's limit is global — nine people at twenty each is a hundred and
+ * eighty, four times what ORS accepts in a minute. A per-user bucket cannot fix
+ * that; only a shared budget of the kind `auth/mailBudget.ts` keeps could, and
+ * that machinery is not worth building for nine accounts who never open forty
+ * maps in a minute between them. If it ever happens, ORS answers 429, the
+ * client draws the straight line it already draws, and — this is the part that
+ * is new — `ruta.controller.ts` writes `ritmo` in the log, so the day it starts
+ * happening is a day somebody can see.
+ */
+export const rutaLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 20,
+  keyGenerator: perUser,
+  message: { message: "Demasiados trazados seguidos. Espere un momento e intente de nuevo." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
  * Counting is asked while somebody types a filter value, so it needs a budget an
  * order of magnitude larger than running the report — and it can afford one: it
  * reads no rows, only an aggregate over the filtered set.
