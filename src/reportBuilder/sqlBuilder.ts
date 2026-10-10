@@ -987,6 +987,32 @@ function applyAggregate(expr: string, agg: AggFn, resolved: ResolvedExpr): strin
 }
 
 /**
+ * The page a configuration asks for, as the query will actually bind it.
+ *
+ * Exported because the export's size guard has to judge the same page the query
+ * reads. It worked the limit out on its own and disagreed with this: with no
+ * `limit` it assumed twenty thousand rows where the query reads five hundred,
+ * and refused a one-page file for a size it could never reach.
+ */
+export function pageOf(config: ReportConfig): { limit: number; offset: number } {
+  // Coerce then truncate: Number.isFinite("100") is false, so a stringified
+  // offset silently became 0 and the user got page 1 while asking for page 2.
+  // A fractional value reached Postgres and failed as an invalid bigint.
+  const toCount = (value: unknown, fallback: number): number => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.trunc(n) : fallback;
+  };
+  const limit = Math.max(1, Math.min(toCount(config.limit, 500), MAX_ROWS));
+  // A ceiling as well as a floor. `1e21` is finite, so it passed the check and
+  // bound as the number 1e+21, which Postgres refuses as an invalid bigint —
+  // and `handleError` reads an unrecognised database code as a server fault, so
+  // a caller mistake came back as a 500 and a line in the error log. No report
+  // has a millionth page; past the last one the answer is simply no rows.
+  const offset = Math.max(0, Math.min(toCount(config.offset, 0), MAX_ROWS * 1000));
+  return { limit, offset };
+}
+
+/**
  * Builds the SQL for a report configuration.
  *
  * Pure function: same config and viewer always produce the same SQL and binds,
@@ -1193,15 +1219,23 @@ export function buildQuery(config: ReportConfig, viewer: Viewer): BuiltQuery {
       }
       expr = applyAggregate(expr, sort.agg, resolved);
     } else if (sort.agg) {
-      // Nothing here will apply it — the expression is grouped, or the report
-      // is not a summary — so the ranking would be by a different number from
-      // the one asked for, and no header shows the ordering formula. The
-      // columns refuse this; the ordering used to accept it and drop the
-      // aggregate on the floor.
-      throw new ReportConfigError(
-        `No se puede ordenar por ${AGG_LABEL[sort.agg]} de "${resolved.label}" ` +
-          `en un reporte que no lo resume así.`,
-      );
+      // The one aggregate a plain listing does carry: the one already inside a
+      // self-aggregating expression's own subquery. It is the same rule the
+      // columns apply, and it has to be — the listing shows «Contar revisiones»
+      // as a column, the sort arrow on that column sends exactly this, and
+      // refusing it answered 400 to an ordering by the number on screen.
+      const yaLoLleva = !isSummary && resolved.selfAggregating && resolved.innerAgg === sort.agg;
+      // Anything else nothing here will apply — the expression is grouped, or
+      // the report is not a summary — so the ranking would be by a different
+      // number from the one asked for, and no header shows the ordering
+      // formula. The columns refuse this; the ordering used to accept it and
+      // drop the aggregate on the floor.
+      if (!yaLoLleva) {
+        throw new ReportConfigError(
+          `No se puede ordenar por ${AGG_LABEL[sort.agg]} de "${resolved.label}" ` +
+            `en un reporte que no lo resume así.`,
+        );
+      }
     }
     orderParts.push(`${expr} ${sort.dir === "asc" ? "ASC" : "DESC"} NULLS LAST`);
   }
@@ -1220,20 +1254,7 @@ export function buildQuery(config: ReportConfig, viewer: Viewer): BuiltQuery {
     orderParts.push(`t0.${quote("id")} ASC`);
   }
 
-  // Coerce then truncate: Number.isFinite("100") is false, so a stringified
-  // offset silently became 0 and the user got page 1 while asking for page 2.
-  // A fractional value reached Postgres and failed as an invalid bigint.
-  const toCount = (value: unknown, fallback: number): number => {
-    const n = Number(value);
-    return Number.isFinite(n) ? Math.trunc(n) : fallback;
-  };
-  const limit = Math.max(1, Math.min(toCount(config.limit, 500), MAX_ROWS));
-  // A ceiling as well as a floor. `1e21` is finite, so it passed the check and
-  // bound as the number 1e+21, which Postgres refuses as an invalid bigint —
-  // and `handleError` reads an unrecognised database code as a server fault, so
-  // a caller mistake came back as a 500 and a line in the error log. No report
-  // has a millionth page; past the last one the answer is simply no rows.
-  const offset = Math.max(0, Math.min(toCount(config.offset, 0), MAX_ROWS * 1000));
+  const { limit, offset } = pageOf(config);
 
   binds.push(limit);
   const limitBind = `$${binds.length}`;

@@ -137,7 +137,7 @@ function handleError(error: unknown, res: Response) {
     return res.status(413).json({ message: error.message });
   }
   // Nobody is listening: the socket closed, which is why the build stopped.
-  // Answering would throw on a finished response, so this only leaves a trace.
+  // An answer would be written to nobody, so this only leaves a trace.
   if (error instanceof ExportCanceledError) {
     generadorLog.info("exportación cancelada por el cliente");
     return;
@@ -361,12 +361,23 @@ export async function postExportar(req: Request, res: Response) {
     // process, so the next person read "ya hay una exportación en curso" about
     // their own abandoned one, with no way to tell.
     //
+    // On the response, not the request. Since Node 16 the request's `close`
+    // fires once its body has been read, which is long before this line runs:
+    // a listener attached here never fired, and cancelling went on cancelling
+    // nothing. Measured on Node 24 — an aborted client fires `close` on the
+    // response alone.
+    //
     // `close` also fires on a response that finished normally, so the guard is
-    // on whether anything was written yet.
+    // on whether the answer went out whole.
     const abort = new AbortController();
-    req.on("close", () => {
-      if (!res.writableEnded) abort.abort();
+    res.on("close", () => {
+      if (!res.writableFinished) abort.abort();
     });
+    // `close` fires once. Somebody who hung up while the permission and the
+    // viewer were still being resolved has already had theirs, before the
+    // listener above existed, and the whole export would run for nobody in the
+    // one slot there is — the same defect through a narrower window.
+    if (res.destroyed) abort.abort();
 
     const output = await exportSlot.run(() => buildExport({
       config: body.config as ReportConfig,
@@ -464,7 +475,10 @@ export async function getReportes(req: Request, res: Response) {
       rows: rows.map((model) => {
         const row = model.toJSON() as IReporteVista;
         const pruned = pruneConfig(row.config as unknown as ReportConfig, viewer);
-        return { ...row, config: pruned.config, omitted: pruned.omitted };
+        return {
+          ...row, config: pruned.config, omitted: pruned.omitted,
+          extraFields: pruned.extraFields, extraRelations: pruned.extraRelations,
+        };
       }),
       total: count,
       limit,
@@ -490,7 +504,10 @@ export async function getReporte(req: Request, res: Response) {
     }
 
     const pruned = pruneConfig(row.config as unknown as ReportConfig, await viewerOf(req));
-    res.status(200).json({ ...row, config: pruned.config, omitted: pruned.omitted });
+    res.status(200).json({
+      ...row, config: pruned.config, omitted: pruned.omitted,
+      extraFields: pruned.extraFields, extraRelations: pruned.extraRelations,
+    });
   } catch (error) {
     handleError(error, res);
   }

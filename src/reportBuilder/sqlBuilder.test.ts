@@ -1152,6 +1152,32 @@ describe("buildQuery — aggregates over correlated subqueries", () => {
     expect(sql).toContain("ORDER BY SUM((SELECT COUNT(*)");
   });
 
+  it("orders a plain listing by a count column it is allowed to show", () => {
+    // The column is accepted outside a summary because the count already lives
+    // inside its own subquery. The ordering refused the very same thing, so the
+    // sort arrow on a «Contar revisiones» column answered 400 every time — and
+    // the sort stayed in the configuration, failing the next Generar too.
+    const { sql } = buildQuery(
+      base({
+        columns: [{ path: "id" }, { path: "revisiones", agg: "count" }],
+        sort: [{ path: "revisiones", dir: "desc", agg: "count" }],
+      }),
+      ADMIN,
+    );
+    expect(sql).toContain('ORDER BY (SELECT COUNT(*) FROM "revicions" s');
+  });
+
+  it("still refuses, in a plain listing, an ordering aggregate nothing applies", () => {
+    // What the refusal is for: `max` over a count, or any aggregate over a
+    // plain field, would be dropped and the rows ranked by a different number.
+    expect(() =>
+      buildQuery(base({ sort: [{ path: "numRevisiones", dir: "desc", agg: "max" }] }), ADMIN),
+    ).toThrow(/no lo resume así/);
+    expect(() =>
+      buildQuery(base({ sort: [{ path: "id", dir: "desc", agg: "count" }] }), ADMIN),
+    ).toThrow(/no lo resume así/);
+  });
+
   it("rejects an aggregate on a column that is also grouped", () => {
     expect(() =>
       buildQuery(

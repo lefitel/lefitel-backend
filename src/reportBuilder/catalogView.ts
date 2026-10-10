@@ -6,7 +6,9 @@
 import { catalog, MAX_DEPTH, MAX_ROWS } from "./catalog.js";
 import { AGGS_BY_KIND, OPERATORS_BY_KIND } from "./constraints.js";
 import { MAX_COLUMNS, MAX_CONDITIONS, MAX_FILTER_VALUE, MAX_SORTS } from "./sqlBuilder.js";
-import type { AggFn, EntityDef, FieldKind, FieldSemantic, Operator } from "./types.js";
+import type {
+  AggFn, CalculatedDef, EntityDef, FieldDef, FieldKind, FieldSemantic, Operator,
+} from "./types.js";
 import { isVisible, type Viewer } from "./viewer.js";
 
 export interface CatalogFieldView {
@@ -92,6 +94,176 @@ export function rowNoun(root: string, count?: number): string {
   return count === 1 ? pair[0] : pair[1];
 }
 
+/** A stored column, as the picker lists it. */
+function fieldView(
+  name: string,
+  field: FieldDef,
+  entityKey: string,
+  path: string,
+  group: string,
+  throughRelation: boolean,
+): CatalogFieldView {
+  return {
+    path,
+    label: field.label,
+    kind: field.kind,
+    group,
+    operators: OPERATORS_BY_KIND[field.kind],
+    // `sum` is dropped for anything reached through a relation: the value
+    // belongs to the parent and is read once per row of this report, so
+    // adding those readings up multiplies. `count` counts the report's own
+    // rows and `min`/`max` do not care how often a value repeats, so both
+    // stay. The builder refuses the same combination — a picker that offers
+    // it is offering an error.
+    aggregates: throughRelation
+      ? AGGS_BY_KIND[field.kind].filter((agg) => agg !== "sum")
+      : AGGS_BY_KIND[field.kind],
+    semantic: field.semantic,
+    // Keyed by entity and column, not by path: one list, however many paths
+    // reach it.
+    optionList: field.optionList === true ? `${entityKey}.${name}` : undefined,
+  };
+}
+
+/** A value derived in SQL, as the picker lists it. */
+function calculatedView(
+  calc: CalculatedDef,
+  path: string,
+  group: string,
+  throughRelation: boolean,
+): CatalogFieldView {
+  return {
+    path,
+    label: calc.label,
+    kind: calc.kind,
+    group,
+    operators: OPERATORS_BY_KIND[calc.kind],
+    // A total reached through a relation belongs to that entity's grain, not
+    // to the report's, so summarising it counts the same subquery once per
+    // row — a poste with n events contributed n². The builder refuses it, and
+    // by the rule just above, a picker that offers it is offering an error.
+    aggregates: throughRelation
+      ? calc.innerAgg !== undefined
+        ? []
+        : AGGS_BY_KIND[calc.kind].filter((agg) => agg !== "sum")
+      : AGGS_BY_KIND[calc.kind],
+    calculated: true,
+    semantic: calc.semantic,
+    aggregate: calc.innerAgg !== undefined,
+  };
+}
+
+/** Own keys only: a path segment is user text, and `constructor` is a key too. */
+const own = <T>(record: Record<string, T> | undefined, key: string): T | undefined =>
+  record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+
+/**
+ * Walks a chain of to-one relations from an entity, the way the builder does.
+ *
+ * Returns where it landed and the group label it would be listed under, or null
+ * when any hop is missing, hidden from this viewer, or a to-many relation.
+ */
+function walkRelations(
+  entityKey: string,
+  segments: string[],
+  viewer: Viewer,
+): { key: string; entity: EntityDef; group: string } | null {
+  let key = entityKey;
+  let entity = own(catalog.entities, key);
+  if (!entity) return null;
+  let group = entity.label;
+
+  for (const segment of segments) {
+    const relation = own(entity.relations, segment);
+    if (!relation || relation.kind === "toMany") return null;
+    if (!isVisible(relation.staffOnly, viewer)) return null;
+    const target = own(catalog.entities, relation.target);
+    if (!target) return null;
+    key = relation.target;
+    entity = target;
+    group = `${group} › ${relation.label}`;
+  }
+  return { key, entity, group };
+}
+
+/**
+ * Describes one path the way the picker would, whether or not the picker lists it.
+ *
+ * The menu is narrower than the language on purpose — see `chain` below and
+ * `rootOnly` in types.ts — so a stored configuration can name a path that is
+ * perfectly valid and that `buildCatalogView` never produced. Whoever opens that
+ * report still has to be shown a header, a type and a list of operators for it,
+ * and this is where they come from.
+ *
+ * Null for anything that is not a field this viewer may use. It says nothing
+ * about to-many relations, which are never fields; see `toManyTarget`.
+ */
+export function describePath(
+  entityKey: string,
+  path: string,
+  viewer: Viewer,
+): CatalogFieldView | null {
+  if (typeof path !== "string" || path === "") return null;
+  const segments = path.split(".");
+  if (segments.some((s) => s === "") || segments.length - 1 > MAX_DEPTH) return null;
+
+  const landing = walkRelations(entityKey, segments.slice(0, -1), viewer);
+  if (!landing) return null;
+  const leaf = segments[segments.length - 1];
+  const throughRelation = segments.length > 1;
+
+  const field = own(landing.entity.fields, leaf);
+  if (field) {
+    if (!isVisible(field.staffOnly, viewer)) return null;
+    return fieldView(leaf, field, landing.key, path, landing.group, throughRelation);
+  }
+  const calc = own(landing.entity.calculated, leaf);
+  if (calc) {
+    if (!isVisible(calc.staffOnly, viewer)) return null;
+    return calculatedView(calc, path, landing.group, throughRelation);
+  }
+  return null;
+}
+
+/**
+ * The entity a to-many path leads to, or null when it is not one this viewer
+ * may use. What an `exists` filter needs: its inner conditions are written
+ * relative to that entity, not to the report's root.
+ */
+export function toManyTarget(entityKey: string, path: string, viewer: Viewer): string | null {
+  return describeToMany(entityKey, path, viewer)?.target ?? null;
+}
+
+/**
+ * A to-many relation the way `aggregateOnly` lists it, plus where it leads.
+ *
+ * The menu's list of these is cut by the same rule that cuts its fields — it
+ * does not walk back into an entity it is standing in — so «las revisiones del
+ * evento de la última revisión» is a relation the builder counts and the
+ * catalog never mentions. A report that counts one, or filters on one, needs
+ * its name to be drawn at all.
+ *
+ * The hops before it are bounded as the builder bounds them (`walkToOne`): a
+ * path that would be refused for its depth is not one to keep.
+ */
+export function describeToMany(
+  entityKey: string,
+  path: string,
+  viewer: Viewer,
+): { path: string; label: string; group: string; target: string } | null {
+  if (typeof path !== "string" || path === "") return null;
+  const segments = path.split(".");
+  if (segments.some((s) => s === "") || segments.length - 1 > MAX_DEPTH) return null;
+
+  const landing = walkRelations(entityKey, segments.slice(0, -1), viewer);
+  if (!landing) return null;
+  const relation = own(landing.entity.relations, segments[segments.length - 1]);
+  if (!relation || relation.kind !== "toMany") return null;
+  if (!isVisible(relation.staffOnly, viewer)) return null;
+  if (!own(catalog.entities, relation.target)) return null;
+  return { path, label: relation.label, group: landing.group, target: relation.target };
+}
+
 function collect(
   entity: EntityDef,
   viewer: Viewer,
@@ -117,7 +289,9 @@ function collect(
    * That is why this is the ancestor chain and not everything seen so far.
    *
    * This prunes the menu, not the language: a stored configuration naming one
-   * of those paths still builds, because the SQL was always valid.
+   * of those paths still builds, because the SQL was always valid — and still
+   * opens whole, because `pruneConfig` judges by the language and sends the
+   * description of such a path along with the report (`describePath`).
    */
   chain: readonly string[],
 ): void {
@@ -132,26 +306,7 @@ function collect(
     const path = withPrefix(name);
     if (seen.has(path)) continue;
     seen.add(path);
-    out.fields.push({
-      path,
-      label: field.label,
-      kind: field.kind,
-      group,
-      operators: OPERATORS_BY_KIND[field.kind],
-      // `sum` is dropped for anything reached through a relation: the value
-      // belongs to the parent and is read once per row of this report, so
-      // adding those readings up multiplies. `count` counts the report's own
-      // rows and `min`/`max` do not care how often a value repeats, so both
-      // stay. The builder refuses the same combination — a picker that offers
-      // it is offering an error.
-      aggregates: prefix
-        ? AGGS_BY_KIND[field.kind].filter((agg) => agg !== "sum")
-        : AGGS_BY_KIND[field.kind],
-      semantic: field.semantic,
-      // Keyed by entity and column, not by path: one list, however many paths
-      // reach it.
-      optionList: field.optionList === true ? `${entityKey}.${name}` : undefined,
-    });
+    out.fields.push(fieldView(name, field, entityKey, path, group, prefix !== ""));
   }
 
   for (const [name, calc] of Object.entries(entity.calculated ?? {})) {
@@ -165,25 +320,7 @@ function collect(
     const path = withPrefix(name);
     if (seen.has(path)) continue;
     seen.add(path);
-    out.fields.push({
-      path,
-      label: calc.label,
-      kind: calc.kind,
-      group,
-      operators: OPERATORS_BY_KIND[calc.kind],
-      // A total reached through a relation belongs to that entity's grain, not
-      // to the report's, so summarising it counts the same subquery once per
-      // row — a poste with n events contributed n². The builder refuses it, and
-      // by the rule just above, a picker that offers it is offering an error.
-      aggregates: prefix
-        ? calc.innerAgg !== undefined
-          ? []
-          : AGGS_BY_KIND[calc.kind].filter((agg) => agg !== "sum")
-        : AGGS_BY_KIND[calc.kind],
-      calculated: true,
-      semantic: calc.semantic,
-      aggregate: calc.innerAgg !== undefined,
-    });
+    out.fields.push(calculatedView(calc, path, group, prefix !== ""));
   }
 
   for (const [name, relation] of Object.entries(entity.relations)) {

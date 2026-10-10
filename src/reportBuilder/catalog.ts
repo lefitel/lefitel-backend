@@ -126,7 +126,10 @@ const tipoObs: EntityDef = {
 };
 
 const rol: EntityDef = {
-  // `rols` has no deletedAt column — verified against the live schema.
+  // Not paranoid here although the table is: `rols` gained `deletedAt` in
+  // 20260826000001-add-rol-archiving, and the role controller refuses to
+  // archive a role somebody holds, so a user never points at an archived one.
+  // Leaving the guard off keeps a role's name on its user if that ever changes.
   table: TABLE.rol,
   label: "Rol",
   paranoid: false,

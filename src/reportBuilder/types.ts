@@ -153,7 +153,8 @@ export interface CalculatedDef {
    * ciudad A del poste de este evento" is not a column anybody was looking for.
    *
    * This prunes the *menu*, not the language: a stored configuration that names
-   * one still builds and still runs, because the SQL was always valid.
+   * one still builds, still runs and still opens whole — `pruneConfig` asks the
+   * builder, not the menu.
    */
   rootOnly?: boolean;
 }
@@ -162,7 +163,10 @@ export interface EntityDef {
   /** Physical table name. Verified against the live schema. */
   table: string;
   label: string;
-  /** Whether the table has a deletedAt column. `rols` does not. */
+  /**
+   * Whether rows with `deletedAt` set are left out. `rol` is the one entity
+   * that says no over a table that has the column — see its note in catalog.ts.
+   */
   paranoid: boolean;
   /**
    * Set when the entity *is* personal data, which hides it as a query root.

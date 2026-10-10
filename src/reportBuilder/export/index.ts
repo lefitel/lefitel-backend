@@ -6,7 +6,7 @@
 // a consistent read, moments before the file exists.
 
 import { runReport } from "../execute.js";
-import { buildQuery } from "../sqlBuilder.js";
+import { buildQuery, pageOf } from "../sqlBuilder.js";
 import { rowNoun } from "../catalogView.js";
 import type { ReportConfig } from "../types.js";
 import type { Viewer } from "../viewer.js";
@@ -203,8 +203,8 @@ export async function buildExport(request: ExportRequest): Promise<ExportOutput>
   // rows, so the count in the header always describes the rows underneath it.
   const width = Array.isArray(config.columns) ? config.columns.length : 0;
   const paged = request.scope === "page";
-  const limit = Math.max(1, Math.trunc(Number(config.limit)) || MAX_EXPORT_ROWS);
-  const offset = Math.max(0, Math.trunc(Number(config.offset)) || 0);
+  // The page as the query will read it, not a second reckoning of it.
+  const { limit, offset } = pageOf(config);
   const result = await runReport(
     paged ? config : { ...config, offset: 0, limit: MAX_EXPORT_ROWS },
     viewer,

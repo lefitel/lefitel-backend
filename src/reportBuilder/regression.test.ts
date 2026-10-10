@@ -45,10 +45,16 @@ function fakeReq(body: unknown): Request {
   return { body, user: { id: 1, id_rol: ADMIN }, params: {} } as unknown as Request;
 }
 
-async function callLegacy(
+/**
+ * Most legacy handlers answer with a list of rows, so that is the default.
+ * `putTiemposResumen` answers with an object wrapping one instead, and saying
+ * so at that call site is the honest fix: hard-coding the list here made the
+ * return type a lie for one caller, and the compiler said so.
+ */
+async function callLegacy<T = Record<string, unknown>[]>(
   handler: (req: Request, res: Response) => Promise<unknown>,
   body: unknown,
-): Promise<Record<string, unknown>[]> {
+): Promise<T> {
   const res = {
     code: 0,
     data: undefined as unknown,
@@ -57,7 +63,7 @@ async function callLegacy(
   };
   await handler(fakeReq(body), res as unknown as Response);
   if (res.code !== 200) throw new Error(`legacy respondió ${res.code}`);
-  return res.data as Record<string, unknown>[];
+  return res.data as T;
 }
 
 /** Multiset comparison: tramo labels are not unique, so position means nothing. */
@@ -161,7 +167,10 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
     // Both sides now measure evento.date → solución.date, and both select the
     // period by the repair date. Selecting by revision date, as this test used
     // to, answers a different question: what was visited, not what was fixed.
-    const { tramos: legacy } = await callLegacy(putTiemposResumen, { fechaInicial: FROM, fechaFinal: TO });
+    const { tramos: legacy } = await callLegacy<{ tramos: Record<string, unknown>[] }>(
+      putTiemposResumen,
+      { fechaInicial: FROM, fechaFinal: TO },
+    );
     const config: ReportConfig = {
       root: "evento",
       columns: [

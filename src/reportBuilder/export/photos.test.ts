@@ -185,6 +185,12 @@ describe("loadPhotos", () => {
     expect(result.images.size).toBe(0);
   });
 
+  // Twice the work of anything else in this file — six image conversions rather
+  // than three — and the only test here that competes for the disk with the other
+  // eighty-two files running alongside it. Measured across four full-suite runs it
+  // takes 1.7-2.6 s, and it has overrun vitest's 5 s default at least once on a busy
+  // machine. The budget below asserts nothing about speed: it is there to catch a
+  // hang, and thirty seconds is far past anything six conversions could need.
   it("loads the same set whatever the concurrency", async () => {
     const names = ["/uno.webp", "/dos.webp", "/tres.jpg"];
 
@@ -192,7 +198,7 @@ describe("loadPhotos", () => {
     const parallel = await loadPhotos(names, { directory, concurrency: 8 });
 
     expect([...serial.images.keys()].sort()).toEqual([...parallel.images.keys()].sort());
-  });
+  }, 30_000);
 });
 
 describe("compressLogo", () => {
