@@ -117,8 +117,9 @@ del que también salen los códigos de acceso.
 
 ### 3.8 API y pantalla
 
-Bajo `/api/generator/programaciones`: listar, crear, editar, pausar, borrar, «enviar ahora»
-como prueba, e historial de envíos. Más una ruta pública para la baja.
+Bajo `/api/generator/schedules` (en inglés por la norma de nombres del API, §3.4 del
+estándar: «programación» es vocabulario de la aplicación, no de la red): listar, crear,
+editar, pausar, borrar, «enviar ahora» como prueba, e historial de envíos (`/:id/runs`). Más una ruta pública para la baja.
 
 En `web`: un selector de periodo en los filtros de fecha, y en cada informe guardado un
 panel «Programar envío» con su historial.

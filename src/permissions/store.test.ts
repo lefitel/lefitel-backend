@@ -92,13 +92,19 @@ describe("answering a question", () => {
     findAll.mockResolvedValue([
       row(ADMIN, "modulo_que_ya_no_existe", "archivar"),
       row(ADMIN, "eventos", "accion_inventada"),
+      // A real action of another module: both halves exist, the pair does not.
+      row(ADMIN, "eventos", "programar"),
       row(ADMIN, "eventos", "ver"),
     ]);
 
     const permissions = await permissionsFor(ADMIN);
     expect(Object.keys(permissions).sort()).toEqual([...MODULES].sort());
     expect(permissions.eventos.ver).toBe(true);
-    expect(Object.keys(permissions.eventos).sort()).toEqual([...ACTIONS].sort());
+    // Its own actions, which since `generador.programar` are no longer the
+    // whole vocabulary: this used to compare against `ACTIONS` and held only
+    // while every action belonged to this module.
+    expect(Object.keys(permissions.eventos).sort()).toEqual([...actionsOf("eventos")].sort());
+    expect(await can(ADMIN, "eventos", "programar" as never)).toBe(false);
   });
 
   it("does not treat a non-boolean as permission", async () => {

@@ -18,6 +18,7 @@ import type { Viewer } from "../reportBuilder/viewer.js";
 import { can } from "../permissions/store.js";
 import { ReportConfigError, type ReportConfig } from "../reportBuilder/types.js";
 import { logAction } from "../utils/logAction.js";
+import type { BitacoraAction } from "../utils/bitacoraVocabulary.js";
 import { IReporteVista } from "../interfaces/index.js";
 import { log } from "../utils/logger.js";
 
@@ -95,7 +96,7 @@ const REPORTES_PAGE_MAX = 200;
 function deny(
   req: Request,
   res: Response,
-  action: string,
+  action: BitacoraAction,
   detail: string,
   message: string,
 ) {

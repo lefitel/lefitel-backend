@@ -197,6 +197,7 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "POST /api/evento/": 201,
   "POST /api/generator/reportes": 201,
   "POST /api/generator/reportes/:id/duplicate": 201,
+  "POST /api/generator/schedules/": 201,
   "POST /api/material/": 201,
   "POST /api/obs/": 201,
   "POST /api/poste/": 201,
@@ -208,6 +209,8 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "POST /api/usuario/": 201,
 
   // ── 204: the write reports nothing ──
+  "POST /api/unsubscribe/": 204,
+  "DELETE /api/generator/schedules/:id": 204,
   "DELETE /api/adss/:id": 204,
   "DELETE /api/ciudad/:id": 204,
   "DELETE /api/evento/:id": 204,
@@ -253,6 +256,9 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "POST /api/auth/mfa/verify": 200,
   "POST /api/auth/password/forgot": 200,
   "POST /api/auth/password/reset": 200,
+  // What the unsubscribe page shows before the button: a read with a body,
+  // because the token must not travel in an address.
+  "POST /api/unsubscribe/lookup": 200,
   "POST /api/auth/recovery-codes/": 200,
   "POST /api/auth/stepup": 200,
   "POST /api/auth/totp/confirm": 200,
@@ -271,6 +277,8 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "POST /api/ruta/query": 200,
   "POST /api/generator/count": 200,
   "POST /api/generator/export": 200,
+  // "Send it now" answers with what happened: sent, empty, too large, failed.
+  "POST /api/generator/schedules/:id/run": 200,
   "POST /api/login/": 200,
   "POST /api/poste/export": 200,
   "POST /api/usuario/:id/mfa/reset": 200,
@@ -279,6 +287,7 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "PUT /api/ciudad/:id": 200,
   "PUT /api/evento/:id": 200,
   "PUT /api/generator/reportes/:id": 200,
+  "PUT /api/generator/schedules/:id": 200,
   "PUT /api/material/:id": 200,
   "PUT /api/obs/:id": 200,
   "PUT /api/permiso/:id_rol": 200,
@@ -326,12 +335,15 @@ describe("the ledger of every write", () => {
     // exists. They live in this assertion and nowhere else: five figures of the
     // spec went stale in twenty-four hours because several sessions share the
     // tree.
-    expect(cuenta(201), "las altas que contestan 201").toBe(15);
-    expect(cuenta(204), "las escrituras que no contestan nada").toBe(25);
+    // Sixteen, twenty-seven and fifty since the scheduled reports: creating a
+    // schedule (201); removing one and unsubscribing from one (204); changing
+    // one, sending it now, and asking what an unsubscribe link would stop (200).
+    expect(cuenta(201), "las altas que contestan 201").toBe(16);
+    expect(cuenta(204), "las escrituras que no contestan nada").toBe(27);
     // 47 desde que `POST /api/ruta/query` existe: una lectura con cuerpo, que
     // no crea ni archiva nada. Sube por el mismo motivo que subiría cualquier
     // otra — este número se recuenta, no se estima.
-    expect(cuenta(200), "el resto de las escrituras").toBe(47);
+    expect(cuenta(200), "el resto de las escrituras").toBe(50);
   });
 
   it("never writes two different 2xx in one handler", () => {
@@ -439,6 +451,7 @@ const bitacoraCreate = vi.spyOn(BitacoraModel, "create");
 const adssCreate = vi.spyOn(AdssModel, "create");
 const adssDestroy = vi.spyOn(AdssModel, "destroy");
 const adssRestore = vi.spyOn(AdssModel, "restore");
+const adssFindOne = vi.spyOn(AdssModel, "findOne");
 const obsCreate = vi.spyOn(ObsModel, "create");
 
 const YO = 7;
@@ -518,6 +531,9 @@ describe("what actually leaves the server", () => {
 
   it("answers 204 with nothing at all when a row is restored", async () => {
     adssRestore.mockResolvedValue(undefined as never);
+    // The handler looks the row up among the archived before restoring it, so
+    // that restoring nothing is a 404 and not a line in the audit log.
+    adssFindOne.mockResolvedValue({ get: (campo: string) => (campo === "deletedAt" ? new Date() : 42) } as never);
 
     const res = await request(app).patch("/api/adss/42/restore").set("Cookie", COOKIE).set(DEL_FRONTEND);
 

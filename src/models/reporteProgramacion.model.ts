@@ -104,7 +104,7 @@ export const ReporteProgramacionModel: ModelDefined<IReporteProgramacion, Progra
 
 type DestinatarioCreation = Optional<
   IReporteProgramacionDestinatario,
-  "id" | "id_usuario" | "email" | "rechazos_seguidos" | "baja_at" | "baja_token_hash" | "created_at"
+  "id" | "id_usuario" | "email" | "rechazos_seguidos" | "baja_at" | "baja_token" | "created_at"
 >;
 
 export const ReporteProgramacionDestinatarioModel: ModelDefined<
@@ -128,26 +128,28 @@ export const ReporteProgramacionDestinatarioModel: ModelDefined<
     },
     rechazos_seguidos: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 0 },
     baja_at: { type: DataTypes.DATE, allowNull: true },
-    baja_token_hash: { type: DataTypes.STRING(64), allowNull: true },
+    baja_token: { type: DataTypes.STRING(64), allowNull: true },
   },
   {
     tableName: "reporte_programacion_destinatarios",
     createdAt: "created_at",
     updatedAt: false,
-    // The hash of somebody's unsubscribe token has no reader outside the
-    // lookup that redeems it; it is asked for by name there.
-    defaultScope: { attributes: { exclude: ["baja_token_hash"] } },
+    // Somebody's unsubscribe token has no reader outside the two places
+    // that write the link and redeem it; it is asked for by name there. A
+    // schedule's owner listing its recipients must not be handed the means
+    // to unsubscribe them — or to prove to them that they "asked".
+    defaultScope: { attributes: { exclude: ["baja_token"] } },
   },
 );
 
 // `defaultScope` covers reads. This covers the instance a `create()` returns,
 // which carries every column it was given — the same second net
-// `codigoCorreo.model.ts` keeps for its own hash.
+// `codigoCorreo.model.ts` keeps for its hash.
 (ReporteProgramacionDestinatarioModel.prototype as unknown as Record<string, unknown>).toJSON = function (
   this: { get(): Record<string, unknown> },
 ) {
   const valores = { ...this.get() };
-  delete valores.baja_token_hash;
+  delete valores.baja_token;
   return valores;
 };
 

@@ -3,7 +3,9 @@ import { Op } from "sequelize";
 import { ObsModel } from "../models/obs.model.js";
 import { TipoObsModel } from "../models/tipoObs.model.js";
 import { logAction } from "../utils/logAction.js";
+import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
 import { assignable } from "../utils/authorship.js";
+import { leerNombre } from "../utils/nombre.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -35,14 +37,21 @@ export const getObs = handler("getObs", async (req: Request, res: Response) => {
   return res.status(200).json(listado);
 });
 export const createObs = handler("createObs", async (req: Request, res: Response) => {
-  const TempObs = await ObsModel.create(assignable(req.body));
+  const nombre = leerNombre(req.body, true, "La observación necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
+
+  // The name that was checked is the name that is written: trimmed.
+  const TempObs = await ObsModel.create({ ...assignable(req.body), name: nombre.name });
   const tipoRow = req.body.id_tipoObs != null ? await TipoObsModel.findByPk(req.body.id_tipoObs, { attributes: ["id", "name"], paranoid: false }) : null;
   const tipoRef = tipoRow ? { id: tipoRow.dataValues.id, name: tipoRow.dataValues.name } : (req.body.id_tipoObs ?? null);
-  logAction({ id_usuario: req.user?.id, action: "CREATE_OBS", entity: "Obs", entity_id: TempObs.dataValues.id as number, detail: `Creó observación ${req.body.name}`, metadata: { after: { name: req.body.name, id_tipoObs: tipoRef } }, severity: 'info' });
+  logAction({ id_usuario: req.user?.id, action: "CREATE_OBS", entity: "Obs", entity_id: TempObs.dataValues.id as number, detail: `Creó observación ${nombre.name}`, metadata: { after: { name: nombre.name, id_tipoObs: tipoRef } }, severity: 'info' });
   res.status(201).json(TempObs);
 });
 export const updateObs = handler("updateObs", async (req: Request, res: Response) => {
   const { id } = req.params;
+
+  const nombre = leerNombre(req.body, false, "La observación necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
 
   const TempObs = await ObsModel.findOne({ where: { id } });
   if (!TempObs) return res.status(404).json({ message: "Observación no encontrada" });
@@ -52,7 +61,8 @@ export const updateObs = handler("updateObs", async (req: Request, res: Response
   // refused change is worse than no entry at all: the bitácora is where a reader
   // goes to find out whether the row was archived. Built through a variable, so
   // `logShape.test.ts` cannot see this one — see its header.
-  const editable = assignable(req.body);
+  const editable: Record<string, unknown> = assignable(req.body);
+  if (nombre.name !== undefined) editable.name = nombre.name;
   const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
   const beforeMeta: Record<string, unknown> = {};
   const afterMeta:  Record<string, unknown> = {};
@@ -82,14 +92,14 @@ export const updateObs = handler("updateObs", async (req: Request, res: Response
 export const deleteObs = handler("deleteObs", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await ObsModel.destroy({ where: { id } });
+  if (!(await archivar(ObsModel, id))) return res.status(404).json({ message: NADA_QUE_ARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "DELETE_OBS", entity: "Obs", entity_id: Number(id), detail: `Archivó observación #${id}`, severity: 'critical' });
   return res.status(204).end();
 });
 export const desarchivarObs = handler("desarchivarObs", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await ObsModel.restore({ where: { id } });
+  if (!(await desarchivar(ObsModel, id))) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_OBS", entity: "Obs", entity_id: Number(id), detail: `Desarchivó observación #${id}`, severity: 'info' });
   return res.status(204).end();
 });

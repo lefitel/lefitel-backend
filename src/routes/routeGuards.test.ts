@@ -265,6 +265,16 @@ const AUTHENTICATION_NOT_APPLICABLE = [
   "POST /api/auth/password/forgot",
   "POST /api/auth/password/reset",
 
+  // ── Darse de baja de un informe programado ──────────────────────────────
+  // Quien pulsa es una dirección externa: por definición no tiene cuenta, así
+  // que no hay sesión que pedirle. Lo que hace las veces de credencial es el
+  // token — treinta y dos bytes al azar que solo viajaron en un correo a esa
+  // dirección — y va en el cuerpo, nunca en la ruta. Lo único que puede hacer
+  // quien lo tenga es que UNA dirección deje de recibir UN informe. Ver
+  // `reportSchedule/unsubscribe.ts`.
+  "POST /api/unsubscribe/",
+  "POST /api/unsubscribe/lookup",
+
   // ── Entrar con una passkey, sin contraseña (plan 4C, fase 2) ───────────
   // Las dos son lo que produce la credencial para quien no tiene ninguna,
   // igual que el login: pedirles una sesión sería pedir a quien viene a abrir
@@ -389,6 +399,12 @@ const GATE_NOT_APPLICABLE = [
   // AUTHENTICATION_NOT_APPLICABLE for what stands in for a gate instead.
   "POST /api/auth/password/forgot",
   "POST /api/auth/password/reset",
+
+  // ── Darse de baja de un informe programado ──────────────────────────────
+  // No hay rol al que preguntarle «¿puedes?»: no hay cuenta. Ver la nota en
+  // AUTHENTICATION_NOT_APPLICABLE.
+  "POST /api/unsubscribe/",
+  "POST /api/unsubscribe/lookup",
 
   // ── El código por correo (plan 4E) ──────────────────────────────────────
   // Envía un código a la dirección verificada de la propia cuenta de quien
@@ -559,6 +575,11 @@ describe("who may change data", () => {
  * mean two half-tables, which is the shape the gap above came in.
  */
 const STEP_UP_GATED = [
+  // programacion.routes.ts — two. A schedule is a standing instruction to send
+  // data out, some of it to outside addresses: creating one and changing one
+  // ask for a confirmed identity. Removing one and sending one now do not.
+  "POST /api/generator/schedules/",
+  "PUT /api/generator/schedules/:id",
   // usuario.routes.ts — nine.
   "POST /api/usuario/",
   "DELETE /api/usuario/:id",
@@ -850,6 +871,15 @@ const GENERADOR_GATES: Record<string, string> = {
   "PUT /api/generator/reportes/:id": "generador.editar",
   "DELETE /api/generator/reportes/:id": "generador.archivar",
   "POST /api/generator/reportes/:id/duplicate": "generador.crear",
+  // Scheduled reports. Reading is the generator's ordinary `ver`; every write
+  // is `programar`, a permission of its own — see `programacion.routes.ts`.
+  "GET /api/generator/schedules/": "generador.ver",
+  "GET /api/generator/schedules/:id/runs": "generador.ver",
+  "GET /api/generator/schedules/recipients": "generador.programar",
+  "POST /api/generator/schedules/": "generador.programar",
+  "PUT /api/generator/schedules/:id": "generador.programar",
+  "DELETE /api/generator/schedules/:id": "generador.programar",
+  "POST /api/generator/schedules/:id/run": "generador.programar",
 };
 
 /**
@@ -1221,6 +1251,7 @@ const ROLES_GATES: Record<string, string> = {
 const BITACORA_GATES: Record<string, string> = {
   "GET /api/bitacora/": "bitacora.ver",
   "GET /api/bitacora/authors": "bitacora.ver",
+  "GET /api/bitacora/vocabulary": "bitacora.ver",
   "GET /api/usuario/:id/bitacora": "bitacora.ver",
 };
 
@@ -1424,6 +1455,7 @@ describe("which permission each gate asks for", () => {
       dashboard: "una sola ruta, gateada, y §9 la deja anotada como pendiente de acotar",
       files: "sus seis puertas están en el propio fichero y una ruta es excepción declarada (§3.7)",
       ruta: "una sola ruta, sin puerta de permiso a propósito: no devuelve ningún dato de Osefi y sus cuatro llamantes viven en tres módulos distintos — ver ruta.routes.ts y GATE_NOT_APPLICABLE",
+      unsubscribe: "la baja de un informe programado: dos rutas públicas sin puerta de permiso porque quien las llama no tiene cuenta — ver AUTHENTICATION_NOT_APPLICABLE",
       health: "la sonda de salud del contenedor: una ruta suelta en app.ts, sin sesión ni permiso porque responde 204 sin cuerpo y no lee nada — ver AUTHENTICATION_NOT_APPLICABLE",
     };
     const montados = [...new Set(routes.map((r) => r.path.split("/")[2]).filter(Boolean))];
@@ -1558,10 +1590,12 @@ describe("los cubos por persona de limiters.ts", () => {
     ]);
   });
 
-  it("el cubo de exportación cubre las cuatro descargas, cada una por su nombre", () => {
+  it("el cubo de exportación cubre las cuatro descargas y el envío inmediato de un informe programado", () => {
     expect(rutasCon(exportLimiter)).toEqual([
       "POST /api/evento/export",
       "POST /api/generator/export",
+      // No descarga nada, pero construye el mismo fichero y ocupa el mismo hueco.
+      "POST /api/generator/schedules/:id/run",
       "POST /api/poste/export",
       "POST /api/usuario/export",
     ]);
@@ -1571,9 +1605,12 @@ describe("los cubos por persona de limiters.ts", () => {
     expect(rutasCon(conteoLimiter)).toEqual(["POST /api/generator/count"]);
     expect(rutasCon(writeLimiter)).toEqual([
       "DELETE /api/generator/reportes/:id",
+      "DELETE /api/generator/schedules/:id",
       "POST /api/generator/reportes",
       "POST /api/generator/reportes/:id/duplicate",
+      "POST /api/generator/schedules/",
       "PUT /api/generator/reportes/:id",
+      "PUT /api/generator/schedules/:id",
     ]);
   });
 
@@ -1583,7 +1620,7 @@ describe("los cubos por persona de limiters.ts", () => {
   // esto se lo pide a las dieciséis rutas de una vez.
   it("cada cubo va detrás de la puerta de permiso de su ruta", () => {
     const conCubo = routes.filter((r) => r.handles.some((h) => CUBOS.includes(h as never)));
-    expect(conCubo.length, "cambió cuántas rutas llevan cubo").toBe(17);
+    expect(conCubo.length, "cambió cuántas rutas llevan cubo").toBe(21);
     for (const r of conCubo) {
       if (CUBO_SIN_PUERTA.includes(`${r.method} ${r.path}`)) continue;
       const puerta = r.chain.indexOf("requirePermissionGate");
@@ -1805,6 +1842,11 @@ const STEP_UP_OPTIONS: Record<string, OpcionesGate> = {
   // aquí — eso son `PUT /api/usuario/:id/rol` y `PUT /api/permiso/:id_rol`, las
   // dos arriba.
   "PUT /api/usuario/:id": CON_VENTANA,
+  // Scheduled reports: inside the window. Whoever sets up three schedules in
+  // a row confirms once, and nothing they do there outlives its own undoing —
+  // a schedule can be removed and its recipients are in the bitácora.
+  "POST /api/generator/schedules/": CON_VENTANA,
+  "PUT /api/generator/schedules/:id": CON_VENTANA,
   "PUT /api/usuario/username/:id": CON_VENTANA,
   "PATCH /api/usuario/:id/restore": CON_VENTANA,
   "POST /api/rol/": CON_VENTANA,

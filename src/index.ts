@@ -19,6 +19,10 @@ import { purgeExpiredSessions } from "./auth/sessionStore.js";
 import { purgeExpiredRememberedDevices } from "./auth/rememberedDeviceStore.js";
 import { comprobarLlaveAlArrancar } from "./auth/mfaKeyCheck.js";
 import { configurarRelevo } from "./auth/mailRelay.js";
+import { iniciarProgramador } from "./reportSchedule/scheduler.js";
+import { dependenciasDelProgramadorReales } from "./reportSchedule/store.js";
+import { dependenciasDeInformes } from "./reportSchedule/runtime.js";
+import { INTERVALO_DEL_PROGRAMADOR_MS } from "./reportSchedule/limits.js";
 
 // `quiet` because dotenv 17 prints a line of its own on every load — an
 // "injected env (13) from .env" with a tip appended. Everything else this
@@ -250,6 +254,19 @@ async function main() {
     intervalMs: REMEMBERED_DEVICE_PURGE_INTERVAL_MS,
     onError: (err) => bootLog.warn({ err }, "no se pudo purgar los dispositivos recordados"),
   });
+
+  /**
+   * The scheduled reports: once a minute, find the saved reports that are due
+   * and send them. See `reportSchedule/scheduler.ts`.
+   *
+   * Started here, after the database answered and the mail chain was
+   * configured, because a tick needs both. Like the two sweeps above it
+   * cannot reject — every pass catches its own failures and logs them — and
+   * its interval is `unref`'d. A process that is shutting down simply stops
+   * ticking; a run it had claimed and not finished is closed as interrupted
+   * by the next process, an hour later, and is never sent twice.
+   */
+  iniciarProgramador(dependenciasDelProgramadorReales(dependenciasDeInformes()), INTERVALO_DEL_PROGRAMADOR_MS);
 
   /**
    * Warms the login filler-hash cache during boot, in parallel with whatever

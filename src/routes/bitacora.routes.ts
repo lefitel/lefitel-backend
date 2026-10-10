@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getAllBitacora, getAutoresBitacora } from "../controllers/bitacora.controller.js";
+import { getAllBitacora, getAutoresBitacora, getVocabularioBitacora } from "../controllers/bitacora.controller.js";
 import { requirePermission } from "../middleware/requirePermission.js";
 
 const router = Router();
@@ -21,5 +21,6 @@ router.get("/", requirePermission("bitacora", "ver"), getAllBitacora);
 // `routeOrder.test.ts` still enforces it; it simply has nothing to catch here
 // now.
 router.get("/authors", requirePermission("bitacora", "ver"), getAutoresBitacora);
+router.get("/vocabulary", requirePermission("bitacora", "ver"), getVocabularioBitacora);
 
 export default router;

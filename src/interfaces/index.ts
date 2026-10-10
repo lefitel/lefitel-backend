@@ -200,7 +200,7 @@ export interface IReporteProgramacionDestinatario {
   email?: string | null;
   rechazos_seguidos: number;
   baja_at?: Date | null;
-  baja_token_hash?: string | null;
+  baja_token?: string | null;
   created_at?: Date;
 }
 

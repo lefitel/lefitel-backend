@@ -83,6 +83,8 @@ import webauthnPasswordlessRoutes from "./routes/webauthnPasswordless.routes.js"
 import reporteRoutes from "./routes/reporte.routes.js";
 import rutaRoutes from "./routes/ruta.routes.js";
 import generadorRoutes from "./routes/generador.routes.js";
+import programacionRoutes from "./routes/programacion.routes.js";
+import bajaRoutes from "./routes/baja.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import permisoRoutes from "./routes/permiso.routes.js";
 
@@ -349,6 +351,13 @@ app.use("/api/reporte", authenticate, reporteRoutes);
 // deliberate. It exists so the provider's key stops shipping inside the
 // frontend bundle, where Vite writes every `VITE_*` value literally.
 app.use("/api/ruta", authenticate, rutaRoutes);
+// Unsubscribing from a scheduled report: public on purpose, like the password
+// reset — an outside address has no session to authenticate. The token in the
+// body is the credential; see `routes/baja.routes.ts`.
+app.use("/api/unsubscribe", bajaRoutes);
+// Before the generator itself: Express walks mounts in order, and this one is
+// the more specific path.
+app.use("/api/generator/schedules", authenticate, programacionRoutes);
 app.use("/api/generator", authenticate, generadorRoutes);
 app.use("/api/dashboard", authenticate, dashboardRoutes);
 

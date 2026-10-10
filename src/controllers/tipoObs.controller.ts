@@ -3,7 +3,9 @@ import { Op, fn, col } from "sequelize";
 import { TipoObsModel } from "../models/tipoObs.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { logAction } from "../utils/logAction.js";
+import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
 import { assignable } from "../utils/authorship.js";
+import { leerNombre } from "../utils/nombre.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -48,12 +50,19 @@ export const getTipoObs = handler("getTipoObs", async (req: Request, res: Respon
   return res.status(200).json(listado);
 });
 export const createTipoObs = handler("createTipoObs", async (req: Request, res: Response) => {
-  const TempTipoObs = await TipoObsModel.create(assignable(req.body));
-  logAction({ id_usuario: req.user?.id, action: "CREATE_TIPO_OBS", entity: "TipoObs", entity_id: TempTipoObs.dataValues.id as number, detail: `Creó tipo de observación ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
+  const nombre = leerNombre(req.body, true, "El tipo de observación necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
+
+  // The name that was checked is the name that is written: trimmed.
+  const TempTipoObs = await TipoObsModel.create({ ...assignable(req.body), name: nombre.name });
+  logAction({ id_usuario: req.user?.id, action: "CREATE_TIPO_OBS", entity: "TipoObs", entity_id: TempTipoObs.dataValues.id as number, detail: `Creó tipo de observación ${nombre.name}`, metadata: { after: { name: nombre.name } }, severity: 'info' });
   res.status(201).json(TempTipoObs);
 });
 export const updateTipoObs = handler("updateTipoObs", async (req: Request, res: Response) => {
   const { id } = req.params;
+
+  const nombre = leerNombre(req.body, false, "El tipo de observación necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
 
   const TempTipoObs = await TipoObsModel.findOne({ where: { id } });
   if (!TempTipoObs) return res.status(404).json({ message: "Tipo de observación no encontrado" });
@@ -62,7 +71,8 @@ export const updateTipoObs = handler("updateTipoObs", async (req: Request, res: 
   // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
   // refused change is worse than no entry at all: the bitácora is where a reader
   // goes to find out whether the row was archived.
-  const editable = assignable(req.body);
+  const editable: Record<string, unknown> = assignable(req.body);
+  if (nombre.name !== undefined) editable.name = nombre.name;
   const beforeTipoObs = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
   TempTipoObs.set(editable);
   await TempTipoObs.save();
@@ -72,14 +82,14 @@ export const updateTipoObs = handler("updateTipoObs", async (req: Request, res: 
 export const deleteTipoObs = handler("deleteTipoObs", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await TipoObsModel.destroy({ where: { id } });
+  if (!(await archivar(TipoObsModel, id))) return res.status(404).json({ message: NADA_QUE_ARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "DELETE_TIPO_OBS", entity: "TipoObs", entity_id: Number(id), detail: `Archivó tipo de observación #${id}`, severity: 'critical' });
   return res.status(204).end();
 });
 export const desarchivarTipoObs = handler("desarchivarTipoObs", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await TipoObsModel.restore({ where: { id } });
+  if (!(await desarchivar(TipoObsModel, id))) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_TIPO_OBS", entity: "TipoObs", entity_id: Number(id), detail: `Desarchivó tipo de observación #${id}`, severity: 'info' });
   return res.status(204).end();
 });

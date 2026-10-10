@@ -28,16 +28,12 @@ import type { DependenciasDelProgramador, Vencida } from "./scheduler.js";
 const scheduleLog = log("reportSchedule");
 
 /**
- * The permission that lets an owner's schedule run.
- *
- * 🔴 **Temporary, and written down as such.** The decision (design §1) is a
- * permission of its own, `generador.programar`. That is a fifth *action* in a
- * vocabulary of four, and adding it changes the Seguridad screen, which
- * another session was rewriting when this was built. Until it exists the
- * nearest authority stands in: whoever may create a report. One constant, so
- * the switch is one line here and one in the route gates.
+ * The permission that lets an owner's schedule run — the same one the routes
+ * ask before letting anybody create it. Asked again at every run, not only
+ * when the schedule is made: a role that loses it stops sending that night,
+ * and the schedule pauses with `sin_permiso` as its reason.
  */
-export const PERMISO_PARA_PROGRAMAR = { modulo: "generador", accion: "crear" } as const;
+export const PERMISO_PARA_PROGRAMAR = { modulo: "generador", accion: "programar" } as const;
 
 /** How many due schedules one tick takes. More than this wait for the next. */
 const MAXIMO_POR_TIC = 50;

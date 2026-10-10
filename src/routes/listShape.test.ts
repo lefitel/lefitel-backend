@@ -121,6 +121,11 @@ const LISTADOS = [
   "/api/evento/",
   "/api/evento/:id/obs",
   "/api/evento/:id/revisiones",
+  // Scheduled reports: the schedules themselves, the runs of one, and the
+  // accounts that can be picked as recipients. All three are rows of a table.
+  "/api/generator/schedules/",
+  "/api/generator/schedules/:id/runs",
+  "/api/generator/schedules/recipients",
   "/api/material/",
   "/api/obs/",
   "/api/poste/",
@@ -160,6 +165,8 @@ const DETALLES = [
 const AGREGADAS = [
   "/api/adss/stats",
   "/api/bitacora/authors",
+  // The two lists the Bitácora filters offer: a handful of value/label pairs.
+  "/api/bitacora/vocabulary",
   "/api/dashboard/",
   "/api/evento/:id/solucion",
   "/api/evento/options",
@@ -224,6 +231,7 @@ describe("the ledger of every GET", () => {
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
 const { SesionModel } = await import("../models/sesion.model.js");
 const { UsuarioModel } = await import("../models/usuario.model.js");
+const { ReporteProgramacionModel, ReporteEjecucionModel } = await import("../models/reporteProgramacion.model.js");
 const { AdssModel } = await import("../models/adss.model.js");
 const { AdssPosteModel } = await import("../models/adssPoste.model.js");
 const { BitacoraModel } = await import("../models/bitacora.model.js");
@@ -265,6 +273,12 @@ const { exportLimiter } = await import("../middleware/limiters.js");
 const sesionFindOne = vi.spyOn(SesionModel, "findOne");
 const usuarioFindByPk = vi.spyOn(UsuarioModel, "findByPk");
 const sesionUpdate = vi.spyOn(SesionModel, "update");
+/**
+ * The runs of a schedule are listed only after the schedule itself is found
+ * and belongs to whoever asks — unlike the other sub-resources here, this one
+ * has an owner. So the parent is handed over, owned by the caller.
+ */
+const programacionFindByPk = vi.spyOn(ReporteProgramacionModel, "findByPk");
 
 /** Every model a listing reads, by the address that reads it. */
 const MODELOS = {
@@ -274,6 +288,8 @@ const MODELOS = {
   "/api/usuario/:id/bitacora": BitacoraModel,
   "/api/ciudad/": CiudadModel,
   "/api/evento/": EventoModel,
+  "/api/generator/schedules/": ReporteProgramacionModel,
+  "/api/generator/schedules/:id/runs": ReporteEjecucionModel,
   "/api/poste/:id/eventos": EventoModel,
   "/api/usuario/:id/eventos": EventoModel,
   "/api/evento/:id/obs": EventoObsModel,
@@ -332,6 +348,7 @@ beforeEach(() => {
       image: null, pass_changed_at: PASS_CAMBIADA,
     },
   } as never);
+  programacionFindByPk.mockResolvedValue({ dataValues: { id: 1, id_usuario: YO } } as never);
   sesionUpdate.mockRejectedValue(
     new Error("touchSession corrió: este test habría escrito en la base de datos") as never,
   );

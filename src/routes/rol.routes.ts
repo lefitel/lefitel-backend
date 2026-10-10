@@ -3,6 +3,7 @@ import {
   createRol,
   deleteRol,
   desarchivarRol,
+  exigirNombreDeRol,
   getRol,
   updateRol,
 } from "../controllers/rol.controller.js";
@@ -50,8 +51,10 @@ const router = Router();
 // edits somebody sat down to make.
 
 // Routes
-router.post("/", requirePermission("roles", "crear"), requireStepUp(), createRol);
-router.put("/:id", requirePermission("roles", "editar"), requireStepUp(), updateRol);
+// The name is checked between the permission and the gate, so that a request
+// that could never work is refused before anybody is asked for a password.
+router.post("/", requirePermission("roles", "crear"), exigirNombreDeRol(true), requireStepUp(), createRol);
+router.put("/:id", requirePermission("roles", "editar"), exigirNombreDeRol(false), requireStepUp(), updateRol);
 router.get("/", requirePermission("roles", "ver"), getRol);
 router.delete("/:id", requirePermission("roles", "archivar"), requireStepUp(), deleteRol);
 router.patch(

@@ -7,6 +7,10 @@ import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
 import { leerPaginacion } from "../utils/paginacion.js";
 import { excedeElTecho, listar, responderExcede } from "../utils/listado.js";
+import {
+  BITACORA_ENTITIES, BITACORA_FAMILIES, BITACORA_LEGACY_ENTITIES,
+  accionesDeFamilia, esFamilia, etiquetaDeAccion, etiquetaDeEntidad,
+} from "../utils/bitacoraVocabulary.js";
 
 const bitacoraLog = log("bitacora");
 const handler = makeHandler(bitacoraLog);
@@ -31,6 +35,24 @@ const handler = makeHandler(bitacoraLog);
  * because `bitacoras` has an `id` of its own: unqualified, the statement is
  * ambiguous and Postgres refuses it outright.
  */
+/**
+ * A row as it leaves, with what its action and entity are called on screen.
+ *
+ * The names travel with the row instead of being looked up by the client: the
+ * client's table was the one that fell behind, and three screens each kept
+ * their own. `action` and `entity` stay as stored — filters and links key on
+ * them — and the label is computed per row because `STEP_UP_DENIED` and the
+ * rescues mean different things depending on their metadata.
+ */
+const conEtiquetas = (fila: { toJSON(): object }) => {
+  const j = fila.toJSON() as { action: string; entity: string; metadata?: unknown };
+  return {
+    ...j,
+    action_label: etiquetaDeAccion(j.action, j.metadata),
+    entity_label: etiquetaDeEntidad(j.entity),
+  };
+};
+
 const CON_ENTRADAS = literal(
   'EXISTS (SELECT 1 FROM "bitacoras" WHERE "bitacoras"."id_usuario" = "usuario"."id")',
 );
@@ -38,11 +60,19 @@ const CON_ENTRADAS = literal(
 export const getAllBitacora = handler("getAllBitacora", async (req: Request, res: Response) => {
   const paginacion = leerPaginacion(req.query);
   if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
-  const { id_usuario, action, entity, entity_id, from, to, severity, sortBy, sortOrder } = req.query;
+  const { id_usuario, action, family, entity, entity_id, from, to, severity, sortBy, sortOrder } = req.query;
 
   const where: WhereOptions = {};
   if (id_usuario) where["id_usuario"] = Number(id_usuario);
   if (action)     where["action"]     = { [Op.like]: `${action}%` };
+  // The screen filters by family, and a family is a list of codes this server
+  // declares — not a prefix. Prefixes were how the filter worked while the
+  // screen kept its own table, and a third of the log matched none of them.
+  // `action` stays for whoever still sends one.
+  if (family !== undefined) {
+    if (!esFamilia(family)) return res.status(400).json({ message: "Esa familia de acciones no existe." });
+    where["action"] = { [Op.in]: accionesDeFamilia(family) };
+  }
   if (entity)     where["entity"]     = entity;
   if (entity_id)  where["entity_id"]  = Number(entity_id);
   if (severity)   where["severity"]   = severity;
@@ -85,7 +115,7 @@ export const getAllBitacora = handler("getAllBitacora", async (req: Request, res
   // so a caller could not tell a complete answer from a truncated one — and
   // `BitacoraPanel`, which never sends a `limit`, has been showing the first
   // fifty entries of a sheet's history as though they were the whole of it.
-  res.status(200).json(listado);
+  res.status(200).json({ ...listado, data: listado.data.map(conEtiquetas) });
 });
 
 /**
@@ -147,6 +177,22 @@ export const getAutoresBitacora = handler("getAutoresBitacora", async (_req: Req
   res.status(200).json(autores);
 });
 
+/**
+ * What the two filters of the Bitácora screen offer.
+ *
+ * Served rather than written out in the client for the same reason the labels
+ * are: a family or an entity added here would otherwise be one the screen
+ * cannot filter for until somebody remembers the other repository.
+ */
+export const getVocabularioBitacora = handler("getVocabularioBitacora", async (_req: Request, res: Response) => {
+  const pares = (tabla: Record<string, string>) =>
+    Object.entries(tabla).map(([value, label]) => ({ value, label }));
+  res.status(200).json({
+    families: pares(BITACORA_FAMILIES),
+    entities: pares({ ...BITACORA_ENTITIES, ...BITACORA_LEGACY_ENTITIES }),
+  });
+});
+
 export const getBitacora = handler("getBitacora", async (req: Request, res: Response) => {
   const { id } = req.params;
   const paginacion = leerPaginacion(req.query);
@@ -161,5 +207,5 @@ export const getBitacora = handler("getBitacora", async (req: Request, res: Resp
     order: [["id", "DESC"]],
   }, paginacion);
   if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
-  res.status(200).json(listado);
+  res.status(200).json({ ...listado, data: listado.data.map(conEtiquetas) });
 });

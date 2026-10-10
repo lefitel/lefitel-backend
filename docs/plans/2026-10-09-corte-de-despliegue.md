@@ -227,6 +227,26 @@ cuenta de cada rol inicia sesión con un hash de contraseña del tipo antiguo, v
 rol veía y cierra sesión. La imagen de `master` arrancada después sobre esa base falla
 como describe el paso 8.
 
+**Repetido el 10 de octubre de 2026 con la rama tal como está ese día**, sobre la misma
+copia, porque desde la primera prueba entraron tres migraciones más (las dos de los
+informes programados y una que hace único el nombre de un rol):
+
+- **21 migraciones aplican limpias** (son 22 ficheros; la de mayo ya estaba aplicada).
+- El contenedor queda **sano en unos 10 segundos**.
+- **Los recuentos de las 15 tablas son idénticos antes y después**: 1.900 eventos, 2.073
+  postes, 11.853 revisiones, 10.208 líneas de bitácora, 13 usuarios.
+- Las tablas pasan de 16 a 29. Las tres de los informes programados existen con sus diez
+  restricciones.
+- El permiso nuevo `generador.programar` queda **abierto para el rol 1 y cerrado para el 2
+  y el 3**.
+- El log no tiene ninguna línea de aviso ni de error tras dos pasadas del programador.
+- El programador, ejecutado sobre esos datos con el exportador real y sin enviar correo,
+  generó tres informes en 3,8 segundos: 1.750 eventos en Excel (65 KB) y en PDF (1,9 MB),
+  y «últimos 30 días» con las mismas 49 filas que una consulta hecha a mano.
+
+Esta vez **no** se repitió el inicio de sesión de una cuenta por rol: nada de lo añadido
+toca la autenticación.
+
 **No comprobado:** un despliegue real en Coolify.
 
 ## 5. Variables de `web` en Vercel
@@ -258,8 +278,9 @@ Elegir una ventana tranquila y avisar: durante unos minutos nadie podrá entrar.
 2. Seguir el despliegue de `api` en Coolify (pestaña Deployments). Mirar el log del
    contenedor nuevo, en este orden:
    - la línea que dice a qué base se conecta;
-   - `18 migración(es) aplicada(s)` con la lista — son 19 en total, y la de mayo ya está
-     aplicada en producción;
+   - `21 migración(es) aplicada(s)` con la lista — son 22 en total, y la de mayo ya está
+     aplicada en producción. **El número es el del 10 de octubre**: si entra otra
+     migración antes del corte, será uno más;
    - que el servidor queda escuchando y Coolify lo marca sano.
 3. Desplegar `web` en cuanto `api` esté sana.
 4. Recargar la web en el navegador (sin caché) e iniciar sesión.
@@ -279,6 +300,13 @@ el paso 8.
 - [ ] Sacar un informe general y uno de recorrido; comprobar que el recorrido sigue la
       carretera (si no, falta `ORS_API_KEY`).
 - [ ] Generador: generar un informe y exportarlo a Excel.
+- [ ] En un filtro de fecha del Generador, elegir «está en el periodo» y «La semana pasada».
+- [ ] Menú → **Envíos programados** (solo lo ve el Administrador): crear un envío a tu
+      propia cuenta, pulsar «Enviar ahora» y comprobar que llega el correo con el adjunto.
+      Añadir después una dirección externa tuya, enviar otra vez, y comprobar que ese correo
+      trae el enlace «dejar de recibirlo» y que la página de baja funciona.
+- [ ] Roles y permisos: en la fila del Generador aparece una casilla nueva, «Programar
+      envíos», marcada solo para el Administrador.
 - [ ] Pedir un correo de verificación desde el perfil y comprobar que llega.
 - [ ] Cambiar la contraseña equivocándose a propósito en la actual: debe decir
       «contraseña incorrecta» y **no** cerrar la sesión.

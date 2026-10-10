@@ -189,13 +189,13 @@ describe("a recipient's address", () => {
     expect(fila.dataValues.email).toBe("ana@cliente.com");
   });
 
-  it("never serialises the hash of the unsubscribe token", async () => {
+  it("never serialises the unsubscribe token", async () => {
     const { ReporteProgramacionDestinatarioModel } = await import("../models/reporteProgramacion.model.js");
     const fila = ReporteProgramacionDestinatarioModel.build({
       id_programacion: 1,
       email: "ana@cliente.com",
-      baja_token_hash: "a".repeat(64),
+      baja_token: "a".repeat(43),
     } as never);
-    expect(JSON.stringify(fila)).not.toContain("a".repeat(64));
+    expect(JSON.stringify(fila)).not.toContain("a".repeat(43));
   });
 });

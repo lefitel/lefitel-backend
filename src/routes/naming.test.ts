@@ -146,16 +146,25 @@ const EN_INGLES = [
   "export",
   "files",
   "generator",
+  "lookup",
   "mfa",
   "options",
   "orphans",
   "query",
+  // Scheduled reports. A schedule, its recipients and its runs are words of
+  // the application, not of the network — the `dashboard` case again.
+  "recipients",
   "reopen",
-  "resolve",
   "reset",
+  "resolve",
   "restore",
+  "run",
+  "runs",
+  "schedules",
   "stats",
+  "unsubscribe",
   "user",
+  "vocabulary",
 ];
 
 /**

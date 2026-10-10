@@ -710,8 +710,10 @@ beforeEach(() => {
   tokenUsoUnicoDestroy.mockResolvedValue(0);
   usuarioUpdate.mockResolvedValue([1] as never);
   // No role in use, and a role that exists and can be archived — the
-  // deleteRol success path the DELETE tests below exercise.
-  usuarioCount.mockResolvedValue(0 as never);
+  // deleteRol success path the DELETE tests below exercise. An empty list and
+  // not a zero: the count is grouped by role now, so "nobody holds it" is no
+  // row at all.
+  usuarioCount.mockResolvedValue([] as never);
   rolFindOne.mockResolvedValue({ dataValues: { id: 99, name: "Sobrante" }, destroy: vi.fn().mockResolvedValue(undefined) } as never);
   tokenUsoUnicoUpdate.mockResolvedValue([0, []] as never);
   // No factor registered, by default — matching every other fixture in this

@@ -3,7 +3,9 @@ import { Op, fn, col } from "sequelize";
 import { AdssModel } from "../models/adss.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
 import { logAction } from "../utils/logAction.js";
+import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
 import { assignable } from "../utils/authorship.js";
+import { leerNombre } from "../utils/nombre.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -48,12 +50,19 @@ export const getAdss = handler("getAdss", async (req: Request, res: Response) =>
   return res.status(200).json(listado);
 });
 export const createAdss = handler("createAdss", async (req: Request, res: Response) => {
-  const TempAdss = await AdssModel.create(assignable(req.body));
-  logAction({ id_usuario: req.user?.id, action: "CREATE_ADSS", entity: "Adss", entity_id: TempAdss.dataValues.id as number, detail: `Creó ferretería ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
+  const nombre = leerNombre(req.body, true, "La ferretería necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
+
+  // The name that was checked is the name that is written: trimmed.
+  const TempAdss = await AdssModel.create({ ...assignable(req.body), name: nombre.name });
+  logAction({ id_usuario: req.user?.id, action: "CREATE_ADSS", entity: "Adss", entity_id: TempAdss.dataValues.id as number, detail: `Creó ferretería ${nombre.name}`, metadata: { after: { name: nombre.name } }, severity: 'info' });
   res.status(201).json(TempAdss);
 });
 export const updateAdss = handler("updateAdss", async (req: Request, res: Response) => {
   const { id } = req.params;
+
+  const nombre = leerNombre(req.body, false, "La ferretería necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
 
   const TempAdss = await AdssModel.findOne({ where: { id } });
   if (!TempAdss) return res.status(404).json({ message: "Adss no encontrado" });
@@ -62,7 +71,8 @@ export const updateAdss = handler("updateAdss", async (req: Request, res: Respon
   // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
   // refused change is worse than no entry at all: the bitácora is where a reader
   // goes to find out whether the row was archived.
-  const editable = assignable(req.body);
+  const editable: Record<string, unknown> = assignable(req.body);
+  if (nombre.name !== undefined) editable.name = nombre.name;
   const beforeAdss = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
   TempAdss.set(editable);
   await TempAdss.save();
@@ -72,14 +82,14 @@ export const updateAdss = handler("updateAdss", async (req: Request, res: Respon
 export const deleteAdss = handler("deleteAdss", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await AdssModel.destroy({ where: { id } });
+  if (!(await archivar(AdssModel, id))) return res.status(404).json({ message: NADA_QUE_ARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "DELETE_ADSS", entity: "Adss", entity_id: Number(id), detail: `Archivó ferretería #${id}`, severity: 'critical' });
   return res.status(204).end();
 });
 export const desarchivarAdss = handler("desarchivarAdss", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await AdssModel.restore({ where: { id } });
+  if (!(await desarchivar(AdssModel, id))) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_ADSS", entity: "Adss", entity_id: Number(id), detail: `Desarchivó ferretería #${id}`, severity: 'info' });
   return res.status(204).end();
 });

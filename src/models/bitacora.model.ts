@@ -2,7 +2,16 @@ import { DataTypes, ModelDefined, Optional } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { UsuarioModel } from "./usuario.model.js";
 import { IBitacora } from "../interfaces/index.js";
-type BitacoraCreation = Optional<IBitacora, "id">;
+import type { BitacoraAction, BitacoraEntity } from "../utils/bitacoraVocabulary.js";
+// What may be *written* is narrower than what may be read. A row read back can
+// carry a code nothing writes any more, so `IBitacora` keeps `string`; a row
+// created must name an action and an entity the vocabulary declares. Typing
+// only `logAction` left this model open to anyone calling `create` directly —
+// which `rescueCore` does, on purpose.
+type BitacoraCreation = Optional<
+  Omit<IBitacora, "action" | "entity"> & { action: BitacoraAction; entity: BitacoraEntity },
+  "id"
+>;
 export const BitacoraModel: ModelDefined<IBitacora, BitacoraCreation> = sequelize.define("bitacora", {
   id: {
     type: DataTypes.INTEGER,

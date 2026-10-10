@@ -135,9 +135,15 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
         email: { type: DataTypes.STRING(255), allowNull: true },
         rechazos_seguidos: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 0 },
         baja_at: { type: DataTypes.DATE, allowNull: true },
-        // SHA-256 of the unsubscribe token, in hex. The token itself only
-        // ever exists in the link that was mailed.
-        baja_token_hash: { type: DataTypes.STRING(64), allowNull: true },
+        // The unsubscribe token, as it appears in the link. **Stored as it
+        // is, not hashed, and that is a decision**: the same link has to go
+        // out in every message for as long as the schedule lives — a link
+        // that changed each time would kill the one in last week's email —
+        // so the server must be able to produce it again, which a hash
+        // cannot. What it guards is small (it stops one address receiving
+        // one report) and whoever can read this table can already read the
+        // reports themselves.
+        baja_token: { type: DataTypes.STRING(64), allowNull: true },
         created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: ahora },
       },
       { transaction },
@@ -207,8 +213,8 @@ export async function up({ context: queryInterface }: { context: QueryInterface 
     );
     // The unsubscribe link is looked up by this and nothing else.
     await queryInterface.sequelize.query(
-      `CREATE UNIQUE INDEX reporte_destinatarios_baja_uq ON ${DESTINATARIOS} (baja_token_hash)
-         WHERE baja_token_hash IS NOT NULL`,
+      `CREATE UNIQUE INDEX reporte_destinatarios_baja_uq ON ${DESTINATARIOS} (baja_token)
+         WHERE baja_token IS NOT NULL`,
       { transaction },
     );
     await queryInterface.addIndex(DESTINATARIOS, {

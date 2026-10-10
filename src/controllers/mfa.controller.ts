@@ -96,6 +96,7 @@ import { fillerHash } from "../config/security.js";
 import { cobrarIntento, liquidarCodigo } from "../auth/emailCodeStore.js";
 import { admitirIntentoDeCorreo } from "../auth/emailCodeVerifyBudget.js";
 import { logAction } from "../utils/logAction.js";
+import type { BitacoraAction } from "../utils/bitacoraVocabulary.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
 
@@ -407,7 +408,7 @@ async function verificarTotp(id_usuario: number, codigo: string, ip: string | nu
 async function cargarIntentoFallido(
   id_usuario: number,
   ip: string | null,
-  accion: string,
+  accion: BitacoraAction,
   detalle: string,
 ): Promise<number | null> {
   await UsuarioModel.increment("failed_attempts", { where: { id: id_usuario } });

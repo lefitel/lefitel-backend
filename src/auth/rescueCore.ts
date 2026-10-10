@@ -73,6 +73,7 @@ import { BitacoraModel } from "../models/bitacora.model.js";
 import { revokeAllSessionsOf } from "./sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "./rememberedDeviceStore.js";
 import { whereUsernameIs } from "../utils/username.js";
+import type { BitacoraAction } from "../utils/bitacoraVocabulary.js";
 import { avisarRescate } from "./securityNotice.js";
 import { RESCUE_GRACE_HOURS } from "../config/security.js";
 
@@ -359,7 +360,7 @@ async function cuentaArchivadaOrNull(id_usuario: number): Promise<
  */
 async function registrarRescateEnBitacora(input: {
   id_usuario: number;
-  action: string;
+  action: BitacoraAction;
   detail: string;
   actor: string;
   ip: string | null;
@@ -401,7 +402,7 @@ async function ejecutarRescate<T>(input: {
   id_usuario: number;
   actor: ActorRescate;
   /** Shared between the bitácora `action` column and the notice's `operacion`. */
-  accion: string;
+  accion: BitacoraAction;
   /** One sentence: what this operation does. Shared between the notice body
    *  and the bitácora `detail` — both are meant to be read by a person, and
    *  a single sentence that is honest in both places is better than two that

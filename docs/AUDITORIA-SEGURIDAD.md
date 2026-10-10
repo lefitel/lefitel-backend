@@ -357,7 +357,7 @@ rol fabricaba usuarios inservibles.
 | Puerta | `requirePermission(modulo, accion)` en cada ruta |
 | Propiedad | `requireSelfOrPermission` — "es tu propia ficha" no es un permiso de rol y no tiene casilla |
 | API | `GET /permisos/mias`, `GET /permisos`, `PUT /permisos/:id_rol` |
-| Pantalla | `web/src/components/PermisosPanel.tsx`, pestaña Permisos en Seguridad |
+| Pantalla | `web/src/components/PermisosPanel.tsx`, dentro del formulario de un rol en la pantalla «Roles y permisos» (`/app/roles`, permiso `roles`; antes era la pestaña Permisos de Seguridad) |
 
 **`roles` es un módulo aparte de `seguridad`** a propósito. Si "editar usuarios" y
 "asignar roles" fueran el mismo permiso, dar edición al Coordinador le dejaría hacerse

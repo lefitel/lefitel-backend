@@ -4,6 +4,7 @@ import { sequelize } from "../database/sequelize.js";
 import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
 import { authoredBy, withoutAuthor } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
+import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
 import { AdssModel } from "../models/adss.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
 import { CiudadModel } from "../models/ciudad.model.js";
@@ -534,14 +535,14 @@ export const updatePoste = handler("updatePoste", async (req: Request, res: Resp
 export const deletePoste = handler("deletePoste", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await PosteModel.destroy({ where: { id } });
+  if (!(await archivar(PosteModel, id))) return res.status(404).json({ message: NADA_QUE_ARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "DELETE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Archivó Poste #${id}`, severity: 'critical' });
   return res.status(204).end();
 });
 export const desarchivarPoste = handler("desarchivarPoste", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await PosteModel.restore({ where: { id } });
+  if (!(await desarchivar(PosteModel, id))) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Desarchivó Poste #${id}`, severity: 'info' });
   return res.status(204).end();
 });

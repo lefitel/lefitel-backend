@@ -25,7 +25,7 @@
  * Its meaning has changed with this file: it is no longer "what every module
  * has", it is the vocabulary.
  */
-export const ACTIONS = ["ver", "crear", "editar", "archivar"] as const;
+export const ACTIONS = ["ver", "crear", "editar", "archivar", "programar"] as const;
 
 /**
  * What each module can be asked, module by module.
@@ -55,7 +55,12 @@ export const PERMISSIONS = {
   // `MODULES` is `Object.keys` of this object now, so this order *is* the order
   // of the rows — moving an entry here moves a row for everybody.
   reportes: ["ver"],
-  generador: ["ver", "crear", "editar", "archivar"],
+  // `programar`: may schedule a saved report to be mailed. The first action
+  // that is not one of the four verbs, and it belongs to this module alone —
+  // being able to build a report is not the authority to have it sent every
+  // morning to ten addresses, some of them outside the company. Seeded
+  // granted to the Administrador only (`20261010000002`).
+  generador: ["ver", "crear", "editar", "archivar", "programar"],
   seguridad: ["ver", "crear", "editar", "archivar"],
   roles: ["ver", "crear", "editar", "archivar"],
 
@@ -92,6 +97,7 @@ export const ACTION_LABELS: Record<Action, string> = {
   crear: "Crear",
   editar: "Editar",
   archivar: "Archivar",
+  programar: "Programar envíos",
 };
 
 /**

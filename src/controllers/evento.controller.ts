@@ -4,6 +4,7 @@ import { sequelize } from "../database/sequelize.js";
 import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
 import { authoredBy, withoutAuthor } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
+import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
 import { CiudadModel } from "../models/ciudad.model.js";
 import { EventoModel } from "../models/evento.model.js";
 import { EventoObsModel } from "../models/eventoObs.model.js";
@@ -714,14 +715,14 @@ export const reabrirEvento = handler("reabrirEvento", async (req: Request, res: 
 export const deleteEvento = handler("deleteEvento", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await EventoModel.destroy({ where: { id } });
+  if (!(await archivar(EventoModel, id))) return res.status(404).json({ message: NADA_QUE_ARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "DELETE_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Archivó Evento #${id}`, severity: 'critical' });
   return res.status(204).end();
 });
 export const desarchivarEvento = handler("desarchivarEvento", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await EventoModel.restore({ where: { id } });
+  if (!(await desarchivar(EventoModel, id))) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_EVENTO", entity: "Evento", entity_id: Number(id), detail: `Desarchivó Evento #${id}`, severity: 'info' });
   return res.status(204).end();
 });

@@ -182,7 +182,7 @@ describe("the route is reachable at all", () => {
     // still matters: both are declared on the same mount and a future
     // `/authors/:algo` would put them back in a race. It also pins the envelope
     // C3 gave this listing, which it did not have.
-    bitacoraFindAndCountAll.mockResolvedValue({ count: 1, rows: [{ id: 1, action: "login" }] } as never);
+    bitacoraFindAndCountAll.mockResolvedValue({ count: 1, rows: [{ toJSON: () => ({ id: 1, action: "login", entity: "Usuario" }) }] } as never);
 
     const res = await request(app).get("/api/bitacora/").set("Cookie", COOKIE);
 

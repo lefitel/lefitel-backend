@@ -1,9 +1,10 @@
 import { BitacoraModel } from "../models/bitacora.model.js";
+import type { BitacoraAction, BitacoraEntity } from "./bitacoraVocabulary.js";
 
 interface LogParams {
   id_usuario: number;
-  action: string;
-  entity: string;
+  action: BitacoraAction;
+  entity: BitacoraEntity;
   entity_id?: number | null;
   detail: string;
   metadata?: Record<string, unknown> | null;

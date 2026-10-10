@@ -3,7 +3,9 @@ import { Op, fn, col } from "sequelize";
 import { MaterialModel } from "../models/material.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { logAction } from "../utils/logAction.js";
+import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
 import { assignable } from "../utils/authorship.js";
+import { leerNombre } from "../utils/nombre.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -48,12 +50,19 @@ export const getMaterial = handler("getMaterial", async (req: Request, res: Resp
   return res.status(200).json(listado);
 });
 export const createMaterial = handler("createMaterial", async (req: Request, res: Response) => {
-  const TempMaterial = await MaterialModel.create(assignable(req.body));
-  logAction({ id_usuario: req.user?.id, action: "CREATE_MATERIAL", entity: "Material", entity_id: TempMaterial.dataValues.id as number, detail: `Creó material ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
+  const nombre = leerNombre(req.body, true, "El material necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
+
+  // The name that was checked is the name that is written: trimmed.
+  const TempMaterial = await MaterialModel.create({ ...assignable(req.body), name: nombre.name });
+  logAction({ id_usuario: req.user?.id, action: "CREATE_MATERIAL", entity: "Material", entity_id: TempMaterial.dataValues.id as number, detail: `Creó material ${nombre.name}`, metadata: { after: { name: nombre.name } }, severity: 'info' });
   res.status(201).json(TempMaterial);
 });
 export const updateMaterial = handler("updateMaterial", async (req: Request, res: Response) => {
   const { id } = req.params;
+
+  const nombre = leerNombre(req.body, false, "El material necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
 
   const TempMaterial = await MaterialModel.findOne({ where: { id } });
   if (!TempMaterial) return res.status(404).json({ message: "Material no encontrado" });
@@ -62,7 +71,8 @@ export const updateMaterial = handler("updateMaterial", async (req: Request, res
   // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
   // refused change is worse than no entry at all: the bitácora is where a reader
   // goes to find out whether the row was archived.
-  const editable = assignable(req.body);
+  const editable: Record<string, unknown> = assignable(req.body);
+  if (nombre.name !== undefined) editable.name = nombre.name;
   const beforeMaterial = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
   TempMaterial.set(editable);
   await TempMaterial.save();
@@ -72,14 +82,14 @@ export const updateMaterial = handler("updateMaterial", async (req: Request, res
 export const deleteMaterial = handler("deleteMaterial", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await MaterialModel.destroy({ where: { id } });
+  if (!(await archivar(MaterialModel, id))) return res.status(404).json({ message: NADA_QUE_ARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "DELETE_MATERIAL", entity: "Material", entity_id: Number(id), detail: `Archivó material #${id}`, severity: 'critical' });
   return res.status(204).end();
 });
 export const desarchivarMaterial = handler("desarchivarMaterial", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await MaterialModel.restore({ where: { id } });
+  if (!(await desarchivar(MaterialModel, id))) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_MATERIAL", entity: "Material", entity_id: Number(id), detail: `Desarchivó material #${id}`, severity: 'info' });
   return res.status(204).end();
 });

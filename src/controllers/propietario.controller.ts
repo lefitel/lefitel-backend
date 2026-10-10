@@ -4,7 +4,9 @@ import { PropietarioModel } from "../models/propietario.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { EventoModel } from "../models/evento.model.js";
 import { logAction } from "../utils/logAction.js";
+import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
 import { assignable } from "../utils/authorship.js";
+import { leerNombre } from "../utils/nombre.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -78,12 +80,19 @@ export const getPropietario = handler("getPropietario", async (req: Request, res
   return res.status(200).json(listado);
 });
 export const createPropietario = handler("createPropietario", async (req: Request, res: Response) => {
-  const TempPropietario = await PropietarioModel.create(assignable(req.body));
-  logAction({ id_usuario: req.user?.id, action: "CREATE_PROPIETARIO", entity: "Propietario", entity_id: TempPropietario.dataValues.id as number, detail: `Creó propietario ${req.body.name}`, metadata: { after: { name: req.body.name } }, severity: 'info' });
+  const nombre = leerNombre(req.body, true, "El propietario necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
+
+  // The name that was checked is the name that is written: trimmed.
+  const TempPropietario = await PropietarioModel.create({ ...assignable(req.body), name: nombre.name });
+  logAction({ id_usuario: req.user?.id, action: "CREATE_PROPIETARIO", entity: "Propietario", entity_id: TempPropietario.dataValues.id as number, detail: `Creó propietario ${nombre.name}`, metadata: { after: { name: nombre.name } }, severity: 'info' });
   res.status(201).json(TempPropietario);
 });
 export const updatePropietario = handler("updatePropietario", async (req: Request, res: Response) => {
   const { id } = req.params;
+
+  const nombre = leerNombre(req.body, false, "El propietario necesita un nombre.");
+  if ("error" in nombre) return res.status(400).json({ message: nombre.error });
 
   const TempPropietario = await PropietarioModel.findOne({ where: { id } });
   if (!TempPropietario) return res.status(404).json({ message: "Propietario no encontrado" });
@@ -92,7 +101,8 @@ export const updatePropietario = handler("updatePropietario", async (req: Reques
   // id/createdAt/updatedAt/deletedAt at the write, and an entry that records the
   // refused change is worse than no entry at all: the bitácora is where a reader
   // goes to find out whether the row was archived.
-  const editable = assignable(req.body);
+  const editable: Record<string, unknown> = assignable(req.body);
+  if (nombre.name !== undefined) editable.name = nombre.name;
   const beforePropietario = Object.fromEntries(Object.keys(editable).map(k => [k, dv[k]]));
   TempPropietario.set(editable);
   await TempPropietario.save();
@@ -102,14 +112,14 @@ export const updatePropietario = handler("updatePropietario", async (req: Reques
 export const deletePropietario = handler("deletePropietario", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await PropietarioModel.destroy({ where: { id } });
+  if (!(await archivar(PropietarioModel, id))) return res.status(404).json({ message: NADA_QUE_ARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "DELETE_PROPIETARIO", entity: "Propietario", entity_id: Number(id), detail: `Archivó propietario #${id}`, severity: 'critical' });
   return res.status(204).end();
 });
 export const desarchivarPropietario = handler("desarchivarPropietario", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  await PropietarioModel.restore({ where: { id } });
+  if (!(await desarchivar(PropietarioModel, id))) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_PROPIETARIO", entity: "Propietario", entity_id: Number(id), detail: `Desarchivó propietario #${id}`, severity: 'info' });
   return res.status(204).end();
 });
