@@ -79,6 +79,7 @@ describe("estadoTrasEditar", () => {
 
   it.each([
     ["the hour", { ...igual, hora: 9 }, "2026-03-16T13:00:00Z"],
+    ["the minute", { ...igual, minuto: 20 }, "2026-03-16T11:20:00Z"],
     ["the weekday", { ...igual, dia_semana: 3 }, "2026-03-18T11:00:00Z"],
     ["the frequency", { frecuencia: "diaria" as const, dia_semana: null, dia_mes: null, hora: 7, activa: true }, "2026-03-16T11:00:00Z"],
     ["to monthly", { frecuencia: "mensual" as const, dia_semana: null, dia_mes: 20, hora: 7, activa: true }, "2026-03-20T11:00:00Z"],

@@ -176,7 +176,13 @@ describe("the vocabularies, in the migration and in the models", () => {
         .map((a) => a.field as string)
         .sort();
 
-    expect(columnas(modelo.ReporteProgramacionModel)).toEqual(creadas.reporte_programaciones);
+    // `minuto` is not this migration's: `20261010000004` adds it. Named here,
+    // one by one, so that a column the model gains without a migration behind
+    // it still fails this test.
+    const anadidasDespues = ["minuto"];
+    expect(columnas(modelo.ReporteProgramacionModel)).toEqual(
+      [...creadas.reporte_programaciones, ...anadidasDespues].sort(),
+    );
     expect(columnas(modelo.ReporteProgramacionDestinatarioModel)).toEqual(creadas.reporte_programacion_destinatarios);
     expect(columnas(modelo.ReporteEjecucionModel)).toEqual(creadas.reporte_ejecuciones);
   });

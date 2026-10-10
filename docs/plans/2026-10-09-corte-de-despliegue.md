@@ -232,6 +232,11 @@ copia, porque desde la primera prueba entraron tres migraciones más (las dos de
 informes programados y una que hace único el nombre de un rol):
 
 - **21 migraciones aplican limpias** (son 22 ficheros; la de mayo ya estaba aplicada).
+- **Después de esta prueba entró una migración más** (`20261010000004`, que añade el
+  minuto a la hora de un envío programado: una columna con valor 0 sobre una tabla que en
+  producción nace vacía). **No se ha pasado sobre la copia de producción**; sí sobre un
+  PostgreSQL 17 desechable, junto con las otras de los informes programados. El día del
+  corte serán **22 aplicadas**, no 21.
 - El contenedor queda **sano en unos 10 segundos**.
 - **Los recuentos de las 15 tablas son idénticos antes y después**: 1.900 eventos, 2.073
   postes, 11.853 revisiones, 10.208 líneas de bitácora, 13 usuarios.
@@ -278,7 +283,7 @@ Elegir una ventana tranquila y avisar: durante unos minutos nadie podrá entrar.
 2. Seguir el despliegue de `api` en Coolify (pestaña Deployments). Mirar el log del
    contenedor nuevo, en este orden:
    - la línea que dice a qué base se conecta;
-   - `21 migración(es) aplicada(s)` con la lista — son 22 en total, y la de mayo ya está
+   - `22 migración(es) aplicada(s)` con la lista — son 23 en total, y la de mayo ya está
      aplicada en producción. **El número es el del 10 de octubre**: si entra otra
      migración antes del corte, será uno más;
    - que el servidor queda escuchando y Coolify lo marca sano.

@@ -53,7 +53,7 @@ siempre al día.
 ### 3.3 Datos
 
 - `reporte_programaciones`: informe, dueño, frecuencia, día de la semana o del mes
-  (1–28, para que exista en todos los meses), hora (0–23), formato, con o sin fotos,
+  (1–28, para que exista en todos los meses), hora (0–23) y minuto (0–59), formato, con o sin fotos,
   activa, motivo de pausa, próxima ejecución.
 - `reporte_programacion_destinatarios`: un usuario del sistema **o** una dirección
   externa; rechazos seguidos; baja y su token (guardado como hash).
@@ -142,7 +142,9 @@ Tomadas para poder avanzar; cualquiera se cambia con poco coste antes de constru
 
 - Tope de adjunto: 10 MB.
 - Día del mes limitado a 1–28.
-- Hora con precisión de una hora, no de minutos.
+- ~~Hora con precisión de una hora, no de minutos.~~ Cambiado por Isaias el 2026-10-10 al
+  ver el formulario: la hora lleva minutos (columna `minuto`, migración `20261010000004`).
+  Las horas en punto quedan como atajos en el campo.
 - Retraso máximo recuperable: 24 horas.
 - 10 destinatarios por programación y 100 correos de informes al día.
 - Crear o editar una programación entra en la ventana de reautenticación.

@@ -180,6 +180,8 @@ export interface IReporteProgramacion {
   dia_mes?: number | null;
   /** 0–23, in the report's time zone. */
   hora: number;
+  /** 0–59. */
+  minuto: number;
   formato: "excel" | "pdf";
   con_fotos: boolean;
   activa: boolean;

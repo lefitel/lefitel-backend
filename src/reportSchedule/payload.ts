@@ -51,6 +51,8 @@ export function leerProgramacion(cuerpo: unknown): LecturaDeProgramacion {
   const horario: Horario = {
     frecuencia: c.frecuencia as Frecuencia,
     hora: c.hora as number,
+    // Not sent means on the dot. Sent and wrong is refused below, not rounded.
+    minuto: c.minuto === undefined || c.minuto === null ? 0 : (c.minuto as number),
     dia_semana: dado(c.dia_semana as number | null | undefined),
     dia_mes: dado(c.dia_mes as number | null | undefined),
   };

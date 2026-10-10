@@ -1,7 +1,7 @@
 // When a scheduled report runs next — pure calendar arithmetic, no clock and
 // no database. Design: docs/specs/2026-10-10-informes-programados-design.md §3.4.
 //
-// A schedule is an hour of the day in the report's zone, on every day, on one
+// A schedule is a time of day in the report's zone, to the minute, on every day, on one
 // weekday, or on one day of the month. "Next" is always **strictly after** the
 // instant given: the scheduler calls this with the moment a run was due to find
 // the following one, and a function that could answer "now" would have the
@@ -26,6 +26,8 @@ export interface Horario {
   frecuencia: Frecuencia;
   /** 0–23. */
   hora: number;
+  /** 0–59. Absent means on the dot: what every schedule was before it had one. */
+  minuto?: number | null;
   /** ISO weekday, 1 = Monday … 7 = Sunday. Set exactly when weekly. */
   dia_semana?: number | null;
   /** 1–28, so the day exists in every month. Set exactly when monthly. */
@@ -51,6 +53,7 @@ export function problemasDeHorario(h: Horario): string[] {
     return ["La frecuencia debe ser diaria, semanal o mensual."];
   }
   if (!entero(h.hora, 0, 23)) problemas.push("La hora debe ser un número entero entre 0 y 23.");
+  if (!ausente(h.minuto) && !entero(h.minuto, 0, 59)) problemas.push("Los minutos deben ser un número entero entre 0 y 59.");
 
   if (h.frecuencia === "semanal") {
     if (!entero(h.dia_semana, 1, 7)) problemas.push("Un envío semanal necesita el día de la semana, de 1 (lunes) a 7 (domingo).");
@@ -81,8 +84,8 @@ export function proximaEjecucion(h: Horario, despuesDe: Date): Date {
   const mes = local.getUTCMonth();
   const dia = local.getUTCDate();
 
-  /** A La Paz wall-clock moment at the schedule's hour, as a shifted instant. */
-  const a = (y: number, m: number, d: number) => Date.UTC(y, m, d, h.hora, 0, 0, 0);
+  /** A La Paz wall-clock moment at the schedule's time, as a shifted instant. */
+  const a = (y: number, m: number, d: number) => Date.UTC(y, m, d, h.hora, h.minuto ?? 0, 0, 0);
   let candidato: number;
 
   if (h.frecuencia === "diaria") {

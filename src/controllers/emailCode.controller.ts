@@ -34,6 +34,7 @@ import type { Request, Response } from "express";
 import { UsuarioModel } from "../models/usuario.model.js";
 import { emitirCodigo, purgarCodigosCaducados } from "../auth/emailCodeStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
+import { vestirCorreo } from "../auth/mailLook.js";
 import { hayProveedorDisponible } from "../auth/mailRelay.js";
 import { maskEmail } from "../auth/securityNotice.js";
 import { estaBloqueada } from "../middleware/loginLimiters.js";
@@ -60,12 +61,16 @@ export function codeEmailBody(codigo: string): { asunto: string; html: string; t
   const minutos = Math.round(EMAIL_CODE_TTL_MS / 60_000);
   return {
     asunto: "Tu código de acceso — Osefi",
-    html: [
-      "<p>Hola,</p>",
-      `<p>Tu código de acceso a Osefi es: <strong style="font-size:1.4em;letter-spacing:0.2em">${codigo}</strong></p>`,
-      `<p>Caduca en ${minutos} minutos y solo vale una vez.</p>`,
-      "<p>Si no has intentado entrar, alguien conoce tu contraseña: cámbiala cuanto antes.</p>",
-    ].join("\n"),
+    // No link and no button, on purpose: the code is the whole content.
+    html: vestirCorreo({
+      titulo: "Tu código de acceso",
+      bloques: [
+        { parrafo: "Usa este código para entrar en Osefi:" },
+        { codigo },
+        { parrafo: `Caduca en ${minutos} minutos y solo vale una vez.` },
+      ],
+      pie: ["Si no has intentado entrar, alguien conoce tu contraseña: cámbiala cuanto antes."],
+    }),
     texto: [
       "Hola,",
       "",

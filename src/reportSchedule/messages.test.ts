@@ -3,6 +3,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  cadaCuanto,
   esc,
   mensajeConInforme,
   mensajeDeFalloAlDueno,
@@ -14,9 +15,19 @@ import {
 const DATOS: DatosDelMensaje = {
   informe: "Eventos de la semana",
   programadoPor: "Ana Pérez",
-  frecuencia: "semanal",
+  horario: { frecuencia: "semanal", dia_semana: 6, dia_mes: null, hora: 7, minuto: 0 },
   externo: false,
 };
+
+/** What the run knows about a file it attaches. */
+const fichero = (filas: number, nombreDelFichero = "a.xlsx") => ({
+  filas,
+  nombreDelFichero,
+  bytes: 217_000,
+  formato: "excel",
+  // 06:24 in La Paz.
+  generado: new Date("2026-10-10T10:24:31Z"),
+});
 
 describe("somebody else's text", () => {
   const HOSTIL = `<img src=x onerror=alert(1)> & "comillas" 'simples'`;
@@ -24,7 +35,7 @@ describe("somebody else's text", () => {
   it("is escaped everywhere it reaches the HTML part", () => {
     const m = mensajeConInforme(
       { ...DATOS, informe: HOSTIL, programadoPor: HOSTIL },
-      { filas: 3, nombreDelFichero: `${HOSTIL}.xlsx` },
+      fichero(3, `${HOSTIL}.xlsx`),
     );
     expect(m.html).not.toContain("<img");
     expect(m.html).not.toContain('"comillas"');
@@ -43,7 +54,7 @@ describe("somebody else's text", () => {
   });
 
   it("keeps the subject to a readable length", () => {
-    const m = mensajeConInforme({ ...DATOS, informe: "x".repeat(400) }, { filas: 1, nombreDelFichero: "a.xlsx" });
+    const m = mensajeConInforme({ ...DATOS, informe: "x".repeat(400) }, fichero(1));
     expect(m.asunto.length).toBeLessThanOrEqual(120);
     expect(m.asunto.endsWith("…")).toBe(true);
   });
@@ -63,15 +74,51 @@ describe("somebody else's text", () => {
 describe("what each message says", () => {
   it("names who scheduled it and how often, in every message to a recipient", () => {
     for (const m of [
-      mensajeConInforme(DATOS, { filas: 2, nombreDelFichero: "a.xlsx" }),
+      mensajeConInforme(DATOS, fichero(2)),
       mensajeVacio(DATOS),
       mensajeDemasiadoGrande(DATOS, { filas: 9000 }),
     ]) {
       expect(m.texto).toMatch(/lo programó Ana Pérez en Osefi y se envía cada semana/);
       expect(m.html).toMatch(/lo programó Ana Pérez en Osefi y se envía cada semana/);
     }
-    expect(mensajeVacio({ ...DATOS, frecuencia: "diaria" }).texto).toMatch(/cada día/);
-    expect(mensajeVacio({ ...DATOS, frecuencia: "mensual" }).texto).toMatch(/cada mes/);
+  });
+
+  it("says when, to the minute, in the words of each frequency", () => {
+    expect(cadaCuanto(DATOS.horario)).toBe("cada semana, los sábados a las 07:00");
+    expect(cadaCuanto({ frecuencia: "semanal", dia_semana: 1, hora: 7, minuto: 20 })).toBe("cada semana, los lunes a las 07:20");
+    expect(cadaCuanto({ frecuencia: "semanal", dia_semana: 7, hora: 18 })).toBe("cada semana, los domingos a las 18:00");
+    expect(cadaCuanto({ frecuencia: "diaria", hora: 6, minuto: 5 })).toBe("cada día a las 06:05");
+    expect(cadaCuanto({ frecuencia: "mensual", dia_mes: 1, hora: 8 })).toBe("cada mes, el día 1 a las 08:00");
+    expect(mensajeVacio(DATOS).texto).toContain("se envía cada semana, los sábados a las 07:00.");
+  });
+
+  it("says what the attached file is: format, weight, and when it was built in Bolivia's time", () => {
+    const m = mensajeConInforme(DATOS, fichero(438, "Eventos_10-10-2026.xlsx"));
+    expect(m.texto).toContain("Excel · 212 KB · generado el 10/10/2026 a las 06:24");
+    expect(m.texto).toContain("Fichero: Eventos_10-10-2026.xlsx");
+    expect(m.html).toContain("generado el 10/10/2026 a las 06:24");
+    const pesado = mensajeConInforme(DATOS, { ...fichero(9), bytes: 3_400_000, formato: "pdf" });
+    expect(pesado.texto).toContain("PDF · 3,2 MB");
+  });
+
+  it("wears the same frame in every message: the name, the report as a title, and no image or script", () => {
+    for (const m of [
+      mensajeConInforme(DATOS, fichero(2)),
+      mensajeVacio(DATOS),
+      mensajeDemasiadoGrande(DATOS, { filas: 9000 }),
+      mensajeDeFalloAlDueno({ informe: "Eventos de la semana", motivo: "m", pausada: false, fallosSeguidos: 1 }),
+    ]) {
+      expect(m.html).toMatch(/^<div style="[^"]*">\n<div style="[^"]*">Osefi<\/div>\n<p style="[^"]*">Eventos de la semana<\/p>/);
+      expect(m.html.endsWith("</div>")).toBe(true);
+      expect(m.html).not.toMatch(/<img|<script|<style|background/);
+      // A double quote inside a style would end the attribute early.
+      for (const [, estilo] of m.html.matchAll(/style="([^"]*)"/g)) expect(estilo).not.toMatch(/[<>]/);
+    }
+  });
+
+  it("gives the owner's failure notice no small print", () => {
+    const m = mensajeDeFalloAlDueno({ informe: "X", motivo: "m", pausada: false, fallosSeguidos: 1 });
+    expect(m.texto).not.toMatch(/lo programó/);
   });
 
   it("offers the way out only when it was given one", () => {
@@ -82,8 +129,8 @@ describe("what each message says", () => {
   });
 
   it("counts rows in the singular and the plural, and with the thousands separator", () => {
-    expect(mensajeConInforme(DATOS, { filas: 1, nombreDelFichero: "a.xlsx" }).texto).toMatch(/con 1 fila\./);
-    expect(mensajeConInforme(DATOS, { filas: 12500, nombreDelFichero: "a.xlsx" }).texto).toMatch(/con 12\.500 filas\./);
+    expect(mensajeConInforme(DATOS, fichero(1)).texto).toMatch(/con 1 fila\./);
+    expect(mensajeConInforme(DATOS, fichero(12500)).texto).toMatch(/con 12\.500 filas\./);
   });
 
   it("says the empty report is not a broken one", () => {

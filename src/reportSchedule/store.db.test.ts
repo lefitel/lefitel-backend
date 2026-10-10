@@ -1,5 +1,5 @@
 // The scheduled reports against a real PostgreSQL: the database layer
-// (`store.ts`), the unsubscribe functions, the real exporter, and the two
+// (`store.ts`), the unsubscribe functions, the real exporter, and the
 // migrations that create what they use. Everything else in this folder is
 // tested with fakes; this is what proves the fakes describe the real thing.
 //
@@ -65,8 +65,8 @@ const vencer = (id: number, haceSegundos = 1) =>
   sql(`UPDATE reporte_programaciones SET proxima_ejecucion = now() - interval '${haceSegundos} seconds' WHERE id = ${id}`);
 const programar = (id: number, id_reporte: number) =>
   sql(
-    `INSERT INTO reporte_programaciones (id, id_reporte, id_usuario, frecuencia, hora, formato, activa, proxima_ejecucion)
-     VALUES (${id}, ${id_reporte}, 1, 'diaria', 7, 'excel', true, now() - interval '1 minute')`,
+    `INSERT INTO reporte_programaciones (id, id_reporte, id_usuario, frecuencia, hora, minuto, formato, activa, proxima_ejecucion)
+     VALUES (${id}, ${id_reporte}, 1, 'diaria', 7, 20, 'excel', true, now() - interval '1 minute')`,
   );
 
 beforeAll(async () => {
@@ -87,6 +87,8 @@ beforeAll(async () => {
   await sql("DROP TABLE IF EXISTS reporte_ejecuciones, reporte_programacion_destinatarios, reporte_programaciones CASCADE");
   const tablas = await import("../migrations/20261010000001-create-reporte-programaciones.js");
   await tablas.up({ context: sequelize.getQueryInterface() });
+  const minuto = await import("../migrations/20261010000004-add-minuto-to-reporte-programaciones.js");
+  await minuto.up({ context: sequelize.getQueryInterface() });
 
   await sql(`INSERT INTO rols (id, name, description, "createdAt", "updatedAt") VALUES (1,'Administrador','a',now(),now()), (3,'Cliente','c',now(),now())`);
   await sql(`INSERT INTO permisos (id_rol, modulo, accion, permitido, "createdAt", "updatedAt") VALUES (1,'seguridad','ver',true,now(),now())`);
@@ -143,7 +145,7 @@ describe.skipIf(!habilitado).sequential("the scheduled reports against PostgreSQ
     expect(e).toEqual({ estado: "enviado", enviados: 3, no_enviados: 0, manual: false, filas: 2, con_bytes: true, cerrada: true });
 
     const p = await fila(`SELECT activa, fallos_seguidos, proxima_ejecucion > now() AS futura, to_char(proxima_ejecucion AT TIME ZONE 'America/La_Paz', 'HH24:MI') AS hora FROM reporte_programaciones WHERE id = 1`);
-    expect(p).toEqual({ activa: true, fallos_seguidos: 0, futura: true, hora: "07:00" });
+    expect(p).toEqual({ activa: true, fallos_seguidos: 0, futura: true, hora: "07:20" });
     expect(await reales.enviadosHoy()).toBe(3);
   });
 

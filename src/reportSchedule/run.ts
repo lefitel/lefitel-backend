@@ -167,10 +167,19 @@ type Variante =
   | { tipo: "vacio" }
   | { tipo: "demasiado_grande"; filas: number | null };
 
-function contenido(v: Variante, d: DatosDelMensaje): { mensaje: Mensaje; adjunto: ExportOutput | null } {
+function contenido(
+  v: Variante,
+  d: DatosDelMensaje,
+  fichero: { formato: ExportFormat; generado: Date },
+): { mensaje: Mensaje; adjunto: ExportOutput | null } {
   if (v.tipo === "fichero") {
     return {
-      mensaje: mensajeConInforme(d, { filas: v.salida.rows, nombreDelFichero: v.salida.filename }),
+      mensaje: mensajeConInforme(d, {
+        filas: v.salida.rows,
+        nombreDelFichero: v.salida.filename,
+        bytes: v.salida.buffer.length,
+        ...fichero,
+      }),
       adjunto: v.salida,
     };
   }
@@ -277,6 +286,9 @@ export async function ejecutarTurno(
       }
     }
 
+    // One moment for every copy: the files were all built just now.
+    const generado = deps.ahora();
+
     // ── The sends, inside what is left of the day's ceiling. ─────────────
     let quedan = Math.max(0, MAX_CORREOS_DE_INFORMES_AL_DIA - (await deps.enviadosHoy()));
     let sinCupo = 0;
@@ -290,10 +302,10 @@ export async function ejecutarTurno(
       const { mensaje, adjunto } = contenido(variante, {
         informe: informe.nombre,
         programadoPor: dueno.nombre,
-        frecuencia: p.frecuencia,
+        horario: p,
         externo: d.externo,
         enlaceDeBaja: d.externo ? await deps.enlaceDeBaja(d.id) : null,
-      });
+      }, { formato: p.formato, generado });
       const r = await deps.enviar(
         {
           para: d.email,

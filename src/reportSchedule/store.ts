@@ -48,6 +48,7 @@ export function aProgramacion(fila: IReporteProgramacion): Programacion {
     dia_semana: fila.dia_semana ?? null,
     dia_mes: fila.dia_mes ?? null,
     hora: fila.hora,
+    minuto: fila.minuto ?? 0,
     formato: fila.formato,
     con_fotos: fila.con_fotos,
     fallos_seguidos: fila.fallos_seguidos,

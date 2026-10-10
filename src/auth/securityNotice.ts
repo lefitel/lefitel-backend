@@ -29,6 +29,7 @@
 
 import { UsuarioModel } from "../models/usuario.model.js";
 import { enviarCorreo } from "./mailer.js";
+import { correoEnTexto, vestirCorreo, type Correo } from "./mailLook.js";
 import { maskEmail } from "./maskEmail.js";
 import { MAIL_PLAZO_INTERACTIVO_MS } from "../config/security.js";
 import { log } from "../utils/logger.js";
@@ -91,11 +92,9 @@ async function nombreDe(id_usuario: number): Promise<string> {
   }
 }
 
-function cuerpo(lineas: string[]): { html: string; texto: string } {
-  return {
-    html: lineas.map((l) => `<p>${l}</p>`).join("\n"),
-    texto: lineas.join("\n\n"),
-  };
+/** Both parts of a notice, from the same blocks: what one says the other says. */
+function cuerpo(correo: Correo): { html: string; texto: string } {
+  return { html: vestirCorreo(correo), texto: correoEnTexto(correo) };
 }
 
 /**
@@ -114,13 +113,15 @@ export async function avisarPasswordRestablecida(input: {
   const cuando = new Date().toISOString();
   const usuario = await nombreDe(input.id_usuario);
 
-  const alUsuario = cuerpo([
-    "Hola,",
-    "La contraseña de tu cuenta de Osefi acaba de cambiarse usando un enlace de recuperación.",
-    `Fecha: ${cuando}.`,
-    "Se han cerrado todas tus sesiones abiertas. Si has sido tú, ya puedes entrar con la contraseña nueva.",
-    "<strong>Si no has sido tú, avisa a administración inmediatamente.</strong>",
-  ]);
+  const alUsuario = cuerpo({
+    titulo: "Tu contraseña ha cambiado",
+    bloques: [
+      { parrafo: "La contraseña de tu cuenta de Osefi acaba de cambiarse usando un enlace de recuperación." },
+      { parrafo: `Fecha: ${cuando}.` },
+      { parrafo: "Se han cerrado todas tus sesiones abiertas. Si has sido tú, ya puedes entrar con la contraseña nueva." },
+      { parrafo: [{ fuerte: "Si no has sido tú, avisa a administración inmediatamente." }] },
+    ],
+  });
   await enviarCorreo({
     para: input.email_destino,
     flujo: "password/aviso-cambio",
@@ -138,14 +139,16 @@ export async function avisarPasswordRestablecida(input: {
     return;
   }
 
-  const copia = cuerpo([
-    "Aviso de seguridad de Osefi.",
-    `Se ha restablecido la contraseña de la cuenta <strong>@${usuario}</strong> mediante un enlace de recuperación.`,
-    `Dirección que recibió el enlace: ${maskEmail(input.email_destino)}`,
-    `IP desde la que se completó: ${input.ip ?? "desconocida"}`,
-    `Fecha: ${cuando}`,
-    "Si esta persona no ha pedido el cambio, su buzón de recuperación puede estar comprometido.",
-  ]);
+  const copia = cuerpo({
+    titulo: "Contraseña restablecida",
+    bloques: [
+      { parrafo: ["Se ha restablecido la contraseña de la cuenta ", { fuerte: `@${usuario}` }, " mediante un enlace de recuperación."] },
+      { dato: `Dirección que recibió el enlace: ${maskEmail(input.email_destino)}` },
+      { dato: `IP desde la que se completó: ${input.ip ?? "desconocida"}` },
+      { dato: `Fecha: ${cuando}` },
+    ],
+    pie: ["Aviso de seguridad de Osefi. Si esta persona no ha pedido el cambio, su buzón de recuperación puede estar comprometido."],
+  });
   await enviarCorreo({
     para: to,
     flujo: "password/aviso-restablecida",
@@ -181,15 +184,17 @@ export async function avisarCorreoCambiado(input: {
     return;
   }
 
-  const copia = cuerpo([
-    "Aviso de seguridad de Osefi.",
-    `La cuenta <strong>@${usuario}</strong> ha cambiado su dirección de recuperación.`,
-    `Anterior: ${maskEmail(input.email_anterior)}`,
-    `Nueva: ${maskEmail(input.email_nuevo)}`,
-    `IP: ${input.ip ?? "desconocida"}`,
-    `Fecha: ${new Date().toISOString()}`,
-    "Cambiar la dirección de recuperación es el primer paso para tomar una cuenta. Si esta persona no lo ha pedido, conviene comprobarlo con ella directamente.",
-  ]);
+  const copia = cuerpo({
+    titulo: "Dirección de recuperación cambiada",
+    bloques: [
+      { parrafo: ["La cuenta ", { fuerte: `@${usuario}` }, " ha cambiado su dirección de recuperación."] },
+      { dato: `Anterior: ${maskEmail(input.email_anterior)}` },
+      { dato: `Nueva: ${maskEmail(input.email_nuevo)}` },
+      { dato: `IP: ${input.ip ?? "desconocida"}` },
+      { dato: `Fecha: ${new Date().toISOString()}` },
+    ],
+    pie: ["Aviso de seguridad de Osefi. Cambiar la dirección de recuperación es el primer paso para tomar una cuenta. Si esta persona no lo ha pedido, conviene comprobarlo con ella directamente."],
+  });
   await enviarCorreo({
     para: to,
     flujo: "email/aviso-cambio",
@@ -275,15 +280,17 @@ export async function avisarRescate(input: {
   }
 
   const cuando = new Date().toISOString();
-  const copia = cuerpo([
-    "Aviso de seguridad de Osefi — operación de rescate (vía de escape, §8).",
-    `Operación: <strong>${input.operacion}</strong> sobre la cuenta <strong>@${usuario}</strong>.`,
-    input.detalle,
-    `Pedida por: ${input.actor}`,
-    `IP: ${input.ip ?? "consola del contenedor, sin IP"}`,
-    `Fecha: ${cuando}`,
-    "Esta operación actúa sobre la cuenta indicada aunque no la haya pedido su dueño — es exactamente lo que hace un rescate legítimo. Si no reconoces esta acción, contacta a esa persona directamente y revisa la bitácora.",
-  ]);
+  const copia = cuerpo({
+    titulo: "Operación de rescate",
+    bloques: [
+      { parrafo: ["Operación: ", { fuerte: input.operacion }, " sobre la cuenta ", { fuerte: `@${usuario}` }, "."] },
+      { parrafo: input.detalle },
+      { dato: `Pedida por: ${input.actor}` },
+      { dato: `IP: ${input.ip ?? "consola del contenedor, sin IP"}` },
+      { dato: `Fecha: ${cuando}` },
+    ],
+    pie: ["Aviso de seguridad de Osefi — operación de rescate (vía de escape, §8). Esta operación actúa sobre la cuenta indicada aunque no la haya pedido su dueño — es exactamente lo que hace un rescate legítimo. Si no reconoces esta acción, contacta a esa persona directamente y revisa la bitácora."],
+  });
   const { ok } = await enviarCorreo(
     {
     para: to,

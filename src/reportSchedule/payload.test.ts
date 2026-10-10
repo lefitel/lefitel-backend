@@ -29,6 +29,7 @@ describe("leerProgramacion — what it accepts", () => {
         dia_semana: 1,
         dia_mes: null,
         hora: 7,
+        minuto: 0,
         formato: "excel",
         con_fotos: true,
         activa: true,
@@ -85,6 +86,14 @@ describe("leerProgramacion — what it refuses, and in whose words", () => {
     expect(problemas({ ...BUENA, dia_semana: undefined })[0]).toMatch(/necesita el día de la semana/);
     expect(problemas({ ...BUENA, frecuencia: "anual" })).toEqual(["La frecuencia debe ser diaria, semanal o mensual."]);
     expect(problemas({ ...BUENA, frecuencia: "diaria" })[0]).toMatch(/no lleva día de la semana/);
+  });
+
+  it("reads the minute it is given, and refuses one that is not a minute rather than rounding it", () => {
+    expect(leerProgramacion({ ...BUENA, minuto: 20 }).valor?.minuto).toBe(20);
+    expect(leerProgramacion({ ...BUENA, minuto: null }).valor?.minuto).toBe(0);
+    for (const minuto of [60, -1, 7.5, "20"]) {
+      expect(problemas({ ...BUENA, minuto })).toEqual(["Los minutos deben ser un número entero entre 0 y 59."]);
+    }
   });
 
   it("refuses a format the exporter does not have", () => {

@@ -57,6 +57,34 @@ describe("proximaEjecucion — daily", () => {
   });
 });
 
+describe("proximaEjecucion — to the minute", () => {
+  const a = (hora: number, minuto: number): Horario => ({ ...diaria(hora), minuto });
+
+  it("is today while the minute has not come, and tomorrow from the minute itself", () => {
+    expect(enLaPaz(proximaEjecucion(a(7, 20), laPaz("2026-03-11T07:19")))).toBe("2026-03-11 07:20");
+    expect(enLaPaz(proximaEjecucion(a(7, 20), laPaz("2026-03-11T07:20")))).toBe("2026-03-12 07:20");
+  });
+
+  it("is on the dot when no minute is given: what every schedule meant before it had one", () => {
+    expect(enLaPaz(proximaEjecucion({ ...diaria(7), minuto: null }, laPaz("2026-03-11T06:00")))).toBe("2026-03-11 07:00");
+    expect(enLaPaz(proximaEjecucion(diaria(7), laPaz("2026-03-11T06:00")))).toBe("2026-03-11 07:00");
+  });
+
+  it("carries the minute into a weekly and a monthly schedule, across the year's end", () => {
+    expect(enLaPaz(proximaEjecucion({ ...semanal(1, 7), minuto: 45 }, laPaz("2026-03-16T07:44")))).toBe("2026-03-16 07:45");
+    expect(enLaPaz(proximaEjecucion({ ...semanal(1, 7), minuto: 45 }, laPaz("2026-03-16T07:45")))).toBe("2026-03-23 07:45");
+    expect(enLaPaz(proximaEjecucion({ ...mensual(1, 23), minuto: 59 }, laPaz("2026-12-31T23:59")))).toBe("2027-01-01 23:59");
+  });
+
+  it("refuses a minute out of range or a fraction, and says which field", () => {
+    for (const minuto of [60, -1, 7.5, "20" as never]) {
+      expect(problemasDeHorario(a(7, minuto))).toEqual(["Los minutos deben ser un número entero entre 0 y 59."]);
+    }
+    expect(problemasDeHorario(a(7, 0))).toEqual([]);
+    expect(problemasDeHorario(a(7, 59))).toEqual([]);
+  });
+});
+
 describe("proximaEjecucion — weekly", () => {
   // 11 March 2026 is a Wednesday (ISO weekday 3).
   it("is later this week when the day is still ahead", () => {

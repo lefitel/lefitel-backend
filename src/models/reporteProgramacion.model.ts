@@ -65,6 +65,7 @@ type ProgramacionCreation = Optional<
   | "id"
   | "dia_semana"
   | "dia_mes"
+  | "minuto"
   | "con_fotos"
   | "activa"
   | "motivo_pausa"
@@ -86,6 +87,7 @@ export const ReporteProgramacionModel: ModelDefined<IReporteProgramacion, Progra
       dia_semana: { type: DataTypes.SMALLINT, allowNull: true },
       dia_mes: { type: DataTypes.SMALLINT, allowNull: true },
       hora: { type: DataTypes.SMALLINT, allowNull: false },
+      minuto: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 0 },
       formato: { type: DataTypes.STRING(5), allowNull: false },
       con_fotos: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       activa: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },

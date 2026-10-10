@@ -84,6 +84,7 @@ export function estadoTrasEditar(
   const cambioDeHorario =
     actual.frecuencia !== pedida.frecuencia ||
     actual.hora !== pedida.hora ||
+    (actual.minuto ?? 0) !== (pedida.minuto ?? 0) ||
     (actual.dia_semana ?? null) !== (pedida.dia_semana ?? null) ||
     (actual.dia_mes ?? null) !== (pedida.dia_mes ?? null);
   const reactivada = !actual.activa;

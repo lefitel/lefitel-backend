@@ -45,6 +45,7 @@ import { TokenUsoUnicoModel } from "../models/tokenUsoUnico.model.js";
 import { sequelize } from "../database/sequelize.js";
 import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
+import { vestirCorreo } from "../auth/mailLook.js";
 import { hayProveedorDisponible } from "../auth/mailRelay.js";
 import { avisarCorreoCambiado, maskEmail } from "../auth/securityNotice.js";
 import { promoverSesion, sellarPruebaDeFactor } from "../auth/sessionPromotion.js";
@@ -174,12 +175,14 @@ function verificationLinkFor(token: string): string {
 
 function verificationEmailBody(enlace: string): { html: string; texto: string } {
   return {
-    html: [
-      "<p>Hola,</p>",
-      "<p>Recibimos una solicitud para verificar esta dirección de correo en tu cuenta de Osefi.</p>",
-      `<p><a href="${enlace}">Verificar mi correo</a></p>`,
-      "<p>Este enlace caduca en una hora. Si no fuiste tú, puedes ignorar este mensaje.</p>",
-    ].join("\n"),
+    html: vestirCorreo({
+      titulo: "Verifica tu correo",
+      bloques: [
+        { parrafo: "Recibimos una solicitud para verificar esta dirección de correo en tu cuenta de Osefi." },
+        { boton: "Verificar mi correo", href: enlace },
+      ],
+      pie: ["Este enlace caduca en una hora. Si no fuiste tú, puedes ignorar este mensaje."],
+    }),
     texto: [
       "Hola,",
       "",
@@ -202,11 +205,13 @@ function verificationEmailBody(enlace: string): { html: string; texto: string } 
  */
 function previousAddressNoticeBody(nuevaEnmascarada: string): { html: string; texto: string } {
   return {
-    html: [
-      "<p>Hola,</p>",
-      `<p>La dirección de correo de recuperación de tu cuenta de Osefi se cambió a ${nuevaEnmascarada}.</p>`,
-      "<p>Si no fuiste tú quien hizo este cambio, contacta con administración de inmediato.</p>",
-    ].join("\n"),
+    html: vestirCorreo({
+      titulo: "Tu dirección de recuperación ha cambiado",
+      bloques: [
+        { parrafo: `La dirección de correo de recuperación de tu cuenta de Osefi se cambió a ${nuevaEnmascarada}.` },
+        { parrafo: [{ fuerte: "Si no fuiste tú quien hizo este cambio, contacta con administración de inmediato." }] },
+      ],
+    }),
     texto: [
       "Hola,",
       "",

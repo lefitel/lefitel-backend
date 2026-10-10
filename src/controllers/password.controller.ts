@@ -33,6 +33,7 @@ import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
+import { vestirCorreo } from "../auth/mailLook.js";
 import { hayProveedorDisponible } from "../auth/mailRelay.js";
 import { avisarPasswordRestablecida } from "../auth/securityNotice.js";
 import { validarPassword } from "../utils/password.js";
@@ -119,12 +120,14 @@ function resetLinkFor(token: string): string {
 
 function resetEmailBody(enlace: string): { html: string; texto: string } {
   return {
-    html: [
-      "<p>Hola,</p>",
-      "<p>Recibimos una solicitud para restablecer la contraseña de tu cuenta de Osefi.</p>",
-      `<p><a href="${enlace}">Elegir una contraseña nueva</a></p>`,
-      "<p>Este enlace caduca en 15 minutos. Si no fuiste tú, ignora este mensaje: tu contraseña actual sigue siendo válida.</p>",
-    ].join("\n"),
+    html: vestirCorreo({
+      titulo: "Restablece tu contraseña",
+      bloques: [
+        { parrafo: "Recibimos una solicitud para restablecer la contraseña de tu cuenta de Osefi." },
+        { boton: "Elegir una contraseña nueva", href: enlace },
+      ],
+      pie: ["Este enlace caduca en 15 minutos. Si no fuiste tú, ignora este mensaje: tu contraseña actual sigue siendo válida."],
+    }),
     texto: [
       "Hola,",
       "",
