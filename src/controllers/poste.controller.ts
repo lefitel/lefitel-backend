@@ -19,6 +19,7 @@ import {
 import { exportSlot } from "../reportBuilder/export/queue.js";
 import { MAX_EXPORT_ROWS } from "../reportBuilder/export/index.js";
 import { nombreDeTramo } from "../utils/tramo.js";
+import { coordenadasInvalidas } from "../utils/coordenadas.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -352,6 +353,10 @@ export const exportarPostes = handler("exportarPostes", async (req: Request, res
 
 export const createPoste = handler("createPoste", async (req: Request, res: Response) => {
   const { adss_ids, ...posteBody } = req.body;
+  // Before anything is written. See `coordenadasInvalidas` for what one bad
+  // pair costs the rest of its stretch.
+  const fallo = coordenadasInvalidas(posteBody);
+  if (fallo) return res.status(400).json({ message: fallo });
   const TempPoste = await sequelize.transaction(async (t) => {
     // Same as evento: the author is the session, not a field of the body.
     const poste = await PosteModel.create(authoredBy(posteBody, req), { transaction: t });
@@ -424,6 +429,11 @@ export const updatePoste = handler("updatePoste", async (req: Request, res: Resp
   const dv = TempPoste.dataValues as unknown as Record<string, unknown>;
 
   const { adss_ids, ...bodyWithoutAdss } = req.body;
+  // The same refusal as on creating. Correcting one of the poles that already
+  // has an impossible pair goes through here, and passes: only what the request
+  // carries is judged.
+  const fallo = coordenadasInvalidas(bodyWithoutAdss);
+  if (fallo) return res.status(400).json({ message: fallo });
 
   const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
   // The diff below is computed from what will actually be written, not from
