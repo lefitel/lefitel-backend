@@ -1,6 +1,8 @@
 // `usuario.routes.ts` — proving the *wiring* of one thing only: that
 // `PATCH /:id/desbloquear` and `POST /:id/mfa/reset` mount `requireStepUp`
-// with `sinVentana: true` — hallazgo F8 of the 2026-09-02 closure audit.
+// and that it takes the ten-minute window — hallazgo F8 of the 2026-09-02
+// closure audit, which asked for the password on every request and was
+// reopened by the decision of 2026-10-10.
 //
 // Not a full wiring suite for this router. `routeGuards.test.ts` already
 // proves, across the whole app, that both routes carry `requirePermissionGate`
@@ -94,11 +96,9 @@ vi.mock("../auth/sessionPromotion.js", () => ({
 vi.mock("../auth/factorInventory.js", () => ({
   tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
   // Añadido por el plan 4C: `requireStepUp` lo llama al rechazar con
-  // `sin-factor-reciente`. Hoy ninguna prueba de este fichero llega a ese
-  // rechazo, así que sin esta línea seguirían pasando — hasta la Tarea 10,
-  // que pone `sinVentana` en estas mismas monturas y las lleva justo
-  // por ahí. Está antes de hacer falta a propósito: el fallo que evita es
-  // «la función no existe», que no se parece en nada a su causa.
+  // `sin-factor-reciente`. Está puesto antes de hacer falta a propósito: el
+  // fallo que evita es «la función no existe», que no se parece en nada a su
+  // causa.
   metodosDeReautenticacion: async () => ["totp"],
 }));
 vi.mock("../utils/logAction.js", () => ({ logAction: (...a: unknown[]) => logAction(...a) }));
@@ -158,7 +158,7 @@ beforeEach(() => {
   passwordConfirmLimiter.mockReset().mockImplementation((_req: unknown, _res: unknown, next: (e?: unknown) => void) => next());
 });
 
-describe("🔴 PATCH /:id/desbloquear and POST /:id/mfa/reset demand the password — hallazgo F8", () => {
+describe("🔴 PATCH /:id/desbloquear and POST /:id/mfa/reset take the window — hallazgo F8, reopened by the decision of 2026-10-10", () => {
   for (const [method, path] of [
     ["PATCH", "/:id/desbloquear"],
     ["POST", "/:id/mfa/reset"],
@@ -168,7 +168,7 @@ describe("🔴 PATCH /:id/desbloquear and POST /:id/mfa/reset demand the passwor
         expect(stepUpGateOf(method, path)).toBeDefined();
       });
 
-      it("refuses with no stepup_password, even though no account anywhere has a factor yet", async () => {
+      it("refuses with no stepup_password and nothing fresh, even though no account anywhere has a factor yet", async () => {
         const stepUpGate = stepUpGateOf(method, path);
         if (!stepUpGate) throw new Error(`${method} ${path} no monta requireStepUp`);
         // Zero of nine accounts have a factor today — this is that exact,
@@ -178,11 +178,10 @@ describe("🔴 PATCH /:id/desbloquear and POST /:id/mfa/reset demand the passwor
 
         await stepUpGate(req, res, next);
 
-        // 🔴 Before hallazgo F8's fix, `requireStepUp()` carried no options
-        // here: a factor-less account's third branch would wave this
-        // through with no password at all. Mutating the mount back to
-        // `requireStepUp()` turns this into `next()` and the assertions
-        // below go red.
+        // A factor-less account with no fresh window is asked for its
+        // password, not waved through on the cookie alone. Removing the gate
+        // from the mount turns this into `next()` and the assertions below go
+        // red.
         expect(next).not.toHaveBeenCalled();
         expect(verifyOwnPassword).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(403);
@@ -207,6 +206,48 @@ describe("🔴 PATCH /:id/desbloquear and POST /:id/mfa/reset demand the passwor
           expect.objectContaining({ id: 1, pass: "la-de-verdad" }),
         );
         expect(next).toHaveBeenCalledTimes(1);
+      });
+
+      it("lets a session with a fresh factor proof through with no password — the cost accepted on 2026-10-10", async () => {
+        // Hallazgo F8 was that a stolen cookie could wait for the real
+        // administrator to open a window for something ordinary and then
+        // clear other accounts' lockouts and second factors inside it. The
+        // mount used to ignore the window (`sinVentana`) and refuse this;
+        // it takes it now. Written as a test so that whoever wants F8 closed
+        // again has to edit it on purpose.
+        const stepUpGate = stepUpGateOf(method, path);
+        if (!stepUpGate) throw new Error(`${method} ${path} no monta requireStepUp`);
+        tieneAlgunFactor.mockResolvedValue(true);
+        const { req, res, next } = contexto(
+          { id: 1, estado: "completa", mfa_satisfied_at: new Date(Date.now() - 60_000) },
+          {},
+        );
+
+        await stepUpGate(req, res, next);
+
+        expect(next).toHaveBeenCalledTimes(1);
+        expect(res.status).not.toHaveBeenCalled();
+        expect(verifyOwnPassword).not.toHaveBeenCalled();
+      });
+
+      it("lets a factor-less session through on a fresh password window, without asking again", async () => {
+        const stepUpGate = stepUpGateOf(method, path);
+        if (!stepUpGate) throw new Error(`${method} ${path} no monta requireStepUp`);
+        tieneAlgunFactor.mockResolvedValue(false);
+        const { req, res, next } = contexto(
+          {
+            id: 1,
+            estado: "completa",
+            mfa_satisfied_at: null,
+            password_confirmed_at: new Date(Date.now() - 60_000),
+          },
+          {},
+        );
+
+        await stepUpGate(req, res, next);
+
+        expect(next).toHaveBeenCalledTimes(1);
+        expect(verifyOwnPassword).not.toHaveBeenCalled();
       });
     });
   }

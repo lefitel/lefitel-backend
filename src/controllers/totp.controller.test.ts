@@ -1,7 +1,7 @@
 // `totp.controller.ts` — the business rules behind `setup`, `confirm` and
 // `delete`, tested with `requireStepUp` already assumed to have run (its own
-// suite is `requireStepUp.test.ts`; the wiring that actually mounts it with
-// `sinVentana: true` is `totp.routes.test.ts`'s job, not this file's).
+// suite is `requireStepUp.test.ts`; the wiring that actually mounts it
+// is `totp.routes.test.ts`'s job, not this file's).
 //
 // `otpauth` is used for real here, never mocked: it is deterministic given a
 // secret and a timestamp, and a mock would just be reimplementing RFC 6238

@@ -3,10 +3,10 @@
 // `totp.controller.test.ts` already covers what `setupTotp`/`confirmTotp`/
 // `deleteTotp` decide once `requireStepUp` has let a request through. What
 // nothing proves without this file is that the router actually mounts that
-// gate with the right options on the right route — the single line hallazgo
-// C1 exists because of ("`requireStepUp` gana `sinVentana: true`") is a
-// configuration object handed to a function call, invisible to a typecheck
-// and invisible to a test that only calls the controller directly.
+// gate with the right options on the right route — `permiteOnboarding` on all
+// three and `toleraFactorIlegible` on the DELETE alone are a configuration
+// object handed to a function call, invisible to a typecheck and invisible to
+// a test that only calls the controller directly.
 //
 // So this file pulls the *real* middleware instances back out of the router
 // exactly as `totp.routes.ts` built them — via Express's own `stack`, the
@@ -187,7 +187,7 @@ describe("the availability gate (Decision 2)", () => {
   });
 });
 
-describe("🔴 sinVentana on all three routes (hallazgo C1)", () => {
+describe("🔴 the gate on all three routes (hallazgo C1, reopened by the decision of 2026-10-10)", () => {
   const RUTAS: Array<[string, string]> = [
     ["POST", "/setup"],
     ["POST", "/confirm"],
@@ -195,7 +195,7 @@ describe("🔴 sinVentana on all three routes (hallazgo C1)", () => {
   ];
 
   it.each(RUTAS)(
-    "%s %s refuses without stepup_password, even on an account with no factor at all",
+    "%s %s refuses without stepup_password, on an account with no factor and nothing fresh",
     async (method, path) => {
       const stepUpGate = stepUpGateOf(method, path);
       tieneAlgunFactor.mockResolvedValue(false);
@@ -206,11 +206,9 @@ describe("🔴 sinVentana on all three routes (hallazgo C1)", () => {
 
       await stepUpGate(req, res, next);
 
-      // 🔴 Without `sinVentana: true` this account — no factor, no fresh
-      // proof needed — would simply be waved through by `requireStepUp`'s own
-      // "nothing to prove" branch. Mutating the mount to `requireStepUp()`
-      // with no options turns this into `next()` and the assertion below
-      // goes red — confirmed while building this task, see the O-report.
+      // A factor-less account with no fresh window is asked for its password,
+      // not waved through on the cookie alone: the "nothing to prove" branch
+      // was deleted by Task 3 of the reauthentication-window plan.
       expect(next).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(403);
       expect(res.json).toHaveBeenCalledWith(
@@ -267,9 +265,9 @@ describe("🔴 sinVentana on all three routes (hallazgo C1)", () => {
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
     );
-    // And the fall-through is *not* a free pass: `sinVentana` stays on, so a
-    // stolen cookie with no password still gets nothing. This request reached
-    // the password branch and was refused there for sending none.
+    // And the fall-through is *not* a free pass: a stolen cookie with no
+    // password still gets nothing. This request reached the password branch
+    // and was refused there for sending none.
     expect(next).not.toHaveBeenCalled();
     // 🔴 And the fall-through leaves a trace, which is the only reason an
     // operator can count these during a key outage: the gate has just decided
@@ -289,6 +287,33 @@ describe("🔴 sinVentana on all three routes (hallazgo C1)", () => {
     // this is its only witness.
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: "STEP_UP_FACTOR_ILEGIBLE", severity: "critical" }),
+    );
+  });
+
+  it("DELETE / ignores a fresh password window while the factor is unreadable: the account has a factor", async () => {
+    // `password_confirmed_at` is the window of an account with NO factor
+    // (§5 of the design). This one has a factor, only unreadable, so the
+    // column must not stand in for it: no password in the body is a refusal
+    // even with the column a minute old.
+    const stepUpGate = stepUpGateOf("DELETE", "/");
+    tieneAlgunFactor.mockResolvedValue(true);
+    hayFactorVerificable.mockResolvedValue(false);
+    const { req, res, next } = contexto(
+      {
+        id: 1,
+        id_sesion: "s1",
+        estado: "completa",
+        mfa_satisfied_at: null,
+        password_confirmed_at: new Date(Date.now() - 60_000),
+      },
+      {},
+    );
+
+    await stepUpGate(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
     );
   });
 
@@ -347,8 +372,7 @@ describe("🔴 sinVentana on all three routes (hallazgo C1)", () => {
 });
 
 describe("🔴 permiteOnboarding: on for all three routes (hallazgo F6/E-5)", () => {
-  // Before this fix, `DELETE /` mounted `requireStepUp({ sinVentana: true })`
-  // with no `permiteOnboarding`, so an `onboarding` session — by construction
+  // Before this fix, `DELETE /` mounted the gate with no `permiteOnboarding`, so an `onboarding` session — by construction
   // one with no *confirmed* factor — was refused at the state check with
   // "Termina de configurar tu segundo factor antes de realizar esta operación",
   // shown on the very screen that button lives on, right under "Añadir". The
@@ -367,10 +391,9 @@ describe("🔴 permiteOnboarding: on for all three routes (hallazgo F6/E-5)", ()
     await stepUpGate(req, res, next);
 
     // Reaches the password branch (still refused, since none was sent) —
-    // proving the *state* check passed, without needing `sinVentana`
-    // turned off to observe it. `sinVentana` stays on for `DELETE` too:
-    // removing a credential is exactly the kind of write that must not go
-    // through on an onboarding session's cookie alone.
+    // proving the *state* check passed. `DELETE` is no different: an
+    // onboarding session's cookie alone gets no free pass, it is asked for
+    // its password like a factor-less `completa` session.
     expect(next).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),

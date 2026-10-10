@@ -10,18 +10,17 @@
 // request may trigger a regeneration, what goes in the response body, and
 // when a bitácora line is expected.
 //
-// **`POST /api/auth/recovery-codes` never accepts a recovery code as proof —
-// only `requireStepUp({ sinVentana: true })`, mounted in
-// `routes/recoveryCodes.routes.ts`.** §5 of the design spec describes this
-// endpoint as "step-up, o un código de recuperación válido"; that half of the
-// sentence is wrong and this plan deliberately does not build it (hallazgo
-// C14, and the spec has been annotated to say so). If a code were enough on
-// its own, the printed sheet in a drawer would be a master key: whoever holds
-// it regenerates the ten and the real owner is left with nothing but a sheet
-// of paper that no longer opens anything. Requiring the password as well —
-// and `sinVentana` asks for it *even inside the ten-minute step-up
-// window a code itself just opened* — is what keeps a lost or stolen sheet
-// from being able to mint itself a fresh, unbounded ten.
+// **`POST /api/auth/recovery-codes` does not take a recovery code in its own
+// request — only `requireStepUp()`, mounted in `routes/recoveryCodes.routes.ts`.**
+// §5 of the design spec describes this endpoint as "step-up, o un código de
+// recuperación válido"; the second half is not built (hallazgo C14, and the
+// spec has been annotated to say so). **But the gate in front of it takes the
+// ten-minute window, and spending a code at the step-up door opens one**
+// (`mfa.controller.ts`, `mfa_source: "codigo"`). So since the decision of
+// 2026-10-10 the printed sheet plus a stolen cookie can regenerate the ten and
+// leave the real owner with a sheet that opens nothing. Before that decision
+// the route asked for the password on every request (`sinVentana`) and closed
+// this; it is now an accepted cost, not a property that still holds.
 //
 // **Consequence of that, already applied where the state machine lives and
 // not touched by this file:** `auth/sessionState.ts` keeps
@@ -46,8 +45,8 @@
 // `factorInventory.ts:13-17` says why in its own words: recovery codes are
 // the way back in when a real factor is unreachable, "handed out at the
 // *end* of registering one, precisely because that assumes one already
-// exists." Nothing here enforced that assumption. `requireStepUp({
-// sinVentana: true })` only proves the caller's own current password —
+// exists." Nothing here enforced that assumption. `requireStepUp()`
+// only proves the caller's own current password (or a fresh window) —
 // it says nothing about whether the account has anything for the ten codes
 // to back up, and an account with nothing is
 // exactly the account that gate's password fallback exists to let through
@@ -68,9 +67,8 @@
 // Counting how many of the ten remain reveals nothing an authenticated
 // caller cannot already infer by trying to spend one, and it creates no
 // credential and changes no state. Gating a read like that behind a fresh
-// password would be friction with nothing behind it to defend — the same
-// reasoning `requireStepUp.ts`'s own `sinVentana` docstring draws around
-// "the routes that register or remove a credential", which this is not.
+// password would be friction with nothing behind it to defend — the gate is
+// for writes that register or remove a credential, which this is not.
 
 import type { Request, Response } from "express";
 import { regenerarCodigos, contarCodigosRestantes } from "../auth/recoveryCodeStore.js";

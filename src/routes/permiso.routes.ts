@@ -29,36 +29,29 @@ const router = Router();
 // permission on the write — see `middleware/requireStepUp.ts` — so a stolen
 // session cannot rewrite who may do what.
 //
-// 🔴 **`sinVentana: true` on the write here — decision D6 of plan 4C (Isaias,
-// 2026-09-02), and one of the mounts that kept it when Isaias cut D6's scope
-// on 2026-09-08.** The caller's password however they logged in, because the
-// password is the one thing that lives neither in an Apple or Google keychain
-// nor on a phone: it is what is missing from whoever has taken those.
+// 🔴 **This write takes the ten-minute window like every other gated route —
+// decision of 2026-10-10 (Isaias).** Decision D6 of plan 4C (2026-09-02) had
+// put it on the password for every request, and it stayed there when Isaias cut
+// D6's scope on 2026-09-08; the 2026-10-10 decision removed that exception.
 //
-// **This route is where the authority is.** §4.1 of
-// `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` put the four
-// `rol` writes inside the ten-minute window on the grounds that a role is a
-// label; this is the route that decides what a label *means*, so somebody who
-// reached it with a stolen cookie would grant themselves the module. It stays
-// out of the window for the same reason `POST /api/usuario/` does.
+// **Accepted cost, stated to him twice.** This route is where the authority
+// is: it decides what a role *means*. Inside the window, somebody holding a
+// hijacked session can rewrite the permission matrix and grant themselves the
+// module — it is the sharpest case of the paths the decision accepted.
 //
-// **And it ignores both windows.** There are two of them now, ten minutes
-// wide each: `mfa_satisfied_at`, bought by proving a factor, and
-// `password_confirmed_at`, bought by a correct password on an account that has
-// no factor to prove — the column this whole reauthentication arc exists to
-// add. `sinVentana` means this route honours neither: the password, on every
-// single request. Five wrong ones in a quarter of an hour shut the shared
-// confirmation budget. Correct ones cost nothing. That is the property people
-// will be surprised by, so it is written here rather than discovered.
+// There are two windows, ten minutes wide each: `mfa_satisfied_at`, bought by
+// proving a factor, and `password_confirmed_at`, bought by a correct password
+// on an account that has no factor to prove. The first serves accounts with a
+// factor, the second the ones without; neither stands in for the other.
 //
 // One cost worth knowing: the 409 for editing your *own* role, and the 400 for
-// a save with nothing in it, both now arrive after the password was typed,
-// because the gate runs before the controller.
+// a save with nothing in it, arrive after the gate was passed, because the gate
+// runs before the controller.
 router.get("/", requirePermission("roles", "ver"), getPermisos);
 router.put(
   "/:id_rol",
   requirePermission("roles", "editar"),
-  requireStepUp({ sinVentana: true }),
+  requireStepUp(),
   putPermisos,
 );
 

@@ -21,6 +21,7 @@ import type { Response } from "express";
 
 const verifyOwnPassword = vi.fn();
 const tieneAlgunFactor = vi.fn();
+const hayFactorVerificable = vi.fn();
 const metodosDeReautenticacion = vi.fn();
 const logAction = vi.fn();
 const consumirCupoDeConfirmacion = vi.fn();
@@ -35,7 +36,11 @@ const devolverCupoDeConfirmacion = vi.fn();
 const sellarContrasena = vi.fn();
 vi.mock("../auth/sessionPromotion.js", () => ({ sellarContrasena }));
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword }));
-vi.mock("../auth/factorInventory.js", () => ({ tieneAlgunFactor, metodosDeReautenticacion }));
+vi.mock("../auth/factorInventory.js", () => ({
+  tieneAlgunFactor,
+  hayFactorVerificable,
+  metodosDeReautenticacion,
+}));
 vi.mock("../utils/logAction.js", () => ({ logAction }));
 // `importOriginal` pulls the real `PASSWORD_CONFIRM_MESSAGE` through rather
 // than retyping the sentence a third time (`loginLimiters.ts` names it once,
@@ -84,6 +89,7 @@ function contexto(user: Record<string, unknown> | undefined, body: unknown = {})
 beforeEach(() => {
   verifyOwnPassword.mockReset();
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
+  hayFactorVerificable.mockReset().mockResolvedValue(true);
   metodosDeReautenticacion.mockReset().mockResolvedValue(["totp"]);
   logAction.mockReset();
   // The default: plenty of room, so the charge in every test that does not
@@ -129,21 +135,18 @@ describe("requireStepUp", () => {
   // Plan 4E: a verified email is a factor. The account that has verified its
   // address and registered nothing else used to take the "nothing to prove"
   // skip below; now it is refused like any other account with a factor, and
-  // the refusal names the one method it has. On an `sinVentana` route
-  // that means the email code *and* the password — the double ceremony the
-  // design's §1.2.1 spells out.
+  // the refusal names the one method it has.
   it("refuses an account whose only factor is its verified email, naming the email as the method", async () => {
     tieneAlgunFactor.mockResolvedValue(true);
     metodosDeReautenticacion.mockResolvedValue(["correo"]);
     const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null });
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
     expect(next).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
         motivo: MOTIVO_SIN_FACTOR_RECIENTE,
         metodos: ["correo"],
-        exigeContrasena: true,
       }),
     );
   });
@@ -395,7 +398,7 @@ describe("requireStepUp", () => {
         };
       });
       verifyOwnPassword.mockResolvedValue({ ok: false });
-      const gate = requireStepUp({ sinVentana: true });
+      const gate = requireStepUp();
 
       const intentos = Array.from({ length: 10 }, () => {
         const { req, res, next } = contexto(
@@ -609,11 +612,10 @@ describe("requireStepUp", () => {
         // como "Sólo en `sin-factor-reciente`" — un motivo distinto del que
         // contesta aquí, así que no hay nada que describiría.
         expect(cuerpo).not.toHaveProperty("metodos");
-        // El par (motivo, exigeContrasena) es lo que el cliente lee para decidir
-        // si una petición aprovecha la ventana ya abierta o espera la suya —
-        // `resolver`, en `web/src/api/stepUpInterceptor.ts`. Esta ruta no pidió
-        // `sinVentana`, así que le basta la contraseña y el campo va en `false`.
-        expect(cuerpo.exigeContrasena).toBe(false);
+        // Ya no viaja `exigeContrasena` (decisión del 2026-10-10): ninguna ruta
+        // pide la contraseña en cada petición, y el cliente trata la ausencia
+        // del campo como `false`.
+        expect(cuerpo).not.toHaveProperty("exigeContrasena");
         // Nada se comparó ni se cobró: la contraseña nunca llegó a mirarse.
         expect(consumirCupoDeConfirmacion).not.toHaveBeenCalled();
         expect(devolverCupoDeConfirmacion).not.toHaveBeenCalled();
@@ -686,60 +688,45 @@ describe("requireStepUp", () => {
   });
 
   /**
-   * `sinVentana`, for the routes that register or remove a credential.
+   * Every gated route takes the ten-minute window — decision of 2026-10-10
+   * (Isaias, "Todo, sin excepciones"). This block used to be `sinVentana`, the
+   * option that made a route ignore a fresh window and demand the password on
+   * every request; it is gone, and what is pinned here is what the routes that
+   * carried it do now.
    *
-   * Since Task 3 of the reauthentication-window plan removed the branch that
-   * let a factor-less account through for free, that account has to type its
-   * password on every gated route, this option on or off — see the describe
-   * block above. What this option still changes for it is only
-   * `exigeContrasena` in the refusal body: `true` here, `false` on the plain
-   * gate, which is the pair the client's interceptor reads to know whether a
-   * queued request can reuse the ceremony already open on screen.
-   *
-   * Where the option earns its name is the account that *does* have a factor
-   * and proved it inside the window: the `satisfecho` branch above explains
-   * why that proof alone is not enough here — plan 4B seals `mfa_satisfied_at`
-   * when somebody spends a recovery code, and without this option that alone
-   * would be enough to register a new factor with no password at all.
-   *
-   * So the option exists and defaults to `false`: nothing mounted today
-   * changes. 4B mounts the registration routes with it on.
+   * Plan 4B seals `mfa_satisfied_at` when somebody spends a **recovery code**,
+   * so a printed sheet alone now opens the window on routes that register or
+   * remove a credential. That is the accepted cost the tests below name, not a
+   * property the gate protects.
    */
-  describe("sinVentana, for the routes that register a credential", () => {
+  describe("the window on the routes that register a credential", () => {
     const cuentaSinFactor = { id: 1, estado: "completa" as const, mfa_satisfied_at: null };
 
-    it("still demands the password for a factor-less account when the route does not ask for sinVentana — only exigeContrasena in the body changes", async () => {
-      // The guard on every route mounted with this gate and no option. If
-      // this goes red on `next()`, the default started letting a
-      // factor-less account through again; if it goes red on
-      // `exigeContrasena`, the two settings stopped answering different
-      // values for it.
+    it("still demands the password of a factor-less account with nothing fresh, and announces no `exigeContrasena`", async () => {
+      // If this goes red on `next()`, the gate started letting a factor-less
+      // account through on the cookie alone; if it goes red on the field, the
+      // wire kept a flag that no route can set to true any more.
       const { req, res, next } = contexto(cuentaSinFactor, {});
       await requireStepUp()(req, res, next);
 
       expect(next).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(403);
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA, exigeContrasena: false }),
-      );
+      const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+      expect(cuerpo.code).toBe(CODIGO_STEP_UP);
+      expect(cuerpo.motivo).toBe(MOTIVO_CONTRASENA_REQUERIDA);
+      expect(cuerpo).not.toHaveProperty("exigeContrasena");
     });
 
-    it("refuses a factor-less account with no password when the route demands one", async () => {
+    it("never puts `exigeContrasena` on the refusal for an account with a factor either, and keeps `metodos`", async () => {
+      tieneAlgunFactor.mockResolvedValue(true);
+      metodosDeReautenticacion.mockResolvedValue(["passkey", "totp"]);
       const { req, res, next } = contexto(cuentaSinFactor, {});
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      await requireStepUp()(req, res, next);
 
-      expect(next).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(403);
-      expect(res.json).toHaveBeenCalledWith(
-        // `exigeContrasena: true` pinned here too: nothing else in the file
-        // fixes it to `true` on this branch, so a literal `false` in
-        // `denegar`'s call would leave every other test green.
-        expect.objectContaining({
-          code: CODIGO_STEP_UP,
-          motivo: MOTIVO_CONTRASENA_REQUERIDA,
-          exigeContrasena: true,
-        }),
-      );
+      const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+      expect(cuerpo.motivo).toBe(MOTIVO_SIN_FACTOR_RECIENTE);
+      expect(cuerpo.metodos).toEqual(["passkey", "totp"]);
+      expect(cuerpo).not.toHaveProperty("exigeContrasena");
     });
 
     it("tells a missing password apart from a wrong one", async () => {
@@ -750,7 +737,7 @@ describe("requireStepUp", () => {
       // somebody of mistyping a password they never typed.
       verifyOwnPassword.mockResolvedValue({ ok: false });
       const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      await requireStepUp()(req, res, next);
 
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({ motivo: MOTIVO_CONTRASENA_INCORRECTA }),
@@ -760,9 +747,9 @@ describe("requireStepUp", () => {
       );
     });
 
-    it("treats an empty string as no password, on a route that demands one", async () => {
+    it("treats an empty string as no password", async () => {
       const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "" });
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      await requireStepUp()(req, res, next);
 
       expect(next).not.toHaveBeenCalled();
       expect(res.json).toHaveBeenCalledWith(
@@ -776,50 +763,54 @@ describe("requireStepUp", () => {
       // field — spend somebody's whole confirm budget and lock them out of
       // the very screen that would fix it.
       const { req, res, next } = contexto(cuentaSinFactor, {});
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      await requireStepUp()(req, res, next);
 
       expect(consumirCupoDeConfirmacion).not.toHaveBeenCalled();
       expect(devolverCupoDeConfirmacion).not.toHaveBeenCalled();
       expect(verifyOwnPassword).not.toHaveBeenCalled();
     });
 
-    it("accepts the right password on a route that demands one", async () => {
+    it("accepts the right password of a factor-less account, and seals the password window", async () => {
       verifyOwnPassword.mockResolvedValue({ ok: true });
-      const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "la-de-verdad" });
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      const { req, res, next } = contexto(
+        { ...cuentaSinFactor, id_sesion: "s1", password_confirmed_at: null },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp()(req, res, next);
 
       expect(next).toHaveBeenCalled();
       expect(consumirCupoDeConfirmacion).toHaveBeenCalledWith(1);
       expect(devolverCupoDeConfirmacion).toHaveBeenCalledWith(1);
+      // The next gated write of this session finds `password_confirmed_at`
+      // fresh and asks for nothing: that is what the seal is for.
+      expect(sellarContrasena).toHaveBeenCalledWith("s1");
     });
 
-    it("refuses the wrong password on a route that demands one, and charges the bucket", async () => {
+    it("refuses the wrong password, charges the bucket and seals nothing", async () => {
       verifyOwnPassword.mockResolvedValue({ ok: false });
       const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      await requireStepUp()(req, res, next);
 
       expect(next).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(403);
       expect(consumirCupoDeConfirmacion).toHaveBeenCalledWith(1);
       expect(devolverCupoDeConfirmacion).not.toHaveBeenCalled();
+      expect(sellarContrasena).not.toHaveBeenCalled();
     });
 
     it("writes the refusal to the bitácora at warning severity", async () => {
       const { req, res, next } = contexto(cuentaSinFactor, {});
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      await requireStepUp()(req, res, next);
 
       expect(logAction).toHaveBeenCalledWith(
         expect.objectContaining({ action: "STEP_UP_DENIED", severity: "warning" }),
       );
     });
 
-    it("changes nothing for an account that already has a factor", async () => {
-      // The option only ever touches the factor-less branch. With a factor,
-      // the gate refuses before the password is looked at either way, and
-      // that is the same refusal it already gave.
+    it("changes nothing for an account that already has a factor: no password is looked at", async () => {
       tieneAlgunFactor.mockResolvedValue(true);
       const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "la-de-verdad" });
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      await requireStepUp()(req, res, next);
 
       expect(next).not.toHaveBeenCalled();
       expect(res.json).toHaveBeenCalledWith(
@@ -828,19 +819,130 @@ describe("requireStepUp", () => {
       expect(verifyOwnPassword).not.toHaveBeenCalled();
     });
 
-    it("demands the password even from a session that just proved its factor", async () => {
-      // The case that makes `sinVentana` mean one thing instead of two.
-      // Plan 4B seals `mfa_satisfied_at` when somebody spends a **recovery
-      // code** — so without this, whoever holds only the printed sheet spends
-      // one code, lands inside the ten-minute window, and registers their own
-      // factor with no password at all. That is precisely the bound this
-      // option exists to draw, walked around through the front door.
+    it("lets a session that just proved its factor straight through, with no password asked", async () => {
+      // The case `sinVentana` used to refuse. Plan 4B seals `mfa_satisfied_at`
+      // when somebody spends a **recovery code**, so whoever holds only the
+      // printed sheet spends one code, lands inside the ten-minute window and
+      // registers a factor with no password at all. That is the cost Isaias
+      // accepted on 2026-10-10; this test is where it is written down, so a
+      // later change of mind has to edit it on purpose.
       tieneAlgunFactor.mockResolvedValue(true);
       const { req, res, next } = contexto(
         { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
         {},
       );
-      await requireStepUp({ sinVentana: true })(req, res, next);
+      await requireStepUp({ permiteOnboarding: true })(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+      expect(consumirCupoDeConfirmacion).not.toHaveBeenCalled();
+    });
+
+    it("lets a fresh factor proof through without spending the password budget, even when a password comes along", async () => {
+      // Used to be "accepts a fresh factor proof together with the password",
+      // the second half of a two-step ceremony. There is no second half: the
+      // password is not compared, not charged and not refunded, and it leaves
+      // the body.
+      tieneAlgunFactor.mockResolvedValue(true);
+      verifyOwnPassword.mockResolvedValue({ ok: true });
+      const body: Record<string, unknown> = { stepup_password: "la-de-verdad" };
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
+        body,
+      );
+      await requireStepUp()(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+      expect(consumirCupoDeConfirmacion).not.toHaveBeenCalled();
+      expect(devolverCupoDeConfirmacion).not.toHaveBeenCalled();
+      expect(body).not.toHaveProperty("stepup_password");
+    });
+
+    it("still asks a stale account to prove its factor first, before any password", async () => {
+      // Order matters and this pins it: with a factor and nothing fresh to
+      // show, the answer is "prove the factor", not "type your password".
+      // Otherwise these routes would quietly become password-only ones.
+      tieneAlgunFactor.mockResolvedValue(true);
+      const { req, res, next } = contexto(
+        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(STEP_UP_WINDOW_MINUTES + 1) },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp()(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }),
+      );
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+    });
+
+    it("still refuses an onboarding session, which the window does not touch", async () => {
+      // `permiteOnboarding` says *which states* reach the gate, not what proof
+      // they owe: a route that leaves it off refuses `onboarding` whatever the
+      // password.
+      const { req, res, next } = contexto(
+        { id: 1, estado: "onboarding", mfa_satisfied_at: null },
+        { stepup_password: "la-de-verdad" },
+      );
+      await requireStepUp()(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
+      );
+    });
+  });
+
+  /**
+   * `toleraFactorIlegible` — the account HAS a factor, this server cannot read
+   * it, and the route (only `DELETE /auth/totp`) falls through to the password.
+   * In that fall-through `tieneFactor` is true, so the password window must be
+   * neither consulted nor sealed: during a keyring outage that route costs the
+   * password on every request unless a *factor* window is already fresh.
+   */
+  describe("toleraFactorIlegible: the password fall-through for a factor this server cannot read", () => {
+    const cuentaConFactorIlegible = (extra: Record<string, unknown> = {}) => ({
+      id: 1,
+      id_sesion: "s1",
+      estado: "completa" as const,
+      mfa_satisfied_at: null,
+      password_confirmed_at: null,
+      ...extra,
+    });
+
+    beforeEach(() => {
+      tieneAlgunFactor.mockResolvedValue(true);
+      hayFactorVerificable.mockResolvedValue(false);
+    });
+
+    it("takes the password when the only factor is unreadable, and writes the bitácora line", async () => {
+      verifyOwnPassword.mockResolvedValue({ ok: true });
+      const { req, res, next } = contexto(cuentaConFactorIlegible(), { stepup_password: "la-de-verdad" });
+      await requireStepUp({ toleraFactorIlegible: true })(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "STEP_UP_FACTOR_ILEGIBLE" }),
+      );
+    });
+
+    it("does not seal a password window for it: the account has a factor", async () => {
+      verifyOwnPassword.mockResolvedValue({ ok: true });
+      const { req, res, next } = contexto(cuentaConFactorIlegible(), { stepup_password: "la-de-verdad" });
+      await requireStepUp({ toleraFactorIlegible: true })(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(sellarContrasena).not.toHaveBeenCalled();
+    });
+
+    it("does not consult a fresh password window: it costs the password every time", async () => {
+      // A `password_confirmed_at` of one minute ago would let a factor-less
+      // account straight through. This account has a factor, so the window is
+      // not read: no password in the body means a refusal, not a pass.
+      const { req, res, next } = contexto(cuentaConFactorIlegible({ password_confirmed_at: haceMinutos(1) }), {});
+      await requireStepUp({ toleraFactorIlegible: true })(req, res, next);
 
       expect(next).not.toHaveBeenCalled();
       expect(res.json).toHaveBeenCalledWith(
@@ -848,33 +950,19 @@ describe("requireStepUp", () => {
       );
     });
 
-    it("accepts a fresh factor proof together with the password", async () => {
-      // Something held and something known, which is the whole shape of the
-      // ceremony on a route that registers a credential.
-      tieneAlgunFactor.mockResolvedValue(true);
-      verifyOwnPassword.mockResolvedValue({ ok: true });
-      const { req, res, next } = contexto(
-        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
-        { stepup_password: "la-de-verdad" },
-      );
-      await requireStepUp({ sinVentana: true })(req, res, next);
+    it("passes on a fresh factor window without asking anything, like every other route", async () => {
+      const { req, res, next } = contexto(cuentaConFactorIlegible({ mfa_satisfied_at: haceMinutos(1) }), {});
+      await requireStepUp({ toleraFactorIlegible: true })(req, res, next);
 
       expect(next).toHaveBeenCalled();
-      expect(consumirCupoDeConfirmacion).toHaveBeenCalledWith(1);
-      expect(devolverCupoDeConfirmacion).toHaveBeenCalledWith(1);
+      expect(hayFactorVerificable).not.toHaveBeenCalled();
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
     });
 
-    it("still asks a stale account to prove its factor first, before any password", async () => {
-      // Order matters and this pins it: with a factor and nothing fresh to
-      // show, the answer is "prove the factor", not "type your password".
-      // Otherwise the option would quietly turn these routes into
-      // password-only ones, which is the opposite of what it is for.
-      tieneAlgunFactor.mockResolvedValue(true);
-      const { req, res, next } = contexto(
-        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(STEP_UP_WINDOW_MINUTES + 1) },
-        { stepup_password: "la-de-verdad" },
-      );
-      await requireStepUp({ sinVentana: true })(req, res, next);
+    it("refuses with the factor ceremony when a factor IS readable, option or not", async () => {
+      hayFactorVerificable.mockResolvedValue(true);
+      const { req, res, next } = contexto(cuentaConFactorIlegible(), { stepup_password: "la-de-verdad" });
+      await requireStepUp({ toleraFactorIlegible: true })(req, res, next);
 
       expect(next).not.toHaveBeenCalled();
       expect(res.json).toHaveBeenCalledWith(
@@ -883,35 +971,8 @@ describe("requireStepUp", () => {
       expect(verifyOwnPassword).not.toHaveBeenCalled();
     });
 
-    it("still lets a fresh proof straight through when the route does not demand a password", async () => {
-      // The same guard from the other side:
-      // the new clause must not have made a fresh factor proof insufficient
-      // everywhere.
-      tieneAlgunFactor.mockResolvedValue(true);
-      const { req, res, next } = contexto(
-        { id: 1, estado: "completa", mfa_satisfied_at: haceMinutos(1) },
-        {},
-      );
-      await requireStepUp()(req, res, next);
-
-      expect(next).toHaveBeenCalled();
-      expect(res.status).not.toHaveBeenCalled();
-    });
-
-    it("still refuses an onboarding session, which the option does not touch", async () => {
-      // `permiteOnboarding` and `sinVentana` are independent: this one
-      // says *what proof* the factor-less branch accepts, not *which states*
-      // reach it. A route that wants both has to ask for both.
-      const { req, res, next } = contexto(
-        { id: 1, estado: "onboarding", mfa_satisfied_at: null },
-        { stepup_password: "la-de-verdad" },
-      );
-      await requireStepUp({ sinVentana: true })(req, res, next);
-
-      expect(next).not.toHaveBeenCalled();
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ motivo: MOTIVO_ESTADO_INCOMPLETO }),
-      );
+    it("can be mounted without any other option: it no longer demands `sinVentana`", () => {
+      expect(() => requireStepUp({ toleraFactorIlegible: true })).not.toThrow();
     });
   });
 });
@@ -926,46 +987,26 @@ describe("what the refusal tells the client (plan 4D, tarea 2)", () => {
   const cuentaSinFactor = { id: 1, estado: "completa" as const, mfa_satisfied_at: null };
   const cuentaConFactor = { id: 1, estado: "completa" as const, mfa_satisfied_at: null };
 
-  // ── exigeContrasena, so one window can ask for both ────────────────────
+  // ── exigeContrasena is gone from the wire ─────────────────────────────
 
-  it("announces that the password will also be needed, on a route that demands it", async () => {
-    // 🔴 Without this field the ceremony cannot be done in one window. The
-    // server names one missing thing per refusal, and on these routes there
-    // are two, in a fixed order: prove the factor, then type the password.
-    // A client that cannot see the second one coming has to ask twice — on
-    // the two most delicate operations in the ERP.
-    tieneAlgunFactor.mockResolvedValue(true);
-    const { req, res, next } = contexto(cuentaConFactor, {});
-    await requireStepUp({ sinVentana: true })(req, res, next);
-
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        motivo: MOTIVO_SIN_FACTOR_RECIENTE,
-        exigeContrasena: true,
-      }),
-    );
-  });
-
-  it("says false on a route that does not demand it", async () => {
-    // The ordinary administrative route: proving the factor is the whole of
-    // what it wants, and a window that asked for a password here would be
-    // asking for something the server will not even read.
+  it("does not announce `exigeContrasena` on the refusal, for any account", async () => {
+    // Until 2026-10-10 this refusal said `exigeContrasena: true` on the routes
+    // that wanted the password on top of the factor, so one window could ask
+    // for both. No route does that any more. The web client treats an absent
+    // field as false, and the two repos deploy together.
     tieneAlgunFactor.mockResolvedValue(true);
     const { req, res, next } = contexto(cuentaConFactor, {});
     await requireStepUp()(req, res, next);
 
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        motivo: MOTIVO_SIN_FACTOR_RECIENTE,
-        exigeContrasena: false,
-      }),
-    );
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(cuerpo.motivo).toBe(MOTIVO_SIN_FACTOR_RECIENTE);
+    expect(cuerpo).not.toHaveProperty("exigeContrasena");
   });
 
   it("never lets the extra fields overwrite the three the contract is built on", async () => {
     tieneAlgunFactor.mockResolvedValue(true);
     const { req, res, next } = contexto(cuentaConFactor, {});
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
     expect(cuerpo.code).toBe(CODIGO_STEP_UP);
@@ -993,7 +1034,7 @@ describe("what the refusal tells the client (plan 4D, tarea 2)", () => {
     consumirCupoDeConfirmacion.mockResolvedValue({ permitido: true, restantes: PASSWORD_CONFIRM_LIMIT - 1 });
     verifyOwnPassword.mockResolvedValue({ ok: false });
     const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1012,7 +1053,7 @@ describe("what the refusal tells the client (plan 4D, tarea 2)", () => {
     consumirCupoDeConfirmacion.mockResolvedValue({ permitido: true, restantes: 0 });
     verifyOwnPassword.mockResolvedValue({ ok: false });
     const { req, res, next } = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ intentosRestantes: 0 }),
@@ -1037,7 +1078,7 @@ describe("what the refusal tells the client (plan 4D, tarea 2)", () => {
     tieneAlgunFactor.mockResolvedValue(false);
     verifyOwnPassword.mockResolvedValue({ ok: false });
     const alarmante = contexto(cuentaSinFactor, { stepup_password: "no-es-la-mia" });
-    await requireStepUp({ sinVentana: true })(alarmante.req, alarmante.res, alarmante.next);
+    await requireStepUp()(alarmante.req, alarmante.res, alarmante.next);
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: "STEP_UP_DENIED", severity: "critical" }),
     );
@@ -1066,7 +1107,7 @@ describe("what the refusal tells the client (plan 4D, tarea 2)", () => {
       stepup_password: "la-mia",
     });
 
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     expect(next).toHaveBeenCalled();
     const cuerpo = (req as unknown as { body: Record<string, unknown> }).body;
@@ -1075,27 +1116,12 @@ describe("what the refusal tells the client (plan 4D, tarea 2)", () => {
     expect(cuerpo.nombre).toBe("algo");
   });
 
-  it("se niega a montarse en la combinación que sería un pase libre", () => {
-    // 🔴 `toleraFactorIlegible` sin `sinVentana` deja que una ventana de
-    // `mfa_satisfied_at` todavía fresca de antes de que la clave se rompiera
-    // baste por sí sola — la rama `satisfecho && !sinVentana` ni siquiera
-    // llega a mirar `toleraFactorIlegible`. Un error al montar la ruta es
-    // imposible de pasar por alto; una comprobación en tiempo de petición
-    // llegaría tarde.
-    expect(() => requireStepUp({ toleraFactorIlegible: true })).toThrow(
-      /sinVentana/,
-    );
-    expect(() =>
-      requireStepUp({ toleraFactorIlegible: true, sinVentana: true }),
-    ).not.toThrow();
-  });
-
   it("says nothing about guesses when the password was never compared", async () => {
     // A missing password costs nothing and is charged nothing — see the
     // branch's own comment. Reporting a countdown here would tell somebody
     // they had spent a guess they never spent.
     const { req, res, next } = contexto(cuentaSinFactor, {});
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
     expect(cuerpo.motivo).toBe(MOTIVO_CONTRASENA_REQUERIDA);
@@ -1143,22 +1169,17 @@ describe("requireStepUp — el 403 dice qué puede cubrirlo", () => {
     expect(cuerpo.metodos).toEqual(["passkey"]);
   });
 
-  // Both halves of the ceremony in one answer, which is the whole reason
-  // `exigeContrasena` travels on this refusal: one window asks for the finger
-  // and the password together instead of two round trips.
-  it("travels beside `exigeContrasena` without displacing it", async () => {
+  // `metodos` is the one extra field this refusal carries now that
+  // `exigeContrasena` is gone, and it must still travel with the motivo.
+  it("travels beside `motivo`, and nothing else rides with it", async () => {
     tieneAlgunFactor.mockResolvedValue(true);
     metodosDeReautenticacion.mockResolvedValue(["passkey", "totp"]);
     const { req, res, next } = contexto(caducada(), {});
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        motivo: MOTIVO_SIN_FACTOR_RECIENTE,
-        exigeContrasena: true,
-        metodos: ["passkey", "totp"],
-      }),
-    );
+    const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
+    expect(Object.keys(cuerpo).sort()).toEqual(["code", "message", "metodos", "motivo"]);
+    expect(cuerpo.metodos).toEqual(["passkey", "totp"]);
   });
 
   // The refusal that means "you have nothing to prove, type your password".
@@ -1167,7 +1188,7 @@ describe("requireStepUp — el 403 dice qué puede cubrirlo", () => {
   it("is absent from a `contraseña-requerida` refusal", async () => {
     tieneAlgunFactor.mockResolvedValue(false);
     const { req, res, next } = contexto({ id: 1, estado: "completa", mfa_satisfied_at: null }, {});
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     const cuerpo = res.json.mock.calls[0][0] as Record<string, unknown>;
     expect(cuerpo.motivo).toBe(MOTIVO_CONTRASENA_REQUERIDA);
@@ -1292,7 +1313,7 @@ describe("requireStepUp — what leaves with the request", () => {
       { id: 1, estado: "completa", mfa_satisfied_at: null },
       body,
     );
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(429);
     expect(next).not.toHaveBeenCalled();
@@ -1302,14 +1323,14 @@ describe("requireStepUp — what leaves with the request", () => {
 
 describe("requireStepUp — what it says about itself", () => {
   // What `routeGuards.test.ts` reads to tell one mount from another. The
-  // resolved triple, defaults filled in, so a table can compare whole objects.
+  // resolved pair, defaults filled in, so a table can compare whole objects.
   it("stamps its resolved options on the gate it returns", () => {
     expect((requireStepUp() as unknown as { opciones: unknown }).opciones).toEqual({
-      permiteOnboarding: false, sinVentana: false, toleraFactorIlegible: false,
+      permiteOnboarding: false, toleraFactorIlegible: false,
     });
     expect(
-      (requireStepUp({ sinVentana: true }) as unknown as { opciones: unknown }).opciones,
-    ).toEqual({ permiteOnboarding: false, sinVentana: true, toleraFactorIlegible: false });
+      (requireStepUp({ permiteOnboarding: true }) as unknown as { opciones: unknown }).opciones,
+    ).toEqual({ permiteOnboarding: true, toleraFactorIlegible: false });
   });
 
   it("keeps the name Express mounts, which is what the walker finds it by", () => {
@@ -1335,7 +1356,7 @@ describe("requireStepUp — the password leaves on the error paths too", () => {
       { id: 1, estado: "completa", mfa_satisfied_at: null },
       body,
     );
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     expect(next).toHaveBeenCalledWith(expect.any(Error));
     expect(body).not.toHaveProperty("stepup_password");
@@ -1394,16 +1415,6 @@ describe("requireStepUp — la ventana que abre una contraseña correcta", () =>
     expect(res.status).toHaveBeenCalledWith(403);
   });
 
-  it("no abre una ruta con `sinVentana`, aunque la ventana esté fresca", async () => {
-    const { req, res, next } = contexto(haceMinutosLaContrasena(1));
-    await requireStepUp({ sinVentana: true })(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
-    );
-  });
-
   it("no consulta la ventana de una cuenta que tiene un factor", async () => {
     // 🔴 El hallazgo de la auditoría, escrito como test. Si esta columna
     // entrase en `satisfecho` — treinta líneas antes de la comprobación de
@@ -1446,14 +1457,13 @@ describe("requireStepUp — la ventana que abre una contraseña correcta", () =>
     expect(sellarContrasena).not.toHaveBeenCalled();
   });
 
-  it("no sella la sesión de una cuenta que ya probó su factor", async () => {
-    // 🔴 El otro lado del mismo hallazgo. En una ruta con `sinVentana`, una
-    // cuenta que acaba de probar su factor llega igualmente a teclear la
-    // contraseña — y ahí `tieneAlgunFactor` ni siquiera se preguntó, porque
-    // `satisfecho` ya era cierto. Sellar entonces escribiría una ventana de
-    // contraseña a nombre de una cuenta CON factor: exactamente el estado
+  it("ni compara ni sella la contraseña de una cuenta que ya probó su factor", async () => {
+    // 🔴 El otro lado del mismo hallazgo. Una cuenta que acaba de probar su
+    // factor pasa por `satisfecho` antes de que nadie mire la contraseña, y
+    // `tieneAlgunFactor` ni siquiera se pregunta. Sellar una ventana de
+    // contraseña a nombre de una cuenta CON factor es exactamente el estado
     // desde el que se podría sostener indefinidamente el alta y la baja de
-    // credenciales con la contraseña sola.
+    // credenciales con la contraseña sola (§5 del diseño).
     verifyOwnPassword.mockResolvedValue({ ok: true });
     const { req, res, next } = contexto(
       {
@@ -1465,9 +1475,10 @@ describe("requireStepUp — la ventana que abre una contraseña correcta", () =>
       },
       { stepup_password: "la-de-verdad" },
     );
-    await requireStepUp({ sinVentana: true })(req, res, next);
+    await requireStepUp()(req, res, next);
 
     expect(next).toHaveBeenCalled();
+    expect(verifyOwnPassword).not.toHaveBeenCalled();
     expect(sellarContrasena).not.toHaveBeenCalled();
   });
 

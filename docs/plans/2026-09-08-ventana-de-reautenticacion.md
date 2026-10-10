@@ -1,5 +1,7 @@
 # Ventana de reautenticación — plan de implementación
 
+> ⚠️ **Nota del 2026-10-10.** Los pasajes de este documento sobre `sinVentana` y `exigeContrasena` describen lo que se decidió y se construyó entonces. Esa opción y ese campo del 403 ya no existen: toda ruta con puerta de step-up entra en la ventana de diez minutos (decisión de Isaias, ver «Revisión 4» en `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md`). El texto de abajo se conserva como historia, no como descripción del código actual.
+
 > **Para agentes:** SUB-SKILL OBLIGATORIA: usa `superpowers:subagent-driven-development`
 > (recomendado) o `superpowers:executing-plans` para ejecutar tarea a tarea. Los pasos usan
 > casillas (`- [ ]`) para seguimiento.

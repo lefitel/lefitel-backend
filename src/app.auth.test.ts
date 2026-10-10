@@ -1869,7 +1869,7 @@ describe("changing your own credentials spends the budget for a wrong password, 
      * The other half, and the one that would be a daily outage if it were
      * got wrong.
      *
-     * `PUT /userpass/:id` carries `requireStepUp({ sinVentana: true })`, and
+     * `PUT /userpass/:id` carries `requireStepUp()`, and
      * for an account that **has** a factor that gate passes only on a
      * `mfa_satisfied_at` newer than `STEP_UP_WINDOW_MINUTES` — so anybody
      * with a factor who reaches this handler proved it minutes ago. Deciding
@@ -2268,7 +2268,7 @@ describe("requireStepUp, mounted on the real routes", () => {
       expect(res.status).toBe(403);
       expect(res.body.code).toBe(CODIGO_STEP_UP);
       expect(res.body.metodos).toEqual(["correo"]);
-      expect(res.body.exigeContrasena).toBe(true);
+      expect(res.body).not.toHaveProperty("exigeContrasena");
     } finally {
       puede = false;
     }
@@ -2527,10 +2527,10 @@ describe("requireStepUp, mounted on the real routes", () => {
     // reauthentication-window plan (2026-09-08) removed that branch, so what
     // this proves now is the same shape as its neighbour above
     // (`/api/rol/99`): a body-less DELETE is read without crashing, on a
-    // route that leaves `sinVentana` off rather than on. Measures the real
+    // route that leaves `permiteOnboarding` off. Measures the real
     // Express stack — no Content-Type means `req.body` really is
     // `undefined`, and that is what has to survive the gate's own read of it.
-    it("refuses a body-less DELETE for lacking a password, on a route that leaves sinVentana off", async () => {
+    it("refuses a body-less DELETE for lacking a password, on a route that leaves permiteOnboarding off", async () => {
       const res = await request(app)
         .delete("/api/auth/sessions/99")
         .set("Cookie", COOKIE)
@@ -2796,18 +2796,19 @@ describe("la contraseña abre diez minutos cuando la cuenta no tiene ningún fac
     // `WHERE` de antigüedad, cada confirmación mueve la fecha y la ventana se
     // sostiene sola indefinidamente.
     //
-    // Se mide en una ruta con `sinVentana`, que es la única manera de volver
-    // a llegar a la comprobación de la contraseña estando ya dentro de la
-    // ventana: en las demás, la ventana contesta antes y no hay nada que
-    // sellar.
+    // Desde la decisión del 2026-10-10 ninguna ruta ignora la ventana, así que
+    // la segunda petición ya no llega a la comprobación de la contraseña: la
+    // ventana contesta antes. Lo que se mide aquí es lo observable de eso —
+    // la segunda petición pasa **sin contraseña**, no vuelve a sellar y la
+    // fecha de la fila no se mueve. (Antes de esa decisión la segunda
+    // petición traía la contraseña, la puerta la comparaba y el `WHERE` de
+    // antigüedad era lo único que impedía mover la fecha; ese `WHERE` sigue
+    // en `sellarContrasena` y lo cubre `sessionPromotion.test.ts`.)
     //
-    // `POST /api/usuario` y no `DELETE /api/rol/99`: la Tarea 7 metió las
-    // cuatro escrituras de `rol` en la ventana, y desde entonces la segunda
-    // petición de aquí abajo ya no llegaría a la contraseña. Ésta conserva
-    // `sinVentana` y lo conservará — crea una cuenta con sus propias
-    // credenciales, que es el criterio de §4.1 del diseño. El 409 es el de
-    // `createUsuario` con el cuerpo incompleto: da igual cuál sea, lo que
-    // importa es que la petición pasó la puerta las dos veces.
+    // `POST /api/usuario` porque es una de las rutas que antes pedían la
+    // contraseña siempre. El 409 es el de `createUsuario` con el cuerpo
+    // incompleto: da igual cuál sea, lo que importa es que la petición pasó la
+    // puerta las dos veces.
     puede = true;
     try {
       const primera = await request(app)
@@ -2819,18 +2820,18 @@ describe("la contraseña abre diez minutos cuando la cuenta no tiene ningún fac
       const primerSello = fila.password_confirmed_at;
       expect(primerSello).toBeInstanceOf(Date);
 
+      // Sin contraseña: la ventana abierta por la primera basta.
       const segunda = await request(app)
         .post("/api/usuario")
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND)
-        .send({ user: "nuevo", stepup_password: "la-de-verdad" });
+        .send({ user: "nuevo" });
       expect(segunda.status).toBe(409);
 
-      // Se intentó sellar las dos veces. Sin esta línea el test pasaría
-      // igual con una puerta que hubiera dejado de sellar del todo: la fecha
-      // tampoco se movería.
-      expect(sellados()).toHaveLength(2);
-      // Y la fila no se movió, porque el `WHERE` del segundo UPDATE no casó.
+      // Se selló una sola vez, la primera. Sin esta línea el test pasaría
+      // igual con una puerta que hubiera dejado de sellar del todo.
+      expect(sellados()).toHaveLength(1);
+      // Y la fila no se movió.
       expect(fila.password_confirmed_at).toBe(primerSello);
     } finally {
       puede = false;
@@ -2900,9 +2901,11 @@ describe("la contraseña abre diez minutos cuando la cuenta no tiene ningún fac
     // de baja credenciales. Por eso el sello se escribe únicamente cuando la
     // puerta acaba de comprobar que no hay ningún factor.
     //
-    // En una ruta con `sinVentana`, que es donde la propiedad se puede medir:
-    // con la opción apagada, la ventana del factor contesta antes y no se
-    // llega a la contraseña, así que un cero aquí no probaría nada.
+    // Con una prueba de factor fresca la puerta contesta antes de mirar la
+    // contraseña, así que aquí no se compara ni se sella nada: el cero de
+    // `sellados()` es lo observable. Que la rama de la contraseña tampoco
+    // selle para una cuenta CON factor cuando sí llega a ella (la ruta con
+    // `toleraFactorIlegible`) lo fija `requireStepUp.test.ts`.
     passkeyCount.mockResolvedValue(1);
     fila.mfa_satisfied_at = new Date();
     puede = true;
@@ -2920,12 +2923,12 @@ describe("la contraseña abre diez minutos cuando la cuenta no tiene ningún fac
     }
   });
 
-  it("no abre con la ventana una ruta que pide la contraseña siempre", async () => {
+  it("abre con la ventana una ruta que antes pedía la contraseña siempre", async () => {
     // Crear una cuenta, repartir un rol, reescribir la matriz de permisos y
-    // tocar las credenciales de otra persona piden la contraseña se haya
-    // entrado como se haya entrado — §4.1 del diseño. La ventana no es una
-    // excepción a eso, y la primera petición de aquí abajo la deja abierta a
-    // propósito para demostrarlo.
+    // tocar las credenciales de otra persona pedían la contraseña en cada
+    // petición (§4.1 del diseño). Desde la decisión del 2026-10-10 entran en
+    // la ventana como todas las demás, y ése es el coste aceptado: la primera
+    // petición de aquí abajo la deja abierta y la segunda pasa sin nada.
     const abre = await request(app)
       .delete(`/api/auth/sessions/${AJENA}`)
       .set("Cookie", COOKIE)
@@ -2941,35 +2944,33 @@ describe("la contraseña abre diez minutos cuando la cuenta no tiene ningún fac
         .set(DEL_FRONTEND)
         .send({ user: "nuevo" });
 
-      expect(res.status).toBe(403);
-      expect(res.body).toMatchObject({ code: CODIGO_STEP_UP, motivo: "contraseña-requerida" });
+      // 409 de `createUsuario` con el cuerpo incompleto: la puerta no pidió nada.
+      expect(res.body.code).not.toBe(CODIGO_STEP_UP);
+      expect(res.status).toBe(409);
     } finally {
       puede = false;
     }
   });
 
-  it("tampoco abre la ruta que registra la dirección de recuperación", async () => {
+  it("también abre con la ventana la ruta que registra la dirección de recuperación", async () => {
     /**
-     * El mismo `sinVentana`, en la ruta donde perderlo es una toma de cuenta y
-     * no una molestia — y hasta la Tarea 17 su único testigo era la tabla de
-     * `routeGuards.test.ts`.
-     *
      * `POST /api/auth/email/send` registra la dirección por la que se
-     * recupera una cuenta. La cadena que describe el propio
+     * recupera una cuenta, la cadena que describe el propio
      * `sendVerificationEmail`: con una sesión robada, apuntar la recuperación
      * a un buzón propio, verificarla, esperar a que la persona cierre sesión y
-     * pedir un restablecimiento — y la dueña legítima se queda fuera. Diez
-     * minutos de ventana abierta en otra pantalla bastarían para el primer
-     * paso sin teclear nada, así que aquí se pide la contraseña en **cada**
-     * petición.
+     * pedir un restablecimiento — y la dueña legítima se queda fuera. Antes
+     * del 2026-10-10 esta ruta pedía la contraseña en **cada** petición para
+     * que diez minutos de ventana abierta en otra pantalla no bastasen para el
+     * primer paso; ahora bastan, y es un coste aceptado con ese riesgo dicho.
      *
-     * Y esta ruta es además el sitio donde la comprobación se quedó en un solo
-     * sitio: la Tarea 14 quitó del controlador su propio campo `pass`, de modo
-     * que si la opción se cayera del montaje no quedaría nada detrás.
+     * Esta ruta es además el sitio donde la comprobación se quedó en un solo
+     * sitio: la Tarea 14 quitó del controlador su propio campo `pass`, así que
+     * la puerta es lo único que pide algo aquí, y con la ventana abierta no
+     * pide nada.
      *
      * La primera petición abre la ventana a propósito, igual que su gemela de
-     * arriba; sin ella este 403 no distinguiría «no acepta la ventana» de «no
-     * había ventana».
+     * arriba; sin ella este test no distinguiría «acepta la ventana» de «no
+     * había nada que pedir».
      */
     const abre = await request(app)
       .delete(`/api/auth/sessions/${AJENA}`)
@@ -2985,15 +2986,13 @@ describe("la contraseña abre diez minutos cuando la cuenta no tiene ningún fac
       .set(DEL_FRONTEND)
       .send({ email: "nueva@osefi.net" });
 
-    // El cuerpo antes que el número, y a propósito: si la opción se cayera del
-    // montaje, la petición pasaría la puerta y moriría más adelante en el
+    // La petición pasa la puerta y muere más adelante en el
     // `sequelize.transaction()` que este fichero no monta — ver la cabecera de
-    // «email verification, through the real stack». O sea que el rojo sería un
-    // 500, y `expected 500 to be 403` no le dice a nadie qué se rompió.
-    // Comparando el cuerpo, el rojo dice que la puerta no contestó.
-    expect(res.body).toMatchObject({ code: CODIGO_STEP_UP, motivo: "contraseña-requerida" });
-    expect(res.status).toBe(403);
-    // Y no llegó al trabajo: la dirección no se escribió en ninguna parte.
+    // «email verification, through the real stack». Lo que se afirma es lo que
+    // esta puerta decidió: no contestó `STEP_UP_REQUIRED`.
+    expect(res.body.code).not.toBe(CODIGO_STEP_UP);
+    expect(res.status).not.toBe(403);
+    // Y la dirección no se escribió: el transaction que falla está delante.
     expect(usuarioUpdate).not.toHaveBeenCalled();
   });
 });
@@ -3298,10 +3297,11 @@ describe("email verification, through the real stack", () => {
   it("is the gate, not the handler, that refuses this route without a password", async () => {
     /**
      * The other side of the move. The demand for a password on this route is
-     * real and it is `requireStepUp`'s: `sinVentana: true`, so it is asked on
-     * every request rather than once per ten minutes, because a verified
-     * address is a factor since plan 4E and a window on a route that registers
-     * a credential is a way in.
+     * real and it is `requireStepUp`'s: a factor-less account with no fresh
+     * window is asked for it. Since 2026-10-10 the answer opens a ten-minute
+     * window like on any gated route, although a verified address is a factor
+     * since plan 4E and a window on a route that registers a credential is a
+     * way in — an accepted cost.
      *
      * Pinned by `code` and `motivo` rather than the number: this route can
      * answer 403 from `authenticate` too, for a session state it will not

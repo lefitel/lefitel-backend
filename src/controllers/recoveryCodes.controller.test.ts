@@ -1,7 +1,7 @@
 // `recoveryCodes.controller.ts` — the two thin HTTP wrappers around
 // `auth/recoveryCodeStore.ts`, tested with `requireStepUp` already assumed to
 // have run on the POST (its own suite is `requireStepUp.test.ts`; the wiring
-// that actually mounts it with `sinVentana: true` on this route is
+// that actually mounts it on this route is
 // `recoveryCodes.routes.test.ts`'s job, not this file's).
 //
 // `recoveryCodeStore.ts` itself is off-limits tonight — built and verified —

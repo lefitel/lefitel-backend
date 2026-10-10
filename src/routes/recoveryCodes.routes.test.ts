@@ -118,8 +118,8 @@ beforeEach(() => {
   passwordConfirmLimiter.mockReset().mockImplementation((_req: unknown, _res: unknown, next: (e?: unknown) => void) => next());
 });
 
-describe("🔴 POST / demands the password, always — hallazgo C14", () => {
-  it("refuses without stepup_password, even on an account with no factor at all", async () => {
+describe("🔴 POST / takes the ten-minute window — hallazgo C14, reopened by the decision of 2026-10-10", () => {
+  it("refuses without stepup_password, on an account with no factor and nothing fresh", async () => {
     const stepUpGate = stepUpGateOf("POST", "/");
     if (!stepUpGate) throw new Error("POST / no monta requireStepUp (nombre \"stepUpGate\" ausente)");
     tieneAlgunFactor.mockResolvedValue(false);
@@ -127,24 +127,27 @@ describe("🔴 POST / demands the password, always — hallazgo C14", () => {
 
     await stepUpGate(req, res, next);
 
-    // 🔴 Without `sinVentana: true` this account — no factor, no fresh
-    // proof needed — would simply be waved through by `requireStepUp`'s own
-    // "nothing to prove" branch. Mutating the mount to `requireStepUp()` with
-    // no options turns this into `next()` and the assertion below goes red.
+    // A factor-less account with no fresh window is asked for its password,
+    // not waved through on the cookie alone: the "nothing to prove" branch
+    // does not exist any more. (`controlador` refuses such an account with a
+    // 409 anyway — it has nothing for the ten codes to back up.)
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }));
   });
 
-  it("refuses a fresh recovery-code proof too — a `codigo` field in the session state does not exist, but a fresh mfa_satisfied_at from one does, and it still is not enough on its own", async () => {
+  it("lets a fresh recovery-code proof through with no password — the cost accepted on 2026-10-10", async () => {
     const stepUpGate = stepUpGateOf("POST", "/");
     if (!stepUpGate) throw new Error("POST / no monta requireStepUp");
     tieneAlgunFactor.mockResolvedValue(true);
-    // A session that just proved a factor — recovery code included — inside
-    // the ten-minute window. Without `sinVentana`, `requireStepUp`'s
-    // first branch (`satisfecho && !sinVentana`) would let this straight
-    // through with no password at all — exactly the "printed sheet is a
-    // master key" shape hallazgo C14 warns about.
+    // A session that just proved a factor — recovery code included, since
+    // spending one seals `mfa_satisfied_at` (`mfa.controller.ts`) — inside the
+    // ten-minute window. This used to be refused: the mount asked for the
+    // password regardless (`sinVentana`), so the printed sheet could not
+    // regenerate itself. That is the "printed sheet is a master key" shape
+    // hallazgo C14 warned about, and it is open again by Isaias's decision,
+    // with the risk put to him twice. This test is where it is written down:
+    // whoever wants it closed again has to edit it on purpose.
     const { req, res, next } = contexto(
       { id: 1, estado: "completa", mfa_satisfied_at: new Date().toISOString() },
       {},
@@ -152,9 +155,25 @@ describe("🔴 POST / demands the password, always — hallazgo C14", () => {
 
     await stepUpGate(req, res, next);
 
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+    expect(verifyOwnPassword).not.toHaveBeenCalled();
+  });
+
+  it("refuses a stale proof, naming the factor ceremony and not the password", async () => {
+    const stepUpGate = stepUpGateOf("POST", "/");
+    if (!stepUpGate) throw new Error("POST / no monta requireStepUp");
+    tieneAlgunFactor.mockResolvedValue(true);
+    const { req, res, next } = contexto(
+      { id: 1, estado: "completa", mfa_satisfied_at: new Date(Date.now() - 11 * 60_000).toISOString() },
+      { stepup_password: "does-not-matter" },
+    );
+
+    await stepUpGate(req, res, next);
+
     expect(next).not.toHaveBeenCalled();
     expect(verifyOwnPassword).not.toHaveBeenCalled();
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }));
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ motivo: MOTIVO_SIN_FACTOR_RECIENTE }));
   });
 
   it("still refuses an account with an unproven factor before ever asking for a password", async () => {

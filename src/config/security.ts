@@ -286,9 +286,9 @@ export const EMAIL_CODE_VERIFY_LIMIT = 20;
  * for an account that has no factor to prove; and `sellarContrasena`
  * (`auth/sessionPromotion.ts`) reads it a third time, to refuse to re-stamp a
  * window that is still inside itself — which is what makes the ten minutes run
- * from the first confirmation instead of renewing on every request. A route
- * mounted with `sinVentana` honours none of the three. See
- * `middleware/requireStepUp.ts`.
+ * from the first confirmation instead of renewing on every request. Every
+ * gated route honours the first two (decision of 2026-10-10: there is no
+ * route that ignores the window any more). See `middleware/requireStepUp.ts`.
  */
 export const STEP_UP_WINDOW_MINUTES = 10;
 
@@ -296,9 +296,10 @@ export const STEP_UP_WINDOW_MINUTES = 10;
  * The field a caller re-enters their current password in for the step-up gate.
  *
  * Not only the accounts with no factor: since the free-pass branch was deleted
- * (2026-09-08) every account has to send this when the gate asks, and the
- * mounts carrying `sinVentana` ask on every single request — so an account
- * that has just proved a factor sends it too.
+ * (2026-09-08) every account without a fresh window has to send this when the
+ * gate asks for a password: an account with no factor, or the one route that
+ * falls back to the password while the TOTP key is unreadable
+ * (`toleraFactorIlegible`).
  */
 export const STEP_UP_PASSWORD_FIELD = "stepup_password";
 

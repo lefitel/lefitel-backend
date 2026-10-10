@@ -12,10 +12,16 @@
 // rescue, because none of those touch the attacker's account. So the field
 // moved out rather than the route staying out.
 //
+// **Since the decision of 2026-10-10 this route takes the window too**, so the
+// promotion above is possible inside one: it used to ask for the caller's
+// password on every request and no longer does. An accepted cost, with the risk
+// put to Isaias twice; the split still keeps the field off the route a person
+// edits their own profile through.
+//
 // This handler is therefore the only place in the API that writes the `id_rol`
 // of an account that already exists. `createUsuario` still sets one — an
-// account cannot be born without a role — and `POST /api/usuario/` stays out of
-// the window for the very same reason this route does.
+// account cannot be born without a role — and `POST /api/usuario/` takes the
+// window exactly as this route does.
 //
 // What is *not* here: the permission that decides who may call this. The route
 // asks for `roles.editar` (`usuario.routes.ts`) and so does the first check

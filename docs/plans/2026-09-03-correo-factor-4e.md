@@ -1,5 +1,7 @@
 # Plan 4E — El correo como segundo factor, y el correo con relevo
 
+> ⚠️ **Nota del 2026-10-10.** Los pasajes de este documento sobre `sinVentana` y `exigeContrasena` describen lo que se decidió y se construyó entonces. Esa opción y ese campo del 403 ya no existen: toda ruta con puerta de step-up entra en la ventana de diez minutos (decisión de Isaias, ver «Revisión 4» en `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md`). El texto de abajo se conserva como historia, no como descripción del código actual.
+
 > ## Estado — 2026-09-03
 >
 > **Terminado (tareas 1–10): servidor y cliente, cada tarea auditada antes y después, y cada

@@ -21,15 +21,18 @@
 // asking changes the 503 either, so there is no reason to spend a session
 // lookup finding out first on the two routes that do carry it.
 //
-// 🔴 **`sinVentana: true` on all three routes — hallazgo C1.** Without it, a
-// stolen session cookie that waits for the owner to open a ten-minute window
+// 🔴 **All three routes take the ten-minute window — hallazgo C1, reopened by
+// the decision of 2026-10-10 (Isaias, risks put to him twice).** Hallazgo C1
+// was that a stolen session cookie that waits for the owner to open a window
 // registers its own factor inside it, and from that instant `tieneAlgunFactor`
 // denies the real owner the password fallback too (since plan 4E a verified
-// address does the same, which is why `/email/send` carries this option as
-// well): their next login opens `parcial`, escapable only by proving the
-// *attacker's* factor. Changing the password does not help and `logout-all`
-// revokes sessions, not credentials — a permanent lockout. See
-// `requireStepUp.ts`'s own docstring on `sinVentana` for the mechanism.
+// address does the same, which is why `/email/send` is in the same position):
+// their next login opens `parcial`, escapable only by proving the *attacker's*
+// factor. Changing the password does not help and `logout-all` revokes
+// sessions, not credentials — a permanent lockout. These routes used to close
+// that by asking for the password on every request (`sinVentana`). They no
+// longer do: inside the window a hijacked session can register its own
+// credential and delete the owner's. Accepted cost, not a property that holds.
 //
 // 🔴 **`permiteOnboarding: true` on all three routes, `DELETE` included —
 // hallazgo F6/E-5.** `requireStepUp.ts`'s own docstring on `permiteOnboarding`
@@ -88,14 +91,14 @@ router.post(
   "/setup",
   requireTotpKeyAvailable,
   authenticate,
-  requireStepUp({ permiteOnboarding: true, sinVentana: true }),
+  requireStepUp({ permiteOnboarding: true }),
   setupTotp,
 );
 router.post(
   "/confirm",
   requireTotpKeyAvailable,
   authenticate,
-  requireStepUp({ permiteOnboarding: true, sinVentana: true }),
+  requireStepUp({ permiteOnboarding: true }),
   confirmTotp,
 );
 // No `requireTotpKeyAvailable` here — see the module header, hallazgo F6.
@@ -103,13 +106,15 @@ router.post(
 // Without it the exemption above is undone by the gate right below it: this
 // DELETE stays reachable when the keyring cannot read the secret, and then
 // `requireStepUp` asks for a code produced from that same unreadable secret.
-// The escape hatch and the door in front of it disagreed. `sinVentana`
-// stays on, so what replaces the impossible code is the password, which a
-// stolen cookie does not carry. See the option's own comment.
+// The escape hatch and the door in front of it disagreed. What replaces the
+// impossible code is the password, asked on every request while the key is
+// broken (that fall-through never opens a password window for an account that
+// has a factor), unless a factor window is already fresh. See the option's own
+// comment.
 router.delete(
   "/",
   authenticate,
-  requireStepUp({ permiteOnboarding: true, sinVentana: true, toleraFactorIlegible: true }),
+  requireStepUp({ permiteOnboarding: true, toleraFactorIlegible: true }),
   deleteTotp,
 );
 

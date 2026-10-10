@@ -24,9 +24,9 @@
 //
 // 🔴 **The other half is no longer in this file, and looking for it here is
 // the mistake to avoid.** The password that stops that chain is compared by
-// the gate on the route — `requireStepUp({ permiteOnboarding: true,
-// sinVentana: true })` in `auth.routes.ts` — before this handler runs, against
-// a field of the gate's own. This handler used to compare a second copy of the
+// the gate on the route — `requireStepUp({ permiteOnboarding: true })` in
+// `auth.routes.ts` — before this handler runs, against a field of the gate's
+// own. This handler used to compare a second copy of the
 // same secret under the name `pass`, and asking twice for one password is what
 // the reauthentication-window work exists to stop. So there is nothing to
 // assert here about a password: what these tests hold instead is that the
@@ -288,10 +288,10 @@ describe("POST /auth/email/send", () => {
    * **who asks**. This handler used to compare a password of its own, in a
    * field called `pass`, and said in a comment beside the check that it was
    * the only thing asking. Since the route mounts
-   * `requireStepUp({ permiteOnboarding: true, sinVentana: true })`
-   * (`auth.routes.ts`) the gate compares the caller's password on **every**
-   * request to this route, window or no window, and adds the account's factor
-   * on top when it has one — which the handler's own check never could.
+   * `requireStepUp({ permiteOnboarding: true })` (`auth.routes.ts`) the gate
+   * asks for the caller's password (account with no factor) or a factor proved
+   * in the last ten minutes, unless a window is already open — which the
+   * handler's own check never could.
    *
    * Two secrets asked for twice was the whole complaint this arc started
    * from, so the handler's copy goes and the gate keeps it. These tests are
@@ -863,9 +863,9 @@ describe("POST /auth/email/send — changing the address may remove the last fac
      * handler's own `pass` check whenever the client did not send that field,
      * and the client stopped sending it in this same change.
      *
-     * What still asks is the gate, on the route, with `permiteOnboarding`
-     * and `sinVentana` — a password on every request, plus a factor for
-     * whoever has one. `app.auth.test.ts` drives that end of it; this pins
+     * What still asks is the gate, on the route, with `permiteOnboarding` —
+     * the password for an account with no factor, a proved factor for whoever
+     * has one. `app.auth.test.ts` drives that end of it; this pins
      * that the handler adds no second lock behind it.
      */
     findByPk.mockResolvedValue(usuarioRow({ email: null, email_verified_at: null }));

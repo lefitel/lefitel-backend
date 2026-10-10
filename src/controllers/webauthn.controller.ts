@@ -105,9 +105,9 @@ const NOMBRE_MAX = 100;
  * consistency — the one door that depends on nothing external is what keeps
  * the mail chain from being a single point of lockout for the whole payroll.
  *
- * What still holds the line is that this route is gated: `sinVentana` means
- * the caller's own password on every request, so "no verified address needed"
- * is not "no proof needed". See `webauthn.routes.ts`.
+ * What still holds the line is that this route is gated: the step-up window
+ * (a proved factor, or the password of an account with none), so "no verified
+ * address needed" is not "no proof needed". See `webauthn.routes.ts`.
  */
 export const registerOptions = handler("registerOptions", async (req: Request, res: Response) => {
   const caller = req.user;
@@ -374,8 +374,9 @@ export const registerVerify = handler("registerVerify", async (req: Request, res
     },
     // `critical`, matching `TOTP_CONFIRMED`: registering a credential is the
     // exact event a stolen cookie produces when it is used to take an account,
-    // and the whole argument for `sinVentana` rests on somebody being
-    // able to notice it. `info` was a line nobody would read.
+    // and the cost accepted on 2026-10-10 (registration takes the
+    // window, not the password every time) rests on somebody being able to
+    // notice it. `info` was a line nobody would read.
     severity: "critical",
     ip_address: req.ip ?? null,
   });

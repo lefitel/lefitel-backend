@@ -69,11 +69,10 @@ router.post("/login", loginRateLimit, login);
 // `docs/specs/2026-08-21-autenticacion-mfa-design.md` §step-up, where the first
 // enrolment of a factor "exige reintroducir la contraseña" — i.e. the password
 // travelling in the write itself, not a confirmation call before it. Where that
-// demand ended up is `requireStepUp`, which asks for it on every route carrying
-// `sinVentana` and, on the rest, accepts a window opened in the last
-// `STEP_UP_WINDOW_MINUTES` — by a proved factor, or by a correct password on an
-// account with no factor to prove. What no route accepts any more is a live
-// cookie and nothing else.
+// demand ended up is `requireStepUp`, which on every gated route accepts a
+// window opened in the last `STEP_UP_WINDOW_MINUTES` — by a proved factor, or
+// by a correct password on an account with no factor to prove — and otherwise
+// asks. What no route accepts is a live cookie and nothing else.
 //
 // What it cost while it was mounted: it was the only endpoint in the API that
 // compared a password with **no operation behind it**, any authenticated session
@@ -182,27 +181,24 @@ router.delete("/sessions/:id", authenticate, requireStepUp(), endSession);
  * be re-derived from the gate's internals.
  */
 /**
- * `requireStepUp({ permiteOnboarding: true, sinVentana: true })` on
- * `/email/send`, and both options are the whole point of the line.
+ * `requireStepUp({ permiteOnboarding: true })` on `/email/send`.
  *
  * **Why the gate and not the handler.** The handler used to demand the
- * password itself, under another name (`pass`), and until this option went on
- * that field was the *only* thing asking. `sinVentana` moved the demand to the
- * gate, which is where every other route in the API asks for a password, and
- * which is the only place that can also require a factor from an account that
- * has one. The handler's own copy is gone: two comparisons of one secret in one
- * request is the double prompt this arc exists to remove, and keeping the
- * check while the client stopped sending the field would have answered 400 to
- * everybody.
+ * password itself, under another name (`pass`). The gate is where every other
+ * route in the API asks for a password, and the only place that can also
+ * require a factor from an account that has one. The handler's own copy is
+ * gone: two comparisons of one secret in one request is the double prompt this
+ * arc exists to remove, and keeping the check while the client stopped sending
+ * the field would have answered 400 to everybody.
  *
- * 🔴 **Why no window here.** A verified address is a factor since plan 4E
- * (`auth/factorInventory.ts`), so this route registers a credential — and on a
- * route that registers or removes one, a window is a way in. Somebody holding
- * the cookie waits for the owner to confirm their password for something
- * ordinary, changes the recovery address to their own inside those ten
- * minutes, and verifies it from their own inbox. The console rescue does not
- * clear `email_verified_at` (`auth/rescueCore.ts`), so that factor outlives
- * the remedy.
+ * 🔴 **This route takes the ten-minute window — accepted cost, decision of
+ * 2026-10-10.** A verified address is a factor since plan 4E
+ * (`auth/factorInventory.ts`), so this route registers a credential. Inside a
+ * window somebody holding the cookie can change the recovery address to their
+ * own and verify it from their own inbox. The console rescue does not clear
+ * `email_verified_at` (`auth/rescueCore.ts`), so that factor outlives the
+ * remedy. The route used to ask for the password on every request to close
+ * this; Isaias chose, with that stated, to give it up.
  *
  * **Why `permiteOnboarding`.** `ONBOARDING_EXTRA` opens `/api/auth/email` on
  * purpose, and the plain gate would close it: `app.auth.test.ts`'s "leaves the
@@ -219,11 +215,11 @@ router.delete("/sessions/:id", authenticate, requireStepUp(), endSession);
  * an account that *does* have a factor is still refused, by the factor check
  * below it.
  *
- * 🔴 **And `sinVentana` is not a factor requirement.** It means "the password
- * on every request, **plus** the factor if the account has one" — never "a
- * factor is required". On deploy day nobody has one, and `/auth/totp/setup`
- * answers 409 without a verified address: read the other way round, this pair
- * of options would be the sealed room the paragraph above is about.
+ * 🔴 **The gate is not a factor requirement.** An account with no factor
+ * passes it with its password; one with a factor needs that factor fresh. On
+ * deploy day nobody has one, and `/auth/totp/setup` answers 409 without a
+ * verified address: a rule demanding a factor here would be the sealed room
+ * the paragraph above is about.
  *
  * **Before `passwordConfirmLimiter`, deliberately.** Both draw on the same
  * `pc:<id>` budget. Since Task 1 of the reauthentication-window plan the gate
@@ -238,7 +234,7 @@ router.delete("/sessions/:id", authenticate, requireStepUp(), endSession);
  * is the order the comment above is about and which this line does not
  * disturb.
  */
-router.post("/email/send", authenticate, requireStepUp({ permiteOnboarding: true, sinVentana: true }), passwordConfirmLimiter, emailSendLimiter, sendVerificationEmail);
+router.post("/email/send", authenticate, requireStepUp({ permiteOnboarding: true }), passwordConfirmLimiter, emailSendLimiter, sendVerificationEmail);
 router.post("/email/verify", authenticate, emailVerifyLimiter, verifyEmail);
 
 /**

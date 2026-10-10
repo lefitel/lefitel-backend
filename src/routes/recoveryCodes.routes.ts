@@ -7,16 +7,17 @@
 // at all — and then `POST /`'s own gate closes behind it, on purpose, for the
 // reason two paragraphs down.
 //
-// 🔴 **`POST /` carries `requireStepUp({ sinVentana: true })` — hallazgo
-// C14.** §5 of the design spec describes this endpoint as "step-up, o un
-// código de recuperación válido"; that half is wrong and deliberately not
-// built (see `recoveryCodes.controller.ts`'s own header, and the spec has
-// been annotated). Without `sinVentana`, a caller who just spent a
-// recovery code to get here would land inside `requireStepUp`'s ten-minute
-// window and regenerate the whole set on the strength of the sheet alone —
-// exactly the "printed sheet becomes a master key" hallazgo C14 warns about.
-// `sinVentana` asks for the password regardless of how fresh that proof
-// is, which is what closes it.
+// 🔴 **`POST /` carries the plain `requireStepUp()` — hallazgo C14, reopened
+// by the decision of 2026-10-10.** §5 of the design spec describes this
+// endpoint as "step-up, o un código de recuperación válido"; the endpoint
+// itself still never accepts a recovery code as its own proof (see
+// `recoveryCodes.controller.ts`'s header). But a caller who spends a recovery
+// code at the step-up door lands inside `requireStepUp`'s ten-minute window,
+// and the window is all this route asks for: the sheet plus a cookie can
+// regenerate the whole set, which is the "printed sheet becomes a master key"
+// that C14 warned about. The route used to close it by asking for the password
+// on every request (`sinVentana`); Isaias chose, with that stated, to give
+// that up for every gated route. Accepted cost, not an oversight.
 //
 // 🔴 **No `permiteOnboarding` on `POST /` — removed by the 2026-09-02 closure
 // audit, hallazgo F1.** An earlier version of this mount carried it, on the
@@ -66,7 +67,7 @@ import { regenerateRecoveryCodes, countRecoveryCodes } from "../controllers/reco
 
 const router = Router();
 
-router.post("/", authenticate, requireStepUp({ sinVentana: true }), regenerateRecoveryCodes);
+router.post("/", authenticate, requireStepUp(), regenerateRecoveryCodes);
 router.get("/", authenticate, countRecoveryCodes);
 
 export default router;

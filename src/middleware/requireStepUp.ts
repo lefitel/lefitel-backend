@@ -33,24 +33,30 @@ const gateLog = log("step-up");
  * migration. Anything that changes that turns "remember this browser" into
  * "this browser is permanently step-up authorised".
  *
- * **An account with nothing to prove still has to type its password.** Task
- * 3 of the reauthentication-window plan (2026-09-08) removed the branch that
- * used to let a factor-less account through on the cookie alone: `web/src`
- * has sent `STEP_UP_PASSWORD_FIELD` since plan 4D, so there is no longer a
- * caller this gate cannot ask. Correct, and it opens the gate; wrong or
- * missing, and it is refused — missing for free, wrong **and charged**
- * against the shared budget. See the password branch below for exactly what
- * each answer costs.
+ * **An account with nothing to prove has to type its password.** Task 3 of the
+ * reauthentication-window plan (2026-09-08) removed the branch that used to let
+ * a factor-less account through on the cookie alone: `web/src` has sent
+ * `STEP_UP_PASSWORD_FIELD` since plan 4D, so there is no longer a caller this
+ * gate cannot ask. Correct, and it opens the gate; wrong or missing, and it is
+ * refused — missing for free, wrong **and charged** against the shared budget.
+ * See the password branch below for exactly what each answer costs.
  *
  * **And a correct one buys that account ten minutes**, the same width a
  * proved factor gets, stamped on the session row by `sellarContrasena` and
  * read back on the next request. Task 5 of the same plan added it, and it is
  * what keeps "type your password on every sensitive write" from being the
  * whole day's experience for the accounts that have no factor to prove — the
- * exact annoyance this arc exists to remove. Two bounds on it, both
- * deliberate: the window does not renew itself (the ten minutes run from the
- * *first* confirmation, never the latest), and a route carrying `sinVentana`
- * ignores it entirely.
+ * exact annoyance this arc exists to remove. The window does not renew itself:
+ * the ten minutes run from the *first* confirmation, never the latest.
+ *
+ * **Every gated route takes the window — decision of 2026-10-10 (Isaias,
+ * "Todo, sin excepciones", taken twice with the risks put to him).** No route
+ * asks for the password on every request any more; the `sinVentana` option
+ * that did that is gone. The accepted cost: inside the ten minutes a hijacked
+ * session can register its own credential and delete the owner's, archive
+ * accounts (not reversible from the app), create accounts, assign roles and
+ * rewrite permissions. See "Revisión 4" in
+ * `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md`.
  *
  * **The fallback that does spend something is rate-limited, and shares its
  * budget with `chargeConfirmBudgetOnSelfChange`** (`usuario.routes.ts`) rather
@@ -116,8 +122,8 @@ export const MOTIVO_ESTADO_INCOMPLETO = "estado-incompleto";
 export const MOTIVO_SIN_FACTOR_RECIENTE = "sin-factor-reciente";
 export const MOTIVO_CONTRASENA_INCORRECTA = "contraseña-incorrecta";
 /**
- * The fourth, and the only one a route has to opt into: `sinVentana`
- * asked for a password and the body carried none.
+ * The fourth: an account with no factor and no fresh password window reached
+ * the password branch and the body carried no password.
  *
  * **Deliberately not `MOTIVO_CONTRASENA_INCORRECTA`**, even though the remedy
  * looks the same from here. The two are different sentences on screen — "type
@@ -188,35 +194,6 @@ export interface OpcionesStepUp {
   permiteOnboarding?: boolean;
 
   /**
-   * Esta ruta no acepta la ventana: pide la contraseña en **cada** petición
-   * a la ruta que la monta.
-   *
-   * 🔴 Hasta la Tarea 3 del plan de reautenticación esto era lo mismo que
-   * decía su nombre anterior, `exigeContrasena`: las rutas que la llevan
-   * apagada dejaban pasar a una cuenta sin ningún factor sin pedir nada. Esa
-   * rama ya no existe — toda cuenta sin factor tiene que escribir la
-   * contraseña, encendida o apagada esta opción — así que lo que sigue
-   * haciendo hoy es apagar los atajos de los diez minutos, que desde la
-   * Tarea 5 son dos: con la opción apagada basta una ventana todavía fresca
-   * —de `mfa_satisfied_at` si la cuenta tiene un factor, de
-   * `password_confirmed_at` si no tiene ninguno— para pasar sin volver a
-   * pedir nada; con ella encendida, ninguna de las dos vale. Se renombró
-   * antes de que la rama desapareciera porque ese era exactamente el momento
-   * en que «exige la contraseña» dejaría de describirla y «sin ventana»
-   * seguiría siendo cierto.
-   *
-   * Qué rutas la llevan encendida hoy: la lista canónica es
-   * `STEP_UP_OPTIONS` en `routeGuards.test.ts`, no un número aquí — un
-   * recuento que tiene que coincidir a mano con otro fichero es justo la
-   * clase de comentario que se desactualiza sin que nadie se entere.
-   *
-   * 🔴 **El campo del cable NO se renombra.** El 403 sigue llevando
-   * `exigeContrasena`, porque `web/src/api/stepUp.ts:71` ya lo lee y los dos
-   * repos se despliegan aparte.
-   */
-  sinVentana?: boolean;
-
-  /**
    * Stop demanding proof of a factor **this server has just declared it cannot
    * read**. Off by default, and exactly one route turns it on:
    * `DELETE /auth/totp`, the one whose entire purpose is undoing that factor.
@@ -228,20 +205,21 @@ export interface OpcionesStepUp {
    * keyring can no longer decrypt. The route stays open and the gate in front
    * of it is shut. Both pieces are right; the seam is the lockout.
    *
-   * **Why this is not a weakening.** The one route that reads it also carries
-   * `sinVentana`, so what replaces the impossible code is the password —
-   * something a stolen cookie does not have. And demanding proof of a factor
-   * the server itself reports as unreadable is not a stricter gate, it is an
-   * unsatisfiable one — nothing this account could ever send would open it.
-   * This option routes it to the password branch below instead, the same
-   * branch a factor-less account already has to answer.
+   * **What it costs.** What replaces the impossible code is the password. In
+   * that fall-through the account HAS a factor, so the password window
+   * (`password_confirmed_at`) is neither consulted nor sealed: during a keyring
+   * outage this route asks for the password on every request, unless a
+   * *factor* window (`mfa_satisfied_at`) is already fresh — which passes first,
+   * like on every other route. Demanding proof of a factor the server itself
+   * reports as unreadable is not a stricter gate, it is an unsatisfiable one —
+   * nothing this account could ever send would open it.
    *
    * **Deliberately narrow, and it has to be.** Read by one route rather than
    * applied to every route that carries the gate, because everywhere else the honest answer to a
    * broken key is still "prove your factor or spend a recovery code" — those
    * codes are bcrypt, never encrypted, so they survive exactly this failure.
    * Widening it would mean that during a configuration fault the password
-   * alone reaches every sensitive write in the ERP. The narrow door is the
+   * alone reaches every sensitive write in the ERP, on every request. The narrow door is the
    * escape hatch; the wide one would be the hole.
    *
    * 🔴 **This is a remedy, not a fix.** With an unreadable TOTP the lockout
@@ -268,12 +246,12 @@ export interface OpcionesStepUp {
  * them — and that is a table rendered on a screen. An administrator's plaintext
  * password in `bitacora.metadata` was one unlucky pair of tabs away.
  *
- * D6 closed that particular hole for a week, by putting `sinVentana` on every
- * `rol` route so the shortcut was not reachable there. 🔴 **It is reachable
- * again**: §4.1 of the reauthentication design (2026-09-08) put the four `rol`
- * writes back inside the window, so the exact pair described above — the
- * shortcut and a controller that files the body — is live, and this line is
- * what stands between them. It also covers every other mount that takes the
+ * D6 closed that particular hole for a week, by keeping the `rol` routes off
+ * the shortcut. 🔴 **It is reachable again**: §4.1 of the reauthentication
+ * design (2026-09-08) put the four `rol` writes back inside the window, and
+ * the 2026-10-10 decision did the same for every other gated route, so the
+ * exact pair described above — the shortcut and a controller that files the
+ * body — is live, and this line is what stands between them. It also covers every other mount that takes the
  * window, any mount added later, and the error handler; none of the rest file
  * the body today, and the next Sentry hook or `req.body` in a log line would. A
  * rule with no exceptions is the only one the next reader can build on.
@@ -287,35 +265,8 @@ function soltarContrasena(req: Request): void {
 
 export function requireStepUp({
   permiteOnboarding = false,
-  sinVentana = false,
   toleraFactorIlegible = false,
 }: OpcionesStepUp = {}): RequestHandler {
-  /**
-   * 🔴 La combinación que dejaría esta puerta abierta con sólo la ventana
-   * fresca, rechazada al montar la ruta y no en producción.
-   *
-   * `toleraFactorIlegible` sólo entra en juego cuando `tieneAlgunFactor` ya
-   * dijo que sí: la cuenta tiene un factor, sólo que este servidor no puede
-   * leerlo. Ese es exactamente el caso que la regla de `sinVentana` nombra
-   * — "cualquier ruta que dé de alta o de baja un factor" — así que sin la
-   * opción encendida, una `mfa_satisfied_at` todavía fresca de *antes* de
-   * que la clave se rompiera basta por sí sola para pasar: la rama
-   * `satisfecho && !sinVentana` de más arriba ni siquiera llega a mirar
-   * `toleraFactorIlegible`, y una cookie robada con esa ventana viva
-   * borraría el factor sin volver a probar nada.
-   *
-   * Hoy la única ruta que activa la opción lleva las dos, así que no hay
-   * agujero. Esto es lo que impide que deje de ser verdad en un descuido: un
-   * error al arrancar es imposible de pasar por alto, y una comprobación en
-   * tiempo de petición llegaría tarde.
-   */
-  if (toleraFactorIlegible && !sinVentana) {
-    throw new Error(
-      "requireStepUp: `toleraFactorIlegible` exige `sinVentana`. Sin la contraseña, " +
-        "una cookie robada bastaría para una escritura sensible cuando la clave del TOTP falla.",
-    );
-  }
-
   // Named, not anonymous: a later task walks the mounted Express stack the
   // way `routeGuards.test.ts` already does for `requirePermissionGate`, and it
   // can only tell this gate apart from an ordinary handler by this name
@@ -389,22 +340,12 @@ export function requireStepUp({
       const satisfecho = probadoHace >= 0 && probadoHace <= STEP_UP_WINDOW_MINUTES * 60_000;
 
       /**
-       * A fresh proof is enough on its own for every route mounted today, and
-       * **deliberately not enough** for one that asked for `sinVentana`:
-       * there the two are wanted together, something held and something known.
-       *
-       * The case that forces this, and it is not hypothetical — plan 4B seals
-       * this very column when somebody spends a **recovery code**. Without this
-       * clause, whoever holds only the printed sheet spends one code, lands
-       * inside the window, and registers their own factor with no password at
-       * all — which is exactly the bound `sinVentana` exists to draw. The
-       * option has to mean one thing: this route wants the password, always.
-       *
-       * An account that has a factor and no fresh proof still gets refused
-       * below and has to prove it first. So on these routes the ceremony is two
-       * steps, in this order: prove the factor, then type the password.
+       * A fresh proof is enough on its own, on every route. That includes a
+       * stamp sealed by spending a **recovery code** (plan 4B): the printed
+       * sheet alone opens the window, with no password. Accepted by the
+       * 2026-10-10 decision, not overlooked — see "Revisión 4" in the design.
        */
-      if (satisfecho && !sinVentana) {
+      if (satisfecho) {
         soltarContrasena(req);
         next();
         return;
@@ -416,16 +357,12 @@ export function requireStepUp({
        * answer here, and checking it first would spend a bcrypt comparison to
        * reach the same refusal.
        *
-       * **Three values, not two, and the third is load-bearing.** `null` means
-       * the question was never asked — the window is already satisfied, which
-       * only a `sinVentana` route reaches, and there the factor has just been
-       * proved, so asking whether one exists is both answered and beside the
-       * point. `false` means it *was* asked and the account has nothing: the
-       * only state in which the password branch below may seal a window. A
-       * plain boolean would fold those two together, and the fold is a
-       * security bug rather than an inelegance — see the seal itself.
+       * A plain boolean: a fresh `mfa_satisfied_at` has already returned above,
+       * so this is always asked. `true` is the only state in which the factor
+       * branch applies; `false` is the only one in which the password branch
+       * below may consult or seal `password_confirmed_at`.
        */
-      const tieneFactor: boolean | null = satisfecho ? null : await tieneAlgunFactor(user.id);
+      const tieneFactor = await tieneAlgunFactor(user.id);
 
       if (tieneFactor) {
         // The factor exists. Whether it can be *proved* is a second question,
@@ -434,16 +371,7 @@ export function requireStepUp({
         // on, so the ordinary path still pays for one pair of COUNTs rather
         // than two: this is the hot path of every gated write.
         if (!toleraFactorIlegible || (await hayFactorVerificable(user.id))) {
-          // 🔴 `exigeContrasena` travels with this refusal, and the whole
-          // ceremony depends on it. On these routes the server demands two
-          // things in a fixed order — prove the factor, *then* type the
-          // password — and it only ever names one of them per refusal. A
-          // client that cannot see the second one coming has no choice but to
-          // ask twice: one window for the code, and, after a round trip, a
-          // second window for the password, on the two most delicate
-          // operations there are. Saying it now is what lets one window ask
-          // for both. Absent means false, so nothing that ignores it changes.
-          // 🔴 **And `metodos` names what the window has to draw.** This
+          // 🔴 **`metodos` names what the window has to draw.** This
           // refusal says "prove a factor" and, until passkeys existed, there
           // was only one thing that could mean, so the window hard-coded a
           // six-digit field. There are two now and they look nothing alike.
@@ -489,16 +417,12 @@ export function requireStepUp({
               "no se pudo averiguar con qué puede probarse la cuenta: se rechaza sin decirlo",
             );
           }
-          denegar(req, res, MENSAJE, MOTIVO_SIN_FACTOR_RECIENTE, {
-            exigeContrasena: sinVentana,
-            ...(metodos ? { metodos } : {}),
-          });
+          denegar(req, res, MENSAJE, MOTIVO_SIN_FACTOR_RECIENTE, metodos ? { metodos } : {});
           return;
         }
-        // Falls through to the password branch below, which every account
-        // without a fresh window reaches now, factor or not — there is no
-        // free skip left to fall back to on the routes that leave
-        // `sinVentana` off.
+        // Falls through to the password branch below with `tieneFactor` true:
+        // the password window is not consulted (it never stands in for a
+        // factor) and a correct password does not seal one.
         //
         // 🔴 Y queda constancia, porque es un evento que un operador querría
         // poder contar durante una avería de claves: el servidor acaba de
@@ -528,7 +452,7 @@ export function requireStepUp({
           severity: "critical",
           ip_address: req.ip ?? null,
         });
-      } else if (tieneFactor === false) {
+      } else {
         /**
          * The window of an account with **no factor at all**, which is the
          * whole of what this branch is about — and it is consulted here,
@@ -537,11 +461,10 @@ export function requireStepUp({
          *
          * `satisfecho` is computed *before* the factor lookup. As an `OR`
          * there, this column would let an account that **does** have a factor
-         * prove it once in the life of a session and then hold the routes that
-         * register and delete credentials open on the password alone,
-         * re-sealing on every request — which destroys the whole property of
-         * `sinVentana`. Down here, `tieneAlgunFactor` has already answered
-         * `false`: there is no factor for a password to stand in for.
+         * be held open by the password alone, with the factor never proved —
+         * and the separate column (§5 of the design) exists to prevent exactly
+         * that. Down here, `tieneAlgunFactor` has already answered `false`:
+         * there is no factor for a password to stand in for.
          *
          * `NaN` for a missing or unreadable stamp, and `>= 0` on the other
          * side, for exactly the reasons the `mfa_satisfied_at` window above
@@ -554,7 +477,7 @@ export function requireStepUp({
             : Date.now() - new Date(user.password_confirmed_at).getTime();
         const ventanaDeContrasena =
           confirmadoHace >= 0 && confirmadoHace <= STEP_UP_WINDOW_MINUTES * 60_000;
-        if (ventanaDeContrasena && !sinVentana) {
+        if (ventanaDeContrasena) {
           // The password leaves the body here too. This is a path out of the
           // gate like any other, and a request can arrive carrying the field
           // even on a route that never asked for it — see `soltarContrasena`.
@@ -575,17 +498,7 @@ export function requireStepUp({
         // `sin-factor-reciente`": ese es su contrato, no una casualidad de
         // esta rama. Este refusal contesta `contraseña-requerida`, un motivo
         // distinto, así que no hay nada que el campo tendría que describir.
-        denegar(req, res, MENSAJE_CONTRASENA_REQUERIDA, MOTIVO_CONTRASENA_REQUERIDA, {
-          // 🔴 **El par (motivo, exigeContrasena) es lo que el cliente lee
-          // para decidir si una petición que recibió el rechazo puede
-          // aprovechar la ventana que ya está abierta o tiene que esperar la
-          // suya** — `resolver`, en `web/src/api/stepUpInterceptor.ts`. Dos
-          // rechazos con el mismo motivo y distinto `exigeContrasena` piden
-          // cosas distintas, así que mandar el campo aquí no es informativo:
-          // sin él, esta negativa se confundiría con la de una ruta que sólo
-          // necesita la contraseña, y la ventana entregaría lo que no era.
-          exigeContrasena: Boolean(sinVentana),
-        });
+        denegar(req, res, MENSAJE_CONTRASENA_REQUERIDA, MOTIVO_CONTRASENA_REQUERIDA);
         soltarContrasena(req);
         return;
       }
@@ -693,14 +606,13 @@ export function requireStepUp({
 
         /**
          * 🔴 **Y se abre la ventana de diez minutos, sólo para una cuenta sin
-         * ningún factor.** `tieneFactor === false` es "se preguntó y no hay
-         * nada"; `null` es "no se preguntó", que es lo que pasa cuando
-         * `satisfecho` ya era cierto — una cuenta que acaba de probar su
-         * factor en una ruta con `sinVentana`. Sellar en ese caso escribiría
-         * una ventana de contraseña a nombre de una cuenta **con** factor, que
-         * es exactamente el estado que la auditoría prohíbe: probar el factor
-         * una vez y sostener después las rutas de credenciales con la
-         * contraseña sola.
+         * ningún factor.** Una cuenta **con** factor llega aquí únicamente por
+         * `toleraFactorIlegible` (su factor existe pero este servidor no puede
+         * leerlo): sellar entonces escribiría una ventana de contraseña a
+         * nombre de una cuenta con factor, que es exactamente el estado que
+         * la auditoría prohíbe — `password_confirmed_at` no puede hacer de
+         * factor (§5 del diseño). Esa ruta sigue costando la contraseña en
+         * cada petición durante la avería.
          *
          * 🔴 **Con `await`, no con `void`.** Sin él, `next()` corre antes de
          * que el UPDATE haya llegado a la base de datos, y la siguiente
@@ -728,7 +640,7 @@ export function requireStepUp({
          * seguido, lo que un operador querrá contar es a cuánta gente se le
          * está pidiendo la contraseña de más.
          */
-        if (tieneFactor === false) {
+        if (!tieneFactor) {
           try {
             await sellarContrasena(user.id_sesion);
           } catch (err) {
@@ -801,13 +713,13 @@ export function requireStepUp({
    * shape `requirePermission` gives `permission`, and for the same reader:
    * `routeGuards.test.ts` walks the assembled app and can otherwise tell only
    * that *a* step-up gate is on a route, never which one. `STEP_UP_OPTIONS`
-   * in that file is the canonical list of which mounts carry `sinVentana` —
+   * in that file is the canonical list of which options each mount carries —
    * not a count here, which is exactly the kind of comment that drifts out
    * of step with that table without anyone noticing — and without this stamp
    * a revert of any one of those mounts left every test green.
    *
    * The **resolved** locals, not the argument: `requireStepUp()` would stamp
-   * `{}` and `requireStepUp({ sinVentana: true })` a partial, and the
+   * `{}` and `requireStepUp({ permiteOnboarding: true })` a partial, and the
    * table comparing against them would have to spell the defaults out twice.
    * Stamping what the closure reads is the only thing that keeps the metadata
    * from drifting away from the behaviour.
@@ -816,7 +728,7 @@ export function requireStepUp({
     // Frozen: the property cannot be reassigned, but the object behind it
     // could be edited in place, and a table that compares whole objects
     // would then read a lie that nothing in the closure shares.
-    value: Object.freeze({ permiteOnboarding, sinVentana, toleraFactorIlegible }),
+    value: Object.freeze({ permiteOnboarding, toleraFactorIlegible }),
     enumerable: true,
   });
   return stepUpGate;
@@ -841,8 +753,8 @@ function registrar(req: Request, motivo: string): void {
      * says *first*, as the opening move of an ordinary ceremony: they mean
      * "the window is about to ask you for something", and the plan 4D
      * interceptor produces one of them on **every** protected operation — two
-     * of them on the routes that want both the factor and the password. One
-     * person saving the permission matrix would file two critical lines.
+     * of them for an account that has a factor and a stale window. One
+     * person saving the permission matrix would file critical lines for it.
      * Marking those critical is how a log stops being read: if everything is
      * critical, nothing is.
      *
@@ -884,7 +796,6 @@ function denegar(
   // 🔴 `extra` last, but it can never overwrite the three above: nothing passes
   // `code`, `motivo` or `message` in it, and a future caller that tried would
   // be silently redefining the contract this whole file is about. The fields
-  // it does carry today are `exigeContrasena`, `metodos` and
-  // `intentosRestantes`.
+  // it does carry today are `metodos` and `intentosRestantes`.
   res.status(403).json({ message, code: CODIGO_STEP_UP, motivo, ...extra });
 }

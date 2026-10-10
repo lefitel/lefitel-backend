@@ -14,6 +14,52 @@ diálogo solo, que diga que es para proteger, y que se guarde unos minutos»*.
 > de rutas, el sellado por OR y la columna del plazo de gracia. §13 registra qué cambió en
 > cada vuelta y por qué, para que nadie reintroduzca lo anterior creyendo que simplifica.
 
+> ## Revisión 4 — 2026-10-10: ninguna ruta se queda fuera de la ventana
+>
+> **La decisión.** Toda ruta con puerta de step-up entra en la ventana de diez minutos.
+> Ninguna pide ya la contraseña en cada petición. La opción `sinVentana` desaparece de
+> `requireStepUp` y de las 15 monturas que la llevaban; el 403 deja de enviar
+> `exigeContrasena` (el cliente trata el campo ausente como `false`; los dos repos se
+> despliegan juntos). `STEP_UP_GATED` no cambia: ninguna ruta gana ni pierde la puerta.
+>
+> **Quién la tomó.** Isaias, el 2026-10-10, **dos veces**, con los riesgos expuestos las dos
+> y eligiendo la opción «Todo, sin excepciones». No es un descuido ni una simplificación
+> de un tercero: es el coste elegido a cambio de no volver a teclear la contraseña en las
+> operaciones de credenciales y de administración.
+>
+> **Qué sustituye**, exactamente:
+>
+> - §4.1, la tabla **«Sin ventana (15)»**: ya no hay quince rutas sin ventana. Las 23 son
+>   «con ventana». Las opciones `permiteOnboarding` y `toleraFactorIlegible` de cada fila
+>   siguen como estaban.
+> - §4.1, **«Por qué las de credenciales no son negociables»**: el camino que ahí se
+>   describe como cerrado queda abierto durante la ventana.
+> - **§4.3**, por qué `POST /api/auth/email/send` se queda sin ventana: ahora entra en ella.
+> - **§4.4**, el renombrado `exigeContrasena` → `sinVentana`: la opción renombrada ya no
+>   existe. (§4.2 sigue en pie en lo que importa, el sub-recurso `PUT /api/usuario/:id/rol`;
+>   solo cae su mención de `sinVentana: true`.)
+>
+> **Los caminos de ataque aceptados.** Dentro de los diez minutos, una sesión secuestrada
+> —una cookie robada que espera a que el dueño abra su ventana para otra cosa, o un papel
+> de códigos de recuperación más una cookie, porque gastar un código sella
+> `mfa_satisfied_at`— puede registrar su propia credencial y borrar la del dueño (con lo
+> que el siguiente login del dueño abre `parcial`, escapable solo probando el factor del
+> atacante), archivar cuentas (no se deshace desde la aplicación), crear cuentas con
+> credenciales propias, asignar roles y reescribir la matriz de permisos, cambiar la
+> contraseña de otra persona, levantar bloqueos de inicio de sesión y borrar los factores de
+> otras cuentas, y regenerar los diez códigos de recuperación. Todo ello sobrevive a que la
+> víctima cambie su contraseña y cierre sus sesiones.
+>
+> **Qué sobrevive.** §5 entero: la columna `password_confirmed_at` sigue **separada** de
+> `mfa_satisfied_at` y no puede hacer de factor. La regla de la cuenta sin ningún factor: la
+> contraseña correcta sella la ventana **solo** si la cuenta no tiene factor; una cuenta con
+> factor no abre ventana de contraseña. `permiteOnboarding`: se decide por ruta, nunca por
+> estado. `toleraFactorIlegible`: sigue sin exigir `sinVentana` (ya no existe) y no lanza al
+> montar; cuando el único factor de la cuenta es ilegible para este servidor, la ruta cae a
+> la contraseña **sin consultar ni sellar** la ventana de contraseña, así que durante una
+> avería de claves esa ruta cuesta la contraseña en cada petición salvo que haya una
+> ventana de factor fresca.
+
 ---
 
 ## 1. Estado real del sistema: nada de esto está desplegado
@@ -165,6 +211,9 @@ una, y escribirla así habría vuelto a sellar la sala: siete de estas rutas nec
 
 **Sin ventana (15)** — `sinVentana: true`. La contraseña, en cada petición.
 
+> ⚠️ Sustituido por la revisión 4 (2026-10-10): `sinVentana` ya no existe y estas 15 rutas
+> entran en la ventana. La tabla se conserva como registro de qué se pidió y por qué.
+
 | Ruta | Opciones | Por qué |
 |---|---|---|
 | `POST /api/usuario/` | — | Crea una cuenta con el rol que se elija. **Sobrevive a cambiar la contraseña, a `logout-all`, al reset de factores y al rescate del panel**, porque es otra cuenta: persistencia perfecta. |
@@ -187,6 +236,10 @@ una, y escribirla así habría vuelto a sellar la sala: siete de estas rutas nec
 se enciende.
 
 **Por qué las de credenciales no son negociables.**
+
+> ⚠️ Sustituido por la revisión 4 (2026-10-10): el camino descrito abajo queda abierto
+> durante la ventana, por decisión de Isaias, con ese riesgo dicho.
+
 [`requireStepUp.ts:524-527`](../../src/middleware/requireStepUp.ts): *«every route that
 registers or removes a credential must be mounted with it on. It is not a hardening knob to
 turn on later: on those routes, off is a permanent lockout.»* El camino si se apagaran:
@@ -223,6 +276,9 @@ la solución mantenible. El patrón de sub-recursos ya está establecido por D1.
 
 ### 4.3. Por qué `POST /api/auth/email/send` se queda sin ventana
 
+> ⚠️ Sustituido por la revisión 4 (2026-10-10): esta ruta entra en la ventana como las
+> demás. Se conserva el razonamiento sobre mover la comprobación del controlador a la puerta.
+
 Hoy su contraseña la pide el **controlador**, con otro nombre (`pass`), no la puerta
 ([`email.controller.ts:306`](../../src/controllers/email.controller.ts), comparación en
 `:325`); el comentario de `:311` lo admite: *«This field is the defence, and
@@ -247,6 +303,9 @@ su correo y nadie podría montar un TOTP.
 > `webauthn.controller.ts` no menciona esa columna en ningún punto. Se corrige.
 
 ### 4.4. El renombrado: `exigeContrasena` → `sinVentana`
+
+> ⚠️ Sustituido por la revisión 4 (2026-10-10): `sinVentana` ya no existe y el 403 ya no
+> envía `exigeContrasena`.
 
 Con la rama del pase libre borrada, **la contraseña la exige la puerta siempre**. Lo único
 que esa opción hace es apagar el atajo de la ventana. Conservar el nombre viejo dejaría, en

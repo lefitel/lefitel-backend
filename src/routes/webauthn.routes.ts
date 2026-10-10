@@ -26,15 +26,15 @@
 // credentials. The rule: `PARCIAL` may gain what *proves* an existing factor,
 // never what *creates* one.
 //
-// 🔴 **`sinVentana: true` on both routes, and it is not a hardening knob
-// to turn on later.** On a route that registers or removes a credential, the
-// ten-minute window is a way in: leave the option off and a stolen cookie
-// waits for the owner to confirm something ordinary, then registers its own
-// key inside those minutes without typing anything — which ends in the
-// permanent lockout the paragraph above describes. What the option demands
-// instead is the caller's password on every request, and the password is the
-// one thing the cookie does not carry — and, once passkeys sync through an
-// Apple or Google account, the one thing that account does not carry either.
+// 🔴 **Both registration routes take the ten-minute window — decision of
+// 2026-10-10 (Isaias, risks put to him twice).** On a route that registers or
+// removes a credential the window is a way in: a stolen cookie waits for the
+// owner to prove a factor for something ordinary, then registers its own key
+// inside those minutes without typing anything — which ends in the permanent
+// lockout the paragraph above describes. These routes used to demand the
+// caller's password on every request (`sinVentana`), the one thing the cookie
+// does not carry; that option is gone. The lockout is now an accepted cost for
+// the length of a window, not a property the gate prevents.
 //
 // **`permiteOnboarding: true` for the same reason `totp.routes.ts` has it**:
 // this is the screen somebody in `onboarding` has to reach in order to stop
@@ -91,14 +91,14 @@ router.post("/login/verify", authenticate, webauthnCeremonyLimiter, loginVerify)
 router.post(
   "/register/options",
   authenticate,
-  requireStepUp({ permiteOnboarding: true, sinVentana: true }),
+  requireStepUp({ permiteOnboarding: true }),
   registerOptions,
 );
 
 router.post(
   "/register/verify",
   authenticate,
-  requireStepUp({ permiteOnboarding: true, sinVentana: true }),
+  requireStepUp({ permiteOnboarding: true }),
   registerVerify,
 );
 
@@ -112,30 +112,27 @@ router.post(
  * able to see and tidy the keys they are registering; somebody holding nothing
  * but a password may not so much as enumerate them.
  *
- * 🔴 **The list carries no `requireStepUp`, the deletion carries it with the
- * password.** Reading your own key names is not a sensitive write and gating it
+ * 🔴 **The list carries no `requireStepUp`, the deletion carries the plain
+ * gate.** Reading your own key names is not a sensitive write and gating it
  * would put a ceremony in front of the screen that *shows* you what to prove
  * with. Removing one is the mirror of registering one — it changes what the
- * account can prove with — so it takes the same gate and the same
- * `sinVentana`, for the reason written above the registration routes: the
- * password is the one thing a stolen cookie does not carry, and once passkeys
- * sync through an Apple or Google account, the one thing that account does not
- * carry either.
+ * account can prove with — so it takes the same gate and the same window as
+ * the registration routes, with the same accepted cost (decision of
+ * 2026-10-10): inside the window a hijacked session can delete the owner's key.
  *
  * **And it does not lock anybody out**, which is the question this mount has to
  * answer. An account whose only factor is the key it wants to delete is refused
- * `sin-factor-reciente` with `exigeContrasena` — and, since Task 8, with
- * `metodos: ["passkey", …]`, so the window knows to offer the fingerprint. The
- * person proves the key at `/webauthn/login/verify`, types their password, and
- * the deletion goes through. Without that field the window would have drawn a
- * six-digit box they could never fill.
+ * `sin-factor-reciente` with `metodos: ["passkey", …]`, so the window knows to
+ * offer the fingerprint. The person proves the key at `/webauthn/login/verify`
+ * and the deletion goes through. Without that field the window would have drawn
+ * a six-digit box they could never fill.
  */
 router.get("/credentials", authenticate, listCredentials);
 
 router.delete(
   "/credentials/:id",
   authenticate,
-  requireStepUp({ permiteOnboarding: true, sinVentana: true }),
+  requireStepUp({ permiteOnboarding: true }),
   deleteCredential,
 );
 

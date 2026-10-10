@@ -195,17 +195,21 @@ export async function sellarPruebaDeFactor(
  * 🔴 **It does not re-seal inside the window, and the `WHERE` is what makes
  * that true.** The promise this implements is "ten fixed minutes, which do not
  * renew themselves": without the age clause, every confirmation moves the date
- * forward, and a route that asks for the password on every request — every
- * mount carrying `sinVentana` — would hold the window open for as long as
- * somebody kept working. Ten minutes that never end is not the decision the
- * owner of this project took.
+ * forward, and a caller that re-confirmed its password would hold the window
+ * open for as long as somebody kept working. Ten minutes that never end is not
+ * the decision the owner of this project took. Since the gate consults the
+ * window before it ever asks for a password, a request that reaches this call
+ * normally finds the window already closed; the clause covers two requests
+ * that confirm at the same moment, and any future caller that skips the
+ * gate's own check.
  *
  * **Only the factor-less branch of `requireStepUp` calls it.** An account that
- * *has* a factor gains no window by typing its password. If it did, that
- * account could prove its factor once in the life of a session and then keep
- * the routes that register and delete credentials open on the password alone,
- * re-sealing on every request — which is exactly the bound `sinVentana`
- * exists to draw.
+ * *has* a factor gains no window by typing its password (the only way such an
+ * account reaches the password branch is `toleraFactorIlegible`, and there the
+ * gate does not call this). If it did, that account could prove its factor once
+ * in the life of a session and then keep the routes that register and delete
+ * credentials open on the password alone — which is what the separate column
+ * (§5 of the reauthentication design) exists to prevent.
  *
  * **`revoked_at: null` in the `WHERE` and not only `id`**, matching every
  * other write in this file: a revoked row must not come back holding fresh

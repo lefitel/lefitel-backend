@@ -6,10 +6,10 @@
 // to live in `usuario.controller.test.ts` and were the only witnesses either
 // property had. They are here now because here is where the write is.
 //
-// What this file does **not** cover, and where it does live: the password this
-// route asks for on every request. That is a property of the mount, not of the
-// handler — `requireStepUp({ sinVentana: true })` in `usuario.routes.ts` — and
-// it is pinned as the whole option object in `routeGuards.test.ts`
+// What this file does **not** cover, and where it does live: the step-up gate
+// this route sits behind. That is a property of the mount, not of the
+// handler — `requireStepUp()` in `usuario.routes.ts` — and it is pinned as the
+// whole option object in `routeGuards.test.ts`
 // (`STEP_UP_OPTIONS`), with the gate's own behaviour in
 // `requireStepUp.test.ts`. A handler test cannot see a middleware it is never
 // called through, and pretending otherwise is how a mount goes missing.

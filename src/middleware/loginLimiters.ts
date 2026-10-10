@@ -225,7 +225,7 @@ export function confirmCostsNothing(_req: Request, res: Response): boolean {
  * read differently the day one of them gets improved.
  *
  * **The second half names what else this takes away, and that is the point.**
- * This bucket is shared: `requireStepUp` on every route mounted with `sinVentana`,
+ * This bucket is shared: `requireStepUp` on every gated route when it asks for a password,
  * `chargeConfirmBudgetOnSelfChange` on the password change, and
  * `/auth/email/send`. So five wrong passwords typed into a step-up window also
  * shut, for fifteen minutes, the screens somebody would go to next — "change

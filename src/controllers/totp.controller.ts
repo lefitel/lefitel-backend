@@ -9,15 +9,15 @@
 // a 409, which secret a code is checked against, and when a deletion is
 // severe enough for a `critical` bitácora line.
 //
-// **The password gate is not in this file, and that is deliberate.** All
-// three routes mount `requireStepUp({ sinVentana: true })` in
-// `routes/totp.routes.ts` — hallazgo C1: without it, a stolen session cookie
-// with no password registers its own factor and locks the real owner out
-// permanently, because `tieneAlgunFactor` then denies the victim the
-// password fallback too. By the time a handler below runs, the caller has
-// already typed their current password (or, for an account with a factor
-// already, already proved it fresh — see `requireStepUp.ts` for why
-// `sinVentana` demands both in that order). Nothing here re-checks that.
+// **The step-up gate is not in this file, and that is deliberate.** All
+// three routes mount `requireStepUp` in `routes/totp.routes.ts`. Hallazgo C1:
+// a stolen session cookie that registers its own factor locks the real owner
+// out permanently, because `tieneAlgunFactor` then denies the victim the
+// password fallback too. The gate no longer asks for the password on every
+// request (decision of 2026-10-10): by the time a handler below runs, the
+// caller has typed their password (an account with no factor) or proved a
+// factor in the last ten minutes, or is inside a window opened by either.
+// Nothing here re-checks that.
 //
 // **The secret and the `otpauth://` URI travel in the JSON body, never in a
 // URL.** Hallazgo B11: `httpLogger` logs `originalUrl` — query string and

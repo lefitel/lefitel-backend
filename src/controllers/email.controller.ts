@@ -241,8 +241,10 @@ function previousAddressNoticeBody(nuevaEnmascarada: string): { html: string; te
  * one: the attack above works identically against an account with no recovery
  * address yet, and the moment somebody is establishing their own way back in
  * is exactly the moment a confirmation is worth asking for. That is what
- * `sinVentana` on the mount buys — the password on every single request here,
- * never a ten-minute window somebody else's session can walk into.
+ * the gate on the mount buys — a confirmation before the address is set. Since
+ * the decision of 2026-10-10 that confirmation may be a ten-minute window
+ * opened earlier, including by somebody else holding the session; the mount
+ * used to ask for the password on every request and no longer does.
  *
  * Does not touch Global Constraint #1. That constraint is about the
  * *destination* address — whether it is free, already claimed, or whether the
@@ -292,10 +294,10 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
   }
 
   // 🔴 **No password check here, and its absence is the decision.** The route
-  // mounts `requireStepUp({ permiteOnboarding: true, sinVentana: true })`
-  // (`auth.routes.ts`), so the gate compares the caller's password on every
-  // request to this route — window or no window — and asks for the account's
-  // factor on top when it has one. This handler used to compare a second copy
+  // mounts `requireStepUp({ permiteOnboarding: true })`
+  // (`auth.routes.ts`), so the gate asks for the caller's password (account
+  // with no factor) or a factor proved in the last ten minutes, unless a
+  // window is already open. This handler used to compare a second copy
   // of that same secret, in a field of its own called `pass`, and the two were
   // one password asked for twice: once by the gate's dialog and once by the
   // form. Removing the duplicate is what the reauthentication-window work is

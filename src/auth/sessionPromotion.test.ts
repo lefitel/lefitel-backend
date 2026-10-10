@@ -186,8 +186,9 @@ describe("sellarContrasena", () => {
   it("no re-sella dentro de la ventana: el WHERE lleva la antigüedad", async () => {
     // 🔴 La promesa es «diez minutos fijos, sin renovarse». Sin esta
     // cláusula, cada confirmación mueve la fecha y la ventana se sostiene
-    // sola indefinidamente en cuanto alguien trabaja seguido sobre una ruta
-    // con `sinVentana`, que pide la contraseña en cada petición.
+    // sola indefinidamente en cuanto dos confirmaciones coinciden. La puerta
+    // ya consulta la ventana antes de pedir la contraseña, así que este
+    // `WHERE` es la segunda cerradura y no la única.
     const antes = Date.now();
     await sellarContrasena("s1");
     const despues = Date.now();

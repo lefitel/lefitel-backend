@@ -32,12 +32,13 @@
 // IS NULL` — and `rowCount = 0` means "somebody else already spent this
 // one", not an error to report differently.
 //
-// **Hallazgo C14** is why generating a fresh set requires the caller to
-// already hold step-up with the password. This module does not, and cannot,
-// enforce that itself — it has no request to inspect — so whichever
-// controller calls `regenerarCodigos` is the one place that has to sit
-// behind `requireStepUp({ sinVentana: true })`. A printed sheet of ten
-// codes must never be able to regenerate itself into a fresh ten.
+// **Hallazgo C14** is why generating a fresh set is gated by step-up. This
+// module does not, and cannot, enforce that itself — it has no request to
+// inspect — so whichever controller calls `regenerarCodigos` is the one place
+// that has to sit behind `requireStepUp()`. Know what that gate is worth: a
+// recovery code spent at the step-up door opens its ten-minute window, so
+// since the decision of 2026-10-10 a printed sheet plus a cookie can
+// regenerate the ten inside it. Accepted cost; see the design's Revisión 4.
 //
 // No code, no prefix and no hash ever reaches a log line, a thrown error, or
 // an HTTP response more than once. `regenerarCodigos` is the only moment the

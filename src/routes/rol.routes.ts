@@ -28,21 +28,20 @@ const router = Router();
 // The gate sits behind the permission on every write, never in front — see
 // `middleware/requireStepUp.ts`. Reads carry neither.
 //
-// 🔴 **The plain gate on every write here, and no `sinVentana` — the scope
-// Isaias cut on 2026-09-08.** From plan 4C's decision D6 until then, these four
-// asked for the caller's password on *every* request; §4.1 of
-// `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` puts them back
-// inside the ten-minute window.
+// 🔴 **The plain gate on every write here, as on every gated route.** From plan
+// 4C's decision D6 until 2026-09-08 these four asked for the caller's password
+// on *every* request; §4.1 of
+// `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` put them inside
+// the ten-minute window, and the decision of 2026-10-10 put the rest of the
+// gated routes there too, so these four are no longer the exception.
 //
-// **Why these four and not the rest of D6.** A role is a label. The authority
+// **A role is a label, and that is why these four were first.** The authority
 // is in the two routes that hand it out — `PUT /api/permiso/:id_rol` writes the
-// matrix and `PUT /api/usuario/:id/rol` says who wears which label — and both
-// of those keep the password on every request. Renaming "Supervisor" or undoing
-// its archive leaves a stolen cookie exactly as powerful as it already was, and
-// it is visible and reversible from the same screen. That is the test §4.1 of
-// the design applies, and it is what `POST /api/usuario/` fails: an account
-// minted there keeps its **own** credentials, so it outlives the victim
-// changing their password, `logout-all`, a factor reset and the console rescue.
+// matrix and `PUT /api/usuario/:id/rol` says who wears which label. Those two
+// now take the window as well; inside it a hijacked session can rewrite the
+// matrix or assign roles (accepted cost, see the design's Revisión 4). Renaming
+// "Supervisor" or undoing its archive is visible and reversible from the same
+// screen.
 //
 // **Still a prompt, just not per request.** The gate is not off: outside the
 // window every one of these answers 403, and the way through is the caller's

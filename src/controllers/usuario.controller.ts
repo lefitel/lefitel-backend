@@ -430,11 +430,14 @@ const EDITABLE_FIELDS = ["name", "lastname", "birthday", "image", "phone"] as co
  * **own** credentials, and so survives the victim changing their password,
  * `logout-all`, a factor reset and the console rescue. The field left the route
  * instead of the route leaving the window: `PUT /api/usuario/:id/rol` writes it
- * now (`usuarioRol.controller.ts`), and that one asks for the password every
- * time.
+ * now (`usuarioRol.controller.ts`). That sub-resource used to ask for the
+ * password on every request; since the decision of 2026-10-10 it takes the
+ * window like every gated route, so the promotion described above is possible
+ * inside one — an accepted cost, and the split still keeps the field off the
+ * route a person edits their own profile through.
  *
  * It stays on the creation path because an account cannot be born without a
- * role, and `POST /api/usuario/` asks for the password every time as well.
+ * role; `POST /api/usuario/` takes the window as well (same decision).
  */
 const ROLE_ASSIGNMENT_FIELDS = ["id_rol"] as const;
 
@@ -963,7 +966,7 @@ export const updateUserPass = handler("updateUserPass", async (req: Request, res
    * softening of the rule — it is what the route's own gate already
    * guarantees.** `estadoInicialDeSesion` answers `parcial` for any account
    * with a factor, because a login has proved no factor yet. This is not a
-   * login: `requireStepUp({ sinVentana: true })` on this route lets an account
+   * login: `requireStepUp()` on this route lets an account
    * *with* a factor past only on an `mfa_satisfied_at` newer than
    * `STEP_UP_WINDOW_MINUTES`, so everybody here who has a factor proved it
    * minutes ago. Writing `parcial` anyway would have `authenticate` answer 401
@@ -1164,13 +1167,17 @@ export const desbloquearUsuario = handler("desbloquearUsuario", async (req: Requ
  * not merely "unwise".** This route's whole job is to leave its target with
  * *zero* registered factors, and what that costs the caller's own session is
  * a downgrade of everything `requireStepUp` (`middleware/requireStepUp.ts`)
- * asks of it afterwards. With a factor on the account the gate demands the
- * factor proved recently **and**, on the mounts carrying `sinVentana`, the
- * password on top; with no factor left it demands the password alone — and on
- * the mounts that take the window, one correct password then opens ten
- * minutes for the rest (`password_confirmed_at`). So doing this to yourself
- * spends your own second factor to make your own session cheaper to use, which
- * is the opposite of what an escape hatch is for. The console (`--reset-mfa`
+ * asks of it afterwards. With a factor on the account the gate demands that
+ * factor proved in the last ten minutes (`mfa_satisfied_at`); with no factor
+ * left it demands the password alone, and one correct password then opens ten
+ * minutes for every gated route (`password_confirmed_at`). So doing this to
+ * yourself trades "something you hold" for "something you know" as the only
+ * thing the gate asks of your own session — it spends your own second factor
+ * to make your own session cheaper to use, which is the opposite of what an
+ * escape hatch is for. (Before the decision of 2026-10-10 the refusal was
+ * written as "the factor **and** the password to the password alone"; the
+ * "and" is gone, since no route asks for both any more, but the downgrade from
+ * the factor to the password alone is real and is what remains.) The console (`--reset-mfa`
  * run with a shell inside the production container) is the deliberate way to
  * reset your own factors instead — it does not go through this gate, or any
  * session, at all.

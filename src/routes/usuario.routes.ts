@@ -102,50 +102,48 @@ function chargeConfirmBudgetOnSelfChange(req: Request, res: Response, next: Next
 // comparison, and learns nothing about the route existing. See
 // `middleware/requireStepUp.ts` for what it asks of the caller.
 //
-// 🔴 **The password on every request is no longer the rule on this router; it
-// is a per-route decision.** Plan 4C's decision D6 (Isaias, 2026-09-02) put
-// `sinVentana: true` on every write here, and Isaias cut that scope on
-// 2026-09-08: §4.1 of
-// `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` puts the
-// ordinary administrative writes inside the ten-minute window and leaves the
-// option on where losing it would be permanent.
+// 🔴 **Every write on this router takes the ten-minute window — decision of
+// 2026-10-10 (Isaias, "Todo, sin excepciones", risks put to him twice).** Plan
+// 4C's decision D6 (2026-09-02) had put the caller's password on every request
+// for each write here, §4.1 of
+// `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` cut that to the
+// ones whose result outlives every remedy the victim has, and the 2026-10-10
+// decision removed the rest. No route asks for the password on every request
+// any more.
 //
-// **The line the design draws.** It keeps the password on every request where
-// what the request does outlives every remedy the victim has: creating an
-// account, archiving one, handing out a role, rewriting somebody else's
-// password, clearing their lockout or their factors. Those survive the victim
-// changing their own password, `logout-all`, a factor reset and the console
-// rescue, because the result lives in another account or another credential.
-// Editing a profile, renaming one and undoing an archive do not, so those three
-// take the window.
+// **The accepted cost.** The writes that used to be exempt are the ones whose
+// result survives the victim changing their own password, `logout-all`, a
+// factor reset and the console rescue, because it lives in another account or
+// another credential: creating an account, archiving one, handing out a role,
+// rewriting somebody else's password, clearing their lockout or their factors.
+// Inside the window a hijacked session can do any of them. That is a cost
+// chosen with the risk stated, not a property the gate still provides.
 //
-// **Which mounts carry it is `STEP_UP_OPTIONS` in `routeGuards.test.ts`**, and
-// no figure here: that table compares the whole option object against the real
-// app in both directions, and a number written beside the routes goes stale the
-// first time one is added. This sentence used to carry two, and both were wrong
-// within the week.
+// **Which options each mount carries is `STEP_UP_OPTIONS` in
+// `routeGuards.test.ts`**, and no figure here: that table compares the whole
+// option object against the real app in both directions.
 //
-// **The window is not an open door.** Where the option is off the gate still
-// runs: outside the ten minutes every one of these answers 403, and the way
-// through is the caller's own password, or a factor proved recently if the
-// account has one. What the window buys is that one confirmation covers the
-// batch of edits somebody sat down to make.
+// **The window is not an open door.** The gate still runs: outside the ten
+// minutes every one of these answers 403, and the way through is the caller's
+// own password if the account has no factor, or a factor proved recently if it
+// has one. What the window buys is that one confirmation covers the batch of
+// edits somebody sat down to make.
 router.post(
   "/",
   requirePermission("seguridad", "crear"),
-  requireStepUp({ sinVentana: true }),
+  requireStepUp(),
   createUsuario,
 );
 router.delete(
   "/:id",
   requirePermission("seguridad", "archivar"),
-  requireStepUp({ sinVentana: true }),
+  requireStepUp(),
   deleteUsuario,
 );
-// The window, and its own reason: undoing an archive must never cost more than
-// the archiving did, and the archiving is the half with no way back — the
-// self-archive refusal in `deleteUsuario` (`usuario.controller.ts`) spells that
-// out, and it is why `DELETE` above keeps the password on every request.
+// Undoing an archive takes the same window as the archiving above. Archiving is
+// the half with no way back from the app — the self-archive refusal in
+// `deleteUsuario` (`usuario.controller.ts`) spells that out — and that is an
+// accepted cost of the 2026-10-10 decision, not something the gate prevents.
 router.patch(
   "/:id/restore",
   requirePermission("seguridad", "archivar"),
@@ -179,17 +177,16 @@ router.patch(
 // writes both to zero and NULL and files a `critical` line saying what it
 // undid.
 //
-// 🔴 **`sinVentana: true` — added by the 2026-09-02 closure audit, hallazgo F8
-// (auditor B-6), and it is the half that does not depend on the window.** Every
-// account has to answer this gate with something now, whatever it has
-// registered; what this option adds is that the answer here is the caller's own
-// current password on **every** request, never a window opened ten minutes ago
-// by something else. Lifting somebody's lockout costs a password typed for
-// this, which is the one thing a stolen cookie does not carry.
+// 🔴 **Hallazgo F8 (2026-09-02 closure audit, auditor B-6), reopened by the
+// decision of 2026-10-10.** This mount used to demand the caller's own current
+// password on every request, never a window opened ten minutes ago by
+// something else, so lifting somebody's lockout cost a secret a stolen cookie
+// does not carry. It takes the window now: inside it, a hijacked session can
+// clear the lockout counters of any account it chooses. Accepted cost.
 router.patch(
   "/:id/desbloquear",
   requirePermission("seguridad", "editar"),
-  requireStepUp({ sinVentana: true }),
+  requireStepUp(),
   desbloquearUsuario,
 );
 // The escape hatch from §8 of the MFA design: an administrator clears
@@ -199,23 +196,21 @@ router.patch(
 // unable to log in. See `rescatarMfaDeUsuario` in `usuario.controller.ts`
 // for the refusal this route adds on top of both gates — resetting your own
 // factors through here is rejected even with the permission and a proved
-// factor, because it would downgrade what the caller's own session has to
-// answer for every later sensitive write, from "the factor **and** the
-// password" to the password alone.
+// factor. The reason is in that function's comment.
 //
-// 🔴 **`sinVentana: true` — same hallazgo F8, and the more severe half
-// of it.** `rescatarMfaDeUsuario` deletes the target account's rows in all
-// three factor tables and revokes every one of its live sessions and
-// remembered devices — a route that removes credentials, which is the case
-// `sinVentana` exists for. Without the option, a stolen cookie could wait for
-// the real administrator to open a ten-minute window for something ordinary
-// and then clear the second factor of every other account inside it, one
-// request each, without ever typing a password. `sinVentana` is what makes
-// each of those cost the administrator's own current password.
+// 🔴 **Same hallazgo F8, reopened by the decision of 2026-10-10, and the more
+// severe half of it.** `rescatarMfaDeUsuario` deletes the target account's rows
+// in all three factor tables and revokes every one of its live sessions and
+// remembered devices — a route that removes credentials. This mount used to
+// demand the administrator's own password on every request, so a stolen cookie
+// could not clear other accounts' second factors even inside a window the real
+// administrator had opened for something ordinary. It takes the window now: a
+// hijacked session can do exactly that, one request each, without typing a
+// password. Accepted cost.
 router.post(
   "/:id/mfa/reset",
   requirePermission("seguridad", "editar"),
-  requireStepUp({ sinVentana: true }),
+  requireStepUp(),
   rescatarMfaDeUsuario,
 );
 router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);
@@ -295,11 +290,12 @@ router.get("/:id/bitacora", requireSelfOrPermission("bitacora", "ver"), getBitac
 // already draws: whoever may fix a colleague's telephone number must not
 // thereby be able to hand out administrator.
 //
-// `sinVentana` — the caller's own password on every request, never a window —
-// because handing out a role is handing out authority. The account promoted
-// keeps its **own** credentials, so the promotion outlives the victim changing
-// their password, `logout-all`, a factor reset and the console rescue. That is
-// the same test §4.1 of the design applies to `POST /` at the top of this file.
+// Takes the window like every gated route (decision of 2026-10-10). It used to
+// demand the caller's own password on every request, because handing out a role
+// is handing out authority and the account promoted keeps its **own**
+// credentials, so the promotion outlives the victim changing their password,
+// `logout-all`, a factor reset and the console rescue. Inside the window a
+// hijacked session can now assign roles; accepted cost.
 //
 // Declared ahead of `PUT /:id`: one segment cannot match two, so Express
 // reaches both either way and `routeOrder.test.ts` is silent about the pair —
@@ -307,18 +303,18 @@ router.get("/:id/bitacora", requireSelfOrPermission("bitacora", "ver"), getBitac
 router.put(
   "/:id/rol",
   requirePermission("roles", "editar"),
-  requireStepUp({ sinVentana: true }),
+  requireStepUp(),
   asignarRol,
 );
 //
-// 🔴 **The three where the split is sharpest, and it does not fall the way the
-// verbs do.** Editing an account and renaming one take the ten-minute window;
-// changing a password keeps `sinVentana`. The reason is not how destructive
-// each is, it is whether the target can undo it: a profile edit or a rename is
-// visible and reversible by the person it happened to, while a password written
-// through `/userpass` locks them out of their own account, and
-// `requiresOwnPassword` is false when the target is somebody else — so on that
-// one route the gate is the only thing asking for a secret at all.
+// 🔴 **The three where the stakes differ most, though the gate is now the same
+// on all of them.** Editing an account and renaming one are visible and
+// reversible by the person it happened to. A password written through
+// `/userpass` can lock them out of their own account, and `requiresOwnPassword`
+// is false when the target is somebody else — so for an administrator changing
+// *another* account's password, the gate is the only thing in the request that
+// asks for a secret at all, and inside the window it asks for none (decision of
+// 2026-10-10; it used to ask for the caller's password every time).
 //
 // **These two are why the window exists.** `PUT /username/:id` is the operation
 // the whole reauthentication design started from: renaming yourself asked for
@@ -347,7 +343,7 @@ router.put(
 router.put(
   "/userpass/:id",
   requireSelfOrPermission("seguridad", "editar"),
-  requireStepUp({ sinVentana: true }),
+  requireStepUp(),
   chargeConfirmBudgetOnSelfChange,
   updateUserPass,
 );

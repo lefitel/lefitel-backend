@@ -1,5 +1,7 @@
 # Plan 4B — El segundo factor, de verdad
 
+> ⚠️ **Nota del 2026-10-10.** Los pasajes de este documento sobre `sinVentana` y `exigeContrasena` describen lo que se decidió y se construyó entonces. Esa opción y ese campo del 403 ya no existen: toda ruta con puerta de step-up entra en la ventana de diez minutos (decisión de Isaias, ver «Revisión 4» en `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md`). El texto de abajo se conserva como historia, no como descripción del código actual.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.

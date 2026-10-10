@@ -1582,7 +1582,7 @@ describe("a new password ends the old sessions", () => {
   it("mantiene `completa` para una cuenta con factor, que acaba de probarlo en la puerta", async () => {
     // `estadoInicialDeSesion` contesta `parcial` a cualquier cuenta con
     // factor, porque un login todavia no ha probado ninguno. Esto no es un
-    // login: `requireStepUp({ sinVentana: true })` solo deja pasar a una
+    // login: `requireStepUp()` solo deja pasar a una
     // cuenta con factor con un `mfa_satisfied_at` mas fresco que
     // `STEP_UP_WINDOW_MINUTES`. Escribir `parcial` aqui haria que
     // `authenticate` contestase 401 a la peticion siguiente: el navegador de
