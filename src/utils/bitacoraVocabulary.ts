@@ -56,11 +56,11 @@ export const BITACORA_ACTIONS = {
   CREATE_POSTE:            a("Nuevo poste", "crear"),
   CREATE_PROPIETARIO:      a("Nuevo propietario", "crear"),
   CREATE_PROGRAMACION:     a("Nuevo envío programado", "crear"),
-  CREATE_REPORTE_VISTA:    a("Nueva vista de informe", "crear"),
+  CREATE_REPORTE_VISTA:    a("Nuevo informe guardado", "crear"),
   CREATE_ROL:              a("Nuevo rol", "crear"),
-  CREATE_TIPO_OBS:         a("Nuevo tipo obs.", "crear"),
+  CREATE_TIPO_OBS:         a("Nuevo tipo de observación", "crear"),
   CREATE_USUARIO:          a("Nuevo usuario", "crear"),
-  DUPLICATE_REPORTE_VISTA: a("Duplicó vista de informe", "crear"),
+  DUPLICATE_REPORTE_VISTA: a("Duplicó informe guardado", "crear"),
 
   UPDATE_ADSS:          a("Editó ferretería", "editar"),
   UPDATE_ADSS_POSTE:    a("Actualizó ferretería", "editar"),
@@ -73,22 +73,22 @@ export const BITACORA_ACTIONS = {
   UPDATE_POSTE:         a("Editó poste", "editar"),
   UPDATE_PROPIETARIO:   a("Editó propietario", "editar"),
   UPDATE_PROGRAMACION:  a("Editó envío programado", "editar"),
-  UPDATE_REPORTE_VISTA: a("Editó vista de informe", "editar"),
+  UPDATE_REPORTE_VISTA: a("Editó informe guardado", "editar"),
   UPDATE_ROL:           a("Editó rol", "editar"),
-  UPDATE_TIPO_OBS:      a("Editó tipo obs.", "editar"),
+  UPDATE_TIPO_OBS:      a("Editó tipo de observación", "editar"),
   UPDATE_USUARIO:       a("Editó usuario", "editar"),
 
   DELETE_ADSS:          a("Archivó ferretería", "archivar"),
   DELETE_CIUDAD:        a("Archivó ciudad", "archivar"),
   DELETE_EVENTO:        a("Archivó evento", "archivar"),
   DELETE_MATERIAL:      a("Archivó material", "archivar"),
-  DELETE_OBS:           a("Eliminó observación", "archivar"),
+  DELETE_OBS:           a("Archivó observación", "archivar"),
   DELETE_POSTE:         a("Archivó poste", "archivar"),
   DELETE_PROPIETARIO:   a("Archivó propietario", "archivar"),
   DELETE_PROGRAMACION:  a("Eliminó envío programado", "archivar"),
-  DELETE_REPORTE_VISTA: a("Eliminó vista de informe", "archivar"),
-  DELETE_ROL:           a("Eliminó rol", "archivar"),
-  DELETE_TIPO_OBS:      a("Eliminó tipo obs.", "archivar"),
+  DELETE_REPORTE_VISTA: a("Archivó informe guardado", "archivar"),
+  DELETE_ROL:           a("Archivó rol", "archivar"),
+  DELETE_TIPO_OBS:      a("Archivó tipo de observación", "archivar"),
   DELETE_USUARIO:       a("Archivó usuario", "archivar"),
 
   RESTORE_ADSS:        a("Desarchivó ferretería", "restaurar"),
@@ -99,13 +99,13 @@ export const BITACORA_ACTIONS = {
   RESTORE_POSTE:       a("Desarchivó poste", "restaurar"),
   RESTORE_PROPIETARIO: a("Desarchivó propietario", "restaurar"),
   RESTORE_ROL:         a("Desarchivó rol", "restaurar"),
-  RESTORE_TIPO_OBS:    a("Desarchivó tipo obs.", "restaurar"),
+  RESTORE_TIPO_OBS:    a("Desarchivó tipo de observación", "restaurar"),
   RESTORE_USUARIO:     a("Desarchivó usuario", "restaurar"),
 
   REABRIR_EVENTO: a("Reabrió evento", "eventos"),
   RESOLVE_EVENTO: a("Resolvió evento", "eventos"),
 
-  CLEAR_BROKEN_REFS: a("Limpió referencias rotas", "archivos"),
+  CLEAR_BROKEN_REFS: a("Quitó fotos inexistentes de las fichas", "archivos"),
   DELETE_FILE:       a("Eliminó archivo", "archivos"),
   DELETE_ORPHANS:    a("Eliminó archivos huérfanos", "archivos"),
   UPLOAD_IMAGE:      a("Subió imagen", "archivos"),
@@ -118,17 +118,17 @@ export const BITACORA_ACTIONS = {
   RUN_REPORTE:    a("Ejecutó informe", "exportar"),
 
   DELETE_PROGRAMACION_DENIED: a("Borrado de envío programado rechazado", "rechazos"),
-  DELETE_REPORTE_DENIED:    a("Borrado de vista rechazado", "rechazos"),
-  DUPLICATE_REPORTE_DENIED: a("Duplicado de vista rechazado", "rechazos"),
+  DELETE_REPORTE_DENIED:    a("Intentó archivar un informe ajeno", "rechazos"),
+  DUPLICATE_REPORTE_DENIED: a("Intentó duplicar un informe ajeno", "rechazos"),
   EDIT_PROGRAMACION_DENIED: a("Edición de envío programado rechazada", "rechazos"),
-  EDIT_REPORTE_DENIED:      a("Edición de vista rechazada", "rechazos"),
+  EDIT_REPORTE_DENIED:      a("Intentó modificar un informe ajeno", "rechazos"),
   READ_PROGRAMACION_DENIED: a("Lectura de envío programado rechazada", "rechazos"),
-  READ_REPORTE_DENIED:      a("Lectura de vista rechazada", "rechazos"),
+  READ_REPORTE_DENIED:      a("Intentó abrir un informe ajeno", "rechazos"),
   RUN_PROGRAMACION_DENIED:  a("Envío inmediato rechazado", "rechazos"),
   ROLE_CHANGE_DENIED:       a("Intento de cambio de rol", "rechazos"),
 
   LOGIN:                       a("Inició sesión", "sesion"),
-  LOGIN_FAILED:                a("Sesión fallida", "sesion"),
+  LOGIN_FAILED:                a("Inicio de sesión fallido", "sesion"),
   LOGOUT:                      a("Cerró sesión", "sesion"),
   LOGOUT_ALL:                  a("Cerró todas las sesiones", "sesion"),
   SESSION_REVOKED:             a("Cerró una sesión", "sesion"),
@@ -137,24 +137,24 @@ export const BITACORA_ACTIONS = {
 
   CHANGE_PASSWORD: a("Cambió contraseña", "credenciales"),
   CHANGE_USERNAME: a("Cambió usuario", "credenciales"),
-  EMAIL_CHANGED:   a("Cambió correo", "credenciales"),
+  EMAIL_CHANGED:   a("Sustituyó su correo verificado", "credenciales"),
   EMAIL_SEND:      a("Pidió verificar correo", "credenciales"),
-  PASSWORD_FORGOT: a("Pidió restablecer contraseña", "credenciales"),
+  PASSWORD_FORGOT: a("Se pidió restablecer su contraseña", "credenciales"),
   PASSWORD_RESET:  a("Restableció contraseña", "credenciales"),
 
-  ACCOUNT_LOCKED:   a("Cuenta bloqueada", "cuenta"),
+  ACCOUNT_LOCKED:   a("Cuenta bloqueada por intentos fallidos", "cuenta"),
   ACCOUNT_UNLOCKED: a("Desbloqueó cuenta", "cuenta"),
   ROLE_ASSIGNED:    a("Asignó rol", "cuenta"),
 
-  EMAIL_VERIFIED:                    a("Verificó correo", "factor"),
+  EMAIL_VERIFIED:                    a("Verificó correo (queda como segundo factor)", "factor"),
   LAST_CREDENTIAL_REMOVED:           a("Eliminó su última llave", "factor"),
-  LAST_CREDENTIAL_REVOCATION_FAILED: a("Equipos recordados sin revocar", "factor"),
+  LAST_CREDENTIAL_REVOCATION_FAILED: a("Última llave eliminada: equipos recordados sin revocar", "factor"),
   LAST_FACTOR_REMOVED:               a("Eliminó su último factor", "factor"),
-  LAST_FACTOR_REVOCATION_FAILED:     a("Sesiones sin revocar", "factor"),
-  MFA_CLOCK_SKEW_DETECTED:           a("Reloj desajustado", "factor"),
+  LAST_FACTOR_REVOCATION_FAILED:     a("Sin factor y con sesiones abiertas (revocación fallida)", "factor"),
+  MFA_CLOCK_SKEW_DETECTED:           a("Código fuera de hora (posible reloj desajustado)", "factor"),
   MFA_EMAIL_CODE_FAILED:             a("Envío de código fallido", "factor"),
   MFA_EMAIL_CODE_SENT:               a("Código enviado por correo", "factor"),
-  MFA_GRACE_START_FAILED:            a("Plazo de gracia no iniciado", "factor"),
+  MFA_GRACE_START_FAILED:            a("Fallo al iniciar el plazo para configurar segundo factor", "factor"),
   MFA_VERIFIED:                      a("Segundo factor verificado", "factor"),
   MFA_VERIFY_FAILED:                 a("Segundo factor fallido", "factor"),
   RECOVERY_CODES_ISSUED:             a("Códigos de recuperación emitidos", "factor"),
@@ -168,11 +168,23 @@ export const BITACORA_ACTIONS = {
   WEBAUTHN_DELETED:                  a("Eliminó llave de acceso", "factor"),
   WEBAUTHN_REGISTERED:               a("Registró llave de acceso", "factor"),
 
-  PASSWORD_CONFIRM_FAILED:    a("Contraseña incorrecta", "reautenticacion"),
-  STEP_UP_DENIED:             a("Operación sensible rechazada", "reautenticacion"),
-  STEP_UP_FACTOR_ILEGIBLE:    a("Factor ilegible", "reautenticacion"),
-  STEP_UP_REPROVED:           a("Confirmó identidad", "reautenticacion"),
-  STEP_UP_VENTANA_NO_ABIERTA: a("Ventana no abierta", "reautenticacion"),
+  // Dos de estas las escribe la puerta de reautenticación (`requireStepUp`) sin
+  // que la persona las provoque: son cosas que le pasan al servidor y que ella
+  // sufre.
+  //
+  // `STEP_UP_FACTOR_ILEGIBLE`: la cuenta tiene un segundo factor que este
+  // servidor no puede descifrar, así que le pide la contraseña en su lugar. Se
+  // cuenta durante una avería de claves.
+  //
+  // `STEP_UP_VENTANA_NO_ABIERTA`: la contraseña era correcta pero no se pudo
+  // guardar que lo fuera, así que se le volverá a pedir en la siguiente
+  // operación en vez de valerle diez minutos. Si aparece seguido, es que se
+  // está pidiendo la contraseña de más.
+  PASSWORD_CONFIRM_FAILED:    a("Contraseña incorrecta al confirmar una operación", "reautenticacion"),
+  STEP_UP_DENIED:             a("Reautenticación pedida o fallida", "reautenticacion"),
+  STEP_UP_FACTOR_ILEGIBLE:    a("Fallo del servidor: no pudo leer el segundo factor", "reautenticacion"),
+  STEP_UP_REPROVED:           a("Confirmó identidad con segundo factor", "reautenticacion"),
+  STEP_UP_VENTANA_NO_ABIERTA: a("Se le volverá a pedir la contraseña (fallo al guardar)", "reautenticacion"),
 
   RESCUE_ACCOUNT_UNARCHIVED: a("Rescate: desarchivar cuenta", "rescate"),
   RESCUE_ACCOUNT_UNLOCK:     a("Rescate: desbloquear cuenta", "rescate"),
@@ -213,7 +225,7 @@ export const BITACORA_ENTITIES = {
   Adss:                 "Ferretería",
   TipoObs:              "Tipo de observación",
   Obs:                  "Observación",
-  ReporteVista:         "Vista de informe",
+  ReporteVista:         "Informe guardado",
   ReporteProgramacion:  "Envío programado",
   File:                 "Archivo",
   Usuario:              "Usuario",
