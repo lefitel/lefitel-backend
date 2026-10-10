@@ -6,7 +6,7 @@ import { UsuarioModel } from "../models/usuario.model.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { issueSession } from "../auth/issueSession.js";
-import { verifyOwnPassword } from "../auth/credentials.js";
+import { estadoInicialDeSesion } from "../auth/factorInventory.js";
 import { restablecerSegundoFactor, type ActorRescate } from "../auth/rescueCore.js";
 import bcryptjs from "bcryptjs";
 import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
@@ -72,26 +72,34 @@ function requireUsernameString(user: unknown): user is string {
 const USERNAME_NOT_STRING_MESSAGE = "El nombre de usuario debe ser un texto.";
 
 /**
- * Shared text: the caller did not send their current password.
+ * The caller did not send their current password.
  *
- * Two handlers on this file answer it now, and they have to answer it with the
- * same sentence — a rename and a password change are the same demand made of
- * the same person, and wording them differently is how one of them ends up
- * sounding optional. Exported so the tests can pin the *reason* rather than the
- * number: this route already answers 400 to a username that is not a string,
- * so a test asserting `toBe(400)` alone would pass through the wrong branch.
- * That exact accident happened earlier in this plan with a 401.
+ * `updateUserPass` is the one handler that answers this. It used to be two —
+ * the rename asked as well, until the reauthentication window moved that
+ * demand onto the gate, where it belongs and where it can also ask for a
+ * factor. What is left here is not a proof of identity at all: on a password
+ * change the current password is *half of what is being changed*, and typing
+ * it is the operation rather than a toll on the way to it (Isaias,
+ * 2026-09-08).
+ *
+ * Exported so tests can pin the *reason* rather than the number, which matters
+ * on a route that has more than one way to answer 400. That exact accident
+ * happened earlier in this plan with a 401.
  */
 export const CURRENT_PASSWORD_REQUIRED_MESSAGE = "Debe proporcionar su contraseña actual.";
 
-/** Shared text: they sent one and it is not theirs. Same sentence on both routes. */
+/** They sent one and it is not theirs. */
 export const CURRENT_PASSWORD_WRONG_MESSAGE = "La contraseña actual suministrada no es correcta.";
 
 /**
- * Whether this credential change has to prove the caller's password first.
+ * Whether this request is somebody changing their **own** password.
  *
- * One rule for both of them — the rename below and the password change after it
- * — because it is one decision and it was worth writing down once:
+ * Read by `updateUserPass` below, to decide whether to compare `oldPass` at
+ * all, and by `usuario.routes.ts`, to decide whether the request pays into the
+ * password-confirmation budget. One function, so the rate limit and the
+ * handler can never disagree about which requests compare a password.
+ *
+ * The rule it encodes, worth writing down once:
  *
  * > The exemption `seguridad.editar` grants is for **rescuing somebody else**.
  * > It never applies to acting on your own account.
@@ -99,42 +107,36 @@ export const CURRENT_PASSWORD_WRONG_MESSAGE = "La contraseña actual suministrad
  * So this is true exactly when the account being changed is the caller's own,
  * and **holding the permission does not lift it.**
  *
+ * 🔴 It used to answer for the rename too. It does not any more: renaming
+ * proves identity at the gate on the route (`requireStepUp()`), for everybody,
+ * whoever the target is — so there is no longer a question here for a rename
+ * to ask.
+ *
  * **Why the exemption exists at all**, because it is legitimate and must keep
  * working: an administrator resets a password precisely because somebody cannot
  * get in. Demanding the current one there is demanding what nobody has — not
- * the locked-out person, and certainly not the administrator helping them. Same
- * for a rename of somebody else's account: the target's password is unknown to
- * the caller by design.
+ * the locked-out person, and certainly not the administrator helping them.
  *
- * **Why it stops at your own account.** Renaming or re-passwording *yourself*
- * rescues nobody. There is no locked-out person on the other side of it, no
- * operational need it serves, and you hold your own current password because
- * you logged in with it minutes ago — so the exemption buys nothing and gives
- * up the only thing this check is here for.
+ * **Why it stops at your own account.** Re-passwording *yourself* rescues
+ * nobody. There is no locked-out person on the other side of it, no operational
+ * need it serves, and you hold your own current password because you logged in
+ * with it minutes ago — so the exemption buys nothing and gives up the only
+ * thing this check is here for.
  *
- * And it gives it up in the worst place. What this closes is an unattended
- * machine with a live session: whoever sits down changes the credential and
- * locks its owner out without ever learning the password. An administrator's
- * unattended machine is the same act with more reach, so exempting
- * administrators leaves the hole open exactly on the accounts where it costs
- * most — which is how the condition came to be written against the *permission*
- * instead of against *whose account it is*, and it read as prudence.
- *
- * A password change is the sharper of the two. A rename locks its owner out of
- * a name an administrator can hand back; a password change ends every other
- * session of that account in the same request, so the attacker stays in on the
- * session already open and the owner cannot come back at all. **On a password
- * change, the exemption made the administrator the attacker.**
- *
- * Exported because `usuario.routes.ts` needs the same answer to decide whether
- * a request pays into the password-confirmation budget. One function, so the
- * rate limit and the two handlers can never disagree about which requests
- * compare a password.
+ * And it gives it up in the worst place. A password change ends every other
+ * session of that account in the same request, so on an unattended machine with
+ * a live session the attacker stays in on the session already open and the
+ * owner cannot come back at all. An administrator's unattended machine is the
+ * same act with more reach, so exempting administrators left the hole open
+ * exactly on the accounts where it costs most — which is how the condition came
+ * to be written against the *permission* instead of against *whose account it
+ * is*, and it read as prudence. **The exemption made the administrator the
+ * attacker.**
  *
  * `Number(req.params.id)` and not the raw string, matching the "is this me"
- * comparison the IDOR guard in each handler already makes. Two notions of
+ * comparison the IDOR guard in the handler already makes. Two notions of
  * "self" on one route is the drift worth ruling out here: the guard deciding
- * ownership one way and the gate deciding it another is how a request slips
+ * ownership one way and this deciding it another is how a request slips
  * through as somebody else's while being charged as your own.
  */
 export function requiresOwnPassword(req: Request): boolean {
@@ -411,12 +413,29 @@ export const createUsuario = handler("createUsuario", async (req: Request, res: 
  * This handler used to hand `req.body` straight to `TempUsuario.set()`, and the
  * route deliberately lets a person edit their own record — so any authenticated
  * account could PUT `{ id_rol: 1 }` at its own id and come back an
- * administrator. Username and password each have their own endpoint with their
- * own checks, and `id` is not something a request gets to choose.
+ * administrator. Username, password and role each have their own endpoint with
+ * their own checks, and `id` is not something a request gets to choose.
  */
 const EDITABLE_FIELDS = ["name", "lastname", "birthday", "image", "phone"] as const;
 
-/** Needs the Roles module, not merely the right to edit the account. */
+/**
+ * Needs the Roles module, not merely the right to edit the account — and
+ * `creatableFrom` below is the only thing that reads it.
+ *
+ * **`editableFrom` used to read it too**, which is what let `PUT
+ * /api/usuario/:id` write the `id_rol` of somebody else's account. That route
+ * is also the one a person edits their own profile through, so it asks for a
+ * password once every ten minutes rather than on every request; a role handed
+ * out inside that window would be a promotion the attacker keeps under their
+ * **own** credentials, and so survives the victim changing their password,
+ * `logout-all`, a factor reset and the console rescue. The field left the route
+ * instead of the route leaving the window: `PUT /api/usuario/:id/rol` writes it
+ * now (`usuarioRol.controller.ts`), and that one asks for the password every
+ * time.
+ *
+ * It stays on the creation path because an account cannot be born without a
+ * role, and `POST /api/usuario/` asks for the password every time as well.
+ */
 const ROLE_ASSIGNMENT_FIELDS = ["id_rol"] as const;
 
 /**
@@ -457,14 +476,16 @@ function pick(body: unknown, fields: readonly string[]): Record<string, unknown>
   return chosen;
 }
 
-function editableFrom(body: unknown, mayAssignRoles: boolean): Record<string, unknown> {
-  return pick(body, mayAssignRoles ? [...EDITABLE_FIELDS, ...ROLE_ASSIGNMENT_FIELDS] : EDITABLE_FIELDS);
+function editableFrom(body: unknown): Record<string, unknown> {
+  return pick(body, EDITABLE_FIELDS);
 }
 
 /**
- * No `mayAssignRoles` argument, unlike `editableFrom`: `createUsuario` has
- * already refused the request outright without that permission, so by the time
- * this runs the role is always allowed.
+ * The role is on this list and not on `editableFrom`'s: `createUsuario` has
+ * already refused the request outright without the Roles permission, so by the
+ * time this runs the role is always allowed — and an account has to be born
+ * with one, which is why creating is the one door that still assigns a role
+ * alongside everything else.
  */
 function creatableFrom(body: unknown): Record<string, unknown> {
   return pick(body, [...CREATABLE_FIELDS, ...ROLE_ASSIGNMENT_FIELDS]);
@@ -502,10 +523,22 @@ export const updateUsuario = handler("updateUsuario", async (req: Request, res: 
   const TempUsuario = await UsuarioModel.findOne({ where: { id } });
   if (!TempUsuario) return res.status(404).json({ message: "Usuario no encontrado" });
 
-  // The profile page sends the whole user object back, its own role included,
-  // so an unchanged id_rol from a non-administrator is ordinary traffic and is
-  // simply dropped by the allowlist. Asking for a *different* one is an
-  // escalation attempt, and that earns a refusal and a line in the bitácora.
+  /**
+   * The two blocks below refuse a request; neither is what stops the write any
+   * more. `id_rol` is off this route's allowlist entirely — see
+   * `ROLE_ASSIGNMENT_FIELDS` — so whatever a body says about a role is dropped
+   * before `set()` sees it, whoever sent it. `PUT /api/usuario/:id/rol` is the
+   * route that writes one.
+   *
+   * They stay because "the field is ignored" and "the request is refused" are
+   * not the same answer to give. The profile page sends the whole user object
+   * back, its own role included, so an unchanged `id_rol` is ordinary traffic
+   * and passes both. Asking for a *different* one is somebody reaching for
+   * authority through the wrong door, and that earns a refusal — and, without
+   * the Roles permission, the same `critical` line in the bitácora
+   * `createUsuario` writes for the same reach. Answering 200 to it would leave
+   * an attempt at escalation looking exactly like a successful save.
+   */
   const requestedRol = (req.body as Record<string, unknown> | undefined)?.id_rol;
   if (!mayAssignRoles && requestedRol !== undefined && Number(requestedRol) !== TempUsuario.dataValues.id_rol) {
     logAction({ id_usuario: loggedUser.id, action: "ROLE_CHANGE_DENIED", entity: "Usuario", entity_id: Number(id), detail: `Intentó cambiar el rol del usuario #${id} sin permiso sobre Roles`, metadata: { from: TempUsuario.dataValues.id_rol, requested: requestedRol }, severity: 'critical', ip_address: req.ip ?? null });
@@ -518,6 +551,8 @@ export const updateUsuario = handler("updateUsuario", async (req: Request, res: 
    * nobody else can hand it back to you. This is why the block above checks
    * *permission* and this one checks *whose account it is* — holding
    * `roles.editar` is exactly what lets the block above fall through here.
+   * `asignarRol` refuses the same request on the route that can actually
+   * perform it.
    *
    * Only when the request is actually asking for a *different* role than the
    * one already on file: the profile page echoes `id_rol` back untouched on
@@ -535,29 +570,21 @@ export const updateUsuario = handler("updateUsuario", async (req: Request, res: 
     });
   }
 
-  const patch = editableFrom(req.body, mayAssignRoles);
+  const patch = editableFrom(req.body);
   const oldImage = TempUsuario.dataValues.image;
   const udv = TempUsuario.dataValues as unknown as Record<string, unknown>;
   const isPrimVal = (v: unknown) => v === null || v === undefined || ["string", "number", "boolean"].includes(typeof v);
   const beforeMeta: Record<string, unknown> = {};
   const afterMeta:  Record<string, unknown> = {};
+  // Every field this route may write is a scalar of the profile, so the diff
+  // needs nothing but the values themselves. It used to resolve `id_rol` into
+  // `{ id, name }` through a second query, because a bitácora entry saying
+  // "3 → 1" tells a reader nothing; that resolution moved to `asignarRol`
+  // along with the write.
   for (const k of Object.keys(patch)) {
     const bv = udv[k];
-    if (bv === undefined || k === "id_rol") continue;
+    if (bv === undefined) continue;
     if (isPrimVal(bv) && isPrimVal(patch[k])) { beforeMeta[k] = bv; afterMeta[k] = patch[k]; }
-  }
-  const bvRol = udv["id_rol"] as number | null | undefined;
-  const avRol = patch["id_rol"] as number | null | undefined;
-  // Only when the role is actually part of the write. Reading it off the raw
-  // body meant a request that never mentioned id_rol still logged a change
-  // "to null".
-  if ("id_rol" in patch && bvRol !== avRol) {
-    const fkRef = async (pkVal: number | null | undefined) => {
-      if (pkVal == null) return null;
-      const row = await RolModel.findByPk(pkVal, { attributes: ["id", "name"], paranoid: false });
-      return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
-    };
-    [beforeMeta["id_rol"], afterMeta["id_rol"]] = await Promise.all([fkRef(bvRol), fkRef(avRol)]);
   }
   TempUsuario.set(patch);
   await TempUsuario.save();
@@ -589,98 +616,46 @@ export const updateUserName = handler("updateUserName", async (req: Request, res
     }
 
     /**
-     * Renaming yourself proves it is you, and it proves it before anything else
-     * happens.
+     * Renaming yourself proves it is you. **The gate on the route proves it;
+     * this handler does not, and no longer may.**
      *
-     * **Why a username is worth this at all.** It is half of the credential.
-     * Change somebody's username and they cannot log in — not because they have
-     * forgotten their password, but because they no longer know what name to
-     * offer it with. So this operation is worth what a password change is
-     * worth, and `updateUserPass` below had demanded the current password of
-     * ordinary callers all along while this one demanded nothing whatsoever.
-     * (Of *ordinary* callers, and that qualifier turned out to matter: it
-     * exempted anybody who could manage accounts, their own password included.
-     * Same asymmetry, same fix, and it is one function now — see
-     * `requiresOwnPassword`.)
+     * **Why a username is worth proving anything at all.** It is half of the
+     * credential. Change somebody's username and they cannot log in — not
+     * because they have forgotten their password, but because they no longer
+     * know what name to offer it with. So this operation is worth what a
+     * password change is worth. The concrete case is an unattended machine in
+     * the office, or the shared field laptop: whoever sits down at a live
+     * session renames the account and **locks its owner out of it without
+     * knowing the password**. It is repairable — an administrator hands the
+     * name back — but nobody understands what happened in the meantime.
      *
-     * The concrete case: an unattended machine in the office, or the shared
-     * field laptop. Whoever sits down at a live session renames the account and
-     * **locks its owner out of it without knowing the password**. It is
-     * repairable — an administrator hands the name back — but nobody
-     * understands what happened in the meantime.
-     *
-     * **Why here and not on the screen.** Both screens that rename an account
-     * asked for a password; one of them then sent the change without it, and
-     * the other never asked. A confirmation that lives only in the client is
+     * **Why not on the screen.** Both screens that rename an account used to
+     * ask for a password; one of them then sent the change without it, and the
+     * other never asked. A confirmation that lives only in the client is
      * optional by definition: whoever does not want to type it uses the other
      * screen, or `curl`. Which of the two is a real gate is settled entirely by
-     * where the check runs, and that is here.
+     * where the check runs, and it is not the browser.
      *
-     * **Who has to pass it** is `requiresOwnPassword` — the answer is not
-     * "whoever lacks a permission", and the reasoning is up there with it.
+     * **So where does it run.** `requireStepUp()` on `PUT /username/:id` in
+     * `usuario.routes.ts`. That is strictly more than this handler ever asked:
+     * the gate wants the caller's password *or* a factor proved recently, and
+     * for an account that has a factor a password alone stops being an
+     * acceptable answer — a rule no comparison of `oldPass` here could express.
+     * It also opens a ten-minute window, so a run of ordinary edits costs one
+     * confirmation instead of one per request.
      *
-     * **Before the collision check**, deliberately: a caller who has not proved
-     * who they are learns nothing from this endpoint about which usernames are
-     * taken. It costs an early return on a request that was going to be a 409
-     * anyway.
+     * **And this handler asking again is what was removed.** For a self-rename
+     * the gate and this block compared the same secret, twice, in one request:
+     * once typed into the dialog as `stepup_password`, once typed into the form
+     * as `oldPass`. That double prompt is the complaint the whole
+     * reauthentication design started from. `oldPass` arriving from a tab
+     * opened before the change is not read.
      *
-     * **`verifyOwnPassword` and not a `bcryptjs.compare` of its own.** It asks
-     * exactly the question this needs answered — is this the password of the
-     * account already asking? — and it carries what a fresh comparison here
-     * would have quietly lacked: the `checkAgainstRow` the login shares, the
-     * filler hash that levels the timings, and a `PASSWORD_CONFIRM_FAILED` line
-     * that records the failed attempt without forging a login nobody made. This
-     * is that function's only caller now, since the confirmation endpoint it was
-     * written alongside is retired.
-     *
-     * **It does not apply the lockout, and that took a defect to get right.**
-     * This paragraph used to list "the refusal to let a locked account through a
-     * side door that would clear its own lockout" among the things borrowed here,
-     * as though it were a benefit. It was the opposite. `authenticate` does not
-     * read `locked_until`, so somebody whose account was locked by another
-     * machine grinding their username keeps the session they already had and
-     * keeps working — and this screen told them their **correct** password was
-     * wrong, charged the shared budget for the lie, and at the fifth attempt
-     * answered 429 on the same bucket as the password change, which was their way
-     * out. `LockoutPolicy` in `auth/credentials.ts` is where that decision lives
-     * now, by name.
-     *
-     * It also, on purpose, does **not** touch `failed_attempts`: mistyping your
-     * own password while renaming yourself must not be able to shut you out of
-     * the ERP. That is why the budget against guessing lives on the route
-     * instead — see `usuario.routes.ts`, and note that the budget only charges
-     * for the 401 below, so a rename that fails for any other reason is free.
-     *
-     * The id comes from `req.user` and never from `:id`. They are equal here by
-     * the check just made, and reading it off the session is what keeps that
-     * true if this block is ever moved.
+     * **`updateUserPass` below keeps its own comparison, and the difference is
+     * not an inconsistency.** There, "current password" is not a proof of
+     * identity: it is half of what is being changed, and typing it is the
+     * operation. Isaias, 2026-09-08.
      */
-    if (requiresOwnPassword(req)) {
-      const oldPass = (req.body as { oldPass?: unknown } | undefined)?.oldPass;
-      // Not a string is not a password, and an empty one is not a
-      // confirmation — refused before the round trip, the same way
-      // `verifyOwnPassword` refuses them, so the two cannot disagree about
-      // what counts as "sent nothing".
-      if (typeof oldPass !== "string" || oldPass === "") {
-        return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
-      }
-      const confirmacion = await verifyOwnPassword({
-        id: loggedUser.id,
-        pass: oldPass,
-        ip: req.ip ?? null,
-      });
-      if (!confirmacion.ok) {
-        // Archived between `authenticate` and here — the narrow race
-        // `verifyOwnPassword` names. Answered as the 404 the lookup below
-        // would have given anyway, and pointedly not as a wrong password:
-        // sending somebody hunting for a typo in a password that was right is
-        // worse than telling them nothing.
-        if (confirmacion.reason === "no-account") {
-          return res.status(404).json({ message: "Usuario no encontrado" });
-        }
-        return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
-      }
-    }
 
     // Case-insensitive, matching `usuarios_user_uniq`. The exact-match check
     // this replaced let a rename to `Isaias` pass the application layer while
@@ -806,7 +781,17 @@ export const updateUserPass = handler("updateUserPass", async (req: Request, res
     const isMatch = await bcryptjs.compare(oldPass, TempUsuario.dataValues.pass);
     if (!isMatch) {
       logAction({ id_usuario: loggedUser.id, action: "PASSWORD_CONFIRM_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: `Contraseña incorrecta al cambiar la contraseña de @${TempUsuario.dataValues.user}`, metadata: { user: TempUsuario.dataValues.user }, severity: 'warning', ip_address: req.ip ?? null });
-      return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
+      // 400, not 401. The frontend reads every 401 as "the session is dead"
+      // and logs out — which is right for the other fourteen 401s in this API,
+      // all of them about the session — so a mistyped current password threw
+      // the person to the login screen with "Tu sesión se cerró". It was the
+      // only 401 here that was not about the session.
+      //
+      // The flag is what keeps the guess from becoming free: the budget on
+      // this route charges by status, 401 only, and `confirmCostsNothing`
+      // reads this to charge a refusal that is not one.
+      res.locals.stepUpPasswordWrong = true;
+      return res.status(400).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
     }
   }
 
@@ -959,15 +944,75 @@ export const updateUserPass = handler("updateUserPass", async (req: Request, res
    * request once rather than treat the 401 as the end of the session; the new
    * cookie is already on the response that raced it.
    *
-   * `estado` **is** carried across, from the session making the request.
-   * Today only `completa` can reach this route at all — `sessionState.ts`
-   * opens nothing outside `/api/auth/*` to the other two — so a literal
-   * `"completa"` would behave identically and would be a silent promotion the
-   * day that allowlist widens.
+   * 🔴 **`estado` is decided here the way a login decides it, and is no longer
+   * carried across from the session making the request.**
+   *
+   * This is the only place in `src/` outside the two login doors that opens a
+   * session, and copying the caller's own `estado` onto the new row made it a
+   * way round the fourteen-day deadline. The new row is created **now**, and
+   * `estadoEfectivo` exempts a `completa` session opened after its account's
+   * deadline had already passed — such a row can normally only have got there
+   * by proving a factor. So a `completa` session past its deadline could write
+   * itself a fresh, exempt `completa` session, and do it again before the
+   * thirty-day ceiling ran out, for ever, on an account with no second factor.
+   * Nobody would have taken that road while the login handed out fourteen new
+   * days for registering a passkey and deleting it; with that loop closed
+   * (`auth/sessionPromotion.ts`'s tombstone), it is the road that is left.
+   *
+   * 🔴 **An account that has a factor keeps `completa`, and that is not a
+   * softening of the rule — it is what the route's own gate already
+   * guarantees.** `estadoInicialDeSesion` answers `parcial` for any account
+   * with a factor, because a login has proved no factor yet. This is not a
+   * login: `requireStepUp({ sinVentana: true })` on this route lets an account
+   * *with* a factor past only on an `mfa_satisfied_at` newer than
+   * `STEP_UP_WINDOW_MINUTES`, so everybody here who has a factor proved it
+   * minutes ago. Writing `parcial` anyway would have `authenticate` answer 401
+   * to their very next request — the browser thrown back to the login form by
+   * the same response that says the password changed, which is precisely the
+   * failure this rotation was built to prevent.
+   *
+   * What is left after that is the account with **no** factor, which is the
+   * one the deadline is about, and it gets exactly what its next login would
+   * give it: `completa` inside the grace period, `onboarding` once it is over.
+   * `onboarding` is not a lockout — it opens the doors that lead to
+   * registering a factor and answers `FACTOR_PENDIENTE` for the rest.
+   *
+   * **`graceUntil` is written here too, for the same reason the login writes
+   * it.** A non-null answer means this account has no usable deadline stored,
+   * so the clock has to start; leaving that to the next login would let
+   * somebody whose column is NULL — after the documented manual reprieve, say
+   * — hold the ERP indefinitely by rotating their session and never logging in
+   * again. Best-effort and after the session exists, exactly as
+   * `terminarLogin` does it: the password is already committed by this line,
+   * so a failed stamp is logged and swallowed, and the next login retries it.
    */
   if (isSelf) {
     try {
-      await issueSession(req, res, loggedUser.id, loggedUser.estado);
+      // Inside the `try` on purpose: these are two more queries, and a
+      // rejection here must reach the same swallowed failure as one from
+      // `issueSession`. Thrown, it would answer 500 about a password that
+      // has already changed — the exact retry trap the paragraph above
+      // describes.
+      const { estado, graceUntil, conFactor } = await estadoInicialDeSesion(
+        // The caller's own row: `isSelf` is what makes `TempUsuario` the same
+        // account as `loggedUser`, and it was read with every column, so the
+        // deadline needs no second query.
+        { id: loggedUser.id, mfa_grace_until: TempUsuario.dataValues.mfa_grace_until },
+        new Date(),
+      );
+      await issueSession(req, res, loggedUser.id, conFactor ? "completa" : estado);
+      if (graceUntil !== null) {
+        // Its own `catch`, and after the session exists, for the two reasons
+        // `terminarLogin` gives: a deadline must never start on a request that
+        // failed to hand out a session, and a failure here must not cost the
+        // caller the cookie they have just been given. The column stays NULL,
+        // so the next login takes the same branch and tries again.
+        try {
+          await UsuarioModel.update({ mfa_grace_until: graceUntil }, { where: { id: loggedUser.id } });
+        } catch (err) {
+          logAction({ id_usuario: loggedUser.id, action: "MFA_GRACE_START_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: "Rotó la sesión al cambiar su contraseña, pero no se pudo iniciar el plazo de gracia: mientras la columna siga vacía el ERP no se cerrará nunca para esta cuenta", metadata: { error: err instanceof Error ? err.message : String(err), graceUntil }, severity: 'warning', ip_address: req.ip ?? null });
+        }
+      }
     } catch (err) {
       logAction({ id_usuario: loggedUser.id, action: "SESSION_ROTATION_FAILED", entity: "Usuario", entity_id: loggedUser.id, detail: "Cambió su contraseña, pero no se pudo abrir la sesión nueva", metadata: { error: err instanceof Error ? err.message : String(err) }, severity: 'warning', ip_address: req.ip ?? null });
     }
@@ -1117,16 +1162,18 @@ export const desbloquearUsuario = handler("desbloquearUsuario", async (req: Requ
  *
  * **Refuses `:id === req.user.id` — Isaias's decision, not a default, and
  * not merely "unwise".** This route's whole job is to leave its target with
- * *zero* registered factors. `requireStepUp` (`middleware/requireStepUp.ts`)
- * lets exactly that kind of account — one with nothing to prove — through
- * its own gate on the session cookie alone (see that middleware's "account
- * has nothing to prove" branch). So resetting your *own* factors here would
- * disarm the gate in front of every other sensitive route on your own
- * session, starting with the very next request: no factor left to demand,
- * so nothing left to check. The console (`--reset-mfa` run with a shell
- * inside the production container) is the deliberate way to reset your own
- * factors instead — it does not go through this gate, or any session, at
- * all.
+ * *zero* registered factors, and what that costs the caller's own session is
+ * a downgrade of everything `requireStepUp` (`middleware/requireStepUp.ts`)
+ * asks of it afterwards. With a factor on the account the gate demands the
+ * factor proved recently **and**, on the mounts carrying `sinVentana`, the
+ * password on top; with no factor left it demands the password alone — and on
+ * the mounts that take the window, one correct password then opens ten
+ * minutes for the rest (`password_confirmed_at`). So doing this to yourself
+ * spends your own second factor to make your own session cheaper to use, which
+ * is the opposite of what an escape hatch is for. The console (`--reset-mfa`
+ * run with a shell inside the production container) is the deliberate way to
+ * reset your own factors instead — it does not go through this gate, or any
+ * session, at all.
  */
 export const rescatarMfaDeUsuario = handler("rescatarMfaDeUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;

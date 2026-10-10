@@ -220,8 +220,9 @@ const CONOCIDOS = new Set([...NEGOCIO_EN_ESPANOL, ...EN_INGLES, ...INFORMES_EN_E
  * §2 lists fourteen routes as the authentication module's: ten under
  * `/api/auth`, `POST /api/login/`, and the three below, which live on the
  * `usuario` router for reasons it gives — password recovery reaches `userpass`
- * directly, the two renames share `chargeConfirmBudgetOnSelfChange`, and
- * unlocking an account is the way back from a lockout the same plan owns. So
+ * directly, renaming an account is the operation the reauthentication window
+ * was designed around, and unlocking an account is the way back from a lockout
+ * the same plan owns. So
  * `desbloquear` stays in Spanish and that is a decision, not an oversight.
  *
  * Named one by one rather than skipped by a pattern, because a pattern would

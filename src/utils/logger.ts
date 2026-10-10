@@ -125,10 +125,17 @@ export const REDACT_PATHS = [
   "oldPass",
   "password",
   "token",
+  // pino matches a redaction path against the exact object key, not a
+  // substring, so "password" does not reach "stepup_password" — the field
+  // the step-up reauthentication window (plan 4D) sends in the body of a
+  // reauthenticated request. Named separately for the same reason `pass` and
+  // `oldPass` are separate from `password` above.
+  "stepup_password",
   "*.pass",
   "*.oldPass",
   "*.password",
   "*.token",
+  "*.stepup_password",
   "MFA_ENCRYPTION_KEY",
   "secreto",
   "secret",

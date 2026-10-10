@@ -77,10 +77,34 @@ async function getAllDbImageMap(): Promise<Map<string, FileUsage>> {
   return map;
 }
 
-async function readDiskFiles(): Promise<FileInfo[]> {
+/**
+ * What the images directory holds, or why it could not be read.
+ *
+ * 🔴 **"Could not read" and "is empty" are not the same answer, and treating
+ * them as one is a data-loss defect.** Every reader here decides what is an
+ * orphan or a broken reference by comparing the database against this list. An
+ * empty list makes *every* stored value look broken — so `clearBrokenImageRefs`,
+ * which writes `image: null` on every row it thinks is broken, would empty the
+ * photograph column of `postes`, `eventos`, `ciudads`, `usuarios` and
+ * `solucions` in one request. The files would still be on disk; nothing would
+ * name them, and there is no way back.
+ *
+ * The scenario is not hypothetical and it is not rare: `IMAGES_DIR` must be a
+ * volume the host mounts (see `fileUtils.ts`), and a first deploy where that
+ * mount is missing or misspelled is exactly when an administrator opens the
+ * Archivos screen, sees every image listed as a broken reference, and presses
+ * the button the screen is offering. The mount failing "up" — an empty directory
+ * where the volume should be — reads as success from `readdir`, which is why
+ * emptiness is guarded below as well as failure.
+ */
+type Disco =
+  | { legible: true; ficheros: FileInfo[] }
+  | { legible: false; motivo: string };
+
+async function leerDisco(): Promise<Disco> {
   try {
     const names = await fs.promises.readdir(IMAGES_DIR);
-    return await Promise.all(
+    const ficheros = await Promise.all(
       names.map(async (name) => {
         const stats = await fs.promises.stat(path.join(IMAGES_DIR, name));
         // `path` is what the client renders and links; comparisons below use
@@ -88,9 +112,19 @@ async function readDiskFiles(): Promise<FileInfo[]> {
         return { name, path: `/${name}`, size: stats.size, createdAt: stats.birthtime };
       })
     );
-  } catch {
-    return [];
+    return { legible: true, ficheros };
+  } catch (error) {
+    return { legible: false, motivo: (error as { code?: string })?.code ?? "desconocido" };
   }
+}
+
+/**
+ * The lenient reader, for the two callers where "nothing on disk" is a true and
+ * harmless answer: listing files, and counting them per entity. Neither writes.
+ */
+async function readDiskFiles(): Promise<FileInfo[]> {
+  const disco = await leerDisco();
+  return disco.legible ? disco.ficheros : [];
 }
 
 /** The bare names on disk, for "does this stored value point at a real file". */
@@ -162,9 +196,51 @@ export const getEntityImageStats = handler("getEntityImageStats", async (req: Re
   });
 });
 
-export const getBrokenImageRefs = handler("getBrokenImageRefs", async (req: Request, res: Response) => {
-  const rota = rotaSegun(await diskNames());
+/**
+ * The refusal the two broken-reference routes share.
+ *
+ * Returns the set of names on disk, or a response already sent. Two refusals,
+ * and the second is the one that catches the real accident:
+ *
+ *   - the directory could not be read at all — `503`, because it is a
+ *     dependency being unavailable and retrying is the right next move;
+ *   - the directory is readable and **empty while the database holds
+ *     references** — `409`. A volume that failed to mount usually leaves an
+ *     empty directory behind rather than an error, so this is what the first
+ *     deploy actually looks like. Ten thousand broken references and zero files
+ *     is not a cleanup job; it is a mount problem, and the message says so.
+ *
+ * Nothing is written in either case, and the sentence says that too: an
+ * administrator who reads "no se ha modificado nada" does not go looking for
+ * what was half-done.
+ */
+const nombresEnDiscoOFallo = async (
+  res: Response,
+  referencias: number,
+): Promise<Set<string> | null> => {
+  const disco = await leerDisco();
+  if (!disco.legible) {
+    res.status(503).json({
+      message:
+        "No se pudo leer el directorio de imágenes, así que no hay forma de saber qué " +
+        "referencias están rotas. No se ha modificado nada.",
+    });
+    return null;
+  }
+  if (disco.ficheros.length === 0 && referencias > 0) {
+    res.status(409).json({
+      message:
+        `El directorio de imágenes está vacío y la base de datos tiene ${referencias} ` +
+        "referencias. Eso parece un volumen sin montar, no referencias rotas. No se ha " +
+        "modificado nada.",
+      referencias,
+    });
+    return null;
+  }
+  return new Set(disco.ficheros.map((f) => f.name));
+};
 
+export const getBrokenImageRefs = handler("getBrokenImageRefs", async (req: Request, res: Response) => {
   const [postes, eventos, ciudades, usuarios, soluciones] = await Promise.all([
     PosteModel.findAll({ attributes: ["id", "image", "name"], paranoid: false }),
     EventoModel.findAll({ attributes: ["id", "image"], paranoid: false }),
@@ -172,6 +248,15 @@ export const getBrokenImageRefs = handler("getBrokenImageRefs", async (req: Requ
     UsuarioModel.findAll({ attributes: ["id", "image", "name", "lastname"], paranoid: false }),
     SolucionModel.findAll({ attributes: ["id", "image", "id_evento"], paranoid: false }),
   ]);
+
+  // The listing refuses on the same two conditions as the button below, and
+  // that is deliberate: this is what the screen draws, and a screen listing
+  // every photograph in the company as broken is what invites the click.
+  const referencias = [postes, eventos, ciudades, usuarios, soluciones]
+    .flat().filter((r) => (r.dataValues as { image?: unknown }).image).length;
+  const disco = await nombresEnDiscoOFallo(res, referencias);
+  if (!disco) return;
+  const rota = rotaSegun(disco);
 
   const broken: { tipo: string; id: number; name: string; image: string }[] = [];
 
@@ -195,8 +280,6 @@ export const getBrokenImageRefs = handler("getBrokenImageRefs", async (req: Requ
 });
 
 export const clearBrokenImageRefs = handler("clearBrokenImageRefs", async (req: Request, res: Response) => {
-  const rota = rotaSegun(await diskNames());
-
   const [postes, eventos, ciudades, usuarios, soluciones] = await Promise.all([
     PosteModel.findAll({ attributes: ["id", "image"], paranoid: false }),
     EventoModel.findAll({ attributes: ["id", "image"], paranoid: false }),
@@ -204,6 +287,14 @@ export const clearBrokenImageRefs = handler("clearBrokenImageRefs", async (req: 
     UsuarioModel.findAll({ attributes: ["id", "image"], paranoid: false }),
     SolucionModel.findAll({ attributes: ["id", "image"], paranoid: false }),
   ]);
+
+  // 🔴 The guard, before a single row is written. This is the only route in the
+  // API that can empty a column across five tables in one request.
+  const referencias = [postes, eventos, ciudades, usuarios, soluciones]
+    .flat().filter((r) => (r.dataValues as { image?: unknown }).image).length;
+  const disco = await nombresEnDiscoOFallo(res, referencias);
+  if (!disco) return;
+  const rota = rotaSegun(disco);
 
   let cleared = 0;
 

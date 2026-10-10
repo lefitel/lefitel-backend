@@ -43,7 +43,7 @@ import { CredencialWebauthnModel } from "../models/credencialWebauthn.model.js";
 import { FactorTotpModel } from "../models/factorTotp.model.js";
 import { CodigoRecuperacionModel } from "../models/codigoRecuperacion.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
-import { MFA_GRACE_DAYS } from "../config/security.js";
+import { MFA_GRACE_DAYS, mfaObligatorio } from "../config/security.js";
 import { totpEstaDisponible } from "./mfaKeyCheck.js";
 import type { EstadoSesion, FuenteEnElLogin } from "./sessionState.js";
 
@@ -157,8 +157,9 @@ export async function tieneCredencialRegistrada(
  * recovery codes may be minted or spent. Since plan 4E a verified email is a
  * factor on its own (Isaias, 2026-09-03: automatic, on a par with the app and
  * the key, complete), so an account that has verified its address and nothing
- * else opens `parcial` and is asked for a code by email, and `requireStepUp`'s
- * "nothing to prove, let through" branch no longer applies to it.
+ * else opens `parcial` and is asked for a code by email — and at the step-up
+ * gate it stops being answerable with the password alone: it has a factor now,
+ * so the gate demands that factor proved recently.
  *
  * Three reads, in parallel, and none of them `factoresDe`: this runs on the
  * hot path of every gated write, and the recovery-code count that function
@@ -287,9 +288,13 @@ export async function hayFactorVerificable(id_usuario: number): Promise<boolean>
  * docblock imagined — that screen still does not exist, and the count of
  * unspent codes it wanted is deliberately dropped here, because a refusal
  * naming how many codes are left tells a stolen cookie how much runway it has.
- * (Which is also why this list is **not** sent to a `parcial` session on the
- * login body: plan 4E's first draft did, and the audit named it what it was —
- * the factor inventory handed to whoever holds only the password.)
+ *
+ * **And since 9 October 2026 it has a second caller: `GET /api/auth/me`, for a
+ * `parcial` session.** Plan 4E's first draft sent this list to such a session
+ * on the login body and the audit named it what it was — the factor inventory
+ * handed to whoever holds only the password — so it was withheld. Isaias
+ * reversed that with the cost stated, because the second-step screen cannot
+ * offer the right way in without it; the reasoning is on the handler.
  */
 export type MetodoReautenticacion = "passkey" | "totp" | "correo" | "codigo";
 
@@ -348,14 +353,18 @@ export async function metodosDeReautenticacion(
  * every request, which is the cost this whole design refuses — so it belongs to
  * the endpoint that causes it, at the moment it causes it.
  *
- * **And the tidying that was worth doing even though nothing depends on it —
- * done, by `apagarLaMecha` in `sessionPromotion.ts`:** `usuarios.mfa_grace_until`
- * is cleared when an account confirms its first factor, from `confirmTotp` and
- * from `registerVerify`. The first branch below already says a date in that
- * column "reads as: this account is still being chased", and after
- * registration it is not. Third line of defence, not the first — which is
- * why an account whose clearing write was lost is still handled correctly by
- * `estadoEfectivo`'s clause 3.
+ * 🔴 **And the tidying that looked worth doing, was done, and had to be
+ * undone.** For a week, confirming a factor cleared `usuarios.mfa_grace_until`
+ * — from `confirmTotp`, `registerVerify` and `verifyEmail` — on the grounds
+ * that the first branch below says a date in that column "reads as: this
+ * account is still being chased", and after registration it is not. It also
+ * made the deadline renewable at will: NULL is read here as "the clock never
+ * started", so registering a factor and deleting it again bought a whole new
+ * `MFA_GRACE_DAYS` at the next login, indefinitely, and registering a passkey
+ * needs no mailbox. Nothing clears the column any more, and nothing may: see
+ * the tombstone at the foot of `sessionPromotion.ts`. The stamp is written
+ * once and stays, which is what makes the second branch below fire exactly
+ * once in an account's life.
  *
  * ~~A decision 4B has to take rather than inherit: `factoresDe` and
  * `InventarioFactores` have no caller anywhere in `src/`.~~ **Settled by plan
@@ -476,13 +485,13 @@ export async function metodosDeReautenticacion(
  * screen on deploy day. That is still true and still avoided: nobody is
  * *required* to verify anything to get in. What changed is the other
  * direction — an address, once verified, is enough to be asked for a second
- * factor, because the code by email is one. So on deploy day the nine
- * accounts, none of them verified, take branch 2 exactly as before; the day
- * one of them verifies its address, `verifyEmail` promotes that session and
- * clears the deadline, and its next login opens `parcial` and asks for a
- * code. The way out of `parcial` for that account — `/mfa/email-code` and
- * `/mfa/verify` with `metodo: "correo"` — ships in the same deploy as this
- * paragraph, for the reason the constraint below gives.
+ * factor, because the code by email is one. So an account with no verified
+ * address takes branch 2 exactly as before; the day it verifies one,
+ * `verifyEmail` promotes that session — and leaves the deadline exactly where
+ * it found it, see the paragraph above — and its next login opens `parcial`
+ * and asks for a code. The way out of `parcial` for that account —
+ * `/mfa/email-code` and `/mfa/verify` with `metodo: "correo"` — shipped in the
+ * same deploy, for the reason the constraint below gives.
  *
  * ---
  *
@@ -506,28 +515,25 @@ export async function metodosDeReautenticacion(
  * whoever registers first — starting with whoever tests it.
  *
  * ⚠️ **And `onboarding` is the branch that fires on its own — read this one
- * before deploying.** `parcial` above cannot happen today. This one happens to
+ * before turning `MFA_OBLIGATORIO` on.** With it off, which is the default
+ * since 9 October 2026, none of this paragraph happens: an account with no
+ * factor is let in and no clock is started. With it on, `parcial` needs
+ * somebody to register something first, and this one happens to
  * **everybody**, deterministically, `MFA_GRACE_DAYS` after each account's own
- * first login. No row has to be inserted and nobody has to do anything: the
- * clock this function starts runs out by itself.
+ * first login. No row has to be inserted and nobody has to
+ * do anything: the clock this function starts runs out by itself.
  *
  * When it does, the login still answers 200 and the cookie is still set — and
  * then `authenticate` refuses everything outside the allowlist in
- * `sessionState.ts`. The six extra doors `ONBOARDING_EXTRA` opens are the way
- * out, and as of plan 4C **only one of them is still missing**:
- * `/webauthn/credentials`, which is that plan's Task 9 and manages passkeys
- * rather than creating one. `/totp`, `/webauthn/register` and
- * `/recovery-codes` are mounted (`app.ts`), and any of the first two ends
- * `onboarding` by registering a factor. The paragraph is kept because the
- * shape of the failure is worth remembering: an allowlist entry for a route
- * nobody mounted is a room with a door painted on it.
+ * `sessionState.ts`. The extra doors `ONBOARDING_EXTRA` opens are the way out,
+ * and every prefix on that list has a router mounted behind it in `app.ts`:
+ * `/totp`, `/webauthn/register` and `/webauthn/credentials` among them, and
+ * registering a TOTP or a passkey is what ends `onboarding`. The paragraph is
+ * kept because the shape of the failure is worth remembering: an allowlist
+ * entry for a route nobody mounted is a room with a door painted on it, and
+ * for a while `/webauthn/credentials` was exactly that.
  *
- * **The deadline this commit creates: 4B has to be live within
- * `MFA_GRACE_DAYS` of this deploy.** Not "soon" — fourteen days from the day
- * each person first logs in, and the earliest of those is the day of the
- * deploy itself.
- *
- * **The manual reprieve, if that date is going to be missed:**
+ * **The manual reprieve, if a deadline has to be pushed back:**
  *
  * ```sql
  * UPDATE usuarios SET mfa_grace_until = NULL;
@@ -571,6 +577,17 @@ export async function estadoInicialDeSesion(
       return { estado: "completa", graceUntil: null, conFactor: true, conCredencial };
     }
     return { estado: "parcial", graceUntil: null, conFactor: true, conCredencial };
+  }
+
+  // From here down the account has no factor at all, and what happens to it is
+  // the one thing `MFA_OBLIGATORIO` decides. Off — the default — it is simply
+  // let in: no deadline is started, and one already in the column is not read,
+  // so an account stamped while the switch was on is not chased after it goes
+  // off. `graceUntil: null` is what makes that hold beyond this call: the
+  // callers write the column only for a date, and `estadoEfectivo` narrows
+  // nobody whose column is empty.
+  if (!mfaObligatorio()) {
+    return { estado: "completa", graceUntil: null, conFactor: false, conCredencial: false };
   }
 
   // **`Number.isNaN` is the guard that matters here; the loose `== null` is

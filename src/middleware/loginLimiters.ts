@@ -17,7 +17,7 @@
 // told the new one is too short. A budget that counts honest work runs out during
 // honest work.
 
-import rateLimit, { ipKeyGenerator } from "express-rate-limit";
+import rateLimit, { ipKeyGenerator, MemoryStore } from "express-rate-limit";
 import type { RateLimitRequestHandler } from "express-rate-limit";
 import type { NextFunction, Request, Response } from "express";
 import {
@@ -98,7 +98,22 @@ export function accountBucketKey(req: Request): string {
  */
 export function passwordConfirmKey(req: Request): string {
   const id = req.user?.id;
-  return typeof id === "number" ? `pc:${id}` : `pc:ip:${ipKeyGenerator(req.ip ?? "")}`;
+  return typeof id === "number" ? passwordConfirmKeyForUser(id) : `pc:ip:${ipKeyGenerator(req.ip ?? "")}`;
+}
+
+/**
+ * The same key `passwordConfirmKey` builds off a `Request`, built instead off
+ * a bare user id — for `consumirCupoDeConfirmacion` and
+ * `devolverCupoDeConfirmacion` below, which run from inside `requireStepUp`
+ * after `authenticate` has already resolved `req.user`, so all either of them
+ * ever has is the id itself.
+ *
+ * Factored out rather than duplicated so the two ways of reaching this bucket
+ * — through the request, through the id — can never drift into two different
+ * key formats and split one account's guesses across two buckets.
+ */
+function passwordConfirmKeyForUser(idUsuario: number): string {
+  return `pc:${idUsuario}`;
 }
 
 /**
@@ -108,13 +123,14 @@ export function passwordConfirmKey(req: Request): string {
  * for what it decides is this one — see `costsNothing` below for the same note.
  * Whatever this returns true for is refunded once the response has finished.
  *
- * **On `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id`, only the
- * 401 costs, and the 401 is exactly "your current password is wrong".** Those
- * two routes are this function's original callers, and on them that status has
- * one producer and one meaning: the comparison ran and failed. Nothing else on
- * either path answers 401 — `authenticate` does, but it runs at the mount in
- * `app.ts`, before this middleware, so its refusals never reach the counter,
- * and `requireSelfOrPermission` runs before it too.
+ * **On `PUT /usuario/userpass/:id`, only the 401 costs, and the 401 is exactly
+ * "your current password is wrong".** That route is this function's caller, and
+ * on it that status has one producer and one meaning: the comparison ran and
+ * failed. Nothing else on that path answers 401 — `authenticate` does, but it
+ * runs at the mount in `app.ts`, before this middleware, so its refusals never
+ * reach the counter, and `requireSelfOrPermission` runs before it too. (The
+ * rename was the second such caller until it stopped comparing a password of
+ * its own.)
  *
  * **What that fixed, and it is the failure this bucket was most likely to
  * produce in real use.** Every request used to count, right or wrong, and the
@@ -147,46 +163,52 @@ export function passwordConfirmKey(req: Request): string {
  * **The rule those two routes still have to keep**, written down because
  * "somebody adds a case the enumeration does not cover" is the shape of half of
  * this file's history: a route relying on the 401 branch below must answer a
- * wrong current password with **401 and nothing else**. A door that reported
- * one some other way — a 200 carrying a boolean, say — would be refunded every
- * guess. There was exactly such a door, `POST /api/auth/confirm-password`, and
+ * wrong current password with **401 and nothing else** — or say so through the
+ * flag described further down, which is what `updateUserPass` does since its
+ * wrong-password answer became a 400 (a 401 logged the person out of the
+ * frontend for a typo). A door that reported one some other way, with neither
+ * — a 200 carrying a boolean, say — would be refunded every guess. There was exactly such a door, `POST /api/auth/confirm-password`, and
  * that is why this bucket could not have a refund rule until it was retired: it
  * answered a wrong password with 200 on purpose, so no status-based rule could
  * tell its two answers apart.
  *
- * **A third caller, added for `requireStepUp` (`middleware/requireStepUp.ts`),
- * cannot use that 401 rule at all**, and needs its own branch above it. It
- * shares this exact bucket — same secret, same account, so it has to be the
- * same budget rather than a second one that doubles a guesser's allowance —
- * but every refusal it makes is the same uniform `403 { code: CODIGO_STEP_UP }`,
- * on purpose, so the frontend can react to a stale window, a missing factor and
- * a wrong password all the same way. Reading only the status code would refund
- * every wrong guess made through that gate, leaving it with no real budget
- * behind it at all. `res.locals.stepUpPasswordWrong` is how it says the answer
- * instead — set to `true` right before it charges, and only when it charges.
+ * 🔴 **Historical, since Task 1 of the reauthentication-window plan
+ * (2026-09-08): `requireStepUp.ts` no longer calls this limiter, or sets the
+ * flag below, at all.** It charges and refunds through
+ * `consumirCupoDeConfirmacion` / `devolverCupoDeConfirmacion` instead — see
+ * their own docstrings just above `passwordConfirmLimiter` — because the
+ * deferred refund this flag exists to steer (settled on the response's own
+ * `finish` event) is exactly what let two independent charges in one request
+ * read each other's verdict; the atomic pair does not have that problem to
+ * begin with. The mechanism below is left in place, correct, for whatever
+ * caller of `passwordConfirmLimiter` itself needs a non-401 response to cost
+ * like a 401. There is one: `updateUserPass` in `usuario.controller.ts` sets
+ * the flag to `true` beside its 400 for a wrong current password.
  *
- * **It only ever sets that flag to `true`, never to `false`, because it only
- * ever calls this limiter at all when the comparison came back wrong** — see
- * `requireStepUp.ts`'s own docstring for why a right answer touches nothing
- * here, and the timing bug that made it charge-and-refund the wrong way to
- * begin with. That matters here because `chargeConfirmBudgetOnSelfChange`
- * makes its own, independent charge against this same key right after this
- * gate, on `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id` — and
- * with `requireStepUp` only ever charging on a *wrong* answer, the two charges
- * are mutually exclusive within one request: a wrong answer here ends the
- * request (`requireStepUp` denies, `chargeConfirmBudgetOnSelfChange` never
- * runs), and a right one never touches the counter for `chargeConfirmBudget-
- * OnSelfChange`'s own charge to collide with.
+ * **Why the flag branch exists at all, since the caller it was written for no
+ * longer uses it.** `requireStepUp` could never use the 401 rule: every
+ * refusal it makes is the same uniform `403 { code: CODIGO_STEP_UP }`, on
+ * purpose, so the frontend can react to a stale window, a missing factor and a
+ * wrong password all the same way — and a status-based rule would therefore
+ * refund every wrong guess made through that gate, leaving it with no real
+ * budget behind it at all. `res.locals.stepUpPasswordWrong` was how it said
+ * the answer instead. It says nothing now: it charges and refunds against the
+ * store itself, before `next()`, so no charge of its own is ever left
+ * outstanding for `chargeConfirmBudgetOnSelfChange`'s own charge — made right
+ * after it on `PUT /usuario/userpass/:id`, through this limiter as ordinary
+ * middleware — to read or collide with.
  *
- * This function still reads the flag **once** and deletes it, and still
- * treats an explicit `false` as a refund, even though nothing in this
- * codebase sets `false` today. That is defence in depth, not dead code: it is
- * what would keep two charges in one request from reading each other's
- * verdict off a single shared `res.statusCode` the day some future caller
- * *does* need to mark a charge as right — the exact shape of the halving bug
- * a fix round found here, with the checks reversed. `loginLimiters.test.ts`
- * exercises the deletion directly, against a flag set to `false` by hand,
- * because `requireStepUp` alone will never produce that case to test it with.
+ * The branch stays because the *problem* it solves has not gone anywhere: a
+ * caller of `passwordConfirmLimiter` whose wrong answer is not a 401 needs a
+ * way to say so, and nothing else in this file can tell one 403 from another.
+ * It reads the flag **once** and deletes it, and treats an explicit `false` as
+ * a refund, even though only `true` is ever set in this codebase today —
+ * which is what would keep two charges in one request from reading each
+ * other's verdict off a single shared `res.statusCode`, the exact shape of the
+ * halving bug a fix round found here with the checks reversed.
+ * `loginLimiters.test.ts` exercises both directions directly, against flags
+ * set by hand; the one caller that sets it, `updateUserPass`, is held end to
+ * end by the charge counts in `app.auth.test.ts`.
  */
 export function confirmCostsNothing(_req: Request, res: Response): boolean {
   const marcado = res.locals.stepUpPasswordWrong as boolean | undefined;
@@ -203,13 +225,13 @@ export function confirmCostsNothing(_req: Request, res: Response): boolean {
  * read differently the day one of them gets improved.
  *
  * **The second half names what else this takes away, and that is the point.**
- * This bucket is shared: `requireStepUp` on every route mounted with `exigeContrasena`,
- * `chargeConfirmBudgetOnSelfChange` on rename and change-password, and
+ * This bucket is shared: `requireStepUp` on every route mounted with `sinVentana`,
+ * `chargeConfirmBudgetOnSelfChange` on the password change, and
  * `/auth/email/send`. So five wrong passwords typed into a step-up window also
- * shut, for fifteen minutes, the two screens somebody would go to next —
- * "change my password" and "register my email". Saying only "wait a few
- * minutes" sends that person to a screen that will refuse them for a reason
- * they have no way to connect to what they just did.
+ * shut, for fifteen minutes, the screens somebody would go to next — "change
+ * my password" and "register my email". Saying only "wait a few minutes" sends
+ * that person to a screen that will refuse them for a reason they have no way
+ * to connect to what they just did.
  */
 export const PASSWORD_CONFIRM_MESSAGE =
   "Demasiados intentos. Espere unos minutos antes de volver a confirmar. " +
@@ -276,24 +298,58 @@ export const webauthnCeremonyLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+/**
+ * The store behind `passwordConfirmLimiter`, held onto by name rather than
+ * reached through the limiter's own surface.
+ *
+ * 🔴 **Measured, not assumed.** `express-rate-limit` 8.6.2's `rateLimit()`
+ * return value exposes exactly two methods for reaching into a limiter's
+ * counters — `resetKey` and `getKey` — checked by constructing one and
+ * inspecting what came back. There is no `.store` on it. Building the store
+ * ourselves and handing it to `passwordConfirmLimiter` through its `store`
+ * option below is what lets `consumirCupoDeConfirmacion` and
+ * `devolverCupoDeConfirmacion` call `.increment()`/`.decrement()` directly —
+ * on the exact same instance this limiter reads, under the exact same
+ * `pc:<id>` key `passwordConfirmKey` builds off a `Request`. That sharing is
+ * what keeps this one bucket the *same* budget `chargeConfirmBudgetOnSelfChange`
+ * (`usuario.routes.ts`) charges against — it still calls `passwordConfirmLimiter`
+ * as ordinary middleware, unchanged; only `requireStepUp` moved to calling the
+ * store directly.
+ *
+ * **Why going straight to the store rather than through the limiter matters.**
+ * `MemoryStore.increment()` is declared `async` but never actually awaits
+ * anything in its body — it only ever touches a `Map`. Under Node's
+ * run-to-completion rule that makes one call atomic: nothing else runs
+ * between the read and the write inside it, which is exactly what a separate
+ * "read the count" followed by a separate "write the count" — the shape
+ * `requireStepUp.ts` used before this task — can never guarantee. See
+ * `consumirCupoDeConfirmacion`'s own docstring for the concurrency bug that
+ * gap produced.
+ */
+const passwordConfirmStore = new MemoryStore();
+
 export const passwordConfirmLimiter = rateLimit({
   windowMs: LOGIN_WINDOW_MS,
   limit: PASSWORD_CONFIRM_LIMIT,
+  store: passwordConfirmStore,
   skipSuccessfulRequests: true,
   requestWasSuccessful: confirmCostsNothing,
   keyGenerator: passwordConfirmKey,
   message: { message: PASSWORD_CONFIRM_MESSAGE },
   standardHeaders: true,
   legacyHeaders: false,
-  // `requireStepUp` (`middleware/requireStepUp.ts`) also calls this same
-  // limiter, ahead of `chargeConfirmBudgetOnSelfChange` on
-  // `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id` — but the two
-  // never both charge in the same request (see that gate's own docstring: it
-  // only ever calls this on a confirmed-wrong password, and denies without
-  // calling on, so `chargeConfirmBudgetOnSelfChange` never runs in the same
-  // request that gate charged). `validate.singleCount` — express-rate-limit's
-  // default check that a key is touched at most once per request — is left at
-  // its default (on) now that the two charges are mutually exclusive, but say
+  // `requireStepUp` (`middleware/requireStepUp.ts`) shares this bucket for
+  // its own password fallback, but since this task it no longer reaches it
+  // through this limiter at all — it charges and refunds directly against
+  // `passwordConfirmStore` above, through `consumirCupoDeConfirmacion` and
+  // `devolverCupoDeConfirmacion`. That charge is always settled, one way or
+  // the other, before `next()` is called — so by the time
+  // `chargeConfirmBudgetOnSelfChange` runs this same limiter as ordinary
+  // middleware right after it on `PUT /usuario/userpass/:id`, nothing of
+  // `requireStepUp`'s own pass through this key is still outstanding for it
+  // to read.
+  // `validate.singleCount` — express-rate-limit's default check that a key is
+  // touched at most once per request — is left at its default (on), but say
   // plainly what that buys: `express-rate-limit` disables each of its own
   // validations after its first invocation *per limiter instance*
   // (`index.mjs`'s `getValidations`), so `singleCount` can only ever inspect
@@ -303,6 +359,84 @@ export const passwordConfirmLimiter = rateLimit({
   // from disabling it any more; it is not standing watch for a future
   // regression the way an earlier version of this comment claimed.
 });
+
+/**
+ * Consumes one attempt from the confirmation bucket and says whether there
+ * was room — atomically: the increment and the "was there room" verdict are
+ * one call into `MemoryStore`, not a read followed by a separate write.
+ *
+ * 🔴 **Charges BEFORE comparing, not after — this task's whole point.**
+ * `requireStepUp.ts` used to read this bucket's count with `getKey`, spend
+ * ~250ms on a `bcrypt` comparison, and only call the real limiter afterwards
+ * if the comparison came back wrong. Ten requests arriving in the same tick
+ * all read "nothing spent yet" before any of them had charged anything, so
+ * all ten reached `bcrypt` — the nominal `PASSWORD_CONFIRM_LIMIT`-guess
+ * quarter-hour budget was, under concurrency, unbounded. Measured in the
+ * audit of 2026-09-08 that opened this task: a stolen session bought not one
+ * guess but as many as could be fired inside one `bcrypt` round trip.
+ *
+ * The caller gives back what this charges with `devolverCupoDeConfirmacion` —
+ * for the guess that turns out right, and for the one this function itself
+ * refuses without ever letting anything compare a password. That refund is
+ * what keeps `security.ts`'s promise for this bucket: a correct password
+ * never costs anything.
+ *
+ * 🔴 **What "atomically" means here precisely, because it is narrower than it
+ * sounds — corrected in fix round 1, which caught this docstring claiming a
+ * guarantee this function does not actually depend on.** `MemoryStore.increment()`
+ * returns the *same* mutable client object on every call for a key, not a
+ * snapshot, and this function only reads `totalHits` off it after its own
+ * `await` — a microtask tick later. Fired with no `await` in between (a bare
+ * `Promise.all(ids.map(consumirCupoDeConfirmacion))`, say), several calls for
+ * the same id can all read the same final, fully-incremented count instead of
+ * their own place in the sequence — measured directly in
+ * `loginLimiters.test.ts`'s own reproduction of exactly that shape.
+ *
+ * **That staleness cannot go the dangerous direction, though, which is what
+ * actually makes this safe.** `client.totalHits++` for *this* call happens
+ * synchronously, the instant `passwordConfirmStore.increment()` is called —
+ * before this function ever reaches its own `await`. Every read of
+ * `totalHits` afterwards, however delayed, can therefore only be **at least**
+ * this call's true position in the sequence, never less: other calls racing
+ * ahead can only push the number this function reads *up*, by incrementing
+ * the same shared object further, not down. Since `permitido` is
+ * `totalHits <= PASSWORD_CONFIRM_LIMIT`, a stale-high read can only flip a
+ * `true` into a `false` — refusing an attempt that arguably had room — never
+ * the other way round. So this can misfire towards refusing more than the
+ * limit strictly requires under a pathological calling pattern; it can never
+ * let more than `PASSWORD_CONFIRM_LIMIT` comparisons through, regardless of
+ * how calls for the same id interleave. That is true unconditionally, not
+ * because of anything about who calls this function or when.
+ *
+ * `requireStepUp.ts` is not, in fact, guaranteed to reach this only after
+ * awaiting real I/O of its own — when the step-up window is already
+ * satisfied and the route demands a password anyway, `tieneAlgunFactor` is
+ * skipped by short-circuit evaluation, so that specific path has no `await`
+ * of its own before this call. The fail-closed argument above is what covers
+ * that case; nothing about this function's safety leans on the shape of its
+ * caller. `loginLimiters.test.ts`'s own concurrency test still fires each
+ * call after a real gap (`setImmediate`, standing in for genuine request
+ * I/O), because that is what demonstrates the *stronger*, non-adversarial
+ * property this bucket wants in practice — exactly `PASSWORD_CONFIRM_LIMIT`
+ * admitted, not merely no more than that — which is not the same claim as
+ * this paragraph's.
+ */
+export async function consumirCupoDeConfirmacion(
+  idUsuario: number,
+): Promise<{ permitido: boolean; restantes: number }> {
+  const { totalHits } = await passwordConfirmStore.increment(passwordConfirmKeyForUser(idUsuario));
+  const restantes = Math.max(0, PASSWORD_CONFIRM_LIMIT - totalHits);
+  return { permitido: totalHits <= PASSWORD_CONFIRM_LIMIT, restantes };
+}
+
+/**
+ * Gives back one attempt charged by `consumirCupoDeConfirmacion`: a guess
+ * that turned out right, or an attempt that function refused for being over
+ * budget — which it still has to charge first, atomically, to find out.
+ */
+export async function devolverCupoDeConfirmacion(idUsuario: number): Promise<void> {
+  await passwordConfirmStore.decrement(passwordConfirmKeyForUser(idUsuario));
+}
 
 /**
  * Whether an answer costs the caller anything.

@@ -51,6 +51,50 @@ vi.mock("../permissions/store.js", () => ({
 }));
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 
+/**
+ * 🔴 The two reads that made this file need a database, and why they are doubled
+ * rather than skipped.
+ *
+ * This file fakes `SesionModel` on purpose — that is its whole design — so it
+ * was never supposed to touch Postgres. Two later changes reached past the fake:
+ * `DELETE /api/auth/sessions/:id` gained `requireStepUp()` (plan 4C), which asks
+ * `factorInventory` what second factors the account has; and `logout-all` gained
+ * `revokeAllRememberedDevicesOf` (plan 4B). Both query tables nothing here
+ * stubs.
+ *
+ * **On a machine with a database that is invisible, and it was.** The failure
+ * only appears where there is none — which is the deploy container: the
+ * `Dockerfile` runs `npm test` with `.env` outside the build context, on the
+ * argument, written there, that "the handful of tests that do want a real
+ * database skip themselves when none answers". This file does not want one and
+ * does not skip, so three tests answered 500 and **`RUN npm test` aborted every
+ * build**. Measured by recreating that environment, which is the only way this
+ * class of defect is ever found — it is the second time on this project.
+ *
+ * Doubling them and not `describe.skipIf(!dbAvailable)`: skipping would take the
+ * one assertion that a session can be taken back out of the deploy gate, which
+ * is the promise this file exists for. Doubling also removes a dependency on
+ * *what the configured database happens to contain* — until now these tests
+ * passed locally because the account they use has no factors registered, which
+ * is a fact about a copy of production and not about the code.
+ *
+ * The values are the state the tests assume: an account with nothing
+ * configured, so `tieneAlgunFactor` answers `false`. Since Task 3 of the
+ * reauthentication-window plan (2026-09-08), that account still has to prove
+ * a fresh step-up window or send a password to reach `DELETE
+ * /api/auth/sessions/:id` — `navegadorConVentana` below supplies the window
+ * for the two tests that need to reach `endSession` itself; `requireStepUp`'s
+ * own rule is measured in `routeGuards.test.ts` and `app.auth.test.ts`.
+ */
+vi.mock("./factorInventory.js", () => ({
+  tieneAlgunFactor: async () => false,
+  hayFactorVerificable: async () => false,
+  metodosDeReautenticacion: async () => [],
+}));
+vi.mock("./rememberedDeviceStore.js", () => ({
+  revokeAllRememberedDevicesOf: async () => 0,
+}));
+
 const app = (await import("../app.js")).default;
 const { SESSION_COOKIE_NAME } = await import("./sessionCookie.js");
 const { CSRF_CLIENT_HEADER, SESSION_ABSOLUTE_DAYS } = await import("../config/security.js");
@@ -238,6 +282,35 @@ async function navegador(): Promise<{ cookie: string; id: string }> {
   return { cookie: `${SESSION_COOKIE_NAME}=${token}`, id: String(fila.id) };
 }
 
+/**
+ * Like `navegador`, but with a step-up window already proved.
+ *
+ * `tieneAlgunFactor` is hard-mocked `false` for this whole file (see the
+ * comment above that mock), and since Task 3 of the reauthentication-window
+ * plan (2026-09-08) removed the branch that used to let that combination
+ * through for free, `DELETE /api/auth/sessions/:id` now refuses a factor-less
+ * caller for lacking a password unless its session already has a fresh
+ * `mfa_satisfied_at` — this is the only shape left in which the two tests
+ * below still reach `endSession` itself rather than the gate in front of it.
+ *
+ * A fabricated row, not `.send({ stepup_password: "…" })` the way
+ * `app.auth.test.ts` does it for the same gate: that shortcut works there
+ * because the whole file already stubs `bcryptjs.compare` to say yes to
+ * everything. This file deliberately does not — it fakes only `SesionModel`,
+ * `factorInventory.js` and `rememberedDeviceStore.js` (see the file's own
+ * header) and runs the real `verifyOwnPassword` otherwise, which would
+ * compare against `UsuarioModel.findByPk`'s `pass` — a field this file's own
+ * fixture never sets. Stamping the window is the one-line way through that
+ * does not also require faking `bcryptjs` or a real hash nobody else here
+ * needs.
+ */
+async function navegadorConVentana(): Promise<{ cookie: string; id: string }> {
+  const nav = await navegador();
+  const fila = tabla.find((f) => String(f.id) === nav.id);
+  if (fila) fila.mfa_satisfied_at = new Date();
+  return nav;
+}
+
 const vivo = (cookie: string) => request(app).get("/api/auth/me").set("Cookie", cookie);
 const SESION_EXPIRADA = "Su sesión expiró. Vuelva a iniciar sesión.";
 
@@ -330,7 +403,7 @@ describe("closing every session of this account", () => {
     // after losing a laptop. A list that still showed a session `authenticate`
     // has been refusing tells them a risk is open when it is closed — or, the
     // other way round, that it is closed when it is not.
-    const a = await navegador();
+    const a = await navegadorConVentana();
     const b = await navegador();
 
     const antes = await request(app).get("/api/auth/sessions").set("Cookie", a.cookie);
@@ -373,7 +446,7 @@ describe("closing one session", () => {
      * the query; this proves what the filter is *for*, by pointing the endpoint
      * at somebody else's row and finding it still alive afterwards.
      */
-    const mia = await navegador();
+    const mia = await navegadorConVentana();
     const { token: ajeno } = await createSession(99, {}, "completa");
     const filaAjena = tabla[tabla.length - 1];
 

@@ -1,7 +1,7 @@
 // `totp.controller.ts` — the business rules behind `setup`, `confirm` and
 // `delete`, tested with `requireStepUp` already assumed to have run (its own
 // suite is `requireStepUp.test.ts`; the wiring that actually mounts it with
-// `exigeContrasena: true` is `totp.routes.test.ts`'s job, not this file's).
+// `sinVentana: true` is `totp.routes.test.ts`'s job, not this file's).
 //
 // `otpauth` is used for real here, never mocked: it is deterministic given a
 // secret and a timestamp, and a mock would just be reimplementing RFC 6238
@@ -19,8 +19,15 @@ import type { Request, Response } from "express";
 import { Secret, TOTP } from "otpauth";
 
 const usuarioFindByPk = vi.fn();
+// `update` is mocked although this controller no longer calls it: it is the
+// witness for "registering a factor does not clear the grace deadline", the
+// loop closed on 2026-09-08 (see the tombstone in `auth/sessionPromotion.ts`).
+const usuarioUpdate = vi.fn();
 vi.mock("../models/usuario.model.js", () => ({
-  UsuarioModel: { findByPk: (...a: unknown[]) => usuarioFindByPk(...a) },
+  UsuarioModel: {
+    findByPk: (...a: unknown[]) => usuarioFindByPk(...a),
+    update: (...a: unknown[]) => usuarioUpdate(...a),
+  },
 }));
 
 const factorFindOne = vi.fn();
@@ -48,11 +55,9 @@ vi.mock("../auth/totpStore.js", () => ({
 
 const promoverSesion = vi.fn();
 const sellarPruebaDeFactor = vi.fn();
-const apagarLaMecha = vi.fn();
 vi.mock("../auth/sessionPromotion.js", () => ({
   promoverSesion: (...a: unknown[]) => promoverSesion(...a),
   sellarPruebaDeFactor: (...a: unknown[]) => sellarPruebaDeFactor(...a),
-  apagarLaMecha: (...a: unknown[]) => apagarLaMecha(...a),
 }));
 
 // Plan 4E: two questions. `tieneCredencialRegistrada` (a passkey or an app
@@ -130,6 +135,9 @@ const CALLER = {
   expires_at: new Date("2026-09-15T00:00:00Z"),
   estado: "completa" as const,
   mfa_satisfied_at: new Date("2026-09-01T00:00:00Z"),
+  // Required on `req.user`, and null until somebody types their password
+  // into `requireStepUp`: the ten-minute window of a factor-less account.
+  password_confirmed_at: null,
 };
 
 function usuarioRow(overrides: Record<string, unknown> = {}) {
@@ -187,7 +195,6 @@ beforeEach(() => {
   confirmarFactor.mockReset().mockResolvedValue(undefined);
   promoverSesion.mockReset().mockResolvedValue(true);
   sellarPruebaDeFactor.mockReset().mockResolvedValue(undefined);
-  apagarLaMecha.mockReset().mockResolvedValue(undefined);
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
   tieneCredencialRegistrada.mockReset().mockResolvedValue(false);
   revokeAllRememberedDevicesOf.mockReset().mockResolvedValue(0);
@@ -319,7 +326,7 @@ describe("confirmTotp", () => {
     expect(factorUpdate).not.toHaveBeenCalled();
     expect(confirmarFactor).not.toHaveBeenCalled();
     expect(promoverSesion).not.toHaveBeenCalled();
-    expect(apagarLaMecha).not.toHaveBeenCalled();
+    expect(sellarPruebaDeFactor).not.toHaveBeenCalled();
   });
 
   it("confirms against the row's own secret, never one sent in the body (hallazgo C15) — red demonstration", async () => {
@@ -439,7 +446,12 @@ describe("confirmTotp", () => {
     });
   });
 
-  it("clears the fourteen-day grace deadline on confirm", async () => {
+  it("no toca el plazo de gracia al confirmar: registrar un factor no compra catorce dias nuevos", async () => {
+    // Confirmar el factor borraba `usuarios.mfa_grace_until` hasta el
+    // 2026-09-08. NULL lo lee `estadoInicialDeSesion` como "el reloj no ha
+    // empezado nunca", asi que registrar un factor y borrarlo estampaba
+    // catorce dias enteros en el siguiente login, tantas veces como se
+    // quisiera. Este handler no escribe en `usuarios` en absoluto.
     const { secret, base32 } = secretoDeFila();
     leerSecretoSinConfirmar.mockResolvedValue({ id: 55, secreto: base32 });
     const codigo = TOTP.generate({ secret, algorithm: "SHA1", digits: 6, period: 30, timestamp: FIXED_NOW });
@@ -447,7 +459,8 @@ describe("confirmTotp", () => {
 
     await confirmTotp(c.req, c.res);
 
-    expect(apagarLaMecha).toHaveBeenCalledWith(CALLER.id, { transaction: TRANSACCION });
+    expect(c.status).toBe(200);
+    expect(usuarioUpdate).not.toHaveBeenCalled();
   });
 
   it("marks the row confirmed and writes a critical bitácora line", async () => {
@@ -495,7 +508,7 @@ describe("confirmTotp", () => {
 
       expect(c.status).toBe(200);
       // Both reads/writes carry the transaction this handler already opened
-      // for `confirmarFactor`/`promoverSesion`/`apagarLaMecha` — see the
+      // for `confirmarFactor`/`promoverSesion` — see the
       // atomicity test below for why that is not optional.
       expect(contarCodigosRestantes).toHaveBeenCalledWith(CALLER.id, { transaction: TRANSACCION });
       // 🔴 El hashing, FUERA de la transacción; la escritura, dentro. Los diez

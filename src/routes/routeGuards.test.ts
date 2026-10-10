@@ -238,6 +238,14 @@ const routes = mountedRoutes();
  * `app.auth.test.ts` pins its address at 404.
  */
 const AUTHENTICATION_NOT_APPLICABLE = [
+  // ── Not a door at all ──────────────────────────────────────────────────
+  // What the container's HEALTHCHECK asks, every ten seconds, from inside the
+  // container: no cookie to send and nobody behind it. A different case from
+  // every other line here — those produce a credential, this one has no use
+  // for one. It answers 204 with no body and reads nothing, so there is
+  // nothing behind it for a session to protect. See `app.ts`.
+  "GET /api/health",
+
   // The old door. Hands out a session cookie; it used to hand out a JWT too.
   "POST /api/login/",
   // The new door. Same reason as the first: it is what produces the session.
@@ -536,11 +544,13 @@ describe("who may change data", () => {
  * reversed back in silence.
  *
  * **Mounted with an option is still mounted, and this table cannot see the
- * difference.** `POST /api/auth/email/send` carries
- * `requireStepUp({ permiteOnboarding: true })`, which returns the same
- * `stepUpGate` function under a different closure, so the option is pinned
- * where it is observable — through a request, in `app.auth.test.ts` — and not
- * pretended at from here.
+ * difference.** Several of the routes below pass options — which set is
+ * `STEP_UP_OPTIONS`'s job, at the bottom of this file, and not a sentence
+ * here that would go stale the next time a mount changes. `requireStepUp()`
+ * returns the same `stepUpGate` function under a different closure whatever it
+ * is given, so what a mount asked for is pinned where it is observable: by
+ * that table, off the stamp Express carries, and through real requests in
+ * `app.auth.test.ts`. Never pretended at from here.
  *
  * Live here and not in `app.auth.test.ts`, which pins the gate's *behaviour*
  * through real requests: this file already walks the app as Express assembled
@@ -549,26 +559,31 @@ describe("who may change data", () => {
  * mean two half-tables, which is the shape the gap above came in.
  */
 const STEP_UP_GATED = [
-  // usuario.routes.ts — eight.
+  // usuario.routes.ts — nine.
   "POST /api/usuario/",
   "DELETE /api/usuario/:id",
   "PATCH /api/usuario/:id/restore",
   // The one that was outside this list until an audit read its reason again.
   // See the paragraph above, and the rewritten comment beside the route.
-  // Also one of the two mounts below carrying `exigeContrasena: true` since
-  // hallazgo F8 (2026-09-02 closure audit) — see the "cuatro, y dos más
-  // arriba" note near the bottom of this array for why.
+  // It also carries `sinVentana: true`, added by hallazgo F8 (2026-09-02
+  // closure audit) — `STEP_UP_OPTIONS` at the bottom of this file is what says
+  // so, and says why beside the entry.
   "PATCH /api/usuario/:id/desbloquear",
   "PUT /api/usuario/:id",
+  // The sub-resource that took `id_rol` off the route above it. Gated, and
+  // gated on a permission of the *other* module — `ROLES_GATES` holds the pair,
+  // for the reason that table gives about managing accounts and handing out
+  // authority being different powers.
+  "PUT /api/usuario/:id/rol",
   "PUT /api/usuario/username/:id",
   "PUT /api/usuario/userpass/:id",
   // The escape hatch from §8 of the MFA design — an administrator clears
   // somebody else's second factor. `rescatarMfaDeUsuario`'s own comment
   // explains the refusal this route adds on top of the gate: resetting your
-  // own factors here would leave your own session past `requireStepUp` on
-  // nothing but the cookie, since an account with no factors is exactly what
-  // this gate lets through unchallenged. The other of the two mounts with
-  // `exigeContrasena: true` — hallazgo F8, same note below.
+  // own factors here would drop what your own session has to answer this gate
+  // with, from the factor plus the password to the password alone. It carries
+  // `sinVentana: true` too — hallazgo F8, and `STEP_UP_OPTIONS` below is where
+  // that is asserted.
   "POST /api/usuario/:id/mfa/reset",
   // rol.routes.ts — four. `GET /` is a read and carries no gate of any kind:
   // every screen that shows a person needs the name of their role.
@@ -585,43 +600,45 @@ const STEP_UP_GATED = [
   // alive. The neighbouring session routes stay ungated on purpose — see the
   // comment beside this one in `auth.routes.ts`.
   "DELETE /api/auth/sessions/:id",
-  // auth.routes.ts — and one more that also passes an option, `permiteOnboarding`
-  // and not `exigeContrasena` — the two `usuario.routes.ts` mounts above that
-  // pass an option ask for the password instead; this one asks to let
-  // `onboarding` through. The design's step-up list has "cambiar el email
-  // propio" on it, and this is the route that does it. The handler's own
-  // `pass` check is not the same thing: it goes on accepting a password
-  // after plan 4B registers a factor, which is precisely what the gate's
-  // second branch exists to stop.
+  // auth.routes.ts — and one more, which passes two options for two unrelated
+  // reasons: `permiteOnboarding` to let a state through that has to reach this
+  // screen, and `sinVentana` because a verified address is a factor since plan
+  // 4E, so this route registers a credential and a window on it is a way in.
+  // (Not the only mount with two — the credential routes below carry the same
+  // pair, and `DELETE /auth/totp/` carries three.) The design's step-up list
+  // has "cambiar el email propio" on it, and this is the route that does it.
+  // The handler used to compare a `pass` of its own on top; that copy is gone,
+  // and the gate is the only thing on this route that asks for a password.
   "POST /api/auth/email/send",
-  // ── El segundo factor (plan 4B) — cuatro, y dos más arriba ──────────────
-  // Cuántas llevan `exigeContrasena: true` lo dice `STEP_UP_OPTIONS`, al final
-  // de este fichero, y no un número aquí: éste decía «seis, no cuatro» cuando
-  // ya eran nueve, y desde la decisión D6 del plan 4C son veinte. En esta puerta
-  // la opción significa que piden la contraseña **siempre**, también a
-  // quien acaba de probar su factor. Para las cuatro de aquí abajo, no es
-  // celo: un código de recuperación sella esa misma ventana, así que sin el
-  // «siempre» bastaría el papel impreso para dar de alta un factor nuevo —
-  // que es justo el límite que el plan dice que no se puede cruzar. Para las
-  // dos de `usuario.routes.ts` la razón es más simple: con ninguna cuenta
-  // de las nueve con un factor, la contraseña de quien llama es la única
-  // prueba que le queda pedir a la puerta antes de borrar el segundo factor
-  // de otra cuenta o de levantarle su bloqueo de inicio de sesión.
+  // ── El segundo factor (plan 4B) ─────────────────────────────────────────
+  // Cuáles llevan `sinVentana: true` lo dice `STEP_UP_OPTIONS`, al final de
+  // este fichero, y no un número aquí: esta frase llevó un recuento durante
+  // meses, decía «seis, no cuatro» cuando ya eran nueve, y volvió a quedarse
+  // atrás cada vez que la tabla se movió. En esta puerta la opción significa
+  // que piden la contraseña **siempre**, también a quien acaba de probar su
+  // factor y también a quien confirmó la suya hace un minuto. Para las de
+  // aquí abajo no es celo: un código de recuperación sella la ventana del
+  // factor, así que sin el «siempre» bastaría el papel impreso para dar de
+  // alta un factor nuevo — que es justo el límite que el plan dice que no se
+  // puede cruzar. Para las de `usuario.routes.ts` la razón es más simple:
+  // borrar el segundo factor de otra cuenta, o levantarle su bloqueo de
+  // inicio de sesión, no debe poder hacerse a rebufo de una ventana que se
+  // abrió para otra cosa.
   //
   // Las dos de alta (TOTP) llevan además `permiteOnboarding`, y no es una
   // relajación sino lo contrario de una caída: sin ella, quien está en
   // `onboarding` no podría registrar jamás el factor que le saca de
-  // `onboarding`. `parcial` sigue rechazado pase lo que pase. Las dos de
+  // `onboarding`. `parcial` sigue rechazado pase lo que pase. Las de
   // `usuario.routes.ts` no la llevan — nunca la llevaron, y siguen sin
-  // necesitarla: ninguna de las dos es una de las puertas por las que
-  // `onboarding` sale de `onboarding`.
+  // necesitarla: ninguna es una de las puertas por las que `onboarding` sale
+  // de `onboarding`.
   "POST /api/auth/totp/setup",
   "POST /api/auth/totp/confirm",
   "DELETE /api/auth/totp/",
   "POST /api/auth/recovery-codes/",
 
   // ── Las passkeys (plan 4C) ──────────────────────────────────────────────
-  // Las dos con `exigeContrasena: true` y `permiteOnboarding: true`, por las
+  // Las dos con `sinVentana: true` y `permiteOnboarding: true`, por las
   // dos razones que el bloque de arriba ya da para el alta de TOTP, y ninguna
   // de las dos es nueva:
   //
@@ -778,6 +795,11 @@ const READ_GATE_NOT_APPLICABLE = [
   // verlo sería fricción sin defensa; enterarte de que te quedan dos el día
   // que hacen falta es tarde.
   "GET /api/auth/recovery-codes/",
+
+  // The container's health probe. It is the one line here that does not answer
+  // about the caller, because it does not answer about anything: 204, no body,
+  // no read. A permission needs somebody to hold it, and nobody is asking.
+  "GET /api/health",
 ];
 
 describe("who may read data", () => {
@@ -1168,6 +1190,14 @@ const ROLES_GATES: Record<string, string> = {
   "PATCH /api/rol/:id/restore": "roles.archivar",
   "GET /api/permiso/": "roles.ver",
   "PUT /api/permiso/:id_rol": "roles.editar",
+  // Under `/api/usuario` and filed here all the same, the way
+  // `GET /api/usuario/:id/bitacora` is filed under the audit log: §3.7 files a
+  // route by the module that answers its question, not by the router it hangs
+  // off. This one is the sharpest case of the separation this table protects —
+  // it is the route that moves an account between roles, and writing
+  // `seguridad.editar` here would hand that to whoever may edit a telephone
+  // number.
+  "PUT /api/usuario/:id/rol": "roles.editar",
 };
 
 /**
@@ -1192,6 +1222,35 @@ const BITACORA_GATES: Record<string, string> = {
   "GET /api/bitacora/": "bitacora.ver",
   "GET /api/bitacora/authors": "bitacora.ver",
   "GET /api/usuario/:id/bitacora": "bitacora.ver",
+};
+
+/**
+ * The Archivos screen, and the last router that had gates and nothing reading
+ * them.
+ *
+ * 🔴 **Measured before this table existed:** re-point `GET /orphans` at
+ * `bitacora.ver` and downgrade `DELETE /orphans` from `archivos.archivar` to
+ * `archivos.ver`, and the whole server suite stays green — 2.655 tests. That
+ * second one hands the button that **unlinks every unreferenced photograph from
+ * disk** to anybody who can merely look at the screen. `vocabulary.test.ts` does
+ * not save it: both pairs exist in the matrix, so both are spellable.
+ *
+ * It was excused rather than tabulated, and the excuse was the tell — it said
+ * *where* the gates live, not that anything checks them. Excuses that describe
+ * are how a router leaves this check in one line.
+ *
+ * The action split is the whole point of the pair and is what the table pins:
+ * **reading the folder and emptying it are different permissions.** `POST /` is
+ * absent on purpose — it is the one route here with no gate at all, argued in
+ * `files.routes.ts` and pinned by address in `GATE_NOT_APPLICABLE`.
+ */
+const ARCHIVOS_GATES: Record<string, string> = {
+  "GET /api/files/orphans": "archivos.ver",
+  "DELETE /api/files/orphans": "archivos.archivar",
+  "GET /api/files/entity-stats": "archivos.ver",
+  "GET /api/files/broken-refs": "archivos.ver",
+  "DELETE /api/files/broken-refs": "archivos.archivar",
+  "DELETE /api/files/:name": "archivos.archivar",
 };
 
 /**
@@ -1222,6 +1281,7 @@ const BITACORA_GATES: Record<string, string> = {
 const TABULADOS = [
   "usuario", "rol", "permiso", "poste", "evento", "reporte", "bitacora",
   "adss", "ciudad", "material", "obs", "propietario", "revision", "tipo-obs",
+  "files",
 ] as const;
 
 const MODULOS_TABULADOS = new RegExp(`^\\/api\\/(${TABULADOS.join("|")})\\b`);
@@ -1237,6 +1297,7 @@ const TABLAS = [
   ["SEGURIDAD_GATES", SEGURIDAD_GATES],
   ["ROLES_GATES", ROLES_GATES],
   ["BITACORA_GATES", BITACORA_GATES],
+  ["ARCHIVOS_GATES", ARCHIVOS_GATES],
 ] as const;
 
 const TODAS_LAS_PUERTAS = Object.assign({}, ...TABLAS.map(([, t]) => t)) as Record<string, string>;
@@ -1306,16 +1367,12 @@ describe("which permission each gate asks for", () => {
     // five routers instead of the five `/stats` reads. `GENERADOR_GATES` is the
     // one table that happens to name every gated route of its own today without
     // being held to it.
-    const tabuladas = new Set([
-      ...Object.keys(SEGURIDAD_GATES),
-      ...Object.keys(ROLES_GATES),
-      ...Object.keys(EVENTOS_GATES),
-      ...Object.keys(PARAMETROS_GATES),
-      ...Object.keys(CIUDADES_GATES),
-      ...Object.keys(POSTES_GATES),
-      ...Object.keys(REPORTES_GATES),
-      ...Object.keys(BITACORA_GATES),
-    ]);
+    // Derived from `TABLAS`, not written out again. It used to be a second
+    // hand-kept list of the same tables minus one, which is a shape that goes
+    // wrong exactly once: a table added to `TABLAS` and forgotten here reports
+    // every route of its router as undeclared, and the obvious reading of that
+    // failure — "the table is wrong" — is the wrong one.
+    const tabuladas = new Set(TABLAS.flatMap(([, tabla]) => Object.keys(tabla)));
     const alcanzadas = routes.filter((r) => MODULOS_TABULADOS.test(r.path));
     // Anti-vacuity, and the specific vacuity this check is prone to: the filter
     // has no floor, so a router that stops matching the expression leaves the
@@ -1367,6 +1424,7 @@ describe("which permission each gate asks for", () => {
       dashboard: "una sola ruta, gateada, y §9 la deja anotada como pendiente de acotar",
       files: "sus seis puertas están en el propio fichero y una ruta es excepción declarada (§3.7)",
       ruta: "una sola ruta, sin puerta de permiso a propósito: no devuelve ningún dato de Osefi y sus cuatro llamantes viven en tres módulos distintos — ver ruta.routes.ts y GATE_NOT_APPLICABLE",
+      health: "la sonda de salud del contenedor: una ruta suelta en app.ts, sin sesión ni permiso porque responde 204 sin cuerpo y no lee nada — ver AUTHENTICATION_NOT_APPLICABLE",
     };
     const montados = [...new Set(routes.map((r) => r.path.split("/")[2]).filter(Boolean))];
     const sinExcusa = montados
@@ -1679,7 +1737,7 @@ describe("las rutas de passkey caen donde su prefijo dice", () => {
  * Which options each step-up gate was mounted with — Task 10 of plan 4C.
  *
  * 🔴 `STEP_UP_GATED` above says a gate is *there*; it cannot say which one.
- * `requireStepUp()` and `requireStepUp({ exigeContrasena: true })` both mount
+ * `requireStepUp()` and `requireStepUp({ sinVentana: true })` both mount
  * a function called `stepUpGate`, so turning the password off on the
  * permission matrix left every test in this file green — the plan's own words
  * for it were "structurally blind to which options reach `requireStepUp()`".
@@ -1689,63 +1747,93 @@ describe("las rutas de passkey caen donde su prefijo dice", () => {
  * Written out rather than derived, and compared **in both directions**, for
  * the reason `STEP_UP_GATED` gives: a new gated route cannot appear without a
  * declared option set, and an entry cannot outlive its route. Compared as a
- * **whole object**, never one field: a per-field check on `exigeContrasena`
+ * **whole object**, never one field: a per-field check on `sinVentana`
  * would pass if somebody also turned on `toleraFactorIlegible`, which is legal
  * at mount time once the password is on and would let the password alone
  * reach the permission matrix during a keyring fault.
  */
 type OpcionesGate = {
   permiteOnboarding: boolean;
-  exigeContrasena: boolean;
+  sinVentana: boolean;
   toleraFactorIlegible: boolean;
 };
 
-const SOLO_FACTOR: OpcionesGate = {
-  permiteOnboarding: false, exigeContrasena: false, toleraFactorIlegible: false,
+/**
+ * Con ventana: una contraseña correcta —o un factor probado— vale para los
+ * diez minutos siguientes. Sigue sin haber pase libre: una petición fuera de
+ * la ventana contesta 403 igual que las de abajo.
+ */
+const CON_VENTANA: OpcionesGate = {
+  permiteOnboarding: false, sinVentana: false, toleraFactorIlegible: false,
 };
-const FACTOR_Y_CONTRASENA: OpcionesGate = {
-  permiteOnboarding: false, exigeContrasena: true, toleraFactorIlegible: false,
+const SIN_VENTANA: OpcionesGate = {
+  permiteOnboarding: false, sinVentana: true, toleraFactorIlegible: false,
 };
-const CONTRASENA_Y_ONBOARDING: OpcionesGate = {
-  permiteOnboarding: true, exigeContrasena: true, toleraFactorIlegible: false,
+const SIN_VENTANA_Y_ONBOARDING: OpcionesGate = {
+  permiteOnboarding: true, sinVentana: true, toleraFactorIlegible: false,
 };
 
 const STEP_UP_OPTIONS: Record<string, OpcionesGate> = {
-  // ── Decisión D6 (plan 4C): permisos, roles y usuarios piden la contraseña
-  // siempre, se haya entrado como se haya entrado. Once monturas.
-  "POST /api/usuario/": FACTOR_Y_CONTRASENA,
-  "DELETE /api/usuario/:id": FACTOR_Y_CONTRASENA,
-  "PATCH /api/usuario/:id/restore": FACTOR_Y_CONTRASENA,
-  "PATCH /api/usuario/:id/desbloquear": FACTOR_Y_CONTRASENA,
-  "PUT /api/usuario/:id": FACTOR_Y_CONTRASENA,
-  "PUT /api/usuario/username/:id": FACTOR_Y_CONTRASENA,
-  "PUT /api/usuario/userpass/:id": FACTOR_Y_CONTRASENA,
-  "POST /api/usuario/:id/mfa/reset": FACTOR_Y_CONTRASENA,
-  "POST /api/rol/": FACTOR_Y_CONTRASENA,
-  "PUT /api/rol/:id": FACTOR_Y_CONTRASENA,
-  "DELETE /api/rol/:id": FACTOR_Y_CONTRASENA,
-  "PATCH /api/rol/:id/restore": FACTOR_Y_CONTRASENA,
-  "PUT /api/permiso/:id_rol": FACTOR_Y_CONTRASENA,
-  // ── Las dos que se quedan sólo con el factor, y por qué. Cerrar otra sesión
-  // propia es una operación sobre la sesión, no sobre la cuenta; y el correo
-  // es la puerta por la que `onboarding` sale de `onboarding`.
-  "DELETE /api/auth/sessions/:id": SOLO_FACTOR,
-  "POST /api/auth/email/send": {
-    permiteOnboarding: true, exigeContrasena: false, toleraFactorIlegible: false,
-  },
-  // ── Credenciales: contraseña siempre, y `onboarding` puede llegar porque es
-  // la pantalla a la que tiene que llegar para dejar de estarlo.
-  "POST /api/auth/totp/setup": CONTRASENA_Y_ONBOARDING,
-  "POST /api/auth/totp/confirm": CONTRASENA_Y_ONBOARDING,
+  // ── Las que se quedan sin ventana, y el criterio que las separa: lo que
+  // hacen sobrevive a que la víctima cambie su contraseña, cierre todas sus
+  // sesiones y resetee sus factores, porque el resultado vive en otra cuenta o
+  // en otra credencial. Ver §4.1 de
+  // `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md`.
+  //
+  // Crea una cuenta con el rol que se elija: persistencia perfecta.
+  "POST /api/usuario/": SIN_VENTANA,
+  // Archivar no es reversible desde dentro — `desarchivarUsuario` exige el
+  // permiso que se acaba de quitar. Ocho peticiones dejan a todos fuera.
+  "DELETE /api/usuario/:id": SIN_VENTANA,
+  // Desactiva el freno contra adivinar contraseñas.
+  "PATCH /api/usuario/:id/desbloquear": SIN_VENTANA,
+  // Asignar un rol reparte autoridad y la cuenta ascendida se queda con **sus
+  // propias** credenciales — el mismo criterio que deja fuera a `POST /`.
+  "PUT /api/usuario/:id/rol": SIN_VENTANA,
+  // Cambia la contraseña de **otra** persona: la puerta es la única defensa,
+  // porque ahí el controlador no pide la contraseña vieja.
+  "PUT /api/usuario/userpass/:id": SIN_VENTANA,
+  // Borra las credenciales de otra cuenta.
+  "POST /api/usuario/:id/mfa/reset": SIN_VENTANA,
+  // Se concede permisos a sí mismo.
+  "PUT /api/permiso/:id_rol": SIN_VENTANA,
+  // Emite diez credenciales offline en una sola respuesta.
+  "POST /api/auth/recovery-codes/": SIN_VENTANA,
+  // ── Las que entran en la ventana de diez minutos. Ninguna lleva otra opción.
+  // Editar un perfil, renombrarse, deshacer un archivado y mantener la lista de
+  // roles son la faena ordinaria de administración: la autoridad no se reparte
+  // aquí — eso son `PUT /api/usuario/:id/rol` y `PUT /api/permiso/:id_rol`, las
+  // dos arriba.
+  "PUT /api/usuario/:id": CON_VENTANA,
+  "PUT /api/usuario/username/:id": CON_VENTANA,
+  "PATCH /api/usuario/:id/restore": CON_VENTANA,
+  "POST /api/rol/": CON_VENTANA,
+  "PUT /api/rol/:id": CON_VENTANA,
+  "DELETE /api/rol/:id": CON_VENTANA,
+  "PATCH /api/rol/:id/restore": CON_VENTANA,
+  // Cerrar otra sesión propia es una operación sobre la sesión, no sobre la
+  // cuenta.
+  "DELETE /api/auth/sessions/:id": CON_VENTANA,
+  // ── Credenciales: contraseña en cada petición, y `onboarding` puede llegar
+  // porque son las pantallas a las que tiene que llegar para dejar de estarlo.
+  // Apagar `sinVentana` en cualquiera de éstas no es endurecer más tarde: es
+  // dejar que quien tenga la cookie espere a una ventana abierta, registre su
+  // propia credencial y borre las del dueño.
+  //
+  // Una dirección verificada es un factor desde el 4E, así que ésta registra
+  // uno y cuenta como las de abajo. Su contraseña la comprueba la puerta, no el
+  // controlador.
+  "POST /api/auth/email/send": SIN_VENTANA_Y_ONBOARDING,
+  "POST /api/auth/totp/setup": SIN_VENTANA_Y_ONBOARDING,
+  "POST /api/auth/totp/confirm": SIN_VENTANA_Y_ONBOARDING,
   // La única con `toleraFactorIlegible`: deshacer un TOTP que este servidor no
   // puede leer. Ver `requireStepUp.ts` para por qué no se ensancha a nadie más.
   "DELETE /api/auth/totp/": {
-    permiteOnboarding: true, exigeContrasena: true, toleraFactorIlegible: true,
+    permiteOnboarding: true, sinVentana: true, toleraFactorIlegible: true,
   },
-  "POST /api/auth/recovery-codes/": FACTOR_Y_CONTRASENA,
-  "POST /api/auth/webauthn/register/options": CONTRASENA_Y_ONBOARDING,
-  "POST /api/auth/webauthn/register/verify": CONTRASENA_Y_ONBOARDING,
-  "DELETE /api/auth/webauthn/credentials/:id": CONTRASENA_Y_ONBOARDING,
+  "POST /api/auth/webauthn/register/options": SIN_VENTANA_Y_ONBOARDING,
+  "POST /api/auth/webauthn/register/verify": SIN_VENTANA_Y_ONBOARDING,
+  "DELETE /api/auth/webauthn/credentials/:id": SIN_VENTANA_Y_ONBOARDING,
 };
 
 describe("which options each step-up gate was mounted with", () => {
@@ -1770,29 +1858,45 @@ describe("which options each step-up gate was mounted with", () => {
     }
   });
 
-  // 🔴 The assertion D6 is about. Stated on its own so that a revert of the
+  // 🔴 The assertion D6 is about, with the scope Isaias cut on 2026-09-08.
+  //
+  // D6 (plan 4C, 2026-09-02) demanded the caller's password on **every** write
+  // to the three routers, and this test was written so that a revert of the
   // decision — "let's drop the password from the permission matrix, it is
-  // annoying" — fails with this sentence and not with a table diff.
+  // annoying" — failed with this sentence and not with a table diff.
+  //
+  // That revert has now been authorised, and only in part: §4.1 of
+  // `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` puts seven of
+  // these writes inside the ten-minute window and leaves the other seven asking
+  // on every request. So the sentence narrows to a named list instead of
+  // disappearing — a tripwire that gets deleted protects nothing, and the half
+  // that survives is the half that hands out authority or reaches into somebody
+  // else's account.
   //
   // Over **every write** on the three routers, not over the routes that
   // already carry the gate: filtered from `gated`, a new administrative write
   // mounted with no gate at all would never enter the set and the loop would
   // never see it — the one direction D6 most needs to be caught in. Filtered
-  // from `routes`, it fails here by name.
-  it("demands the password on every write to permissions, roles and accounts", () => {
+  // from `routes`, it fails here by name. The two lists below have to add up to
+  // exactly that set for the same reason: a write added later belongs to
+  // neither, so it fails here rather than quietly picking up whichever
+  // treatment its author happened to type.
+  it("demands the password on the administrative writes that keep it, and only those", () => {
     // Its own prefix list, not `MODULOS_TABULADOS`: that one names the routers
     // whose gate tables are complete, and grew to six on 3 September. The claim
     // here is narrower — the three routers that mint accounts, hand out roles
     // and rewrite the matrix — and reusing the wider regex would demand a
     // password on every pole edit, which is not what D6 decided.
     //
-    // 🔴 **A name here that stops naming a mount takes its router out of D6, and
-    // the count below would not notice.** D1 renamed `/api/permisos` to
-    // `/api/permiso`: with the old spelling left in place, `PUT /api/permiso/:id_rol`
-    // — the write that rewrites the permission matrix of every role — would
-    // simply not be in `escrituras`, and the floor of ten would still be met by
-    // the twelve that remain. So the prefixes are named and checked against the
-    // mounted table before they are used.
+    // 🔴 **A name here that stops naming a mount takes its router out of this
+    // check entirely.** D1 renamed `/api/permisos` to `/api/permiso`: with the
+    // old spelling left in place, `PUT /api/permiso/:id_rol` — the write that
+    // rewrites the permission matrix of every role — would simply not be in
+    // `escrituras`. The partition below does catch that today, but it catches
+    // it as a diff between two lists of route names, which reads like a missing
+    // route rather than a router that walked out. So the prefixes are named and
+    // checked against the mounted table before they are used, and the failure
+    // says which router left.
     const PREFIJOS = ["usuario", "rol", "permiso"] as const;
     const sinMontar = PREFIJOS.filter((p) => !routes.some((r) => r.path.startsWith(`/api/${p}/`)));
     expect(
@@ -1823,10 +1927,98 @@ describe("which options each step-up gate was mounted with", () => {
         && ADMINISTRATIVOS.test(r.path)
         && !LECTURAS_CON_VERBO_DE_ESCRITURA.includes(nombre(r)),
     );
-    expect(escrituras.length).toBeGreaterThan(10);
+    /**
+     * Las que conservan la contraseña en **cada** petición, una por una.
+     *
+     * Lo que tienen en común: o crean autoridad —una cuenta nueva, un rol
+     * asignado, la matriz de permisos— o alcanzan la cuenta de otra persona sin
+     * que ella pueda deshacerlo. El resultado sobrevive a que la víctima cambie
+     * su contraseña, cierre todas sus sesiones y resetee sus factores, así que
+     * una ventana de diez minutos abierta antes no puede pagarlo.
+     */
+    const SIEMPRE_LA_CONTRASENA = [
+      "POST /api/usuario/",
+      "DELETE /api/usuario/:id",
+      "PATCH /api/usuario/:id/desbloquear",
+      "PUT /api/usuario/:id/rol",
+      "PUT /api/usuario/userpass/:id",
+      "POST /api/usuario/:id/mfa/reset",
+      "PUT /api/permiso/:id_rol",
+    ];
+    /**
+     * Y las que entran en la ventana — la reversión que Isaias autorizó el
+     * 2026-09-08, escrita por nombre para que sea una lista y no una tendencia.
+     *
+     * Editar un perfil, renombrarse, deshacer un archivado y mantener la lista
+     * de roles. Ninguna reparte autoridad: los roles son etiquetas, y quién los
+     * lleva se decide en `PUT /api/usuario/:id/rol`, que está arriba.
+     */
+    const EN_LA_VENTANA = [
+      "PUT /api/usuario/:id",
+      "PUT /api/usuario/username/:id",
+      "PATCH /api/usuario/:id/restore",
+      "POST /api/rol/",
+      "PUT /api/rol/:id",
+      "DELETE /api/rol/:id",
+      "PATCH /api/rol/:id/restore",
+    ];
+    expect([...SIEMPRE_LA_CONTRASENA, ...EN_LA_VENTANA].sort()).toEqual(
+      escrituras.map(nombre).sort(),
+    );
     for (const r of escrituras) {
       expect(r.chain, nombre(r)).toContain("stepUpGate");
-      expect(r.stepUp?.exigeContrasena, nombre(r)).toBe(true);
+      expect(r.stepUp?.sinVentana, nombre(r)).toBe(SIEMPRE_LA_CONTRASENA.includes(nombre(r)));
     }
+  });
+
+  it("mantiene la puerta que sostiene la rotación de sesión de `PUT /userpass/:id`", () => {
+    /**
+     * 🔴 El alambre de una dependencia que no se ve desde el controlador.
+     *
+     * `updateUserPass` rota la sesión del llamador, y desde el 2026-09-08
+     * decide el estado de la sesión nueva como lo decide un login —
+     * `estadoInicialDeSesion`— en vez de copiarlo de la vieja. Copiarlo era la
+     * manera de sortear el plazo de catorce días: la fila nueva se crea
+     * **ahora**, y `estadoEfectivo` exime a una sesión `completa` abierta
+     * después del plazo de su cuenta, así que una sesión con el plazo vencido
+     * se escribía otra sesión exenta, y otra, hasta el infinito.
+     *
+     * **Y una excepción, que es lo que esta puerta sostiene.**
+     * `estadoInicialDeSesion` contesta `parcial` a **toda** cuenta con factor
+     * —correo verificado incluido, que desde el plan 4E es un factor— porque
+     * un login todavía no ha probado nada. `authenticate` contesta **401** a
+     * `parcial`. Escribirlo tal cual devolvería 200 con cookie nueva y echaría
+     * al formulario de login en la petición siguiente, que es justo el fallo
+     * que la rotación existe para evitar. Así que el controlador escribe
+     * `completa` cuando la cuenta tiene factor, y lo que hace legítimo ese
+     * atajo es esta puerta: `requireStepUp` rechaza a una cuenta con factor
+     * que no traiga un `mfa_satisfied_at` más fresco que
+     * `STEP_UP_WINDOW_MINUTES` (rama `sin-factor-reciente`), así que todo el
+     * que llega al handler teniendo factor acaba de probarlo.
+     *
+     * **Lo que hay que vigilar es que la puerta siga montada**, no qué
+     * opciones lleva: esa rama salta con `sinVentana` y sin él. Quitar la
+     * puerta entera —o mover la ruta a un router sin ella— convierte el atajo
+     * del controlador en un regalo: `completa` para una cuenta que no ha
+     * probado ningún factor en esta sesión ni en la anterior. Por eso la
+     * primera aserción es la de estar en `gated`, y las otras dos solo fijan
+     * la forma con la que está montada hoy.
+     *
+     * `permiteOnboarding: false` va aquí porque es la otra mitad de la misma
+     * frase: encendido, una sesión ya estrechada a `onboarding` alcanzaría el
+     * handler, y aunque la rama de arriba la seguiría rechazando por no traer
+     * prueba fresca, dejaría de ser cierto que el único estado que llega aquí
+     * es `completa`.
+     */
+    const RUTA = "PUT /api/usuario/userpass/:id";
+    const ruta = routes.find((r) => nombre(r) === RUTA);
+    expect(ruta, `${RUTA} dejó de estar montada`).toBeDefined();
+    expect(
+      ruta?.chain,
+      `${RUTA} perdió su step-up: la rotación de sesión de updateUserPass concede ` +
+        "`completa` a una cuenta con factor apoyándose en que esta puerta acaba de exigírselo",
+    ).toContain("stepUpGate");
+    expect(ruta?.stepUp?.sinVentana, RUTA).toBe(true);
+    expect(ruta?.stepUp?.permiteOnboarding, RUTA).toBe(false);
   });
 });

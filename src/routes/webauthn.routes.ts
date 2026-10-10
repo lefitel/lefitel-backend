@@ -26,12 +26,15 @@
 // credentials. The rule: `PARCIAL` may gain what *proves* an existing factor,
 // never what *creates* one.
 //
-// 🔴 **`exigeContrasena: true` on both routes, and it is not a hardening knob
-// to turn on later.** `requireStepUp`'s own docstring says it: on a route that
-// registers or removes a credential, off is a permanent lockout. It is what
-// makes a stolen cookie insufficient, because the password is the one thing
-// the cookie does not carry — and, once passkeys sync through an Apple or
-// Google account, the one thing that account does not carry either.
+// 🔴 **`sinVentana: true` on both routes, and it is not a hardening knob
+// to turn on later.** On a route that registers or removes a credential, the
+// ten-minute window is a way in: leave the option off and a stolen cookie
+// waits for the owner to confirm something ordinary, then registers its own
+// key inside those minutes without typing anything — which ends in the
+// permanent lockout the paragraph above describes. What the option demands
+// instead is the caller's password on every request, and the password is the
+// one thing the cookie does not carry — and, once passkeys sync through an
+// Apple or Google account, the one thing that account does not carry either.
 //
 // **`permiteOnboarding: true` for the same reason `totp.routes.ts` has it**:
 // this is the screen somebody in `onboarding` has to reach in order to stop
@@ -88,14 +91,14 @@ router.post("/login/verify", authenticate, webauthnCeremonyLimiter, loginVerify)
 router.post(
   "/register/options",
   authenticate,
-  requireStepUp({ permiteOnboarding: true, exigeContrasena: true }),
+  requireStepUp({ permiteOnboarding: true, sinVentana: true }),
   registerOptions,
 );
 
 router.post(
   "/register/verify",
   authenticate,
-  requireStepUp({ permiteOnboarding: true, exigeContrasena: true }),
+  requireStepUp({ permiteOnboarding: true, sinVentana: true }),
   registerVerify,
 );
 
@@ -114,7 +117,7 @@ router.post(
  * would put a ceremony in front of the screen that *shows* you what to prove
  * with. Removing one is the mirror of registering one — it changes what the
  * account can prove with — so it takes the same gate and the same
- * `exigeContrasena`, for the reason written above the registration routes: the
+ * `sinVentana`, for the reason written above the registration routes: the
  * password is the one thing a stolen cookie does not carry, and once passkeys
  * sync through an Apple or Google account, the one thing that account does not
  * carry either.
@@ -132,7 +135,7 @@ router.get("/credentials", authenticate, listCredentials);
 router.delete(
   "/credentials/:id",
   authenticate,
-  requireStepUp({ permiteOnboarding: true, exigeContrasena: true }),
+  requireStepUp({ permiteOnboarding: true, sinVentana: true }),
   deleteCredential,
 );
 

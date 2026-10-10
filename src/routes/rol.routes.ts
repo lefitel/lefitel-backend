@@ -27,30 +27,37 @@ const router = Router();
 // The gate sits behind the permission on every write, never in front — see
 // `middleware/requireStepUp.ts`. Reads carry neither.
 //
-// 🔴 **`exigeContrasena: true` on every write here — decision D6 of plan 4C
-// (Isaias, 2026-09-02).** Permissions, roles and user accounts demand the
-// caller's password however they logged in, because the password is the one
-// thing that lives neither in an Apple or Google keychain nor on a phone: it
-// is what is missing from whoever has taken those. Before 4C these mounts
-// were content with a factor proved in the last ten minutes.
+// 🔴 **The plain gate on every write here, and no `sinVentana` — the scope
+// Isaias cut on 2026-09-08.** From plan 4C's decision D6 until then, these four
+// asked for the caller's password on *every* request; §4.1 of
+// `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` puts them back
+// inside the ten-minute window.
 //
-// **And it has no window.** The factor is asked once per ten minutes; the
-// password, on every request this option is on — there is no "password proved
-// recently" equivalent. Five wrong ones in a quarter of an hour shut the
-// shared confirmation budget. Correct ones cost nothing. That is the property
-// people will be surprised by, so it is written here rather than discovered.
-
-const conContrasena = () => requireStepUp({ exigeContrasena: true });
+// **Why these four and not the rest of D6.** A role is a label. The authority
+// is in the two routes that hand it out — `PUT /api/permiso/:id_rol` writes the
+// matrix and `PUT /api/usuario/:id/rol` says who wears which label — and both
+// of those keep the password on every request. Renaming "Supervisor" or undoing
+// its archive leaves a stolen cookie exactly as powerful as it already was, and
+// it is visible and reversible from the same screen. That is the test §4.1 of
+// the design applies, and it is what `POST /api/usuario/` fails: an account
+// minted there keeps its **own** credentials, so it outlives the victim
+// changing their password, `logout-all`, a factor reset and the console rescue.
+//
+// **Still a prompt, just not per request.** The gate is not off: outside the
+// window every one of these answers 403, and the way through is the caller's
+// own password or a factor proved in the last ten minutes — whichever the
+// account has. What the window buys is that confirming once covers the batch of
+// edits somebody sat down to make.
 
 // Routes
-router.post("/", requirePermission("roles", "crear"), conContrasena(), createRol);
-router.put("/:id", requirePermission("roles", "editar"), conContrasena(), updateRol);
+router.post("/", requirePermission("roles", "crear"), requireStepUp(), createRol);
+router.put("/:id", requirePermission("roles", "editar"), requireStepUp(), updateRol);
 router.get("/", requirePermission("roles", "ver"), getRol);
-router.delete("/:id", requirePermission("roles", "archivar"), conContrasena(), deleteRol);
+router.delete("/:id", requirePermission("roles", "archivar"), requireStepUp(), deleteRol);
 router.patch(
   "/:id/restore",
   requirePermission("roles", "archivar"),
-  conContrasena(),
+  requireStepUp(),
   desarchivarRol,
 );
 

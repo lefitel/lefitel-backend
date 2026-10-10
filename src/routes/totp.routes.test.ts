@@ -4,7 +4,7 @@
 // `deleteTotp` decide once `requireStepUp` has let a request through. What
 // nothing proves without this file is that the router actually mounts that
 // gate with the right options on the right route — the single line hallazgo
-// C1 exists because of ("`requireStepUp` gana `exigeContrasena: true`") is a
+// C1 exists because of ("`requireStepUp` gana `sinVentana: true`") is a
 // configuration object handed to a function call, invisible to a typecheck
 // and invisible to a test that only calls the controller directly.
 //
@@ -49,11 +49,25 @@ const tieneAlgunFactor = vi.fn();
  * pinned in `factorInventory.test.ts`, where the function lives.
  */
 const hayFactorVerificable = vi.fn();
+/**
+ * 🔴 Mocked because this file is the only one that walks the
+ * `toleraFactorIlegible` fall-through, and that path accepts a password from
+ * an account that **does** have a factor — one this server cannot read. The
+ * gate must not open a password window there, and until the mock existed the
+ * test below passed only because the real `sellarContrasena` was never
+ * reached: an assertion nobody had written, held up by an implementation
+ * detail. Now it is asserted, and the mock is what makes the assertion
+ * possible without an UPDATE leaving for a real database.
+ */
+const sellarContrasena = vi.fn();
 const logAction = vi.fn();
 const passwordConfirmLimiter = vi.fn() as ReturnType<typeof vi.fn> & { getKey: ReturnType<typeof vi.fn> };
 passwordConfirmLimiter.getKey = vi.fn();
 const passwordConfirmKey = vi.fn();
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword: (...a: unknown[]) => verifyOwnPassword(...a) }));
+vi.mock("../auth/sessionPromotion.js", () => ({
+  sellarContrasena: (...a: unknown[]) => sellarContrasena(...a),
+}));
 vi.mock("../auth/factorInventory.js", () => ({
   tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
   hayFactorVerificable: (...a: unknown[]) => hayFactorVerificable(...a),
@@ -118,6 +132,7 @@ beforeEach(() => {
   // The ordinary world: whatever factor exists can be proved. The one test
   // that cares flips it.
   hayFactorVerificable.mockReset().mockResolvedValue(true);
+  sellarContrasena.mockReset().mockResolvedValue(true);
   logAction.mockReset();
   passwordConfirmKey.mockReset().mockReturnValue("pc:totp");
   passwordConfirmLimiter.getKey.mockReset().mockResolvedValue(undefined);
@@ -172,7 +187,7 @@ describe("the availability gate (Decision 2)", () => {
   });
 });
 
-describe("🔴 exigeContrasena on all three routes (hallazgo C1)", () => {
+describe("🔴 sinVentana on all three routes (hallazgo C1)", () => {
   const RUTAS: Array<[string, string]> = [
     ["POST", "/setup"],
     ["POST", "/confirm"],
@@ -191,7 +206,7 @@ describe("🔴 exigeContrasena on all three routes (hallazgo C1)", () => {
 
       await stepUpGate(req, res, next);
 
-      // 🔴 Without `exigeContrasena: true` this account — no factor, no fresh
+      // 🔴 Without `sinVentana: true` this account — no factor, no fresh
       // proof needed — would simply be waved through by `requireStepUp`'s own
       // "nothing to prove" branch. Mutating the mount to `requireStepUp()`
       // with no options turns this into `next()` and the assertion below
@@ -252,11 +267,28 @@ describe("🔴 exigeContrasena on all three routes (hallazgo C1)", () => {
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ motivo: MOTIVO_CONTRASENA_REQUERIDA }),
     );
-    // And the fall-through is *not* the free skip: `exigeContrasena` stays on,
-    // so a stolen cookie with no password still gets nothing.
+    // And the fall-through is *not* a free pass: `sinVentana` stays on, so a
+    // stolen cookie with no password still gets nothing. This request reached
+    // the password branch and was refused there for sending none.
     expect(next).not.toHaveBeenCalled();
-    expect(logAction).not.toHaveBeenCalledWith(
-      expect.objectContaining({ action: "STEP_UP_SKIPPED" }),
+    // 🔴 And the fall-through leaves a trace, which is the only reason an
+    // operator can count these during a key outage: the gate has just decided
+    // to accept a password *in place of* a factor it declares unreadable, and
+    // the line is written at the moment of that decision — before the password
+    // is looked at, so it appears for a refused attempt like this one too.
+    // Deliberate: what is worth counting is how many people the broken key
+    // sent down this road, not how many of them got through.
+    //
+    // 🔴 **This assertion replaces a dead one.** It read
+    // `.not.toHaveBeenCalledWith({ action: "STEP_UP_SKIPPED" })` until Task 17
+    // of the reauthentication-window plan (2026-09-08). Task 3 of that same
+    // plan had deleted the branch that emitted `STEP_UP_SKIPPED`, and nothing
+    // writes that action anywhere any more — so the old line was true whatever
+    // this gate did, and would have stayed true with the whole refusal above
+    // deleted. `STEP_UP_FACTOR_ILEGIBLE` is what this path really writes, and
+    // this is its only witness.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "STEP_UP_FACTOR_ILEGIBLE", severity: "critical" }),
     );
   });
 
@@ -275,6 +307,16 @@ describe("🔴 exigeContrasena on all three routes (hallazgo C1)", () => {
     // The whole point: there *is* a way out, and it costs the password.
     expect(next).toHaveBeenCalled();
     expect(verifyOwnPassword).toHaveBeenCalled();
+
+    // 🔴 And it opens **no ten-minute window**. This account has a factor —
+    // the server just cannot read it — so the password is standing in for a
+    // factor rather than replacing one that was never there. Sealing here
+    // would hand a with-factor account a password window, which is the one
+    // state the audit rules out: prove the factor once, then hold the
+    // credential routes open on the password alone. Correct today because
+    // `tieneFactor` is `true` on this path, and asserted here because
+    // nothing else walks it.
+    expect(sellarContrasena).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -305,7 +347,7 @@ describe("🔴 exigeContrasena on all three routes (hallazgo C1)", () => {
 });
 
 describe("🔴 permiteOnboarding: on for all three routes (hallazgo F6/E-5)", () => {
-  // Before this fix, `DELETE /` mounted `requireStepUp({ exigeContrasena: true })`
+  // Before this fix, `DELETE /` mounted `requireStepUp({ sinVentana: true })`
   // with no `permiteOnboarding`, so an `onboarding` session — by construction
   // one with no *confirmed* factor — was refused at the state check with
   // "Termina de configurar tu segundo factor antes de realizar esta operación",
@@ -325,8 +367,8 @@ describe("🔴 permiteOnboarding: on for all three routes (hallazgo F6/E-5)", ()
     await stepUpGate(req, res, next);
 
     // Reaches the password branch (still refused, since none was sent) —
-    // proving the *state* check passed, without needing `exigeContrasena`
-    // turned off to observe it. `exigeContrasena` stays on for `DELETE` too:
+    // proving the *state* check passed, without needing `sinVentana`
+    // turned off to observe it. `sinVentana` stays on for `DELETE` too:
     // removing a credential is exactly the kind of write that must not go
     // through on an onboarding session's cookie alone.
     expect(next).not.toHaveBeenCalled();

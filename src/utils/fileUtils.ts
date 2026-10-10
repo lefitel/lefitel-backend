@@ -51,7 +51,14 @@ export function imageFileName(value: unknown): string | null {
   const name = value.trim().replace(/^(?:[/\\]+|images[/\\]+)+/i, "");
   if (name === "") return null;
   // No separators, no traversal, no drive letters, no NUL byte.
-  if (/[/\\]/.test(name) || name.includes("..") || /^[a-zA-Z]:/.test(name) || name.includes("\0")) {
+  //
+  // Traversal is the name being "." or "..", not the name *containing* two
+  // dots: with every separator already refused, nothing else can leave the
+  // directory. The wider `includes("..")` this replaces also refused
+  // "1712428860328_foto..webp" — a real stored name, because the uploader used
+  // to keep the original file name as it came — and the Archivos screen then
+  // took a photograph in use for an orphan.
+  if (/[/\\]/.test(name) || name === "." || name === ".." || /^[a-zA-Z]:/.test(name) || name.includes("\0")) {
     return null;
   }
   return name;

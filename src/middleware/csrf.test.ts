@@ -459,8 +459,13 @@ describe("mounted on the assembled app", () => {
      * it checks moves with a rename — the same argument this repository makes
      * for the header names.
      */
-    const token = jwt.sign({ id: 7, id_rol: 2 }, process.env.JWT_SECRET as string);
-    expect(jwt.verify(token, process.env.JWT_SECRET as string)).toMatchObject({ id: 7 });
+    // The Docker gate runs with no `.env`, and nothing at runtime sets
+    // `JWT_SECRET` any more: without this line `jwt.sign` threw and the image
+    // never built. A configured key still wins; either way it is in
+    // `process.env`, where a re-added verifier would look for it.
+    process.env.JWT_SECRET ||= "la-clave-que-el-verificador-usaria";
+    const token = jwt.sign({ id: 7, id_rol: 2 }, process.env.JWT_SECRET);
+    expect(jwt.verify(token, process.env.JWT_SECRET)).toMatchObject({ id: 7 });
 
     const res = await request(app)
       .post("/api/ciudad")

@@ -2248,6 +2248,44 @@ y todo el mundo vuelve a iniciar sesión.** Antes: E1, E3, E5 hechas, A2 hecha
 tarea C y D en su repositorio. El corte lleva todo lo que esté terminado ese
 día; lo que no, espera al siguiente y entonces sí paga maniobra.
 
+#### 🔴 Antes de nada: las ocho variables, o el servidor no arranca
+
+Esta lista faltaba, y sin ella ejecutar el apartado al pie de la letra no es una
+degradación sino una caída: `index.ts` comprueba las ocho al arrancar y hace
+`process.exit(1)` nombrando la que falte. Producción corre `master` de mayo y no
+tiene seis de ellas. La fuente es `requiredEnv()` en `config/security.ts`; el
+detalle de cada una vive en `docs/specs/2026-08-21-autenticacion-mfa-design.md`,
+que este apartado no referenciaba.
+
+| Variable | Qué es | Si falta |
+|---|---|---|
+| `CORS_ORIGIN` | Lista separada por comas de orígenes del frontend. Ya existe en producción | No arranca |
+| `COOKIE_NAME` | Nombre de la cookie de sesión. **Tiene que empezar por `__Host-`**, y hay una comprobación aparte que lo verifica | No arranca, y con prefijo incorrecto tampoco |
+| `COOKIE_SECURE` | `true` en producción | No arranca |
+| `MAIL_PROVIDERS` | Cadena de proveedores de correo, en orden de relevo | No arranca |
+| `MAIL_FROM` | Remitente de los correos del sistema | No arranca |
+| `MFA_ENCRYPTION_KEY_ACTIVE` | Puntero a la clave con la que se cifran los secretos del segundo factor | No arranca. Y apuntar a una clave ausente o mal formada tampoco arranca: se comprueba por separado |
+| `WEBAUTHN_RP_ID` | `www.osefi.net`, no el dominio raíz | No arranca |
+| `WEBAUTHN_ORIGIN` | El origen de las llaves de acceso. **No es la lista de CORS** | No arranca |
+
+🔴 **Las dos últimas no se corrigen después.** Cualquier otra variable puesta mal
+se arregla poniéndola bien y reiniciando. Una llave de acceso registrada bajo un
+identificador equivocado **deja de existir** en cuanto se corrija, y hay que
+volver a darla de alta en cada dispositivo y por cada persona. Negarse a arrancar
+es la única forma de fallo que no se puede desplegar sin querer, y por eso están
+en esta lista.
+
+Aparte de las ocho, el arranque también se cae si **ningún** proveedor de
+`MAIL_PROVIDERS` tiene su configuración completa: la cadena de correo vacía es
+fatal en producción, no un aviso.
+
+Y una que no es del servidor: **la construcción de `web` en Vercel lee
+`VITE_DEV_API_URL`**, pese al nombre. La suite se ejecuta con `NODE_ENV=test`
+para que Vercel pueda correrla, y con eso el lector de la dirección base cae en
+la rama de desarrollo. Si esa variable no está en el panel, la construcción falla
+con un error que **no** señala a la variable. Comprobar que está antes del corte
+cuesta un vistazo.
+
 **Todo cambio de contrato hecho antes del corte no necesita maniobra**, porque
 no hay cliente viejo que proteger: ya está roto por la autenticación. Eso
 convierte C1, C3, C4 y D1 en trabajo mecánico en dos repositorios, sin

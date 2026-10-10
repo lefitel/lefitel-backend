@@ -11,7 +11,7 @@
 // when a bitácora line is expected.
 //
 // **`POST /api/auth/recovery-codes` never accepts a recovery code as proof —
-// only `requireStepUp({ exigeContrasena: true })`, mounted in
+// only `requireStepUp({ sinVentana: true })`, mounted in
 // `routes/recoveryCodes.routes.ts`.** §5 of the design spec describes this
 // endpoint as "step-up, o un código de recuperación válido"; that half of the
 // sentence is wrong and this plan deliberately does not build it (hallazgo
@@ -19,7 +19,7 @@
 // its own, the printed sheet in a drawer would be a master key: whoever holds
 // it regenerates the ten and the real owner is left with nothing but a sheet
 // of paper that no longer opens anything. Requiring the password as well —
-// and `exigeContrasena` asks for it *even inside the ten-minute step-up
+// and `sinVentana` asks for it *even inside the ten-minute step-up
 // window a code itself just opened* — is what keeps a lost or stolen sheet
 // from being able to mint itself a fresh, unbounded ten.
 //
@@ -47,7 +47,7 @@
 // the way back in when a real factor is unreachable, "handed out at the
 // *end* of registering one, precisely because that assumes one already
 // exists." Nothing here enforced that assumption. `requireStepUp({
-// exigeContrasena: true })` only proves the caller's own current password —
+// sinVentana: true })` only proves the caller's own current password —
 // it says nothing about whether the account has anything for the ten codes
 // to back up, and an account with nothing is
 // exactly the account that gate's password fallback exists to let through
@@ -69,7 +69,7 @@
 // caller cannot already infer by trying to spend one, and it creates no
 // credential and changes no state. Gating a read like that behind a fresh
 // password would be friction with nothing behind it to defend — the same
-// reasoning `requireStepUp.ts`'s own `exigeContrasena` docstring draws around
+// reasoning `requireStepUp.ts`'s own `sinVentana` docstring draws around
 // "the routes that register or remove a credential", which this is not.
 
 import type { Request, Response } from "express";

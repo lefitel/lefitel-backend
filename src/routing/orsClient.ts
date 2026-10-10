@@ -50,6 +50,8 @@ export type MotivoSinRuta =
   | "sin-ruta"
   /** The walk ran out of time before ORS answered. */
   | "plazo"
+  /** ORS could not be reached at all: DNS, a refused connection, a cut one. */
+  | "red"
   /** ORS refused for a reason of its own. */
   | "rechazo";
 
@@ -80,19 +82,34 @@ export async function pedirRuta(
     // Checked before starting an attempt rather than after finishing one: an
     // attempt begun with no budget left is a request whose answer nobody can
     // wait for.
-    if (ahora() - arranque >= plazo) return { ok: false, motivo: "plazo" };
+    const restante = plazo - (ahora() - arranque);
+    if (restante <= 0) return { ok: false, motivo: "plazo" };
 
-    const res = await deps.fetch(ORS_URL, {
-      method: "POST",
-      headers: { Authorization: deps.clave, "Content-Type": "application/json" },
-      // `-1` is ORS's "no limit" search radius: snap each point to the nearest
-      // road however far it is. Without it a pole a few metres off the road is
-      // a 2010 on its own.
-      body: JSON.stringify({ coordinates: wps, radiuses: wps.map(() => -1) }),
-    });
+    // The check above only stops an attempt from *starting*. One already under
+    // way had nothing to end it: an ORS that accepts the connection and never
+    // answers held the request for `fetch`'s own default, which is minutes. The
+    // signal carries what is left of the budget, and covers reading the body.
+    const corte = AbortSignal.timeout(restante);
+    let res: Response;
+    let geojson: { features?: { geometry?: { coordinates?: number[][] } }[] } | undefined;
+    try {
+      res = await deps.fetch(ORS_URL, {
+        method: "POST",
+        headers: { Authorization: deps.clave, "Content-Type": "application/json" },
+        // `-1` is ORS's "no limit" search radius: snap each point to the nearest
+        // road however far it is. Without it a pole a few metres off the road is
+        // a 2010 on its own.
+        body: JSON.stringify({ coordinates: wps, radiuses: wps.map(() => -1) }),
+        signal: corte,
+      });
+      if (res.ok) geojson = (await res.json()) as typeof geojson;
+    } catch {
+      // Named rather than thrown: the caller logs the reason, and a thrown
+      // error reached the browser as a 500 with no reason written anywhere.
+      return { ok: false, motivo: corte.aborted ? "plazo" : "red" };
+    }
 
     if (res.ok) {
-      const geojson = (await res.json()) as { features?: { geometry?: { coordinates?: number[][] } }[] };
       const coordenadas = geojson.features?.[0]?.geometry?.coordinates;
       if (!coordenadas) return { ok: false, motivo: "sin-ruta" };
       // ORS speaks [lng, lat]; every caller of this API draws in [lat, lng].

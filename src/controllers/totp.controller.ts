@@ -3,21 +3,21 @@
 // C11, C15, B11, and Decisions 5 and 8.
 //
 // Everything this file writes to `factor_totp` goes through `auth/totpStore.ts`
-// (Task 4) and everything it writes to `sesiones`/`usuarios.mfa_grace_until`
-// goes through `auth/sessionPromotion.ts` (Task 5) — this file owns none of
+// (Task 4) and everything it writes to `sesiones` goes through
+// `auth/sessionPromotion.ts` (Task 5) — this file owns none of
 // that storage, only the HTTP-shaped decisions around it: which request gets
 // a 409, which secret a code is checked against, and when a deletion is
 // severe enough for a `critical` bitácora line.
 //
 // **The password gate is not in this file, and that is deliberate.** All
-// three routes mount `requireStepUp({ exigeContrasena: true })` in
+// three routes mount `requireStepUp({ sinVentana: true })` in
 // `routes/totp.routes.ts` — hallazgo C1: without it, a stolen session cookie
 // with no password registers its own factor and locks the real owner out
 // permanently, because `tieneAlgunFactor` then denies the victim the
 // password fallback too. By the time a handler below runs, the caller has
 // already typed their current password (or, for an account with a factor
 // already, already proved it fresh — see `requireStepUp.ts` for why
-// `exigeContrasena` demands both in that order). Nothing here re-checks that.
+// `sinVentana` demands both in that order). Nothing here re-checks that.
 //
 // **The secret and the `otpauth://` URI travel in the JSON body, never in a
 // URL.** Hallazgo B11: `httpLogger` logs `originalUrl` — query string and
@@ -41,7 +41,7 @@ import {
   leerSecretoSinConfirmar,
   confirmarFactor,
 } from "../auth/totpStore.js";
-import { promoverSesion, sellarPruebaDeFactor, apagarLaMecha } from "../auth/sessionPromotion.js";
+import { promoverSesion, sellarPruebaDeFactor } from "../auth/sessionPromotion.js";
 import { sequelize } from "../database/sequelize.js";
 import { tieneAlgunFactor, tieneCredencialRegistrada } from "../auth/factorInventory.js";
 import {
@@ -258,23 +258,27 @@ export const setupTotp = handler("setupTotp", async (req: Request, res: Response
  * sealing the wrong one leaves the neighbouring one still open to replay.
  * `sellarPaso` (Task 4) is handed exactly that value.
  *
- * **On success, four or five writes, in this order, matching the plan's own
- * ordering:** mark the row confirmed, seal the step that matched, promote
- * the session that just proved it (`sessionPromotion.ts`, Task 5 — without
- * this, `estadoEfectivo` only ever narrows and an `onboarding` or `parcial`
- * session that just registered its factor stays exactly what it was) —
- * and the fifth, conditional write: if there was no `parcial`/`onboarding`
- * row for `promoverSesion` to promote, because this session opened
- * `completa` already (an account with no factor, still inside its grace
- * period — see `estadoInicialDeSesion`), seal this session's own proof
- * anyway (`sellarPruebaDeFactor`, hallazgo F2/B-1). Skipping that fifth
- * write is exactly the bug it fixes: the account that registers its factor
- * *on time* would leave this endpoint with `mfa_satisfied_at` still NULL,
- * and every step-up gate would refuse it for the rest of the session's
- * life — while somebody who registers late, whose session opened
- * `onboarding`, sails through `promoverSesion` and is fine. Finally, clear
- * the fourteen-day deadline (`apagarLaMecha`) so it does not read as "still
- * overdue" for an account that just did what it was asked.
+ * **On success, in this order, matching the plan's own ordering:** mark the
+ * row confirmed, seal the step that matched, promote the session that just
+ * proved it (`sessionPromotion.ts`, Task 5 — without this, `estadoEfectivo`
+ * only ever narrows and an `onboarding` or `parcial` session that just
+ * registered its factor stays exactly what it was) — and then a conditional
+ * write: if there was no `parcial`/`onboarding` row for `promoverSesion` to
+ * promote, because this session opened `completa` already (an account with no
+ * factor, still inside its grace period — see `estadoInicialDeSesion`), seal
+ * this session's own proof anyway (`sellarPruebaDeFactor`, hallazgo F2/B-1).
+ * Skipping that write is exactly the bug it fixes: the account that registers
+ * its factor *on time* would leave this endpoint with `mfa_satisfied_at`
+ * still NULL, and every step-up gate would refuse it for the rest of the
+ * session's life — while somebody who registers late, whose session opened
+ * `onboarding`, sails through `promoverSesion` and is fine.
+ *
+ * 🔴 **What is deliberately *not* written: `usuarios.mfa_grace_until`.**
+ * Confirming a factor used to clear the fourteen-day deadline, and that is
+ * what let anybody buy a fresh fourteen days by registering a factor and
+ * deleting it again — a cleared deadline reads as "the clock never started",
+ * so the next login stamps a whole new one. The tombstone at the foot of
+ * `auth/sessionPromotion.ts` has the reasoning and the cost.
  *
  * The bitácora line is `critical`: hallazgo (Task 6 Step 7) — registering a
  * credential is a security event worth a permanent record even though
@@ -282,7 +286,7 @@ export const setupTotp = handler("setupTotp", async (req: Request, res: Response
  * bitácora line is the constancy that actually exists, matching
  * `rescueCore.ts`'s own precedent for an expected, unsent notice.
  *
- * **Sixth write, conditional: the first ten recovery codes (Isaias,
+ * **One more write, conditional: the first ten recovery codes (Isaias,
  * 2026-09-02).** Before this decision, confirming a factor never produced a
  * backup net — recovering it required remembering, unprompted, to visit a
  * different screen and type the password again. Whoever scanned the QR and
@@ -316,7 +320,7 @@ export const setupTotp = handler("setupTotp", async (req: Request, res: Response
  * that it needs one, since the whole point of this feature is that nobody
  * reliably goes and checks. Reading the count and, if it calls for it,
  * generating the ten both receive this function's own `{ transaction }` —
- * the same one `confirmarFactor`/`promoverSesion`/`apagarLaMecha` already
+ * the same one `confirmarFactor`/`promoverSesion` already
  * carry — so a real failure in either one rolls back every write in this
  * block together: this codebase has no `useCLS` wired up (verified in the
  * 4A closure audit), so a call that does not explicitly receive the
@@ -409,9 +413,8 @@ export const confirmTotp = handler("confirmTotp", async (req: Request, res: Resp
     if (!promovida) {
       await sellarPruebaDeFactor(caller.id_sesion, "totp", { transaction });
     }
-    await apagarLaMecha(caller.id, { transaction });
 
-    // Sixth write, conditional — see this function's own docstring for why
+    // The conditional write of the ten codes — see this function's own docstring for why
     // the check is against outstanding codes rather than against the factor
     // count, and why the write carries this same transaction.
     //
@@ -501,12 +504,13 @@ export const confirmTotp = handler("confirmTotp", async (req: Request, res: Resp
  * account still holds a factor. So a browser that logged in while this
  * factor existed goes on being `completa` for up to `SESSION_ABSOLUTE_DAYS`
  * after this call — and the instant `tieneAlgunFactor` starts answering
- * `false`, `requireStepUp`'s "nothing to prove" branch treats that stale
- * session exactly like an account that never had a factor at all, waving
- * gated writes through on the cookie alone wherever a route does not also
- * demand a password. A stolen cookie from before this call becomes a
- * password-free key to the whole security panel, for as long as that cookie
- * has left to live.
+ * `false`, `requireStepUp` stops asking that session for a factor at all and
+ * treats it exactly like an account that never had one: the caller's password
+ * is the whole of what stands in front of a gated write, and on the mounts
+ * that take the window one correct password buys ten minutes of them. A stolen
+ * cookie from before this call therefore drops from needing the factor *and*
+ * the password to needing only the password, for as long as that cookie has
+ * left to live.
  *
  * **Revoke, not degrade — decided here, not left to whoever reads this
  * next.** Degrading in place would mean writing some `estado` short of

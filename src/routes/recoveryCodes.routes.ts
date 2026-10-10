@@ -1,22 +1,21 @@
 // Recovery-code router: generating/regenerating the ten, and counting how
 // many are unspent. `docs/plans/2026-09-01-factores-mfa.md` Task 10.
 //
-// **Not mounted anywhere yet.** Per the plan's "Un fichero de rutas por
-// tarea" section, every 4B task that adds routes builds its own router and
-// nobody touches `app.ts` — the final mount happens once, in one pass, when
-// every 4B router exists. This module exports a `Router` meant to be mounted
-// at `/api/auth/recovery-codes`, matching `auth/sessionState.ts`'s
-// `ONBOARDING_EXTRA` entry of the same name.
+// **Mounted at `/api/auth/recovery-codes` in `app.ts`, and the path has to
+// stay that**: it matches `auth/sessionState.ts`'s `ONBOARDING_EXTRA` entry of
+// the same name, which is what lets an `onboarding` session reach this router
+// at all — and then `POST /`'s own gate closes behind it, on purpose, for the
+// reason two paragraphs down.
 //
-// 🔴 **`POST /` carries `requireStepUp({ exigeContrasena: true })` — hallazgo
+// 🔴 **`POST /` carries `requireStepUp({ sinVentana: true })` — hallazgo
 // C14.** §5 of the design spec describes this endpoint as "step-up, o un
 // código de recuperación válido"; that half is wrong and deliberately not
 // built (see `recoveryCodes.controller.ts`'s own header, and the spec has
-// been annotated). Without `exigeContrasena`, a caller who just spent a
+// been annotated). Without `sinVentana`, a caller who just spent a
 // recovery code to get here would land inside `requireStepUp`'s ten-minute
 // window and regenerate the whole set on the strength of the sheet alone —
 // exactly the "printed sheet becomes a master key" hallazgo C14 warns about.
-// `exigeContrasena` asks for the password regardless of how fresh that proof
+// `sinVentana` asks for the password regardless of how fresh that proof
 // is, which is what closes it.
 //
 // 🔴 **No `permiteOnboarding` on `POST /` — removed by the 2026-09-02 closure
@@ -67,7 +66,7 @@ import { regenerateRecoveryCodes, countRecoveryCodes } from "../controllers/reco
 
 const router = Router();
 
-router.post("/", authenticate, requireStepUp({ exigeContrasena: true }), regenerateRecoveryCodes);
+router.post("/", authenticate, requireStepUp({ sinVentana: true }), regenerateRecoveryCodes);
 router.get("/", authenticate, countRecoveryCodes);
 
 export default router;

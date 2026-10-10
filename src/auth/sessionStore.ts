@@ -150,6 +150,7 @@ export async function findLiveSession(
   estado: EstadoSesion;
   mfa_satisfied_at: Date | null;
   mfa_source: string | null;
+  password_confirmed_at: Date | null;
 } | null> {
   const now = new Date();
   const found = await SesionModel.findOne({
@@ -168,6 +169,11 @@ export async function findLiveSession(
       "estado",
       "mfa_satisfied_at",
       "mfa_source",
+      // Sequelize returns only the columns named here, so this list is one of
+      // the places `password_confirmed_at` has to appear before the step-up
+      // gate can read it — and one where forgetting it costs nothing at
+      // compile time and everything at runtime.
+      "password_confirmed_at",
     ],
     transaction: opciones.transaction,
   });
@@ -182,6 +188,7 @@ export async function findLiveSession(
     estado: v.estado,
     mfa_satisfied_at: v.mfa_satisfied_at,
     mfa_source: v.mfa_source,
+    password_confirmed_at: v.password_confirmed_at,
   };
 }
 

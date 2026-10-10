@@ -36,7 +36,7 @@
 // already hold step-up with the password. This module does not, and cannot,
 // enforce that itself — it has no request to inspect — so whichever
 // controller calls `regenerarCodigos` is the one place that has to sit
-// behind `requireStepUp({ exigeContrasena: true })`. A printed sheet of ten
+// behind `requireStepUp({ sinVentana: true })`. A printed sheet of ten
 // codes must never be able to regenerate itself into a fresh ten.
 //
 // No code, no prefix and no hash ever reaches a log line, a thrown error, or
@@ -159,7 +159,7 @@ function tieneFormaDeCodigo(bruto: unknown): bruto is string {
  * standalone regenerate-codes endpoint still calls this with nothing and
  * gets its own, self-contained transaction, exactly as before. `confirmTotp`
  * calls it *with* the transaction it is already holding open for
- * `confirmarFactor`/`promoverSesion`/`apagarLaMecha`, so that issuing the
+ * `confirmarFactor`/`promoverSesion`, so that issuing the
  * first ten recovery codes and confirming the factor they back up commit or
  * roll back together — a factor confirmed with no working recovery net is
  * worse than refusing the confirmation outright, and this codebase has no

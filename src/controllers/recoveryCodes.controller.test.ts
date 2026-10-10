@@ -1,7 +1,7 @@
 // `recoveryCodes.controller.ts` — the two thin HTTP wrappers around
 // `auth/recoveryCodeStore.ts`, tested with `requireStepUp` already assumed to
 // have run on the POST (its own suite is `requireStepUp.test.ts`; the wiring
-// that actually mounts it with `exigeContrasena: true` on this route is
+// that actually mounts it with `sinVentana: true` on this route is
 // `recoveryCodes.routes.test.ts`'s job, not this file's).
 //
 // `recoveryCodeStore.ts` itself is off-limits tonight — built and verified —
@@ -48,6 +48,9 @@ const CALLER = {
   expires_at: new Date("2026-09-15T00:00:00Z"),
   estado: "completa" as const,
   mfa_satisfied_at: new Date("2026-09-01T00:00:00Z"),
+  // Required on `req.user`, and null until somebody types their password
+  // into `requireStepUp`: the ten-minute window of a factor-less account.
+  password_confirmed_at: null,
 };
 
 const DIEZ_CODIGOS = Array.from({ length: 10 }, (_, i) => `CODIGO-${i}-${"X".repeat(20)}`);

@@ -6,14 +6,15 @@ import {
   metodosDeReautenticacion,
   type MetodoReautenticacion,
 } from "../auth/factorInventory.js";
+import { sellarContrasena } from "../auth/sessionPromotion.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
-import { passwordConfirmLimiter, passwordConfirmKey, PASSWORD_CONFIRM_MESSAGE } from "./loginLimiters.js";
 import {
-  STEP_UP_WINDOW_MINUTES,
-  STEP_UP_PASSWORD_FIELD,
-  PASSWORD_CONFIRM_LIMIT,
-} from "../config/security.js";
+  consumirCupoDeConfirmacion,
+  devolverCupoDeConfirmacion,
+  PASSWORD_CONFIRM_MESSAGE,
+} from "./loginLimiters.js";
+import { STEP_UP_WINDOW_MINUTES, STEP_UP_PASSWORD_FIELD } from "../config/security.js";
 
 const gateLog = log("step-up");
 
@@ -32,28 +33,24 @@ const gateLog = log("step-up");
  * migration. Anything that changes that turns "remember this browser" into
  * "this browser is permanently step-up authorised".
  *
- * **An account with nothing to prove is let through, and that is not the same
- * gate weakened — it is the same gate correctly scoped.** Between the deploy
- * of plan 4A and the plan that wires up a real factor challenge, nobody has
- * one to prove, and `web/src` does not yet send `STEP_UP_PASSWORD_FIELD` —
- * that frontend is the later plan's job. A version of this file that refused
- * unconditionally whenever `tieneAlgunFactor` said no was not a stricter
- * gate: with no factor anywhere and no client able to answer a password
- * fallback, it refused *every* gated write on a live deployment — saving the
- * permission matrix, creating a role, an account changing its own password —
- * for every account, always. A gate nothing can satisfy is not a gate, it is
- * an outage, and it shipped that way once before this comment existed to
- * prevent it happening again. See the branch below for exactly what is let
- * through and what still is not, and its own comment for why the skip is
- * temporary by construction rather than by promise.
+ * **An account with nothing to prove still has to type its password.** Task
+ * 3 of the reauthentication-window plan (2026-09-08) removed the branch that
+ * used to let a factor-less account through on the cookie alone: `web/src`
+ * has sent `STEP_UP_PASSWORD_FIELD` since plan 4D, so there is no longer a
+ * caller this gate cannot ask. Correct, and it opens the gate; wrong or
+ * missing, and it is refused — missing for free, wrong **and charged**
+ * against the shared budget. See the password branch below for exactly what
+ * each answer costs.
  *
- * **A caller that does send a password is still held to it.** The later
- * frontend plan will send `stepup_password` on these routes, and from that
- * moment the fallback below behaves exactly as this section always said:
- * correct, and it opens the gate; wrong, and it is refused **and charged**
- * against the shared budget, never for free. The normal first request today
- * sends nothing, precisely because no client sends it yet — that is what
- * lets it through rather than the field being optional once it exists.
+ * **And a correct one buys that account ten minutes**, the same width a
+ * proved factor gets, stamped on the session row by `sellarContrasena` and
+ * read back on the next request. Task 5 of the same plan added it, and it is
+ * what keeps "type your password on every sensitive write" from being the
+ * whole day's experience for the accounts that have no factor to prove — the
+ * exact annoyance this arc exists to remove. Two bounds on it, both
+ * deliberate: the window does not renew itself (the ten minutes run from the
+ * *first* confirmation, never the latest), and a route carrying `sinVentana`
+ * ignores it entirely.
  *
  * **The fallback that does spend something is rate-limited, and shares its
  * budget with `chargeConfirmBudgetOnSelfChange`** (`usuario.routes.ts`) rather
@@ -63,34 +60,43 @@ const gateLog = log("step-up");
  * unlimited number of *real* guesses against this gate, which for whoever has
  * stolen a session is an oracle for the password behind it.
  *
- * **It only ever calls the real limiter — the one that actually increments the
- * shared counter — when this gate's own comparison came back wrong**, never
- * when it came back right and never merely to check the budget. Two things
- * follow, and both were fixed in the round that added this comment rather than
- * designed in from the start. First: a *correct* `stepup_password` never
- * touches the counter at all, so there is nothing to refund and nothing that
- * can be misread. Second, and the reason that matters here specifically: on
- * `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id`,
- * `chargeConfirmBudgetOnSelfChange` makes its own, independent charge against
- * this same key right after this gate. The very first version of this file
- * charged unconditionally, before comparing anything, and marked a wrong
- * answer with a flag `confirmCostsNothing` read as "this one 403 costs" —
- * with no way to say the opposite for a *right* answer. So on a request
- * where this gate's own check was correct and `chargeConfirmBudgetOnSelfChange`'s
- * own `oldPass` check was wrong, both charges landed on the same final 401
- * and **neither** refunded — the right answer had no flag telling
- * `confirmCostsNothing` to let it go, so it read the same as the wrong one.
- * Measured against a real run: every such attempt cost 2, not 1, so the
- * nominal five-guess budget was gone by the third attempt instead of the
- * sixth — closer to halved than merely trimmed by one. Never charging on a
- * right answer removes the charge that caused it — there is nothing left on
- * the books for a wrong answer's own charge to share a verdict with.
- * `confirmCostsNothing` in `loginLimiters.ts` still reads a flag this gate
- * sets on a wrong answer, since that answer is a uniform 403 rather than the
- * 401 the rest of that bucket's callers use — and it still consumes that
- * flag on read, as defence in depth against a future change reintroducing
- * two charges in one request, even though nothing in this file does that
- * today.
+ * **It charges every attempt, right or wrong, and refunds a right one on the
+ * spot — not the deferred, response-`finish`-time refund `passwordConfirmLimiter`
+ * itself does for every other caller.** That distinction is the fix Task 1 of
+ * the reauthentication-window plan (2026-09-08) made, and the reason it is
+ * not the same shape as the version this paragraph used to describe.
+ *
+ * The version before it read the counter with `getKey`, compared the
+ * password (a `bcrypt` call, ~250ms), and only charged afterwards if the
+ * comparison was wrong. Concurrent requests all read "nothing spent yet"
+ * before any of them had charged anything, so a stolen session bought as many
+ * guesses as fit in one `bcrypt` round trip, not `PASSWORD_CONFIRM_LIMIT` —
+ * see `consumirCupoDeConfirmacion`'s own docstring in `loginLimiters.ts` for
+ * the measurement. Charging first and refunding the right answers closes
+ * that gap: the charge and the "was there room" verdict are one atomic call
+ * into the store (`consumirCupoDeConfirmacion`), so two requests racing each
+ * other cannot both read zero.
+ *
+ * **This is not the same shape as the bug an earlier version of this gate had
+ * for a different reason, and the difference is what makes it safe.** That
+ * earlier version also charged before knowing the answer — through
+ * `passwordConfirmLimiter` itself, whose `skipSuccessfulRequests` design
+ * defers the refund decision to the response's own `finish` event, reading a
+ * flag (`res.locals.stepUpPasswordWrong`) off a `Response` this gate shares
+ * with `chargeConfirmBudgetOnSelfChange`'s own, independent charge on
+ * `PUT /usuario/userpass/:id`. That flag
+ * could only ever say "this one costs"; there was no way to say the opposite
+ * for a right answer, so a right answer here landing on the same final 401 as
+ * a wrong `oldPass` check went un-refunded — both charges cost, not one,
+ * halving the real budget. `consumirCupoDeConfirmacion` and
+ * `devolverCupoDeConfirmacion` below never touch `passwordConfirmLimiter` or
+ * its deferred machinery at all: the refund happens synchronously, before
+ * `next()` is ever called, so nothing is left outstanding for
+ * `chargeConfirmBudgetOnSelfChange`'s own charge — which still goes through
+ * `passwordConfirmLimiter` unchanged — to collide with. `confirmCostsNothing`
+ * in `loginLimiters.ts` still exists and still reads that flag, for whatever
+ * future caller of `passwordConfirmLimiter` itself needs a 403 to cost like a
+ * 401 — this gate is simply no longer one of them.
  */
 export const CODIGO_STEP_UP = "STEP_UP_REQUIRED";
 
@@ -110,7 +116,7 @@ export const MOTIVO_ESTADO_INCOMPLETO = "estado-incompleto";
 export const MOTIVO_SIN_FACTOR_RECIENTE = "sin-factor-reciente";
 export const MOTIVO_CONTRASENA_INCORRECTA = "contraseña-incorrecta";
 /**
- * The fourth, and the only one a route has to opt into: `exigeContrasena`
+ * The fourth, and the only one a route has to opt into: `sinVentana`
  * asked for a password and the body carried none.
  *
  * **Deliberately not `MOTIVO_CONTRASENA_INCORRECTA`**, even though the remedy
@@ -135,15 +141,17 @@ export interface OpcionesStepUp {
    * only. Off by default, and every administrative mount leaves it off.
    *
    * **For the doors `onboarding` opens in order to stop being `onboarding`.**
-   * `ONBOARDING_EXTRA` in `auth/sessionState.ts` opens six prefixes, and
-   * **five** of them are that: the email, TOTP, WebAuthn registration, the
-   * stored credentials, the recovery codes. The sixth is `/api/auth/sessions`,
-   * which is not — the write behind it takes this gate with the option **off**,
-   * and refusing `onboarding` there is the whole of what closed a demonstrated
-   * attack (see `auth.routes.ts`). That is the shape of this option, stated
-   * against the one prefix that disproves the lazy version of it: it is decided
-   * per route, never per state, and there is no reading of "`onboarding` may
-   * reach it" that implies "the gate should let it through".
+   * `ONBOARDING_EXTRA` in `auth/sessionState.ts` is the list of prefixes that
+   * state reaches at all — most of them are that kind of door: the email, TOTP,
+   * WebAuthn registration, the stored credentials. `/api/auth/sessions` and
+   * `/api/auth/recovery-codes` are not, and they are the ones worth stating the
+   * rule against: both take this gate with the option **off**, and refusing
+   * `onboarding` on the first of them is the whole of what closed a
+   * demonstrated attack (see `auth.routes.ts`). Which mount carries which
+   * option is `STEP_UP_OPTIONS` in `routeGuards.test.ts`, not a tally here.
+   * That is the shape of this option: it is decided per route, never per
+   * state, and there is no reading of "`onboarding` may reach it" that implies
+   * "the gate should let it through".
    *
    * The specification puts several of those same operations behind step-up —
    * "cambiar el email propio", "dar de alta o de baja cualquier factor" — and,
@@ -156,14 +164,15 @@ export interface OpcionesStepUp {
    * **Measured, not argued.** Mounting the gate without this option on `POST
    * /api/auth/email/send` turns `app.auth.test.ts`'s "leaves the doors that
    * finish the setup open to that same session" from 400 into 403. That is not
-   * a stricter gate, it is a sealed room: `/auth/totp/*` and
-   * `/auth/webauthn/register/*` answer 409 until the address is verified (§5
-   * of the design), the address cannot be registered without this route, and a
+   * a stricter gate, it is a sealed room: `POST /auth/totp/setup` answers 409
+   * until the address is verified (§5 of the design, and `setupTotp`'s own
+   * check), the address cannot be registered without this route, and a
    * registered factor is the only thing that ends `onboarding`. Every account
    * reaches that state on its own, `MFA_GRACE_DAYS` after its first login —
-   * see `estadoInicialDeSesion` — so this would be the whole payroll, with no
-   * way out from inside the API. Plan 4B will need the same option on the
-   * registration routes for the same reason.
+   * see `estadoInicialDeSesion` — so this would be the whole payroll with only
+   * the passkey door left, which is the one factor that needs no mailbox. The
+   * registration routes carry this option for the same reason, and have since
+   * plan 4B: `totp.routes.ts` and `webauthn.routes.ts`.
    *
    * **What it does not do.** `parcial` is still refused: that state means the
    * account *has* a factor and has not proved it on this session, so the way
@@ -171,28 +180,41 @@ export interface OpcionesStepUp {
    * whose account does have a factor — which `estadoEfectivo` can produce for
    * a session opened before the deadline and predating the registration — is
    * refused one line further down by the factor check, which does not consult
-   * this option at all. So what this ever lets through is the case where the
-   * account has nothing to prove: the same treatment, and the same bitácora
-   * line, a factor-less `completa` session already gets.
+   * this option at all. So all this option ever buys is that an account with
+   * nothing to prove reaches the password branch below, and gets there exactly
+   * as a factor-less `completa` session does: it types its current password.
+   * It is not a way past the gate, only past the state check.
    */
   permiteOnboarding?: boolean;
 
   /**
-   * Demand the password from an account that has no factor at all, instead of
-   * letting the write through. Off by default, so every route mounted today
-   * behaves exactly as it did.
+   * Esta ruta no acepta la ventana: pide la contraseña en **cada** petición
+   * a la ruta que la monta.
    *
-   * **For the routes that register or remove a credential**, which plan 4B is
-   * about to mount. The skip below is correct for everything mounted today and
-   * becomes a permanent lockout the moment a route can create a factor — see
-   * its own comment for the sequence, which its author described without
-   * noticing where it led.
+   * 🔴 Hasta la Tarea 3 del plan de reautenticación esto era lo mismo que
+   * decía su nombre anterior, `exigeContrasena`: las rutas que la llevan
+   * apagada dejaban pasar a una cuenta sin ningún factor sin pedir nada. Esa
+   * rama ya no existe — toda cuenta sin factor tiene que escribir la
+   * contraseña, encendida o apagada esta opción — así que lo que sigue
+   * haciendo hoy es apagar los atajos de los diez minutos, que desde la
+   * Tarea 5 son dos: con la opción apagada basta una ventana todavía fresca
+   * —de `mfa_satisfied_at` si la cuenta tiene un factor, de
+   * `password_confirmed_at` si no tiene ninguno— para pasar sin volver a
+   * pedir nada; con ella encendida, ninguna de las dos vale. Se renombró
+   * antes de que la rama desapareciera porque ese era exactamente el momento
+   * en que «exige la contraseña» dejaría de describirla y «sin ventana»
+   * seguiría siendo cierto.
    *
-   * Independent of `permiteOnboarding`: that one says *which states* reach the
-   * factor-less branch, this one says *what proof* that branch accepts. A route
-   * that wants both asks for both.
+   * Qué rutas la llevan encendida hoy: la lista canónica es
+   * `STEP_UP_OPTIONS` en `routeGuards.test.ts`, no un número aquí — un
+   * recuento que tiene que coincidir a mano con otro fichero es justo la
+   * clase de comentario que se desactualiza sin que nadie se entere.
+   *
+   * 🔴 **El campo del cable NO se renombra.** El 403 sigue llevando
+   * `exigeContrasena`, porque `web/src/api/stepUp.ts:71` ya lo lee y los dos
+   * repos se despliegan aparte.
    */
-  exigeContrasena?: boolean;
+  sinVentana?: boolean;
 
   /**
    * Stop demanding proof of a factor **this server has just declared it cannot
@@ -207,11 +229,12 @@ export interface OpcionesStepUp {
    * of it is shut. Both pieces are right; the seam is the lockout.
    *
    * **Why this is not a weakening.** The one route that reads it also carries
-   * `exigeContrasena`, so what replaces the impossible code is the password —
+   * `sinVentana`, so what replaces the impossible code is the password —
    * something a stolen cookie does not have. And demanding proof of a factor
    * the server itself reports as unreadable is not a stricter gate, it is an
-   * unsatisfiable one: the same shape as the outage the factor-less branch
-   * below already exists to avoid.
+   * unsatisfiable one — nothing this account could ever send would open it.
+   * This option routes it to the password branch below instead, the same
+   * branch a factor-less account already has to answer.
    *
    * **Deliberately narrow, and it has to be.** Read by one route rather than
    * applied to every route that carries the gate, because everywhere else the honest answer to a
@@ -233,22 +256,26 @@ export interface OpcionesStepUp {
 
 /**
  * 🔴 **The password leaves the body on every path out of this gate — every
- * `next()`, and both `next(err)` — not only the one that verified it.**
+ * `next()`, and every `next(err)` — not only the one that verified it.**
  *
  * Until Task 10 of plan 4C it left on exactly one. The fresh-window shortcut
  * passed it through untouched, and a request can carry the field there: the
  * client's interceptor serialises concurrent refusals onto one ceremony and
  * injects the same password into every retried body, so a route that never
  * asked for it receives it the moment it shares a ceremony with one that did.
- * Downstream, `rol.controller.ts` writes `req.body` whole into the bitácora as
- * `after` — a table rendered on a screen. An administrator's plaintext
+ * Downstream, `rol.controller.ts` writes the body into the bitácora as `after`
+ * — `assignable()` drops four names from it and `stepup_password` is not one of
+ * them — and that is a table rendered on a screen. An administrator's plaintext
  * password in `bitacora.metadata` was one unlucky pair of tabs away.
  *
- * **Honestly: D6 itself closed that particular hole**, by putting
- * `exigeContrasena` on every `rol` route so the shortcut is no longer reachable
- * there. What this rule protects now is the two mounts that keep the plain
- * gate, any mount added later, and the error handler — none of which log the
- * body today, and the next Sentry hook or `req.body` in a log line would. A
+ * D6 closed that particular hole for a week, by putting `sinVentana` on every
+ * `rol` route so the shortcut was not reachable there. 🔴 **It is reachable
+ * again**: §4.1 of the reauthentication design (2026-09-08) put the four `rol`
+ * writes back inside the window, so the exact pair described above — the
+ * shortcut and a controller that files the body — is live, and this line is
+ * what stands between them. It also covers every other mount that takes the
+ * window, any mount added later, and the error handler; none of the rest file
+ * the body today, and the next Sentry hook or `req.body` in a log line would. A
  * rule with no exceptions is the only one the next reader can build on.
  *
  * Guarded, because a body-less DELETE arrives with `req.body` undefined.
@@ -260,28 +287,31 @@ function soltarContrasena(req: Request): void {
 
 export function requireStepUp({
   permiteOnboarding = false,
-  exigeContrasena = false,
+  sinVentana = false,
   toleraFactorIlegible = false,
 }: OpcionesStepUp = {}): RequestHandler {
   /**
-   * 🔴 La combinación que convertiría esta puerta en un pase libre, rechazada
-   * al montar la ruta y no en producción.
+   * 🔴 La combinación que dejaría esta puerta abierta con sólo la ventana
+   * fresca, rechazada al montar la ruta y no en producción.
    *
-   * `toleraFactorIlegible` hace que un factor que el servidor no puede leer
-   * deje de exigirse, y cae a la rama de la contraseña. Si esa rama no pide
-   * contraseña —`exigeContrasena` apagado— lo que queda es `next()` con una
-   * línea de bitácora, o sea una escritura sensible servida sólo con la cookie.
-   * Y peor: esa línea afirmaría «la cuenta no tiene ningún factor registrado»,
-   * que sería mentira, porque sí lo tiene y sólo está ilegible.
+   * `toleraFactorIlegible` sólo entra en juego cuando `tieneAlgunFactor` ya
+   * dijo que sí: la cuenta tiene un factor, sólo que este servidor no puede
+   * leerlo. Ese es exactamente el caso que la regla de `sinVentana` nombra
+   * — "cualquier ruta que dé de alta o de baja un factor" — así que sin la
+   * opción encendida, una `mfa_satisfied_at` todavía fresca de *antes* de
+   * que la clave se rompiera basta por sí sola para pasar: la rama
+   * `satisfecho && !sinVentana` de más arriba ni siquiera llega a mirar
+   * `toleraFactorIlegible`, y una cookie robada con esa ventana viva
+   * borraría el factor sin volver a probar nada.
    *
    * Hoy la única ruta que activa la opción lleva las dos, así que no hay
    * agujero. Esto es lo que impide que deje de ser verdad en un descuido: un
    * error al arrancar es imposible de pasar por alto, y una comprobación en
    * tiempo de petición llegaría tarde.
    */
-  if (toleraFactorIlegible && !exigeContrasena) {
+  if (toleraFactorIlegible && !sinVentana) {
     throw new Error(
-      "requireStepUp: `toleraFactorIlegible` exige `exigeContrasena`. Sin la contraseña, " +
+      "requireStepUp: `toleraFactorIlegible` exige `sinVentana`. Sin la contraseña, " +
         "una cookie robada bastaría para una escritura sensible cuando la clave del TOTP falla.",
     );
   }
@@ -308,16 +338,20 @@ export function requireStepUp({
       // asked ahead of the window and the factor lookup rather than after
       // them.
       //
-      // **This refuses somebody for real, on one route today.** It used to be
-      // unreachable — every mount lived under `/api/usuario`, `/api/rol` or
-      // `/api/permiso`, none of which the `parcial` or `onboarding`
-      // allowlists in `auth/sessionState.ts` open, so `authenticate` had
-      // already answered 401 or 403 before this gate ran. `DELETE
-      // /api/auth/sessions/:id` changed that: `ONBOARDING_EXTRA` opens
-      // `/api/auth/sessions`, so an `onboarding` session reaches this line,
-      // and this line is the only thing that stops it. That is the whole of
-      // what closed the attack an audit demonstrated — see the route's own
-      // comment in `auth.routes.ts`.
+      // **This refuses somebody for real.** It used to be unreachable — every
+      // mount lived under `/api/usuario`, `/api/rol` or `/api/permiso`, none
+      // of which the `parcial` or `onboarding` allowlists in
+      // `auth/sessionState.ts` open, so `authenticate` had already answered
+      // 401 or 403 before this gate ran. The gated routes under `/api/auth`
+      // changed that: `ONBOARDING_EXTRA` opens the prefixes they sit on, so an
+      // `onboarding` session reaches this line, and on the ones that leave
+      // `permiteOnboarding` off this line is the only thing that stops it.
+      // `DELETE /api/auth/sessions/:id` is where that closed an attack an
+      // audit demonstrated — see the route's own comment in `auth.routes.ts`;
+      // `POST /api/auth/recovery-codes/` is the other, and
+      // `recoveryCodes.routes.ts` explains why it wants this refusal rather
+      // than a password prompt. Which mounts leave the option off is
+      // `STEP_UP_OPTIONS` in `routeGuards.test.ts`.
       //
       // **And it is why `permiteOnboarding` exists**, for the opposite kind of
       // route: the doors `onboarding` opens *in order to stop being*
@@ -356,35 +390,44 @@ export function requireStepUp({
 
       /**
        * A fresh proof is enough on its own for every route mounted today, and
-       * **deliberately not enough** for one that asked for `exigeContrasena`:
+       * **deliberately not enough** for one that asked for `sinVentana`:
        * there the two are wanted together, something held and something known.
        *
        * The case that forces this, and it is not hypothetical — plan 4B seals
        * this very column when somebody spends a **recovery code**. Without this
        * clause, whoever holds only the printed sheet spends one code, lands
        * inside the window, and registers their own factor with no password at
-       * all — which is exactly the bound `exigeContrasena` exists to draw. The
+       * all — which is exactly the bound `sinVentana` exists to draw. The
        * option has to mean one thing: this route wants the password, always.
        *
        * An account that has a factor and no fresh proof still gets refused
        * below and has to prove it first. So on these routes the ceremony is two
        * steps, in this order: prove the factor, then type the password.
        */
-      if (satisfecho && !exigeContrasena) {
+      if (satisfecho && !sinVentana) {
         soltarContrasena(req);
         next();
         return;
       }
 
-      // Asked before the password is even looked at: with a factor on the
-      // account and nothing fresh to show for it, no password is an acceptable
-      // answer here, and checking it first would spend a bcrypt comparison to
-      // reach the same refusal.
-      //
-      // Skipped when the window is already satisfied — that can only be reached
-      // with `exigeContrasena` on, and there the factor has just been proved,
-      // so asking whether one exists is both answered and beside the point.
-      if (!satisfecho && (await tieneAlgunFactor(user.id))) {
+      /**
+       * Asked before the password is even looked at: with a factor on the
+       * account and nothing fresh to show for it, no password is an acceptable
+       * answer here, and checking it first would spend a bcrypt comparison to
+       * reach the same refusal.
+       *
+       * **Three values, not two, and the third is load-bearing.** `null` means
+       * the question was never asked — the window is already satisfied, which
+       * only a `sinVentana` route reaches, and there the factor has just been
+       * proved, so asking whether one exists is both answered and beside the
+       * point. `false` means it *was* asked and the account has nothing: the
+       * only state in which the password branch below may seal a window. A
+       * plain boolean would fold those two together, and the fold is a
+       * security bug rather than an inelegance — see the seal itself.
+       */
+      const tieneFactor: boolean | null = satisfecho ? null : await tieneAlgunFactor(user.id);
+
+      if (tieneFactor) {
         // The factor exists. Whether it can be *proved* is a second question,
         // and only the route that undoes a dead factor ever asks it — see
         // `toleraFactorIlegible`. Asked second, and only when that option is
@@ -447,159 +490,266 @@ export function requireStepUp({
             );
           }
           denegar(req, res, MENSAJE, MOTIVO_SIN_FACTOR_RECIENTE, {
-            exigeContrasena,
+            exigeContrasena: sinVentana,
             ...(metodos ? { metodos } : {}),
           });
           return;
         }
-        // Falls through to the password branch below, which that one route
-        // mounts with `exigeContrasena` — enforced at mount time above, so
-        // this can never reach the free skip.
+        // Falls through to the password branch below, which every account
+        // without a fresh window reaches now, factor or not — there is no
+        // free skip left to fall back to on the routes that leave
+        // `sinVentana` off.
         //
         // 🔴 Y queda constancia, porque es un evento que un operador querría
         // poder contar durante una avería de claves: el servidor acaba de
-        // aceptar una contraseña **en lugar de** un factor que él mismo declara
+        // pedir una contraseña **en lugar de** un factor que él mismo declara
         // ilegible. Sin esta línea la operación no aparecía en ninguna parte.
+        //
+        // 🔴 **Se escribe aquí, antes de mirar la contraseña, así que la línea
+        // sale también para un intento que acaba rechazado** — por no mandar
+        // ninguna, o por mandarla mal. Es deliberado: lo que un operador quiere
+        // contar durante la avería es a cuánta gente mandó la clave rota por
+        // este camino, no a cuánta le salió bien. Por eso el texto dice
+        // «se intenta» y no «se acepta»: era falso en los dos desenlaces
+        // rechazados, que son la mayoría de los que caen aquí.
+        //
+        // Mover la línea detrás de la comprobación cambiaría **qué se cuenta**,
+        // así que es una decisión de producto y no un arreglo de redacción;
+        // queda anotada como deuda. `totp.routes.test.ts` la vigila desde la
+        // Tarea 17, así que quien la mueva se enterará.
         logAction({
           id_usuario: user.id,
           action: "STEP_UP_FACTOR_ILEGIBLE",
           entity: "Sesion",
           entity_id: null,
           detail:
-            "La cuenta tiene un factor que este servidor no puede verificar: se acepta la contraseña en su lugar",
+            "La cuenta tiene un factor que este servidor no puede verificar: se intenta la contraseña en su lugar",
           metadata: { ruta: req.originalUrl, id_sesion: user.id_sesion },
           severity: "critical",
           ip_address: req.ip ?? null,
         });
-      }
-
-      /**
-       * The account has nothing to prove beyond its session, and nothing was
-       * sent to prove anyway — let the write through, and say so.
-       *
-       * This is not the hole it looks like. An account with no factor is
-       * exactly as far as the whole ERP already stood before this task: a
-       * cookie is the only thing anybody has ever had to hold to reach these
-       * routes. `web/src` does not send `STEP_UP_PASSWORD_FIELD` yet — that
-       * frontend is a later plan's job — so refusing here unconditionally, as
-       * an earlier version of this file did, was not a stricter gate: with no
-       * factor registered anywhere and no client able to answer the fallback,
-       * it refused *every* gated write on a live deployment. Saving the
-       * permission matrix, creating a role, changing your own password —
-       * all of it, for every account, always. A gate nothing can satisfy is
-       * not a gate, it is an outage.
-       *
-       * **It closes itself, with nothing to remember.** The moment this
-       * account registers a factor — or, since plan 4E, verifies its email
-       * address, which is a factor on its own — `tieneAlgunFactor` above
-       * starts answering `true` and this branch stops being reached for it at
-       * all — the block above already refuses outright rather than falling
-       * here. Until then, the bitácora line below is the whole of what this
-       * skip costs: a record that a sensitive write ran without the extra
-       * proof, on an account that had no extra proof to give.
-       *
-       * **What that means on the `exigeContrasena` routes, said once so nobody
-       * is surprised on deploy day (plan 4E, §1.2.1 of its design):** an
-       * account whose only factor is its verified address is refused above
-       * with `metodos: ["correo"]` and `exigeContrasena: true`, so editing a
-       * user, a role or the permission matrix costs it an email code *and* the
-       * password, once per `STEP_UP_WINDOW_MINUTES`. Isaias chose that over the
-       * alternative — letting the password alone through when the only factor
-       * is the email — because the alternative leaves a stolen session plus the
-       * password one step from the matrix, which is what `exigeContrasena`
-       * exists to prevent.
-       *
-       * **And that self-closing property is the attack, not the reassurance.**
-       * The window in which this branch is still open is exactly the window in
-       * which somebody registers a factor — so the sentence above describes the
-       * mechanism and stops one step short of where it leads. Whoever holds a
-       * stolen session cookie and not the password calls the registration route
-       * with an empty body, passes here, and confirms their own factor. From
-       * that instant `tieneAlgunFactor` answers `true`, so this gate stops
-       * offering *the owner* the password route, and the owner cannot even
-       * delete the attacker's factor. Their next login opens `parcial`, which
-       * is left only by proving the attacker's factor; changing the password
-       * does not help, and `logout-all` revokes sessions, not credentials.
-       *
-       * That is why `exigeContrasena` exists and why **every route that
-       * registers or removes a credential must be mounted with it on**. It is
-       * not a hardening knob to turn on later: on those routes, off is a
-       * permanent lockout.
-       *
-       * A caller that *does* send `stepup_password` — the shape the later
-       * frontend plan will use, and the only shape this ever refuses for a
-       * factor-less account — still has to get it right; see below.
-       */
-      const password = (req.body as Record<string, unknown> | undefined)?.[STEP_UP_PASSWORD_FIELD];
-      if (typeof password !== "string" || password === "") {
-        // The route asked for the password and none came. Refused for free:
-        // nothing was compared, so no bcrypt was spent and there is nothing to
-        // charge — and charging here would let a client that simply forgets
-        // the field burn somebody's whole confirm budget, locking them out of
-        // the very screen that would fix it.
-        if (exigeContrasena) {
-          denegar(req, res, MENSAJE_CONTRASENA_REQUERIDA, MOTIVO_CONTRASENA_REQUERIDA);
+      } else if (tieneFactor === false) {
+        /**
+         * The window of an account with **no factor at all**, which is the
+         * whole of what this branch is about — and it is consulted here,
+         * rather than thirty lines up in `satisfecho`, for a reason that is
+         * about security and not about tidiness.
+         *
+         * `satisfecho` is computed *before* the factor lookup. As an `OR`
+         * there, this column would let an account that **does** have a factor
+         * prove it once in the life of a session and then hold the routes that
+         * register and delete credentials open on the password alone,
+         * re-sealing on every request — which destroys the whole property of
+         * `sinVentana`. Down here, `tieneAlgunFactor` has already answered
+         * `false`: there is no factor for a password to stand in for.
+         *
+         * `NaN` for a missing or unreadable stamp, and `>= 0` on the other
+         * side, for exactly the reasons the `mfa_satisfied_at` window above
+         * gives: every comparison against `NaN` is false, so both refuse, and
+         * a date in the future must not buy an hour of open gate.
+         */
+        const confirmadoHace =
+          user.password_confirmed_at === null
+            ? NaN
+            : Date.now() - new Date(user.password_confirmed_at).getTime();
+        const ventanaDeContrasena =
+          confirmadoHace >= 0 && confirmadoHace <= STEP_UP_WINDOW_MINUTES * 60_000;
+        if (ventanaDeContrasena && !sinVentana) {
+          // The password leaves the body here too. This is a path out of the
+          // gate like any other, and a request can arrive carrying the field
+          // even on a route that never asked for it — see `soltarContrasena`.
+          soltarContrasena(req);
+          next();
           return;
         }
+      }
 
-        logAction({
-          id_usuario: req.user?.id,
-          action: "STEP_UP_SKIPPED",
-          entity: "Sesion",
-          entity_id: null,
-          detail: "Operación sensible realizada sin step-up: la cuenta no tiene ningún factor registrado",
-          metadata: { ruta: req.originalUrl, id_sesion: req.user?.id_sesion },
-          severity: "warning",
-          ip_address: req.ip ?? null,
+      const password = (req.body as Record<string, unknown> | undefined)?.[STEP_UP_PASSWORD_FIELD];
+      if (typeof password !== "string" || password === "") {
+        // Refusada gratis: no se comparó nada, así que no hay nada que cobrar.
+        // Cobrar aquí dejaría que un cliente que olvide el campo quemase el
+        // cupo de otra persona y la encerrase fuera de la pantalla que lo arregla.
+        //
+        // 🔴 **Sin `metodos`.** No por lo que haría el cliente con la lista —
+        // el campo está documentado en `web/src/api/stepUp.ts` como "Sólo en
+        // `sin-factor-reciente`": ese es su contrato, no una casualidad de
+        // esta rama. Este refusal contesta `contraseña-requerida`, un motivo
+        // distinto, así que no hay nada que el campo tendría que describir.
+        denegar(req, res, MENSAJE_CONTRASENA_REQUERIDA, MOTIVO_CONTRASENA_REQUERIDA, {
+          // 🔴 **El par (motivo, exigeContrasena) es lo que el cliente lee
+          // para decidir si una petición que recibió el rechazo puede
+          // aprovechar la ventana que ya está abierta o tiene que esperar la
+          // suya** — `resolver`, en `web/src/api/stepUpInterceptor.ts`. Dos
+          // rechazos con el mismo motivo y distinto `exigeContrasena` piden
+          // cosas distintas, así que mandar el campo aquí no es informativo:
+          // sin él, esta negativa se confundiría con la de una ruta que sólo
+          // necesita la contraseña, y la ventana entregaría lo que no era.
+          exigeContrasena: Boolean(sinVentana),
         });
-        // Reached only with the field absent, so there is nothing to drop —
-        // called anyway, so that the rule "every `next()` drops it" has no
-        // exception for the next reader to reason about.
         soltarContrasena(req);
-        next();
         return;
       }
 
       /**
-       * Refuse before comparing anything, the same way the login's own lockout
-       * refuses a resting account before comparing anything — but *read* the
-       * budget rather than *spend* it to find out. `passwordConfirmLimiter`
-       * itself would tell us this by incrementing and checking, but every
-       * invocation of it registers a charge that has to be settled later, and
-       * settling it later is exactly the timing problem this gate's docstring
-       * explains: a charge made here and refunded only once the whole response
-       * finishes is briefly on the books for `chargeConfirmBudgetOnSelfChange`'s
-       * own, separate charge on the same key to read. `getKey` costs nothing to
-       * ask and commits to nothing.
+       * Charge before comparing anything — atomically, through the store
+       * directly, not through `passwordConfirmLimiter` itself. See this
+       * function's own top-of-file docstring for why that used to be a
+       * read (`getKey`) instead, and the concurrency bug that produced, and
+       * `consumirCupoDeConfirmacion`'s own docstring in `loginLimiters.ts`
+       * for how the atomicity holds under `MemoryStore` specifically.
+       *
+       * Kept in a local so a wrong answer below can say how many guesses are
+       * left without a second call to the store to ask something this value
+       * already knows.
        */
-      let agotado: boolean;
-      /**
-       * Kept from that same read so a wrong answer can tell the caller how
-       * many guesses are left — see the `denegar` call at the end of this
-       * branch. Reading it again after the charge would cost a second round
-       * trip to say something this value already knows.
-       */
-      let gastados: number;
+      let cupo: { permitido: boolean; restantes: number };
       try {
-        const info = await passwordConfirmLimiter.getKey(passwordConfirmKey(req));
-        gastados = info?.totalHits ?? 0;
-        agotado = gastados >= PASSWORD_CONFIRM_LIMIT;
+        cupo = await consumirCupoDeConfirmacion(user.id);
       } catch (err) {
         soltarContrasena(req);
         next(err);
         return;
       }
-      if (agotado) {
+      if (!cupo.permitido) {
+        try {
+          // Given back: this attempt never got to compare anything, so it
+          // must not be the one left holding the charge that tipped the
+          // bucket over — that charge belongs to whichever request actually
+          // got here first.
+          await devolverCupoDeConfirmacion(user.id);
+        } catch (err) {
+          soltarContrasena(req);
+          next(err);
+          return;
+        }
         registrar(req, "presupuesto-agotado");
+        // Every path out of this gate drops the password from the body — see
+        // `soltarContrasena`'s own docstring — and this 429 is one, same as
+        // every other exit below it. Missing until Task 3 of the
+        // reauthentication-window plan found it while rewriting the branch
+        // just above this one.
+        soltarContrasena(req);
         // The exact same sentence the real limiter itself answers with when it
         // is the one deciding "spent" — imported rather than retyped, so this
-        // early read-only refusal can never drift from that one.
+        // refusal can never drift from that one.
         res.status(429).json({ message: PASSWORD_CONFIRM_MESSAGE });
         return;
       }
 
-      const confirmacion = await verifyOwnPassword({ id: user.id, pass: password, ip: req.ip ?? null });
+      /**
+       * 🔴 Its own try/catch, found missing in fix round 1 — the third gap
+       * `cobrar()`'s own docstring named before this task deleted that
+       * function: "a limiter call can fail in a way that is neither
+       * 'allowed' nor 'the budget is spent'". This branch had the same shape
+       * of failure and none of the guard: without this, a rejection here
+       * fell through to the whole gate's outer catch-all, which answers a
+       * bare 500 and never runs `devolverCupoDeConfirmacion` — so the charge
+       * `consumirCupoDeConfirmacion` just made stayed spent for the full
+       * fifteen-minute window on a comparison that never produced an
+       * answer. `verifyOwnPassword` (`auth/credentials.ts`) runs a real
+       * `UsuarioModel.findByPk` and its own `bcrypt` comparison, either of
+       * which a database blip can reject.
+       */
+      let confirmacion: { ok: boolean };
+      try {
+        confirmacion = await verifyOwnPassword({ id: user.id, pass: password, ip: req.ip ?? null });
+      } catch (err) {
+        /**
+         * Neither right nor wrong — the comparison itself never finished, so
+         * nothing was learned about this password. Given back so a database
+         * blip does not spend a fifth of this account's whole confirm
+         * budget — shared with "change my password" and "register my
+         * email" — on nothing anybody typed.
+         *
+         * Best effort: a refund failure here does not replace the original
+         * error, only logs alongside it. `next(err)` still has to carry
+         * *this* failure — masking it behind the refund's own would leave
+         * the caller thinking their password was somehow wrong instead of
+         * that the server could not check it.
+         */
+        try {
+          await devolverCupoDeConfirmacion(user.id);
+        } catch (refundErr) {
+          gateLog.error(
+            { err: refundErr, id_usuario: user.id },
+            "no se pudo devolver el cupo tras un fallo de verifyOwnPassword: queda cobrado hasta que expire la ventana",
+          );
+        }
+        soltarContrasena(req);
+        next(err);
+        return;
+      }
       if (confirmacion.ok) {
+        try {
+          // Right, so the charge above is given back on the spot — not
+          // deferred to any response event. A correct password never costs
+          // anything, which is `security.ts`'s own promise for this bucket.
+          await devolverCupoDeConfirmacion(user.id);
+        } catch (err) {
+          soltarContrasena(req);
+          next(err);
+          return;
+        }
+
+        /**
+         * 🔴 **Y se abre la ventana de diez minutos, sólo para una cuenta sin
+         * ningún factor.** `tieneFactor === false` es "se preguntó y no hay
+         * nada"; `null` es "no se preguntó", que es lo que pasa cuando
+         * `satisfecho` ya era cierto — una cuenta que acaba de probar su
+         * factor en una ruta con `sinVentana`. Sellar en ese caso escribiría
+         * una ventana de contraseña a nombre de una cuenta **con** factor, que
+         * es exactamente el estado que la auditoría prohíbe: probar el factor
+         * una vez y sostener después las rutas de credenciales con la
+         * contraseña sola.
+         *
+         * 🔴 **Con `await`, no con `void`.** Sin él, `next()` corre antes de
+         * que el UPDATE haya llegado a la base de datos, y la siguiente
+         * petición de la ventana — que el interceptor manda en cuanto vuelve
+         * ésta — lee una fila todavía sin sellar y contesta 403. Es la
+         * molestia que este arco existe para quitar, reaparecida por una
+         * carrera de milisegundos.
+         *
+         * 🔴 **Y con su propio `try/catch`, que no deja caer la operación.**
+         * Quien llega hasta aquí acaba de demostrar su identidad
+         * correctamente: tumbarle con un 500 una escritura ya autorizada
+         * porque falló un UPDATE **de comodidad** es cobrarle a esa persona un
+         * problema de nuestra infraestructura. Lo que decide el caso es a qué
+         * degrada cada opción. Dejar que la excepción suba al `catch` de la
+         * puerta contesta 500, la operación no ocurre, y nada de lo que se ve
+         * en pantalla lo explica. Registrarlo y seguir deja la ventana sin
+         * abrir, así que la siguiente operación vuelve a pedir la contraseña
+         * — que es **exactamente el comportamiento de antes de esta tarea**,
+         * un estado que ya sabemos seguro y que la persona ya conoce. Se
+         * degrada hacia lo conocido y seguro, nunca hacia el 500.
+         *
+         * La línea de bitácora es `warning` y no `error` por lo mismo: no ha
+         * fallado ninguna comprobación de seguridad, sólo se ha perdido una
+         * comodidad. Lleva la sesión dentro porque, si esto empieza a pasar
+         * seguido, lo que un operador querrá contar es a cuánta gente se le
+         * está pidiendo la contraseña de más.
+         */
+        if (tieneFactor === false) {
+          try {
+            await sellarContrasena(user.id_sesion);
+          } catch (err) {
+            gateLog.warn(
+              { err, id_usuario: user.id, id_sesion: user.id_sesion },
+              "no se pudo abrir la ventana de reautenticación: la operación sigue, pero volverá a pedirse la contraseña",
+            );
+            logAction({
+              id_usuario: user.id,
+              action: "STEP_UP_VENTANA_NO_ABIERTA",
+              entity: "Sesion",
+              entity_id: null,
+              detail:
+                "La contraseña era correcta pero no se pudo sellar la ventana: la operación continúa y volverá a pedirse la contraseña",
+              metadata: { ruta: req.originalUrl, id_sesion: user.id_sesion },
+              severity: "warning",
+              ip_address: req.ip ?? null,
+            });
+          }
+        }
+
         /**
          * 🔴 Se borra del cuerpo antes de dejar pasar, y hay un sitio concreto
          * donde importa: `rol.controller.ts` escribe `after: req.body` **entero**
@@ -614,36 +764,13 @@ export function requireStepUp({
          * que no tienen ningún uso para ella.
          */
         soltarContrasena(req);
-        // Nothing was ever charged for this attempt — see the docstring above
-        // for why that is the point, not an oversight.
         next();
         return;
       }
 
-      // Wrong, and only now does this gate ever call the real limiter: it
-      // increments the shared counter for real, and marks the response so
-      // `confirmCostsNothing` charges this uniform 403 the way it would charge
-      // the 401 the rest of that bucket's callers use.
-      res.locals.stepUpPasswordWrong = true;
-      const cobro = await cobrar(req, res, next);
-      if (cobro === "error") {
-        // `next(err)` already ran inside `cobrar`; there is nothing left to
-        // answer here, and answering anyway would race whatever the error
-        // handler sends.
-        return;
-      }
-      if (cobro === "denegado") {
-        // Reached only if a concurrent request crossed the limit between the
-        // read above and this charge — the real limiter already answered its
-        // own 429, which is the sentence that says to wait, not the one that
-        // says the password is wrong.
-        registrar(req, "presupuesto-agotado");
-        return;
-      }
-
       /**
-       * How many guesses are left, counted from the read above plus the charge
-       * this branch just made.
+       * Wrong, and the charge above stays on the books — there is nothing
+       * left to do here but say how many guesses remain.
        *
        * **It reveals nothing.** The limit is a constant in a source file, the
        * answer only ever goes to an already-authenticated caller, and it is
@@ -652,13 +779,8 @@ export function requireStepUp({
        * into a fifteen-minute lockout on the shared budget — a budget that
        * also holds "change my password" and "register my email", which are the
        * two screens they would go to next.
-       *
-       * `Math.max` because the two reads are not one atomic operation: a
-       * concurrent request can charge between them, and a negative number on
-       * screen is worse than a zero.
        */
-      const intentosRestantes = Math.max(0, PASSWORD_CONFIRM_LIMIT - gastados - 1);
-      denegar(req, res, MENSAJE, MOTIVO_CONTRASENA_INCORRECTA, { intentosRestantes });
+      denegar(req, res, MENSAJE, MOTIVO_CONTRASENA_INCORRECTA, { intentosRestantes: cupo.restantes });
     } catch (err) {
       // The whole body is one try/catch, matching `authenticate.ts`'s own
       // reasoning exactly: this runs in front of every write this gate
@@ -678,12 +800,14 @@ export function requireStepUp({
    * The options, readable off the function Express actually mounts — the same
    * shape `requirePermission` gives `permission`, and for the same reader:
    * `routeGuards.test.ts` walks the assembled app and can otherwise tell only
-   * that *a* step-up gate is on a route, never which one. Task 10 of plan 4C
-   * turned `exigeContrasena` on across eleven administrative mounts, and
-   * without this a revert of any one of them left every test green.
+   * that *a* step-up gate is on a route, never which one. `STEP_UP_OPTIONS`
+   * in that file is the canonical list of which mounts carry `sinVentana` —
+   * not a count here, which is exactly the kind of comment that drifts out
+   * of step with that table without anyone noticing — and without this stamp
+   * a revert of any one of those mounts left every test green.
    *
    * The **resolved** locals, not the argument: `requireStepUp()` would stamp
-   * `{}` and `requireStepUp({ exigeContrasena: true })` a partial, and the
+   * `{}` and `requireStepUp({ sinVentana: true })` a partial, and the
    * table comparing against them would have to spell the defaults out twice.
    * Stamping what the closure reads is the only thing that keeps the metadata
    * from drifting away from the behaviour.
@@ -692,42 +816,10 @@ export function requireStepUp({
     // Frozen: the property cannot be reassigned, but the object behind it
     // could be edited in place, and a table that compares whole objects
     // would then read a lie that nothing in the closure shares.
-    value: Object.freeze({ permiteOnboarding, exigeContrasena, toleraFactorIlegible }),
+    value: Object.freeze({ permiteOnboarding, sinVentana, toleraFactorIlegible }),
     enumerable: true,
   });
   return stepUpGate;
-}
-
-/**
- * Makes the one charge this gate ever makes against the shared budget: a
- * confirmed-wrong password. Three outcomes, not two, because a limiter call
- * can fail in a way that is neither "allowed" nor "the budget is spent":
- * `express-rate-limit` wraps its middleware so that any error the store
- * throws reaches the third argument as `next(error)` rather than the second
- * one a plain success/failure callback would expect. `MemoryStore` (the only
- * store configured today) never does that, which is exactly why this was easy
- * to get wrong and leave untested: the Redis store `loginLimiters.ts` already
- * anticipates elsewhere throws on a dropped connection, and a callback that
- * ignored its own error argument would let this gate treat that failure as
- * "charged successfully" and answer the caller as if the password had simply
- * been wrong, with the error itself vanishing.
- */
-async function cobrar(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<"cobrado" | "denegado" | "error"> {
-  let resultado: "cobrado" | "denegado" | "error" = "denegado";
-  await passwordConfirmLimiter(req, res, (err?: unknown) => {
-    if (err) {
-      resultado = "error";
-      soltarContrasena(req);
-      next(err);
-      return;
-    }
-    resultado = "cobrado";
-  });
-  return resultado;
 }
 
 /** The bitácora half of a refusal, on its own so the budget-exhausted path —
@@ -784,15 +876,15 @@ function denegar(
   registrar(req, motivo);
   // `code` is the stable class a client checks to know it must
   // re-authenticate at all — matching on the Spanish `message` instead would
-  // break the day somebody improves the wording. `motivo` is which of the
-  // three (`MOTIVO_ESTADO_INCOMPLETO` / `MOTIVO_SIN_FACTOR_RECIENTE` /
-  // `MOTIVO_CONTRASENA_INCORRECTA`) is what tells it *how*: finish
-  // onboarding, supply a factor, or retype the password — three different
-  // remedies a single `code` cannot distinguish.
+  // break the day somebody improves the wording. `motivo` is what tells it
+  // *how*: finish onboarding, supply a factor, type the password it never
+  // sent, or retype one that was wrong — different remedies a single `code`
+  // cannot distinguish. The `MOTIVO_*` constants at the top of this file are
+  // the whole vocabulary; each carries its own comment saying when it is sent.
   // 🔴 `extra` last, but it can never overwrite the three above: nothing passes
   // `code`, `motivo` or `message` in it, and a future caller that tried would
-  // be silently redefining the contract this whole file is about. The two
-  // three fields it does carry today are `exigeContrasena`, `metodos` and
+  // be silently redefining the contract this whole file is about. The fields
+  // it does carry today are `exigeContrasena`, `metodos` and
   // `intentosRestantes`.
   res.status(403).json({ message, code: CODIGO_STEP_UP, motivo, ...extra });
 }

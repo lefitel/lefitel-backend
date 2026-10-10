@@ -19,14 +19,14 @@
 // password is the second copy this exists to prevent.
 //
 // **And that endpoint arrived.** `verifyOwnPassword` at the bottom of this file
-// answers "is this the password of the account already asking?" for the screen
-// that renames your own account — a screen that until now asked by calling the
-// login itself, opening a session and spending a failed attempt to answer a
-// question about somebody already logged in. It shares `checkAgainstRow` with
-// the login rather than comparing a hash of its own, which is this file's whole
-// argument arriving on time: the second copy would have been the one without the
-// filler hash, or the one that forgot to re-hash a password still stored at the
-// old cost.
+// answers "is this the password of the account already asking?" — and its
+// caller is now the step-up gate (`middleware/requireStepUp.ts`), which asks
+// that question on behalf of every route behind it instead of each handler
+// asking it again for itself. It shares `checkAgainstRow` with the login rather
+// than comparing a hash of its own, which is this file's whole argument
+// arriving on time: the second copy would have been the one without the filler
+// hash, or the one that forgot to re-hash a password still stored at the old
+// cost.
 //
 // The two doors differ in exactly two things, and both have names:
 // `FailureCost` and `LockoutPolicy`. Sharing the implementation is only worth
@@ -500,12 +500,16 @@ async function checkAgainstRow(input: {
  *
  * That reasoning was answered on the other door and not here. `updateUserPass`
  * compares its own hash precisely so that a locked account can change its
- * password — `authenticate` does not read `locked_until`, so the session survives
- * the lockout and changing the password is the way out — and `updateUserName`,
- * the only caller left here, was wired to this door a commit earlier. So somebody
- * whose account had been locked by another machine grinding their username was
- * told their own correct password was wrong, five times, and the sixth answer was
- * a 429 out of a budget shared with the password change: the rescue closed too.
+ * password — `authenticate` does not read `locked_until`, so the session
+ * survives the lockout and changing the password is the way out. The same trap
+ * reached this door through the rename, back when the rename compared a
+ * password here: somebody whose account had been locked by another machine
+ * grinding their username was told their own correct password was wrong, five
+ * times, and the sixth answer was a 429 out of a budget shared with the password
+ * change, so the rescue closed too. The rename no longer calls this at all — the
+ * gate does, for every route behind it — which makes the policy below matter
+ * more rather than less: it is now what every gated operation in the ERP is
+ * answered with while an account rests.
  *
  * `lockout: "ignore"` is the whole fix, and `LockoutPolicy` carries the argument
  * — including what it means that a correct confirmation now lifts the lockout.

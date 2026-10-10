@@ -29,8 +29,20 @@ import { logger } from "../utils/logger.js";
 const fullUrl = (req: IncomingMessage): string =>
   (req as Request).originalUrl ?? req.url ?? "";
 
+/**
+ * The address the container's health check asks, every ten seconds for as long
+ * as the container lives. Named here and used by the route in `app.ts`, so the
+ * address that is served and the address that is kept out of the log cannot
+ * come apart.
+ */
+export const HEALTH_PATH = "/api/health";
+
 /** Requests not worth a line each. */
-function isNoise(req: Request): boolean {
+export function isNoise(req: Request): boolean {
+  // 8,640 a day, all identical, and none of them somebody using the ERP. The
+  // exact address and nothing under it: a prefix would silence whatever is
+  // mounted below it later.
+  if (fullUrl(req).split("?")[0] === HEALTH_PATH) return true;
   // Images are served straight off disk by express.static; a page with fifty
   // photographs would otherwise bury everything else in the log.
   if (/\.(png|jpe?g|gif|webp|svg|ico|css|js|map)$/i.test(fullUrl(req).split("?")[0])) return true;

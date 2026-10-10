@@ -1,9 +1,18 @@
-// Promoting the session that proved a factor, and clearing the grace deadline.
+// Promoting the session that proved a factor, and sealing onto it what it
+// proved.
 //
 // Both models are mocked exactly the way `sessionStore.test.ts` mocks
 // `SesionModel`: nothing here reaches `osefi_local`, and Task 15's shared
 // harness is not needed because this module is exercised directly, never
 // through `app.auth.test.ts`'s route-level mocks.
+//
+// 🔴 **`UsuarioModel` is still mocked although the module no longer imports
+// it, and that is the point.** Until 2026-09-08 this file's `apagarLaMecha`
+// cleared `usuarios.mfa_grace_until` when a factor was registered, which made
+// the fourteen-day deadline renewable at will — register a factor, delete it,
+// log in, collect a fresh `MFA_GRACE_DAYS`. The mock is what turns a write to
+// `usuarios` reappearing in this module into a red test rather than a silent
+// return of that loop; see the last describe in this file.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Op } from "sequelize";
@@ -18,7 +27,9 @@ vi.mock("../models/usuario.model.js", () => ({
   UsuarioModel: { update: (...a: unknown[]) => usuarioUpdate(...a) },
 }));
 
-const { promoverSesion, apagarLaMecha, sellarPruebaDeFactor } = await import("./sessionPromotion.js");
+const modulo = await import("./sessionPromotion.js");
+const { promoverSesion, sellarPruebaDeFactor, sellarContrasena } = modulo;
+const { STEP_UP_WINDOW_MINUTES } = await import("../config/security.js");
 
 /** The bound of a `{ [Op.x]: value }` clause, read past the Symbol key. */
 const boundOf = (clause: unknown, op: symbol) => (clause as Record<symbol, unknown>)[op];
@@ -158,18 +169,76 @@ describe("sellarPruebaDeFactor", () => {
   });
 });
 
-describe("apagarLaMecha", () => {
-  it("clears mfa_grace_until when the first factor is registered", async () => {
-    await apagarLaMecha(7);
-
-    const [values, options] = usuarioUpdate.mock.calls[0] as [
-      Record<string, unknown>,
-      { where: Record<string, unknown> },
-    ];
-    expect(values).toEqual({ mfa_grace_until: null });
-    expect(options.where).toEqual({ id: 7 });
+describe("sellarContrasena", () => {
+  it("stamps password_confirmed_at and nothing else", async () => {
+    // 🔴 And **not** `mfa_satisfied_at`. That column means "a factor was
+    // proved here", and `estadoEfectivo` reads it to decide an account has
+    // nothing left to set up: a password written there would let an account
+    // with no factor at all read as `completa` past its fourteen-day
+    // deadline — the outage `mfa_grace_until` exists to prevent. Four
+    // auditors found that independently.
+    await sellarContrasena("s1");
+    const [values] = sesionUpdate.mock.calls[0] as [Record<string, unknown>];
+    expect(Object.keys(values)).toEqual(["password_confirmed_at"]);
+    expect(values.password_confirmed_at).toBeInstanceOf(Date);
   });
 
+  it("no re-sella dentro de la ventana: el WHERE lleva la antigüedad", async () => {
+    // 🔴 La promesa es «diez minutos fijos, sin renovarse». Sin esta
+    // cláusula, cada confirmación mueve la fecha y la ventana se sostiene
+    // sola indefinidamente en cuanto alguien trabaja seguido sobre una ruta
+    // con `sinVentana`, que pide la contraseña en cada petición.
+    const antes = Date.now();
+    await sellarContrasena("s1");
+    const despues = Date.now();
+
+    const [, options] = sesionUpdate.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
+    const alternativas = (options.where as Record<symbol, unknown>)[Op.or] as Record<
+      string,
+      unknown
+    >[];
+    expect(alternativas).toHaveLength(2);
+    // O nunca se confirmó...
+    expect(alternativas[0]).toEqual({ password_confirmed_at: null });
+    // ...o lo que hay es más viejo que la ventana entera.
+    const cota = boundOf(alternativas[1].password_confirmed_at, Op.lt) as Date;
+    expect(opsOf(alternativas[1].password_confirmed_at)).toEqual([Op.lt]);
+    const ventana = STEP_UP_WINDOW_MINUTES * 60_000;
+    expect(cota.getTime()).toBeGreaterThanOrEqual(antes - ventana);
+    expect(cota.getTime()).toBeLessThanOrEqual(despues - ventana);
+  });
+
+  it("nombra exactamente la sesión que le dan, y sólo si sigue viva", async () => {
+    // `id` solo bastaría para la fila correcta; `revoked_at` es lo que impide
+    // que una sesión ya cerrada salga de aquí con una ventana abierta. Se
+    // comprueban las claves enteras, no `toMatchObject`, porque lo que hay
+    // que descartar es un WHERE *más ancho* del que se lee aquí.
+    await sellarContrasena("mia");
+    const [, options] = sesionUpdate.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
+    expect(Object.keys(options.where).sort()).toEqual(["id", "revoked_at"]);
+    expect(options.where.id).toBe("mia");
+    expect(options.where.revoked_at).toBeNull();
+
+    // Y el WHERE se construye con el argumento de cada llamada, nunca con el
+    // de la anterior.
+    sesionUpdate.mockClear();
+    await sellarContrasena("ajena");
+    const [, segunda] = sesionUpdate.mock.calls[0] as [unknown, { where: Record<string, unknown> }];
+    expect(segunda.where.id).toBe("ajena");
+  });
+
+  it("dice si movió una fila", async () => {
+    sesionUpdate.mockResolvedValue([1]);
+    expect(await sellarContrasena("s1")).toBe(true);
+
+    // Cero es lo que devuelve tanto «no hay tal sesión viva» como «esta
+    // sesión ya está dentro de su ventana», que es el caso normal.
+    sesionUpdate.mockResolvedValue([0]);
+    expect(await sellarContrasena("s1")).toBe(false);
+  });
+});
+
+describe("la transacción del llamador", () => {
   it("joins a transaction it is handed, so a spent code and its seal commit together", async () => {
     // Spending a recovery code and sealing the session it just proved must
     // commit or fail as one: a code consumed without a seal costs somebody one
@@ -199,5 +268,32 @@ describe("apagarLaMecha", () => {
       expect.anything(),
       expect.objectContaining({ transaction: undefined }),
     );
+  });
+});
+
+describe("nada de este módulo escribe en `usuarios`", () => {
+  it("no toca el plazo de gracia por mucho que se pruebe un factor", async () => {
+    /**
+     * El bucle que se cerró el 2026-09-08, convertido en alambre.
+     *
+     * `apagarLaMecha` vivía aquí y ponía `usuarios.mfa_grace_until` a NULL al
+     * registrar un factor. NULL lo lee `estadoInicialDeSesion` como «el reloj
+     * no ha empezado nunca», así que el siguiente login estampaba catorce días
+     * nuevos: registrar un factor y borrarlo renovaba el plazo tantas veces
+     * como se quisiera, y con una passkey ni siquiera hace falta buzón.
+     *
+     * Este test no comprueba lo que el módulo hace, sino lo que ya no puede
+     * hacer: se ejercitan sus tres escrituras y ninguna puede haber pasado por
+     * `UsuarioModel`. Si alguien vuelve a añadir aquí un write a `usuarios`,
+     * el mock lo recoge y esto se pone rojo — que es toda su razón de ser.
+     */
+    await promoverSesion("s1", "totp");
+    await sellarPruebaDeFactor("s1", "totp");
+    await sellarContrasena("s1");
+
+    expect(usuarioUpdate).not.toHaveBeenCalled();
+    // Y ninguna exportación de este módulo puede volver a llamarse así: el
+    // nombre es lo que buscaría quien reintrodujese la función.
+    expect(modulo).not.toHaveProperty("apagarLaMecha");
   });
 });

@@ -36,6 +36,11 @@ declare global {
         // satisfied" in one place and as "no opinion" in another.
         estado: EstadoSesion;
         mfa_satisfied_at: Date | null;
+        // The third one the gate reads, and required for the same reason: an
+        // optional field here is what turns "this session confirmed its
+        // password nine minutes ago" into `undefined` on one route and a
+        // silently closed window on every other.
+        password_confirmed_at: Date | null;
       };
     }
   }
@@ -43,7 +48,7 @@ declare global {
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
-import { httpLogger } from "./middleware/httpLogger.js";
+import { httpLogger, HEALTH_PATH } from "./middleware/httpLogger.js";
 import { authenticate, authenticateArchivos } from "./middleware/authenticate.js";
 import { loginRateLimit } from "./middleware/loginLimiters.js";
 import { requireSameOrigin, requireVerifiedOrigin } from "./middleware/csrf.js";
@@ -98,6 +103,27 @@ app.set("trust proxy", 1);
 // still deserves a line, and anything mounted after this one can reach the
 // request's own logger through `req.log`.
 app.use(httpLogger);
+
+/**
+ * "Is this process up", for the container's HEALTHCHECK and for nothing else.
+ *
+ * Mounted here, ahead of everything, because the check sends a bare request
+ * from inside the container — no cookie, no `Origin`, no client header — and
+ * every layer below this one exists to refuse exactly that.
+ *
+ * 204 and no body: reachable by anybody, so it says nothing. Not the version,
+ * not the environment, and deliberately not whether the database answers. This
+ * process only starts listening after the database has answered and the boot
+ * checks have run (`index.ts`), which is the fact the deploy needs; asking the
+ * database again on every probe would mark a healthy server unhealthy for a
+ * blip that every real request already survives.
+ *
+ * It replaced a probe of `/`, which worked and wrote a `GET / → 401` warning
+ * every ten seconds. `httpLogger` keeps this address out of the log.
+ */
+app.get(HEALTH_PATH, (_req, res) => {
+  res.status(204).end();
+});
 
 /**
  * Two of helmet's defaults are wrong for this server, and one of them fails in

@@ -48,6 +48,7 @@ import {
 } from "../auth/rememberedDeviceIssue.js";
 import { REMEMBER_DEVICE_FIELD } from "../config/security.js";
 import { maskEmail } from "../auth/securityNotice.js";
+import { metodosDeReautenticacion } from "../auth/factorInventory.js";
 import { logAction } from "../utils/logAction.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -360,8 +361,8 @@ export const me = handler("me", async (req: Request, res: Response) => {
      * `attributes` list: this is the session's state, not a column of
      * `usuarios`.
      *
-     * **`estado` and nothing else.** Not `mfa_grace_until`, not the factor
-     * inventory. The state of your own session is something you are already
+     * **`estado` and nothing else on this object.** Not `mfa_grace_until`. The
+     * factor list is a separate key, added further down for one state only. The state of your own session is something you are already
      * living — it decides what you may reach this second, so publishing it to
      * its owner reveals nothing they cannot discover by clicking. The grace
      * deadline is scheduling data the client has no use for yet, and it was
@@ -399,6 +400,32 @@ export const me = handler("me", async (req: Request, res: Response) => {
    * And the query goes with it: `permissionsFor` is not called at all for a
    * state that would not be shown the answer.
    */
+  /**
+   * **A `parcial` session is told which factors the account has**, and it is
+   * the only state that is.
+   *
+   * It is the list the second-step screen draws itself from: one tab per way
+   * in, and straight to the form when there is only one. Without it that screen
+   * showed every tab to everybody and opened on the authenticator app, so an
+   * account whose only factor is a verified address — the usual first one — was
+   * asked for a code it had no way to produce.
+   *
+   * 🔴 **This reverses a finding, on purpose** (Isaias, 9 October 2026, with the
+   * cost stated). Plan 4E's first draft sent this list on the login body and
+   * its audit removed it: the factor inventory handed to whoever holds only the
+   * password. That is still what it is. What changed is the weighing — the
+   * address was already published here, masked, so "has email" was never
+   * hidden; and what the list adds is which factor to go after, not a way past
+   * any of them.
+   *
+   * The same function the step-up window uses, so the two screens cannot
+   * disagree about what an account has, and it keeps that function's two
+   * rules: no count of unspent recovery codes, and no `totp` while the keyring
+   * cannot decrypt one.
+   */
+  if (caller.estado === "parcial") {
+    return res.status(200).json({ ...cuerpo, metodos: await metodosDeReautenticacion(usuario.id) });
+  }
   if (caller.estado !== "completa") return res.status(200).json(cuerpo);
 
   return res.status(200).json({ ...cuerpo, permisos: await permissionsFor(usuario.id_rol) });

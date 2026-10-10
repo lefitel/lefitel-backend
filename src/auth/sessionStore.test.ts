@@ -300,6 +300,35 @@ describe("findLiveSession", () => {
       expect.arrayContaining(["estado", "mfa_satisfied_at", "mfa_source"]),
     );
   });
+
+  it("selects and returns password_confirmed_at, which the step-up window is measured from", async () => {
+    // 🔴 The same two-failures-in-one shape as the two tests above, and the
+    // one that costs the most when it goes wrong: `requireStepUp` reads this
+    // column off `req.user` to decide whether an account with no factor is
+    // still inside its ten minutes. Missing from the SELECT, or dropped on
+    // the way out of this function, and the value reaches the gate as
+    // `undefined` — every comparison against `NaN` is false, so the window
+    // simply never opens, on every request, with `"strict": false` keeping
+    // the typecheck clean and nothing else in the codebase saying a word.
+    const confirmadaEn = new Date("2026-09-08T10:00:00.000Z");
+    findOne.mockResolvedValue({
+      dataValues: {
+        id: "s1",
+        id_usuario: 7,
+        created_at: new Date(),
+        expires_at: new Date(),
+        last_used_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+        mfa_source: null,
+        password_confirmed_at: confirmadaEn,
+      },
+    });
+    const found = await findLiveSession("t");
+    expect(found?.password_confirmed_at).toEqual(confirmadaEn);
+    const [options] = findOne.mock.calls[0] as [{ attributes: string[] }];
+    expect(options.attributes).toContain("password_confirmed_at");
+  });
 });
 
 describe("slidingExpiry", () => {

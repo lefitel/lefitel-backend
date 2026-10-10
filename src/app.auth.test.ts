@@ -23,7 +23,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import jwt from "jsonwebtoken";
 import request from "supertest";
-import { Model } from "sequelize";
+import { Model, Op } from "sequelize";
 
 const permisos = { seguridad: { ver: true, crear: false } };
 /**
@@ -45,7 +45,7 @@ vi.mock("bcryptjs", () => ({
 
 const app = (await import("./app.js")).default;
 const { SESSION_COOKIE_NAME } = await import("./auth/sessionCookie.js");
-const { allowedOrigins, CSRF_CLIENT_HEADER, LOCKOUT_AFTER_FAILURES, PASSWORD_CONFIRM_LIMIT, PASSWORD_MIN_LENGTH, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_DAYS, SESSION_TOUCH_THROTTLE_MINUTES } =
+const { allowedOrigins, CSRF_CLIENT_HEADER, LOCKOUT_AFTER_FAILURES, PASSWORD_CONFIRM_LIMIT, PASSWORD_MIN_LENGTH, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_DAYS, SESSION_TOUCH_THROTTLE_MINUTES, STEP_UP_WINDOW_MINUTES } =
   await import("./config/security.js");
 /**
  * The two sentences the credential gates answer with, imported rather than
@@ -63,9 +63,19 @@ const { CURRENT_PASSWORD_REQUIRED_MESSAGE, CURRENT_PASSWORD_WRONG_MESSAGE } = aw
   "./controllers/usuario.controller.js"
 );
 /**
- * The `/api/usuario` router itself, for the one assertion that is about the
+ * `/email/send`'s own refusal for a malformed address.
+ *
+ * Imported because it is the one sentence on that route that **only the
+ * handler** can produce — no middleware in front of it validates an address —
+ * so it is what proves a request reached the handler at all. Two tests below
+ * lean on that, and both used to lean on the handler's "no password sent"
+ * instead, which stopped existing when that demand moved to the gate.
+ */
+const { EMAIL_INVALIDO } = await import("./controllers/email.controller.js");
+/**
+ * The `/api/usuario` router itself, for the assertions that are about the
  * mounted middleware chain rather than about a response. See "mounts the
- * permission guard before the budget on both routes".
+ * budget on the password change only, and behind the permission guard".
  */
 const usuarioRouter = (await import("./routes/usuario.routes.js")).default;
 const { CODIGO_STEP_UP } = await import("./middleware/requireStepUp.js");
@@ -97,7 +107,6 @@ const { loginIpLimiter, loginAccountIpLimiter, passwordConfirmLimiter } = await 
   "./middleware/loginLimiters.js"
 );
 const { UsuarioModel } = await import("./models/usuario.model.js");
-const { logAction } = await import("./utils/logAction.js");
 const { SesionModel } = await import("./models/sesion.model.js");
 const { sequelize } = await import("./database/sequelize.js");
 const { RolModel } = await import("./models/rol.model.js");
@@ -723,9 +732,25 @@ beforeEach(() => {
   dispositivoUpdate.mockResolvedValue([0] as never);
 });
 
-/** The `where` of the nth UPDATE the store sent to the sessions table. */
-const updateWhere = (n = 0) =>
-  (sesionUpdate.mock.calls[n]?.[1] as { where: Record<string, unknown> } | undefined)?.where;
+/**
+ * The `where` of the UPDATE that **revoked** a session, found by what it
+ * writes rather than by its position in the list.
+ *
+ * It used to be `sesionUpdate.mock.calls[n]`, defaulting to the first, and
+ * that stopped meaning "the revocation" the day `requireStepUp` gained an
+ * UPDATE of its own: on `DELETE /api/auth/sessions/:id` the gate now stamps
+ * `password_confirmed_at` — the ten-minute window — *before* it calls
+ * `next()`, so the controller's query is the second call, not the first.
+ * Three tests below read the seal's `where` and failed on it. An index into a
+ * shared spy is a witness that names the wrong query the moment anything else
+ * on the route learns to write; `revoked_at` names this one for good.
+ */
+const revocacionWhere = () => {
+  const llamada = sesionUpdate.mock.calls.find(
+    ([values]) => values !== null && typeof values === "object" && "revoked_at" in values,
+  );
+  return (llamada?.[1] as { where: Record<string, unknown> } | undefined)?.where;
+};
 
 describe("the six session routes are really mounted", () => {
   it("answers every one of them, and none of them with a 500", async () => {
@@ -1011,11 +1036,14 @@ describe("the credential that is no longer one", () => {
    * header and answer 200.
    */
   const firmado = () => {
-    const secret = process.env.JWT_SECRET as string;
-    // Not a formality: with no `.env` this would be `undefined`, `jwt.sign`
-    // would throw, and the two tests below would fail for a reason that has
-    // nothing to do with what they are about.
-    expect(secret, "JWT_SECRET tiene que estar configurado para que este test pruebe algo").toBeTruthy();
+    // The Docker gate runs this suite with no `.env` (`.dockerignore` keeps it
+    // out of the build context), and nothing at runtime sets `JWT_SECRET` any
+    // more. Requiring it from the environment aborted every image build, so the
+    // file supplies one where none is configured — the same choice
+    // `authenticate.test.ts` makes. A configured key still wins, and either way
+    // it is in `process.env`, where a re-added verifier would look for it.
+    process.env.JWT_SECRET ||= "la-clave-que-el-verificador-usaria";
+    const secret = process.env.JWT_SECRET;
     const token = jwt.sign({ id: YO, id_rol: MI_ROL }, secret);
     expect(jwt.verify(token, secret)).toMatchObject({ id: YO });
     return token;
@@ -1066,6 +1094,19 @@ describe("the credential that is no longer one", () => {
 });
 
 describe("closing sessions, through the real stack", () => {
+  /**
+   * Since Task 3 of the reauthentication-window plan (2026-09-08) removed
+   * the branch that let a factor-less account through for free, this is
+   * what the three tests below now have to send to reach `endSession`'s own
+   * query rather than being refused by `requireStepUp` for lacking a
+   * password — see the shared fixture's `mfa_satisfied_at: null` and its
+   * zero factors, which is the ordinary production shape and now gets a 403
+   * before the controller ever runs. `bcryptjs.compare` defaults to "yes"
+   * for this whole file (see its own comment further down), so any
+   * non-empty string here verifies.
+   */
+  const STEPUP = { stepup_password: "la-de-verdad" };
+
   it("revokes exactly this session on logout and takes the cookie back", async () => {
     const res = await request(app)
       .post("/api/auth/logout")
@@ -1076,7 +1117,7 @@ describe("closing sessions, through the real stack", () => {
     // `id_usuario` in a logout too. It is not needed there — the caller's own
     // session id came from their own cookie — but there is one way to revoke a
     // session in this codebase and the owner is not optional in it.
-    expect(updateWhere()).toEqual({ id: MI_SESION, id_usuario: YO, revoked_at: null });
+    expect(revocacionWhere()).toEqual({ id: MI_SESION, id_usuario: YO, revoked_at: null });
     const setCookie = (res.headers["set-cookie"] as unknown as string[])?.join("; ") ?? "";
     // Cleared by being set to nothing with an expiry in the past — which is the
     // only way to remove a cookie — so the name must be there with an empty
@@ -1092,10 +1133,11 @@ describe("closing sessions, through the real stack", () => {
     const res = await request(app)
       .delete(`/api/auth/sessions/${AJENA}`)
       .set("Cookie", COOKIE)
-      .set(DEL_FRONTEND);
+      .set(DEL_FRONTEND)
+      .send(STEPUP);
 
     expect(res.status).toBe(200);
-    expect(updateWhere()).toEqual({ id: AJENA, id_usuario: YO, revoked_at: null });
+    expect(revocacionWhere()).toEqual({ id: AJENA, id_usuario: YO, revoked_at: null });
   });
 
   it("answers 404, not 403 and not 500, when the row was somebody else's", async () => {
@@ -1103,25 +1145,38 @@ describe("closing sessions, through the real stack", () => {
     const res = await request(app)
       .delete(`/api/auth/sessions/${AJENA}`)
       .set("Cookie", COOKIE)
-      .set(DEL_FRONTEND);
+      .set(DEL_FRONTEND)
+      .send(STEPUP);
 
     expect(res.status).toBe(404);
     // The filter still went to the database — the 404 is the query finding
     // nothing, not a check that skipped it.
-    expect(updateWhere()).toMatchObject({ id_usuario: YO });
+    expect(revocacionWhere()).toMatchObject({ id_usuario: YO });
   });
 
   it("never sends a malformed id to a UUID column", async () => {
     // `WHERE id = 'pepito'` on a `uuid` column is not "no rows", it is Postgres
     // error 22P02. Without the shape check this would be a 500 with a stack
     // trace in the log, produced on demand by any account with a session.
+    //
+    // The password, same as its two neighbours above: without it,
+    // `requireStepUp` refuses this malformed-id request for lacking one
+    // before `endSession`'s own shape check ever runs, and the assertion
+    // below would stay green for that wrong reason instead.
     const res = await request(app)
       .delete("/api/auth/sessions/pepito")
       .set("Cookie", COOKIE)
-      .set(DEL_FRONTEND);
+      .set(DEL_FRONTEND)
+      .send(STEPUP);
 
     expect(res.status).toBe(404);
-    expect(sesionUpdate).not.toHaveBeenCalled();
+    // "No revocation was ever sent", and not "the sessions table was never
+    // written to" — which is what this line used to say and can no longer be
+    // true: the gate in front of this route seals its own ten-minute window
+    // (with `req.user.id_sesion`, a real uuid) before the controller's shape
+    // check ever runs. What must never reach the `uuid` column is `'pepito'`,
+    // and the only query that would carry it is the revocation.
+    expect(revocacionWhere()).toBeUndefined();
   });
 
   it("revokes everything the caller has on logout-all", async () => {
@@ -1135,7 +1190,7 @@ describe("closing sessions, through the real stack", () => {
     expect(res.body.cerradas).toBe(3);
     // By user, and with nothing spared: this is the one that has to be all of
     // them.
-    expect(updateWhere()).toEqual({ id_usuario: YO, revoked_at: null });
+    expect(revocacionWhere()).toEqual({ id_usuario: YO, revoked_at: null });
   });
 });
 
@@ -1156,7 +1211,7 @@ describe("logging in twice from the same browser", () => {
 
     expect(res.status).toBe(200);
     // The previous row, revoked, by id and owner.
-    expect(updateWhere()).toEqual({ id: MI_SESION, id_usuario: YO, revoked_at: null });
+    expect(revocacionWhere()).toEqual({ id: MI_SESION, id_usuario: YO, revoked_at: null });
     // And a new row written all the same.
     expect(sesionCreate).toHaveBeenCalledTimes(1);
   });
@@ -1362,7 +1417,23 @@ describe("changing your own credentials spends the budget for a wrong password, 
     usuarioFindByPk.mockResolvedValue(conHash() as never);
   });
 
-  it("charges the caller's account for a rename whose current password was wrong", async () => {
+  it("charges the caller's account for a rename whose password was wrong — the gate's charge now", async () => {
+    /**
+     * A rename still costs one of the five for a wrong password. **What
+     * changed is who bills it.**
+     *
+     * `updateUserName` used to compare an `oldPass` of its own, and
+     * `chargeConfirmBudgetOnSelfChange` was mounted on this route to bill that
+     * comparison. Both are gone: the gate compares the caller's password for
+     * this route now, and charges `pc:7` before it compares — so the budget
+     * this route draws on is unchanged even though nothing on the route itself
+     * counts anything any more. That is the property worth holding, because
+     * "we removed a check" and "we removed a limit" look identical from a
+     * green suite.
+     *
+     * `stepup_password` and no `oldPass`: the rename has no password field of
+     * its own left to send.
+     */
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockImplementation(soloRechaza("no-es-la-mia") as never);
     try {
@@ -1370,21 +1441,16 @@ describe("changing your own credentials spends the budget for a wrong password, 
         .put(`/api/usuario/username/${YO}`)
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND)
-        .send({ user: "isalas", oldPass: "no-es-la-mia", stepup_password: STEP_UP_OK });
+        .send({ user: "isalas", stepup_password: "no-es-la-mia" });
       await settled();
 
-      // Not 404 — the route exists. Not 403 — `requireSelfOrPermission` let an
-      // owner through. Not 500 — nothing in the chain threw.
-      expect(res.status).toBe(401);
-      // The sentence and not the number, imported rather than retyped: 401 is
-      // also what `authenticate` answers, and a test reading the status alone
-      // would pass for a route whose gate had been deleted and whose cookie had
-      // simply stopped working.
-      expect(res.body.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
+      // The gate's refusal, named by its `code` and `motivo` rather than by
+      // the number: 403 is also what `requireSelfOrPermission` answers, and a
+      // status-only assertion would pass for a route whose gate had been
+      // swapped for a permission the fixture happens to lack.
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: CODIGO_STEP_UP, motivo: "contraseña-incorrecta" });
 
-      // The point of this test. `pc:7` is the one key both routes count against,
-      // so nobody gets ten attempts a quarter of an hour by alternating the two
-      // doors onto one secret.
       expect(await gastado()).toBe(1);
     } finally {
       vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
@@ -1403,7 +1469,7 @@ describe("changing your own credentials spends the budget for a wrong password, 
         .send({ pass: "una-clave-de-prueba", oldPass: "no-es-la-mia", stepup_password: STEP_UP_OK });
       await settled();
 
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(400);
       expect(res.body.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
       expect(await gastado()).toBe(1);
     } finally {
@@ -1411,28 +1477,44 @@ describe("changing your own credentials spends the budget for a wrong password, 
     }
   });
 
-  it("counts the rename and the password change into one bucket, not one each", async () => {
-    // The assertion a second `rateLimit()` call would break, and nothing else
-    // would. Each `rateLimit()` builds a store of its own, so a per-route
-    // limiter — even one keyed identically — would leave each of these reading
-    // one hit, and anybody willing to alternate the two doors onto one secret
-    // would get ten attempts a quarter of an hour instead of five.
+  it("counts the gate's charge and the password change's own into one bucket, not one each", async () => {
+    /**
+     * The assertion a second `rateLimit()` call would break, and nothing else
+     * would. Each `rateLimit()` builds a store of its own, so a second limiter
+     * — even one keyed identically — would leave each of these reading one hit,
+     * and anybody willing to alternate two doors onto one secret would get ten
+     * attempts a quarter of an hour instead of five.
+     *
+     * **Two genuinely different call sites, which is what makes it worth
+     * running.** The first charge comes from `requireStepUp` itself, refusing a
+     * wrong `stepup_password` on the rename; the second from
+     * `chargeConfirmBudgetOnSelfChange`, billing a wrong `oldPass` inside
+     * `updateUserPass`. This pair used to be two routes that both charged
+     * through the second of those, so it could not have told a shared store
+     * from a shared *middleware*.
+     */
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockImplementation(soloRechaza("no-es-la-mia") as never);
     usuarioFindOne.mockResolvedValue(conHash() as never);
     try {
-      for (const url of [`/api/usuario/username/${YO}`, `/api/usuario/userpass/${YO}`]) {
-        const res = await request(app).put(url).set("Cookie", COOKIE).set(DEL_FRONTEND).send({
-          user: "isalas",
-          pass: "una-clave-de-prueba",
-          oldPass: "no-es-la-mia",
-          stepup_password: STEP_UP_OK,
-        });
-        await settled();
-        // Both really reached the comparison, so the two hits below are two
-        // wrong passwords and not two of anything else.
-        expect(res.status, url).toBe(401);
-      }
+      const porLaPuerta = await request(app)
+        .put(`/api/usuario/username/${YO}`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "isalas", stepup_password: "no-es-la-mia" });
+      await settled();
+      // Really reached the comparison, so the hit is a wrong password and not
+      // a refusal for some other reason that happened to bill.
+      expect(porLaPuerta.body).toMatchObject({ motivo: "contraseña-incorrecta" });
+
+      const porElHandler = await request(app)
+        .put(`/api/usuario/userpass/${YO}`)
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ pass: "una-clave-de-prueba", oldPass: "no-es-la-mia", stepup_password: STEP_UP_OK });
+      await settled();
+      expect(porElHandler.status).toBe(400);
+      expect(porElHandler.body.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
 
       expect(await gastado()).toBe(2);
     } finally {
@@ -1442,20 +1524,36 @@ describe("changing your own credentials spends the budget for a wrong password, 
 
   it("charges nothing for a request aimed at somebody else's account", async () => {
     /**
-     * What provides this is `requiresOwnPassword`, and saying so is the whole
-     * point of the rewrite.
+     * What this holds today: **nothing in front of the permission guard can
+     * bill anybody.** A request the guard refuses reaches neither the gate nor
+     * any budget middleware, so neither the caller's bucket nor the target's
+     * moves — and a caller who is refused for lacking a permission must not be
+     * able to spend somebody's allowance on the way to being told no.
      *
-     * This test used to be called "charges nothing for a request the permission
-     * guard already refused", and its comment credited the order of the mount:
-     * *"the budget is mounted after the guard on purpose"*. It passed with the
-     * two swapped — measured, 811 green — because the budget only charges when
-     * the target is the caller and the guard only refuses when it is not. The
-     * conditions are exactly complementary, so no response can tell the two
-     * orders apart. The order is still deliberate and it is pinned structurally,
-     * three tests below.
+     * 🔴 **It no longer holds `requiresOwnPassword`, and it used to say it
+     * did** — the comment here read *"What provides this is
+     * `requiresOwnPassword`, and saying so is the whole point of the
+     * rewrite"*. Measured in Task 17 of the reauthentication-window plan
+     * (2026-09-08): deleting that condition out of
+     * `chargeConfirmBudgetOnSelfChange` leaves the whole api suite green, and
+     * so does re-mounting that middleware on this very route. The reason is
+     * that Task 14 took the budget middleware off `/username/:id` altogether —
+     * the rename compares no password of its own any more — so this request
+     * has no charging middleware to reach even if the guard let it through.
      *
-     * `oldPass` is sent on purpose: a budget that keyed off the body carrying a
-     * password rather than off whose account is being changed would charge here.
+     * Where that condition really is measured: as a pure function, in
+     * `usuario.controller.test.ts`'s own `requiresOwnPassword` block; and the
+     * order of the mount, structurally, three tests below. On
+     * `/userpass/:id`, the one route that still carries the middleware, the
+     * condition has no witness a response can show — the gate ahead of it
+     * charges and refunds the same `pc:<id>` bucket first, and
+     * `confirmCostsNothing` refunds any answer that is not a 401, so removing
+     * it changes no status and no counter that any request can read.
+     *
+     * `oldPass` is still sent on purpose, and its meaning narrows with the
+     * above: it is now here so that a future middleware keyed off "the body
+     * carries a password" rather than off whose account is being changed
+     * would have something to trip over.
      */
     const res = await request(app)
       .put("/api/usuario/username/99")
@@ -1529,71 +1627,80 @@ describe("changing your own credentials spends the budget for a wrong password, 
     }
   });
 
-  it("mounts the permission guard before the budget on both routes", () => {
+  it("mounts the budget on the password change only, and behind the permission guard", () => {
     /**
      * A structural assertion, and deliberately so — see the long note on
      * `chargeConfirmBudgetOnSelfChange` in `usuario.routes.ts`.
      *
-     * The property is real and no response can show it: the guard refuses
-     * exactly the requests the budget does not charge for, so both orders answer
-     * identically to everything. Writing a request-shaped test for it is how the
-     * test three above came to claim the order while `requiresOwnPassword` was
-     * doing the work — the fifth assertion in this project to pass against the
-     * code it said it protected. Reading the mounted chain says what is actually
-     * being held.
+     * **Two properties, both invisible to any response.**
      *
-     * Worth holding because the day the charge condition widens, this order is
-     * the only thing between a stranger and a stranger's allowance. The MFA
-     * plan's step-up could easily want an administrator to send `oldPass` when
-     * acting on somebody else — and then a budget in front of the guard is a
-     * stranger emptying the target's bucket by being refused over and over.
+     * The order: the guard refuses exactly the requests the budget does not
+     * charge for, so both orders answer identically to everything. Writing a
+     * request-shaped test for it is how a test above came to claim the order
+     * while `requiresOwnPassword` was doing the work — the fifth assertion in
+     * this project to pass against the code it said it protected. Worth
+     * holding because the day the charge condition widens, this order is the
+     * only thing between a stranger and a stranger's allowance.
+     *
+     * The absence: `/username/:id` carried this middleware until the rename
+     * stopped comparing a password of its own. Re-mounting it there would bill
+     * a comparison that no longer happens, and nothing in any response would
+     * change — the rename's own budget comes from the gate now. So the absence
+     * is asserted rather than left to be noticed.
      */
     type Capa = { route?: { path: string; stack: { name: string }[] } };
     const rutas = (usuarioRouter as unknown as { stack: Capa[] }).stack
       .filter((capa) => capa.route)
       .map((capa) => ({ path: capa.route.path, chain: capa.route.stack.map((h) => h.name) }));
 
-    for (const path of ["/username/:id", "/userpass/:id"]) {
-      const ruta = rutas.find((r) => r.path === path);
-      expect(ruta, `${path} no está montada`).toBeDefined();
-      const chain = ruta.chain;
-      // Both present first. Without these two, the comparison below passes for a
-      // chain missing either name, because `indexOf` answers -1 and -1 is less
-      // than everything — which is precisely the shape of assertion this file's
-      // header is about.
-      expect(chain, path).toContain("requireSelfOrPermissionGate");
-      expect(chain, path).toContain("chargeConfirmBudgetOnSelfChange");
-      expect(
-        chain.indexOf("requireSelfOrPermissionGate"),
-        `${path}: ${chain.join(" -> ")}`,
-      ).toBeLessThan(chain.indexOf("chargeConfirmBudgetOnSelfChange"));
-    }
+    const cambio = rutas.find((r) => r.path === "/userpass/:id");
+    expect(cambio, "/userpass/:id no está montada").toBeDefined();
+    // Both present first. Without these two, the comparison below passes for a
+    // chain missing either name, because `indexOf` answers -1 and -1 is less
+    // than everything — which is precisely the shape of assertion this file's
+    // header is about.
+    expect(cambio.chain).toContain("requireSelfOrPermissionGate");
+    expect(cambio.chain).toContain("chargeConfirmBudgetOnSelfChange");
+    expect(
+      cambio.chain.indexOf("requireSelfOrPermissionGate"),
+      cambio.chain.join(" -> "),
+    ).toBeLessThan(cambio.chain.indexOf("chargeConfirmBudgetOnSelfChange"));
+
+    const renombre = rutas.find((r) => r.path === "/username/:id");
+    expect(renombre, "/username/:id no está montada").toBeDefined();
+    // The gate is still there — this is "the budget left", not "the route was
+    // unguarded".
+    expect(renombre.chain).toContain("stepUpGate");
+    expect(renombre.chain).not.toContain("chargeConfirmBudgetOnSelfChange");
   });
 
-  it("refunds the rename a cached frontend sends with no current password at all", async () => {
+  it("refunds the password change a cached frontend sends with no current password at all", async () => {
     /**
-     * The deploy window this plan is most worried about, and it used to cost the
-     * people caught in it their budget.
+     * The deploy window, and it used to cost the people caught in it their
+     * budget.
      *
-     * A bundle sitting in somebody's tab from before this arc renames without an
-     * `oldPass` field, because the field does not exist in it. Every one of those
-     * requests is a 400 it cannot satisfy — and charging for them spent the
-     * budget of exactly the people the transition hurts, then took the password
-     * change down with it, on the same bucket, for a quarter of an hour.
+     * A bundle sitting in somebody's tab from before the field existed sends
+     * the change without an `oldPass`. Every one of those requests is a 400 it
+     * cannot satisfy — and charging for them spent the budget of exactly the
+     * people a transition hurts, on the bucket shared with every other gated
+     * operation, for a quarter of an hour.
      *
-     * `stepup_password` is supplied so the request clears `requireStepUp`
-     * first — a bundle old enough to be missing `oldPass` would also be
-     * missing this field and get refused for *free* by the gate before ever
-     * reaching the rename's own check, which is a real improvement over what
-     * this test originally measured but not the thing it exists to prove.
-     * What is under test here is unchanged: a legitimate, non-guessing 400
-     * still gets refunded once it does reach `updateUserName`.
+     * **This used to be measured on the rename**, which no longer compares a
+     * password at all — a request with no `oldPass` renames perfectly happily
+     * now, so there is no refusal there left to refund. The property is the
+     * refund, not the route, and `/userpass/:id` is where the mount that
+     * performs it still lives.
+     *
+     * `stepup_password` clears the gate first, so the 400 below is
+     * `updateUserPass`'s own and not the gate's free refusal.
      */
+    usuarioFindOne.mockResolvedValue(conHash() as never);
+
     const res = await request(app)
-      .put(`/api/usuario/username/${YO}`)
+      .put(`/api/usuario/userpass/${YO}`)
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
-      .send({ user: "isalas", stepup_password: STEP_UP_OK });
+      .send({ pass: "una-clave-de-prueba", stepup_password: STEP_UP_OK });
     await settled();
 
     expect(res.status).toBe(400);
@@ -1695,6 +1802,116 @@ describe("changing your own credentials spends the budget for a wrong password, 
     expect(Math.abs(anunciado - new Date(expira as string).getTime())).toBeLessThan(2000);
   });
 
+  it("does not let the rotation exempt the new session from a deadline that has already passed", async () => {
+    /**
+     * The way round the fourteen-day deadline that changing your password
+     * used to be.
+     *
+     * The rotation copied the state off the session making the request, so a
+     * new row was written `completa` — created **now**, which is after this
+     * account's deadline, and `estadoEfectivo` exempts a `completa` session
+     * opened after its own deadline (it can only have got there by proving a
+     * factor). So the new session was outside the rule for its whole life, and
+     * a session lives `SESSION_ABSOLUTE_DAYS`: changing the password again
+     * before that ran out renewed the exemption, indefinitely, on an account
+     * with no second factor. Nobody used that road while the login handed out
+     * a fresh fourteen days for registering and deleting a passkey; with that
+     * loop closed, it is the road that is left.
+     *
+     * The fixture is what makes it reachable in the first place: a session
+     * opened **after** the deadline is only `completa` because a previous
+     * rotation wrote it that way, which is the state this test starts from.
+     *
+     * The new row must say `onboarding` — the answer a login would give this
+     * account today. It is not a lockout: `onboarding` opens the six doors
+     * that lead to registering a factor, and `authenticate` answers
+     * `FACTOR_PENDIENTE` rather than 401 for everything else.
+     */
+    const VENCIDO = new Date(Date.now() - DIA_MS);
+    usuarioFindByPk.mockResolvedValue(conHash({ mfa_grace_until: VENCIDO }) as never);
+    sesionFindOne.mockResolvedValue({
+      dataValues: {
+        id: MI_SESION,
+        id_usuario: YO,
+        created_at: new Date(Date.now() - 60_000),
+        expires_at: new Date(Date.now() + 5 * DIA_MS),
+        last_used_at: new Date(),
+        estado: "completa",
+        mfa_satisfied_at: null,
+        mfa_source: null,
+      },
+    } as never);
+    usuarioFindOne.mockResolvedValue(escribible({ mfa_grace_until: VENCIDO }) as never);
+    transaction.mockImplementation((async (fn: (t: unknown) => Promise<unknown>) =>
+      fn({ id: "una-transaccion" })) as never);
+
+    const res = await request(app)
+      .put(`/api/usuario/userpass/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ pass: "una-clave-larguisima", oldPass: "la-mia", stepup_password: STEP_UP_OK });
+    await settled();
+
+    // The password change itself still succeeds. Refusing it would be the
+    // wrong fix: somebody past their deadline must still be able to change a
+    // password they believe is known.
+    expect(res.status).toBe(200);
+    expect(sesionCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ id_usuario: YO, estado: "onboarding" }),
+      expect.anything(),
+    );
+  });
+
+  it("keeps the rotated session complete for an account that has just proved a factor", async () => {
+    /**
+     * The other half, and the one that would be a daily outage if it were
+     * got wrong.
+     *
+     * `PUT /userpass/:id` carries `requireStepUp({ sinVentana: true })`, and
+     * for an account that **has** a factor that gate passes only on a
+     * `mfa_satisfied_at` newer than `STEP_UP_WINDOW_MINUTES` — so anybody
+     * with a factor who reaches this handler proved it minutes ago. Deciding
+     * the rotated session's state the way a *login* decides it would answer
+     * `parcial` for exactly those people (a login has proved no factor yet),
+     * `authenticate` answers 401 to `parcial`, and the browser would be
+     * thrown back to the login form by the very response that says the
+     * password was changed — the failure the rotation exists to prevent.
+     */
+    passkeyCount.mockResolvedValue(1);
+    usuarioFindByPk.mockResolvedValue(conHash({ mfa_grace_until: new Date(Date.now() - DIA_MS) }) as never);
+    sesionFindOne.mockResolvedValue({
+      dataValues: {
+        id: MI_SESION,
+        id_usuario: YO,
+        created_at: new Date(Date.now() - 60_000),
+        expires_at: new Date(Date.now() + 5 * DIA_MS),
+        last_used_at: new Date(),
+        estado: "completa",
+        // What the gate above demands of an account with a factor: proof from
+        // a minute ago. Without it this request is a 403 and the test would be
+        // asserting nothing.
+        mfa_satisfied_at: new Date(Date.now() - 60_000),
+        mfa_source: "passkey",
+      },
+    } as never);
+    usuarioFindOne.mockResolvedValue(escribible() as never);
+    transaction.mockImplementation((async (fn: (t: unknown) => Promise<unknown>) =>
+      fn({ id: "una-transaccion" })) as never);
+
+    const res = await request(app)
+      .put(`/api/usuario/userpass/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ pass: "una-clave-larguisima", oldPass: "la-mia", stepup_password: STEP_UP_OK });
+    await settled();
+
+    expect(res.status).toBe(200);
+    expect(sesionCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ id_usuario: YO, estado: "completa" }),
+      expect.anything(),
+    );
+  });
+
   it("never runs out of budget on the password policy, however many times it refuses", async () => {
     /**
      * The premise `PASSWORD_CONFIRM_LIMIT` was calibrated on — "nobody
@@ -1743,31 +1960,38 @@ describe("changing your own credentials spends the budget for a wrong password, 
      * made `requireStepUp` a no-op and left this arithmetic unwitnessed by
      * anything that actually runs.
      *
-     * With the real state restored, each attempt below still charges `pc:7`
-     * exactly **once** — from `chargeConfirmBudgetOnSelfChange`'s own
-     * `oldPass` check, which is wrong here. `requireStepUp`'s own fallback
-     * runs first with the correct `stepup_password` and charges nothing at
-     * all: a right answer never calls the real limiter (see
-     * `requireStepUp.ts`'s own docstring), so there is no second charge for
-     * anything to refund. A fix-round review measured a version of this gate
-     * that *did* charge a correct answer and refund it afterwards, and found
-     * that the not-yet-refunded charge could inflate the count this same
-     * `oldPass` check reads mid-request; that version is gone, and this test
-     * is the arithmetic it would have broken.
+     * With the real state restored, each attempt below charges `pc:7` exactly
+     * **once** — from `chargeConfirmBudgetOnSelfChange`'s own `oldPass` check,
+     * which is wrong here. `requireStepUp`'s own fallback runs first with the
+     * correct `stepup_password` and charges nothing at all: a right answer
+     * never calls the real limiter (see `requireStepUp.ts`'s own docstring),
+     * so there is no second charge for anything to refund. A fix-round review
+     * measured a version of this gate that *did* charge a correct answer and
+     * refund it afterwards, and found that the not-yet-refunded charge could
+     * inflate the count this same `oldPass` check reads mid-request; that
+     * version is gone, and this test is the arithmetic it would have broken.
+     *
+     * **Driven on `/userpass/:id` since the rename stopped comparing an
+     * `oldPass` of its own.** The rename's own guessing is counted by the gate
+     * now — "charges the caller's account for a rename whose password was
+     * wrong" above is that half — and this route is the one where the two
+     * charges can still coincide in a single request, which is the arithmetic
+     * this test is for.
      */
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockImplementation(soloRechaza("adivinando") as never);
+    usuarioFindOne.mockResolvedValue(conHash() as never);
     const attempt = () =>
       request(app)
-        .put(`/api/usuario/username/${YO}`)
+        .put(`/api/usuario/userpass/${YO}`)
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND)
-        .send({ user: "isalas", oldPass: "adivinando", stepup_password: STEP_UP_OK });
+        .send({ pass: "una-clave-de-prueba", oldPass: "adivinando", stepup_password: STEP_UP_OK });
     try {
       for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
         const res = await attempt();
         await settled();
-        expect(res.status, `intento ${i + 1}`).toBe(401);
+        expect(res.status, `intento ${i + 1}`).toBe(400);
         expect(res.body.message, `intento ${i + 1}`).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
       }
 
@@ -1796,17 +2020,18 @@ describe("changing your own credentials spends the budget for a wrong password, 
   it("keeps one budget per account, not one for everybody", async () => {
     // A key generator that ignored `req.user` — or fell back to a constant —
     // would put the whole company in one bucket, and five wrong passwords by one
-    // person would close the rename for everyone. The key is read out of the
-    // bucket rather than inferred from a second caller's answer, because two
-    // accounts cannot easily be signed in at once through this harness.
+    // person would close every gated operation for everyone. The key is read out
+    // of the bucket rather than inferred from a second caller's answer, because
+    // two accounts cannot easily be signed in at once through this harness.
     const bcryptjs = (await import("bcryptjs")).default;
     vi.mocked(bcryptjs.compare).mockImplementation(soloRechaza("no-es-la-mia") as never);
+    usuarioFindOne.mockResolvedValue(conHash() as never);
     try {
       await request(app)
-        .put(`/api/usuario/username/${YO}`)
+        .put(`/api/usuario/userpass/${YO}`)
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND)
-        .send({ user: "isalas", oldPass: "no-es-la-mia", stepup_password: STEP_UP_OK });
+        .send({ pass: "una-clave-de-prueba", oldPass: "no-es-la-mia", stepup_password: STEP_UP_OK });
       await settled();
 
       expect(await gastado()).toBe(1);
@@ -1818,7 +2043,7 @@ describe("changing your own credentials spends the budget for a wrong password, 
     }
   });
 
-  it("lets a locked account rename itself with its own password, which is the ERP it is still working in", async () => {
+  it("lets a locked account change its own password, which is the way out of the lockout", async () => {
     /**
      * F1, end to end through the real stack, and the reason it is here rather
      * than only beside `verifyOwnPassword`: the harm was never one function's
@@ -1827,13 +2052,30 @@ describe("changing your own credentials spends the budget for a wrong password, 
      * Somebody who knows Ana's username fails five times on the login form and
      * her account rests for a quarter of an hour. `authenticate` does not read
      * `locked_until` — deliberately — so the session she already had keeps
-     * working and she keeps using the ERP. She goes to rename herself and types
-     * her password correctly; the shared comparator refused a resting account
+     * working and she keeps using the ERP. She types her own password
+     * correctly to change it; the shared comparator refused a resting account
      * before comparing anything, so she was told her password was wrong. Five
-     * times, one token each, and the sixth answer was a 429 that also closed the
-     * password change — the one screen that would have lifted the lockout.
+     * times, one token each, and the sixth answer was a 429 on the same bucket
+     * — which closed the one screen that would have lifted the lockout.
      *
-     * So: the rename goes through, and it costs her nothing.
+     * **Moved here from the rename, and the reason is not the one written here
+     * first.** The first version of this note claimed the rename had nothing
+     * left for `LockoutPolicy` to answer. That was wrong, and measured wrong:
+     * `requireStepUp` compares `stepup_password` through `verifyOwnPassword`
+     * too, which is the very function `lockout: "ignore"` lives in — so a
+     * locked account renaming itself on nothing but the gate's password still
+     * exercises the policy. Flipping `credentials.ts` to `lockout: "refuse"`
+     * turns that request from 200 into 403, which is what proves it.
+     *
+     * The real reason to move it is the second one, and it stands on its own:
+     * **this is the sharper case.** A rename denied to a locked account is an
+     * annoyance; a password change denied to one is the exit from the lockout
+     * closing, which is the whole failure F1 describes. And this route
+     * exercises **both** comparisons — the gate's `stepup_password` and
+     * `updateUserPass`'s own `oldPass` — where the rename now exercises only
+     * the first. Strictly more of the policy is under test here, not less.
+     *
+     * So: the change goes through, and it costs her nothing.
      */
     usuarioFindByPk.mockResolvedValue(
       conHash({
@@ -1842,18 +2084,19 @@ describe("changing your own credentials spends the budget for a wrong password, 
       }) as never,
     );
     usuarioFindOne.mockResolvedValue(escribible() as never);
+    transaction.mockImplementation((async (fn: (t: unknown) => Promise<unknown>) =>
+      fn({ id: "una-transaccion" })) as never);
 
     const res = await request(app)
-      .put(`/api/usuario/username/${YO}`)
+      .put(`/api/usuario/userpass/${YO}`)
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
-      .send({ user: "isalas", oldPass: "la-mia", stepup_password: STEP_UP_OK });
+      .send({ pass: "una-clave-larguisima", oldPass: "la-mia", stepup_password: STEP_UP_OK });
     await settled();
 
-    // The change itself, not merely "not a 401": a 500 or a 409 would satisfy
+    // The change itself, not merely "not a 401": a 500 or a 400 would satisfy
     // `not.toBe(401)` while leaving her exactly as stuck.
     expect(res.status).toBe(200);
-    expect(res.body.user).toBe("isalas");
     expect(await gastado()).toBe(0);
   });
 });
@@ -2118,12 +2361,6 @@ describe("requireStepUp, mounted on the real routes", () => {
       // Y no por el motivo genérico: el cliente necesita saber que lo que
       // falta es la contraseña, no un factor que esta cuenta no tiene.
       expect(res.body.motivo).toBe("contraseña-requerida");
-      // La otra mitad, y es la que prueba que se cerró de verdad: ya no se
-      // escribe la línea que decía «una escritura sensible pasó sin la prueba
-      // extra». No pasó nada.
-      expect(logAction).not.toHaveBeenCalledWith(
-        expect.objectContaining({ action: "STEP_UP_SKIPPED" }),
-      );
     } finally {
       puede = false;
     }
@@ -2172,21 +2409,24 @@ describe("requireStepUp, mounted on the real routes", () => {
     }
   });
 
-  it("survives confirming the same password twice in one request — this gate's own check, then the rename's own — without crashing or leaving a charge behind", async () => {
+  it("asks for the password once on a self-rename, and leaves the budget where it started", async () => {
     /**
-     * A self-rename on `/username/:id`, with no factor registered and an
-     * unsatisfied window, asks for the caller's password twice in one
-     * request: once for this gate's own fallback, once for `updateUserName`'s
-     * own `oldPass` check, both against the same `pc:7` key. Measured,
-     * though: only **one** real charge is ever made here. This gate's own
-     * check is correct, and a correct answer never calls the real limiter at
-     * all (see `requireStepUp.ts`'s own docstring) — there is nothing for it
-     * to charge or refund. The one charge that does happen is
-     * `chargeConfirmBudgetOnSelfChange`'s, for `oldPass`, and it refunds
-     * because `oldPass` is correct too. What this proves is narrower than
-     * "two charges, both given back": it is that asking the same key about
-     * the same secret from two call sites in one request does not crash and
-     * leaves the budget exactly where it started.
+     * 🔴 **This is the thing the whole arc was for, measured.** A self-rename
+     * on `/username/:id`, with no factor registered and an unsatisfied window,
+     * used to ask the caller for their password **twice in one request**: once
+     * into the step-up dialog as `stepup_password`, and once into the form as
+     * `oldPass`, both compared against the same secret and counted against the
+     * same `pc:7` key. The request below sends `stepup_password` and nothing
+     * else, and it renames.
+     *
+     * The budget assertion is the other half. `requireStepUp` charges `pc:7`
+     * before it compares — one atomic call, so concurrent guesses cannot all
+     * read "nothing spent yet" during the same bcrypt round trip — and gives
+     * the charge straight back when the password turns out to be right. So the
+     * bucket exists and reads zero: `undefined` would mean the gate never
+     * charged, and a positive number would mean it never refunded. A
+     * fix-round review measured a version where a not-yet-refunded charge
+     * could inflate a count read mid-request; that version is gone.
      */
     usuarioFindOne.mockResolvedValue({
       dataValues: {
@@ -2206,10 +2446,13 @@ describe("requireStepUp, mounted on the real routes", () => {
       .put(`/api/usuario/username/${YO}`)
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
-      .send({ user: "isalas-dos-veces", stepup_password: "la-de-verdad", oldPass: "la-de-verdad" });
+      .send({ user: "isalas-una-sola-vez", stepup_password: "la-de-verdad" });
     await new Promise((resolve) => setImmediate(resolve));
 
+    // The rename itself, and the name it wrote: a 403 or a 409 would satisfy
+    // "not a 500" while proving the opposite of what this test is named for.
     expect(res.status).toBe(200);
+    expect(res.body.user).toBe("isalas-una-sola-vez");
     expect(await passwordConfirmLimiter.getKey(CLAVE_YO)).toEqual(
       expect.objectContaining({ totalHits: 0 }),
     );
@@ -2271,31 +2514,29 @@ describe("requireStepUp, mounted on the real routes", () => {
 
         expect(res.status).toBe(403);
         expect(res.body).toMatchObject({ code: "STEP_UP_REQUIRED", motivo: "contraseña-requerida" });
-        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
       } finally {
         puede = false;
       }
     });
 
-    // 🔴 The only live-mount witness of the factor-less skip left after D6.
-    // `requireStepUp.ts`'s own docstring says a gate nothing can satisfy is an
-    // outage, and that branch — no factor, no password demanded, let through
-    // with a `STEP_UP_SKIPPED` line — is what stops that. It used to be
-    // proved through `DELETE /api/rol/:id`; D6 moved that route onto the
-    // password, so the witness moves to the one body-less mount that still
-    // takes the plain gate. Delete this and the branch has no mounted proof.
-    it("still lets a body-less DELETE through where the route asks for no password: closing another session", async () => {
+    // 🔴 This used to be the only live-mount witness of the factor-less
+    // skip left after D6 — `DELETE /api/auth/sessions/99` with no body fell
+    // into it and reached `endSession` on the cookie alone. Task 3 of the
+    // reauthentication-window plan (2026-09-08) removed that branch, so what
+    // this proves now is the same shape as its neighbour above
+    // (`/api/rol/99`): a body-less DELETE is read without crashing, on a
+    // route that leaves `sinVentana` off rather than on. Measures the real
+    // Express stack — no Content-Type means `req.body` really is
+    // `undefined`, and that is what has to survive the gate's own read of it.
+    it("refuses a body-less DELETE for lacking a password, on a route that leaves sinVentana off", async () => {
       const res = await request(app)
         .delete("/api/auth/sessions/99")
         .set("Cookie", COOKIE)
         .set(DEL_FRONTEND);
 
-      // Pinned at the measured answer, not merely `not.toBe(403)`: `endSession`
-      // answers 404 for a session id that is not the caller's, which is what
-      // proves the gate called on rather than refusing — a 500 from a crash
-      // after the gate would have passed the weaker assertion too.
-      expect(res.status).toBe(404);
-      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: CODIGO_STEP_UP, motivo: "contraseña-requerida" });
+      expect(sesionUpdate).not.toHaveBeenCalled();
     });
 
     it("reads stepup_password out of a DELETE body once Content-Type says to parse one", async () => {
@@ -2333,14 +2574,12 @@ describe("requireStepUp, mounted on the real routes", () => {
           .set(DEL_FRONTEND)
           .send({ stepup_password: "la-de-verdad" });
 
+        // Since Task 3 of the reauthentication-window plan, a 204 here is
+        // unambiguous on its own: a gate that failed to read the body would
+        // now answer 403 for lacking a password, not fall through to
+        // anything that could also return success. (204 and not 200 since
+        // C4: archiving a role reports nothing.)
         expect(res.status).toBe(204);
-        // The discriminator this test exists for: a success here is ambiguous
-        // by itself — it is also what a gate that silently failed to read the
-        // body at all would answer, by falling through to the same skip the
-        // test above exercises on purpose. Asserting the skip did *not* fire
-        // is what proves this 204 came from a verified password instead.
-        // (204 and not 200 since C4: archiving a role reports nothing.)
-        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: "STEP_UP_SKIPPED" }));
       } finally {
         puede = false;
       }
@@ -2369,6 +2608,391 @@ describe("requireStepUp, mounted on the real routes", () => {
         vi.mocked(bcryptjs.compare).mockResolvedValue(true as never);
       }
     });
+  });
+});
+
+/**
+ * La ventana de diez minutos que abre una contraseña correcta — Tarea 5 del
+ * plan de reautenticación (2026-09-08).
+ *
+ * 🔴 **Por la app montada, y no por la puerta en aislamiento.** Lo que se
+ * prueba aquí no es una decisión de `requireStepUp` — eso un test unitario de
+ * la puerta lo cubre igual de bien, y pasaría con la cadena rota. Es que la
+ * fecha llegue **entera** desde la fila de `sesiones` hasta `req.user`,
+ * atravesando el modelo, `findLiveSession`, `authenticate` y la declaración
+ * global de `Express.Request`. Con `"strict": false` en `tsconfig.json`,
+ * olvidar cualquiera de esos pasos compila limpio, deja el valor en
+ * `undefined`, y la ventana no se cumple jamás — sin que nada se ponga rojo.
+ */
+describe("la contraseña abre diez minutos cuando la cuenta no tiene ningún factor", () => {
+  const CLAVE_YO = `pc:${YO}`;
+
+  /**
+   * La fila de `sesiones`, que en este bloque sobrevive de una petición a la
+   * siguiente. El resto del fichero devuelve un objeto fijo desde
+   * `sesionFindOne`, y con uno fijo la segunda petición no podría ver lo que
+   * escribió la primera — que es justo la propiedad bajo prueba.
+   */
+  let fila: Record<string, unknown>;
+
+  /**
+   * Si la fila casaría con el `where` de un sellado. Es el trabajo de
+   * Postgres, hecho aquí porque este fichero no tiene Postgres, y entiende
+   * sólo las tres formas que `sellarContrasena` envía.
+   *
+   * Está pinchado por los dos lados, que es lo que lo hace fiable: si dijera
+   * «no» de más, el primer test no vería nunca el sello; si dijera «sí» de
+   * más, el segundo vería la ventana renovarse.
+   */
+  const casaConLaFila = (where: Record<string | symbol, unknown>): boolean => {
+    if (where.id !== fila.id) return false;
+    if (where.revoked_at !== (fila.revoked_at ?? null)) return false;
+    const alternativas = (where as Record<symbol, unknown>)[Op.or] as
+      | Record<string, unknown>[]
+      | undefined;
+    // Sin la cláusula de antigüedad, un UPDATE por `id` casa siempre — que es
+    // exactamente lo que haría Postgres, y lo que el segundo test tiene que ver.
+    if (!alternativas) return true;
+    const sello = (fila.password_confirmed_at ?? null) as Date | null;
+    return alternativas.some((clausula) => {
+      const cota = clausula.password_confirmed_at;
+      if (cota === null) return sello === null;
+      const limite = (cota as Record<symbol, unknown>)?.[Op.lt];
+      return sello !== null && limite instanceof Date && sello.getTime() < limite.getTime();
+    });
+  };
+
+  /** Los UPDATE que intentaron escribir el sello, sin importar si casaron. */
+  const sellados = () =>
+    sesionUpdate.mock.calls.filter(
+      ([values]) =>
+        values !== null && typeof values === "object" && "password_confirmed_at" in values,
+    );
+
+  beforeEach(async () => {
+    await passwordConfirmLimiter.resetKey(CLAVE_YO);
+    fila = {
+      id: MI_SESION,
+      id_usuario: YO,
+      created_at: SESION_CREADA,
+      expires_at: SESION_EXPIRA_FILA,
+      last_used_at: new Date(),
+      estado: "completa",
+      mfa_satisfied_at: null,
+      mfa_source: null,
+      // Lo que tiene hoy cualquier sesión de producción: nadie ha confirmado
+      // nada todavía en ella.
+      password_confirmed_at: null,
+    };
+    /**
+     * Proyecta por `attributes`, como hace Sequelize, y ahí está la mitad del
+     * valor de este bloque: una columna que falte en la lista de
+     * `findLiveSession` no llega, igual que no llegaría contra Postgres.
+     */
+    sesionFindOne.mockImplementation((async (opciones: { attributes?: string[] }) => {
+      const pedidas = opciones?.attributes;
+      return {
+        dataValues: pedidas
+          ? Object.fromEntries(pedidas.map((columna) => [columna, fila[columna]]))
+          : { ...fila },
+      };
+    }) as never);
+    /**
+     * Y escribe. Sólo el sellado toca la fila: los demás UPDATE que pasan por
+     * aquí — revocar una sesión, renovar su expiración — siguen contestando
+     * «una fila» sin cambiar nada, que es lo que este fichero espera de ellos
+     * en todos los demás bloques.
+     */
+    sesionUpdate.mockImplementation((async (
+      values: Record<string, unknown>,
+      opciones: { where: Record<string | symbol, unknown> },
+    ) => {
+      if (!("password_confirmed_at" in values)) return [1];
+      if (!casaConLaFila(opciones.where)) return [0];
+      Object.assign(fila, values);
+      return [1];
+    }) as never);
+  });
+
+  it("deja pasar la segunda operación de los diez minutos sin volver a pedir la contraseña", async () => {
+    // Lo único que la persona nota, y lo único que ve la cadena entera de
+    // seis piezas.
+    const primera = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ stepup_password: "la-de-verdad" });
+
+    expect(primera.status).toBe(200);
+    expect(fila.password_confirmed_at).toBeInstanceOf(Date);
+
+    // Sin `stepup_password` y sin `Content-Type`: la forma que manda
+    // `axios.delete(url)` cuando el interceptor no tiene nada que inyectar.
+    const segunda = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
+
+    expect(segunda.status).toBe(200);
+  });
+
+  it("y también en el renombrado propio, que es la operación que originó todo esto", async () => {
+    /**
+     * 🔴 El testigo sobre la ruta del problema, y no sobre su vecina.
+     *
+     * El test de arriba mide la ventana en `DELETE /api/auth/sessions/:id`,
+     * que era la única ruta con la ventana encendida mientras el arco se
+     * construía. Pero la queja que abrió este trabajo es otra: cambiarse el
+     * nombre de usuario pedía la contraseña dos veces, una en el formulario
+     * (`oldPass`) y otra en el diálogo de reautenticación
+     * (`stepup_password`). Sin este test el arco entregaría su propio motivo
+     * sin medirlo.
+     *
+     * Lo que se mide: la segunda petición **no lleva ninguna contraseña** —ni
+     * la de la puerta ni ninguna propia del renombrado, que ya no existe— y
+     * aun así llega a `updateUserName`: 200, con el nombre cambiado, que es
+     * más que «no fue 403». La primera sí lleva `stepup_password`, porque es
+     * la que abre la ventana.
+     */
+    const escribible = () => ({
+      dataValues: {
+        id: YO, id_rol: MI_ROL, user: "isaias", pass: "$2a$12$hash",
+        name: "Isaias", lastname: "Salas", image: null,
+      },
+      set(patch: Record<string, unknown>) {
+        Object.assign(this.dataValues, patch);
+      },
+      save: async () => undefined,
+      toJSON() {
+        return { ...this.dataValues };
+      },
+    });
+
+    usuarioFindOne.mockResolvedValue(escribible() as never);
+    const primera = await request(app)
+      .put(`/api/usuario/username/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ user: "isalas", stepup_password: "la-de-verdad" });
+
+    expect(primera.status).toBe(200);
+    expect(fila.password_confirmed_at).toBeInstanceOf(Date);
+
+    usuarioFindOne.mockResolvedValue(escribible() as never);
+    const segunda = await request(app)
+      .put(`/api/usuario/username/${YO}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ user: "isalas-otra-vez" });
+
+    expect(segunda.status).toBe(200);
+    expect(segunda.body.user).toBe("isalas-otra-vez");
+  });
+
+  it("no re-sella dentro de la ventana: los diez minutos son fijos", async () => {
+    // La decisión de Isaias es «diez minutos fijos, sin renovarse». Sin el
+    // `WHERE` de antigüedad, cada confirmación mueve la fecha y la ventana se
+    // sostiene sola indefinidamente.
+    //
+    // Se mide en una ruta con `sinVentana`, que es la única manera de volver
+    // a llegar a la comprobación de la contraseña estando ya dentro de la
+    // ventana: en las demás, la ventana contesta antes y no hay nada que
+    // sellar.
+    //
+    // `POST /api/usuario` y no `DELETE /api/rol/99`: la Tarea 7 metió las
+    // cuatro escrituras de `rol` en la ventana, y desde entonces la segunda
+    // petición de aquí abajo ya no llegaría a la contraseña. Ésta conserva
+    // `sinVentana` y lo conservará — crea una cuenta con sus propias
+    // credenciales, que es el criterio de §4.1 del diseño. El 409 es el de
+    // `createUsuario` con el cuerpo incompleto: da igual cuál sea, lo que
+    // importa es que la petición pasó la puerta las dos veces.
+    puede = true;
+    try {
+      const primera = await request(app)
+        .post("/api/usuario")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "nuevo", stepup_password: "la-de-verdad" });
+      expect(primera.status).toBe(409);
+      const primerSello = fila.password_confirmed_at;
+      expect(primerSello).toBeInstanceOf(Date);
+
+      const segunda = await request(app)
+        .post("/api/usuario")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "nuevo", stepup_password: "la-de-verdad" });
+      expect(segunda.status).toBe(409);
+
+      // Se intentó sellar las dos veces. Sin esta línea el test pasaría
+      // igual con una puerta que hubiera dejado de sellar del todo: la fecha
+      // tampoco se movería.
+      expect(sellados()).toHaveLength(2);
+      // Y la fila no se movió, porque el `WHERE` del segundo UPDATE no casó.
+      expect(fila.password_confirmed_at).toBe(primerSello);
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("sí vuelve a sellar una vez la ventana ha caducado", async () => {
+    // 🔴 La otra mitad de la propiedad, y sin ella el test de arriba se
+    // satisface con algo mucho peor que lo que quiere impedir.
+    //
+    // El `WHERE` del sellado tiene dos alternativas: «nunca se confirmó» y
+    // «lo que hay es más viejo que la ventana entera». Quien perdiera **sólo
+    // la segunda** dejaría una `sesiones` en la que cada sesión abre una
+    // ventana en toda su vida y después pide la contraseña en cada petición
+    // para siempre — exactamente la molestia que este arco quita,
+    // reintroducida en silencio. El «no re-sella» de arriba seguiría verde,
+    // porque una fila que nunca vuelve a moverse también cumple «no se
+    // movió».
+    //
+    // La caducidad se simula envejeciendo la fila, no el reloj: lo que decide
+    // el `WHERE` es el estado de la fila, y `vi.useFakeTimers` en mitad de un
+    // flujo de supertest mueve mucho más que esta fecha.
+    const primera = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ stepup_password: "la-de-verdad" });
+    expect(primera.status).toBe(200);
+    const primerSello = fila.password_confirmed_at as Date;
+    expect(primerSello).toBeInstanceOf(Date);
+
+    // Un minuto más allá de los diez, que es lo mismo que si hubieran pasado
+    // once minutos de reloj desde la primera confirmación.
+    fila.password_confirmed_at = new Date(
+      primerSello.getTime() - (STEP_UP_WINDOW_MINUTES + 1) * 60_000,
+    );
+    const caducado = fila.password_confirmed_at;
+
+    // La lectura ya no la acepta: sin contraseña, 403.
+    const sinNada = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND);
+    expect(sinNada.status).toBe(403);
+    expect(sinNada.body).toMatchObject({ motivo: "contraseña-requerida" });
+
+    // Y la escritura sí: la contraseña vuelve a abrir diez minutos, con una
+    // fecha nueva.
+    const segunda = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ stepup_password: "la-de-verdad" });
+    expect(segunda.status).toBe(200);
+
+    expect(fila.password_confirmed_at).not.toBe(caducado);
+    expect((fila.password_confirmed_at as Date).getTime()).toBeGreaterThan(
+      (caducado as Date).getTime(),
+    );
+  });
+
+  it("no sella la sesión de una cuenta que sí tiene un factor", async () => {
+    // El agujero que una auditoría encontró en el plan. Si esta columna
+    // entrase en `satisfecho`, una cuenta CON factor podría probarlo una sola
+    // vez en la vida de la sesión y mantener abiertas después — sólo con la
+    // contraseña, re-sellando en cada petición — las rutas que dan de alta o
+    // de baja credenciales. Por eso el sello se escribe únicamente cuando la
+    // puerta acaba de comprobar que no hay ningún factor.
+    //
+    // En una ruta con `sinVentana`, que es donde la propiedad se puede medir:
+    // con la opción apagada, la ventana del factor contesta antes y no se
+    // llega a la contraseña, así que un cero aquí no probaría nada.
+    passkeyCount.mockResolvedValue(1);
+    fila.mfa_satisfied_at = new Date();
+    puede = true;
+    try {
+      const res = await request(app)
+        .post("/api/usuario")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "nuevo", stepup_password: "la-de-verdad" });
+
+      expect(res.status).toBe(409);
+      expect(sellados()).toHaveLength(0);
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("no abre con la ventana una ruta que pide la contraseña siempre", async () => {
+    // Crear una cuenta, repartir un rol, reescribir la matriz de permisos y
+    // tocar las credenciales de otra persona piden la contraseña se haya
+    // entrado como se haya entrado — §4.1 del diseño. La ventana no es una
+    // excepción a eso, y la primera petición de aquí abajo la deja abierta a
+    // propósito para demostrarlo.
+    const abre = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ stepup_password: "la-de-verdad" });
+    expect(abre.status).toBe(200);
+
+    puede = true;
+    try {
+      const res = await request(app)
+        .post("/api/usuario")
+        .set("Cookie", COOKIE)
+        .set(DEL_FRONTEND)
+        .send({ user: "nuevo" });
+
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: CODIGO_STEP_UP, motivo: "contraseña-requerida" });
+    } finally {
+      puede = false;
+    }
+  });
+
+  it("tampoco abre la ruta que registra la dirección de recuperación", async () => {
+    /**
+     * El mismo `sinVentana`, en la ruta donde perderlo es una toma de cuenta y
+     * no una molestia — y hasta la Tarea 17 su único testigo era la tabla de
+     * `routeGuards.test.ts`.
+     *
+     * `POST /api/auth/email/send` registra la dirección por la que se
+     * recupera una cuenta. La cadena que describe el propio
+     * `sendVerificationEmail`: con una sesión robada, apuntar la recuperación
+     * a un buzón propio, verificarla, esperar a que la persona cierre sesión y
+     * pedir un restablecimiento — y la dueña legítima se queda fuera. Diez
+     * minutos de ventana abierta en otra pantalla bastarían para el primer
+     * paso sin teclear nada, así que aquí se pide la contraseña en **cada**
+     * petición.
+     *
+     * Y esta ruta es además el sitio donde la comprobación se quedó en un solo
+     * sitio: la Tarea 14 quitó del controlador su propio campo `pass`, de modo
+     * que si la opción se cayera del montaje no quedaría nada detrás.
+     *
+     * La primera petición abre la ventana a propósito, igual que su gemela de
+     * arriba; sin ella este 403 no distinguiría «no acepta la ventana» de «no
+     * había ventana».
+     */
+    const abre = await request(app)
+      .delete(`/api/auth/sessions/${AJENA}`)
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ stepup_password: "la-de-verdad" });
+    expect(abre.status).toBe(200);
+    expect(fila.password_confirmed_at).toBeInstanceOf(Date);
+
+    const res = await request(app)
+      .post("/api/auth/email/send")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ email: "nueva@osefi.net" });
+
+    // El cuerpo antes que el número, y a propósito: si la opción se cayera del
+    // montaje, la petición pasaría la puerta y moriría más adelante en el
+    // `sequelize.transaction()` que este fichero no monta — ver la cabecera de
+    // «email verification, through the real stack». O sea que el rojo sería un
+    // 500, y `expected 500 to be 403` no le dice a nadie qué se rompió.
+    // Comparando el cuerpo, el rojo dice que la puerta no contestó.
+    expect(res.body).toMatchObject({ code: CODIGO_STEP_UP, motivo: "contraseña-requerida" });
+    expect(res.status).toBe(403);
+    // Y no llegó al trabajo: la dirección no se escribió en ninguna parte.
+    expect(usuarioUpdate).not.toHaveBeenCalled();
   });
 });
 
@@ -2606,13 +3230,28 @@ describe("email verification, through the real stack", () => {
     expect(verify.status).toBe(401);
   });
 
-  it("answers 400, not 500, for a POST with no body at all — Global Constraint #13", async () => {
-    // With a cookie, so the 400 cannot be mistaken for the 401 the two tests
-    // above already cover.
+  it("answers something other than 500 for a POST with no body at all — Global Constraint #13", async () => {
+    // With a cookie, so the refusal cannot be mistaken for the 401 the two
+    // tests above already cover.
+    //
+    // `/email/send` no longer reaches the handler at all here: since Task 3
+    // of the reauthentication-window plan removed the branch that let a
+    // factor-less, password-less request through, `requireStepUp` itself
+    // now refuses a bodyless POST before `sendVerificationEmail` ever runs.
+    // What still matters is that reading `req.body` on a request with no
+    // Content-Type does not crash the gate. Not `requireStepUp.test.ts`'s
+    // "survives a body-less request" alone — that one exits through the
+    // fresh-window branch's own read (`soltarContrasena`, before `next()`)
+    // and never reaches this account's real read at all. This file's own
+    // "reads nothing out of a body-less DELETE..." (the "on DELETE, where a
+    // body only exists if Content-Type says so" describe above) pins the
+    // actual branch this request answers through, over the real Express body
+    // parser.
+    // `/email/verify` carries no gate, so its own 400 is unchanged.
     const send = await request(app).post("/api/auth/email/send").set("Cookie", COOKIE).set(DEL_FRONTEND);
     const verify = await request(app).post("/api/auth/email/verify").set("Cookie", COOKIE).set(DEL_FRONTEND);
 
-    expect(send.status).toBe(400);
+    expect(send.status).toBe(403);
     expect(verify.status).toBe(400);
     // Neither reached a write: the validation refused before either handler's
     // first database call.
@@ -2620,45 +3259,78 @@ describe("email verification, through the real stack", () => {
     expect(tokenUsoUnicoUpdate).not.toHaveBeenCalled();
   });
 
-  it("gets past the email check and still refuses with no password, through the real mount", async () => {
-    // Unlike the "no body at all" test above, `email` really is present and
-    // valid here — this is a step deeper into the handler, past the point
-    // that test exercises. What this pins is that `passwordConfirmLimiter`,
-    // freshly mounted on this route, really calls `next()` for a fresh
-    // account rather than answering 429 or 500 on its own, so the 400 seen
-    // is the handler's own "no password sent" and not the limiter
-    // misbehaving. A password-bearing happy path is still not exercised
-    // here — see the comment on `usuarioUpdate`/`tokenUsoUnicoUpdate` above
-    // for why `/email/send`'s own transaction keeps that out of this file's
-    // scope.
+  it("carries a satisfied gate all the way into the handler, whose own validation is then the only thing left", async () => {
+    /**
+     * What this holds: `authenticate`, `requireStepUp` and
+     * `passwordConfirmLimiter` all call `next()` for a fresh account with the
+     * right password, so the request really arrives at
+     * `sendVerificationEmail`. The limiter is the piece most likely to break
+     * this quietly — a mount that answered 429 or 500 on its own would look
+     * like any other refusal from outside.
+     *
+     * **The witness is the handler's own `EMAIL_INVALIDO`, and the malformed
+     * address is deliberate.** It used to be the handler's "no password sent",
+     * which was a witness only for as long as the handler compared a password
+     * of its own; it does not any more, so a valid address here would run on
+     * into `sequelize.transaction()` and `crearToken`, neither of which is
+     * reachable in this file (see the note on
+     * `usuarioUpdate`/`tokenUsoUnicoUpdate` above). `EMAIL_INVALIDO` is
+     * decided in the first four lines of the handler, before any of that, and
+     * it is a sentence no middleware in front of it can produce — which is
+     * exactly what makes it say "the request got here".
+     *
+     * The handler's behaviour once it is *past* validation is driven in
+     * `email.controller.test.ts`, which mocks the database.
+     */
+    const res = await request(app)
+      .post("/api/auth/email/send")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ email: "esto-no-es-una-direccion", stepup_password: "la-de-verdad" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe(EMAIL_INVALIDO);
+    expect(usuarioUpdate).not.toHaveBeenCalled();
+  });
+
+  it("is the gate, not the handler, that refuses this route without a password", async () => {
+    /**
+     * The other side of the move. The demand for a password on this route is
+     * real and it is `requireStepUp`'s: `sinVentana: true`, so it is asked on
+     * every request rather than once per ten minutes, because a verified
+     * address is a factor since plan 4E and a window on a route that registers
+     * a credential is a way in.
+     *
+     * Pinned by `code` and `motivo` rather than the number: this route can
+     * answer 403 from `authenticate` too, for a session state it will not
+     * serve, and the two mean entirely different things to the client.
+     */
     const res = await request(app)
       .post("/api/auth/email/send")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
       .send({ email: "a@osefi.net" });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ code: CODIGO_STEP_UP, motivo: "contraseña-requerida" });
     expect(usuarioUpdate).not.toHaveBeenCalled();
   });
 
   it("stops taking a password for this address once the account has a factor", async () => {
     /**
-     * The reason this route needed the gate, given that its handler already
-     * demands the current password.
+     * The rule the gate adds that no password check ever could: a password
+     * stops being an acceptable answer at all once there is a factor to
+     * prove. This route is on the design's step-up list ("cambiar el email
+     * propio"), and a correct password here from somebody holding a stolen
+     * cookie is precisely the account-takeover chain this handler's own
+     * comment exists to break.
      *
-     * The handler's check is a password check and will always be one. The
-     * gate's second branch is the rule that a password stops being an
-     * acceptable answer at all once there is a factor to prove — the whole
-     * design's step-up list, and this route is on it ("cambiar el email
-     * propio"). Without the mount, the request below reaches the handler,
-     * the password is correct, and the address is changed by whoever holds
-     * the cookie and the password but no factor: the account-takeover chain
-     * this handler's own comment says it exists to break, re-opened by plan
-     * 4B rather than closed by it.
+     * The password sent is the gate's own and correct, which is what makes
+     * the refusal mean something: it is refused for the factor, not for the
+     * password.
      *
      * `passkeyCount` at 1 is the real `factorInventory` module answering
-     * "this account has a factor" — the same lever plan 4B will pull for
-     * real, not a stub of the gate.
+     * "this account has a factor" — not a stub of the gate.
      */
     passkeyCount.mockResolvedValue(1);
 
@@ -2666,7 +3338,7 @@ describe("email verification, through the real stack", () => {
       .post("/api/auth/email/send")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
-      .send({ email: "a@osefi.net", pass: "la-de-verdad" });
+      .send({ email: "a@osefi.net", stepup_password: "la-de-verdad" });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe(CODIGO_STEP_UP);
@@ -2724,6 +3396,50 @@ describe("email verification, through the real stack", () => {
       expect.objectContaining({ estado: "completa", mfa_source: "correo" }),
       expect.objectContaining({ transaction: { id: "tx" } }),
     );
+  });
+
+  it("registering a factor does not buy the account a fresh fourteen days", async () => {
+    /**
+     * The loop this closes, and why the witness is "nothing writes that
+     * column" rather than a date comparison.
+     *
+     * Registering a factor used to clear `usuarios.mfa_grace_until`. Deleting
+     * the factor afterwards left the column NULL, and NULL is what
+     * `estadoInicialDeSesion` reads as "the clock never started" — so the next
+     * login stamped a brand-new fourteen days, and the round could be repeated
+     * for ever. Verifying an address is the cheapest lap of it (plan 4E made
+     * an address a factor) and registering a passkey is the one that does not
+     * even need a mailbox.
+     *
+     * The deadline is only ever written by the login's own tail and by the
+     * rescue console, so an endpoint that registers a factor writing this
+     * column *at all* is the defect, whatever value it writes. That is what
+     * this reads: every `usuarios` write this request makes, and none of them
+     * may name it.
+     */
+    tokenUsoUnicoUpdate.mockResolvedValue([
+      1,
+      [{ dataValues: { id_usuario: YO, email_destino: "isaias@osefi.net" } }],
+    ] as never);
+    usuarioFindByPk.mockResolvedValue({
+      dataValues: { id: YO, id_rol: MI_ROL, email: "isaias@osefi.net", pass_changed_at: PASS_CAMBIADA },
+    } as never);
+    transaction.mockImplementation((async (fn: (t: unknown) => Promise<unknown>) => fn({ id: "tx" })) as never);
+    sesionUpdate.mockResolvedValue([1] as never);
+
+    const res = await request(app)
+      .post("/api/auth/email/verify")
+      .set("Cookie", COOKIE)
+      .set(DEL_FRONTEND)
+      .send({ token: "un-token-valido" });
+
+    expect(res.status).toBe(200);
+    // At least one write happened — otherwise this passes on a request that
+    // did nothing at all, which is the shape of a test that stops testing.
+    expect(usuarioUpdate).toHaveBeenCalled();
+    for (const [values] of usuarioUpdate.mock.calls) {
+      expect(values as Record<string, unknown>).not.toHaveProperty("mfa_grace_until");
+    }
   });
 });
 
@@ -2837,6 +3553,46 @@ describe("the fourteen-day deadline, against a session that was already open", (
     expect(usuarioFindOne).not.toHaveBeenCalled();
   });
 
+  it("refuses it just the same with the password window wide open", async () => {
+    /**
+     * 🔴 **The rule the ten-minute window had to leave standing.**
+     *
+     * For an account with no factor, a password opens the step-up window, and
+     * `sesiones.password_confirmed_at` is where that is recorded. It is a
+     * column of its own rather than a second writer of `mfa_satisfied_at`
+     * precisely so that it cannot also answer *this* question, which is not
+     * "was identity confirmed recently" but "does this account have a factor
+     * at all". The migration that added it says so, and this is the assertion
+     * behind that sentence.
+     *
+     * What it costs to get wrong: `estadoEfectivo` reading this column would
+     * hand an account with nothing registered, and its fourteen days long
+     * gone, the whole ERP for as long as it cared to keep typing its password
+     * once every ten minutes. The deadline would still be enforced — against
+     * everybody who never confirmed anything.
+     *
+     * **Through the mounted application, and it cannot be done any other
+     * way.** `estadoEfectivo` takes a typed object literal that does not
+     * declare this column, so a unit test cannot hand it the field at all: it
+     * would compile, run and pass without the value ever reaching the code it
+     * claims to watch. Here the column arrives the way production delivers it
+     * — off the session row, through `findLiveSession`'s projection and
+     * mapping, into `authenticate`, which passes the session whole.
+     */
+    sesionAbierta({ password_confirmed_at: new Date() });
+
+    const res = await request(app).get(`/api/usuario/${YO}`).set("Cookie", COOKIE);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({
+      message: MENSAJE_FACTOR_PENDIENTE,
+      code: CODIGO_FACTOR_PENDIENTE,
+    });
+    // Stopped inside `authenticate`, like its neighbour above: the controller
+    // never read the account.
+    expect(usuarioFindOne).not.toHaveBeenCalled();
+  });
+
   it("gives it 403 and not 401, so the setup screen stays reachable", async () => {
     // The distinction the frontend acts on. A 401 ends the session and sends
     // somebody back to a login they have already passed — and passing it again
@@ -2851,20 +3607,36 @@ describe("the fourteen-day deadline, against a session that was already open", (
   });
 
   it("leaves the doors that finish the setup open to that same session", async () => {
-    // The other half, and the reason the answer is a narrower state rather than
-    // a dead session: `ONBOARDING_EXTRA` in `sessionState.ts` opens
-    // `/api/auth/email`, and this request has to get past `authenticate` and
-    // reach the handler — which then answers 400 for the password it was not
-    // given, its own business. What matters here is that the 400 is the
-    // handler's and not `authenticate`'s 403: a rule that closed everything
-    // would leave the account with no way out of onboarding from inside the API.
+    /**
+     * The other half, and the reason the answer is a narrower state rather
+     * than a dead session: `ONBOARDING_EXTRA` in `sessionState.ts` opens
+     * `/api/auth/email`, so this request gets past `authenticate` and past
+     * `requireStepUp`'s own state check and reaches the handler. A rule that
+     * closed everything would leave the account with **no way out of
+     * `onboarding` from inside the API at all**: verifying an address is the
+     * prerequisite for `/auth/totp/setup` (409 without one), and registering a
+     * factor is the only exit from the state.
+     *
+     * `stepup_password` travels alongside `email` since Task 3 made
+     * `requireStepUp` demand it from every factor-less account, `onboarding`
+     * included — without it the gate refuses before the state check proves
+     * anything either way.
+     *
+     * 🔴 **The witness is the handler's own `EMAIL_INVALIDO`, and it has to be
+     * a sentence no middleware in front can produce.** It used to be the
+     * handler's "no password sent" — which stopped existing when that check
+     * moved to the gate — and a *valid* address here would run on into
+     * `sequelize.transaction()`, which this file cannot reach. `EMAIL_INVALIDO`
+     * is decided in the handler's first four lines, before any of that.
+     */
     const res = await request(app)
       .post("/api/auth/email/send")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
-      .send({ email: "a@osefi.net" });
+      .send({ email: "esto-no-es-una-direccion", stepup_password: "la-de-verdad" });
 
     expect(res.status).toBe(400);
+    expect(res.body.message).toBe(EMAIL_INVALIDO);
   });
 
   it("keeps that door shut for the same state once the account does have a factor", async () => {
@@ -2882,7 +3654,7 @@ describe("the fourteen-day deadline, against a session that was already open", (
       .post("/api/auth/email/send")
       .set("Cookie", COOKIE)
       .set(DEL_FRONTEND)
-      .send({ email: "a@osefi.net", pass: "la-de-verdad" });
+      .send({ email: "a@osefi.net", stepup_password: "la-de-verdad" });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe(CODIGO_STEP_UP);

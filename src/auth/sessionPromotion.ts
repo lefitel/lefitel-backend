@@ -1,5 +1,12 @@
-// Promoting the session that just proved a factor, and turning off the
-// fourteen-day clock the first time an account registers one.
+// Writing back onto the session row what has just been proved on it:
+// promoting the session that showed a factor, sealing that proof onto a row
+// there was nothing left to promote, and — for an account with no factor at
+// all — stamping the password confirmation that opens the ten-minute step-up
+// window.
+//
+// Every write here is on `sesiones`. Nothing in this module touches
+// `usuarios`, and the tombstone at the foot of the file says why that is now
+// a rule rather than an accident.
 //
 // **Why this file has to exist.** `estadoEfectivo` (`sessionState.ts`) opens
 // with `if (guardado !== "completa") return guardado` — it only ever
@@ -14,7 +21,7 @@
 import { Op } from "sequelize";
 import type { Transaction } from "sequelize";
 import { SesionModel } from "../models/sesion.model.js";
-import { UsuarioModel } from "../models/usuario.model.js";
+import { STEP_UP_WINDOW_MINUTES } from "../config/security.js";
 import type { EstadoSesion } from "./sessionState.js";
 
 /**
@@ -183,33 +190,115 @@ export async function sellarPruebaDeFactor(
 }
 
 /**
- * Turn off the fourteen-day clock: clear `usuarios.mfa_grace_until`.
+ * Mark that this session has just confirmed its password.
  *
- * This is the write `factorInventory.ts`'s own docblock asks 4B for by
- * name, and it is the line this task is easiest to skip, because nothing
- * breaks the moment it is missing — `estadoEfectivo`'s clause 3 already
- * keeps a freshly-promoted session `completa` regardless of the deadline.
- * What breaks is later and quieter: `mfa_grace_until` is stamped once, at an
- * account's first login after deploy, and until this function existed
- * **nothing in `src/` ever cleared it again**. So somebody who registers
- * their factor on day 3 still carries a deadline that reads "overdue" from
- * day 15 onward — dead as a lockout only because clause 3 also checks
- * `mfa_satisfied_at`, but a landmine for the next piece of code that reads
- * `mfa_grace_until` on its own and treats a past date as "no factor, still
- * chasing this account".
+ * 🔴 **It does not re-seal inside the window, and the `WHERE` is what makes
+ * that true.** The promise this implements is "ten fixed minutes, which do not
+ * renew themselves": without the age clause, every confirmation moves the date
+ * forward, and a route that asks for the password on every request — every
+ * mount carrying `sinVentana` — would hold the window open for as long as
+ * somebody kept working. Ten minutes that never end is not the decision the
+ * owner of this project took.
  *
- * Called once, when an account's *first* factor is confirmed — see the
- * caller in the TOTP confirm controller. Unconditional `SET ... = NULL`
- * rather than a read-then-write: an account with no deadline stored has
- * nothing to clear, and overwriting NULL with NULL costs nothing and needs
- * no prior read to decide whether to run.
+ * **Only the factor-less branch of `requireStepUp` calls it.** An account that
+ * *has* a factor gains no window by typing its password. If it did, that
+ * account could prove its factor once in the life of a session and then keep
+ * the routes that register and delete credentials open on the password alone,
+ * re-sealing on every request — which is exactly the bound `sinVentana`
+ * exists to draw.
+ *
+ * **`revoked_at: null` in the `WHERE` and not only `id`**, matching every
+ * other write in this file: a revoked row must not come back holding fresh
+ * proof of anything. `findLiveSession` would refuse it anyway, so this is the
+ * second lock rather than the only one.
+ *
+ * **The window is stamped even when the operation behind the gate then fails
+ * — a 404, a 409, a validation error.** That is deliberate, and it is the
+ * question every reader of this function asks: what the window certifies is
+ * *who you are*, not whether the thing you tried to do made sense. Somebody
+ * who typed their password correctly and then hit a stale row has
+ * re-authenticated exactly as much as somebody whose write succeeded, and
+ * making the ten minutes conditional on the controller's answer would ask
+ * them to prove it again for having been unlucky.
+ *
+ * Returns whether a row actually changed — `false` both for "there is no such
+ * live session" and for "this session is already inside its window". The
+ * caller today ignores it; it is returned for the same reason
+ * `sellarPruebaDeFactor` returns one, which its own docstring gives.
  */
-export async function apagarLaMecha(
-  id_usuario: number,
-  opciones: { transaction?: Transaction } = {},
-): Promise<void> {
-  await UsuarioModel.update(
-    { mfa_grace_until: null },
-    { where: { id: id_usuario }, transaction: opciones.transaction },
+export async function sellarContrasena(id_sesion: string): Promise<boolean> {
+  const limite = new Date(Date.now() - STEP_UP_WINDOW_MINUTES * 60_000);
+  const [count] = await SesionModel.update(
+    { password_confirmed_at: new Date() },
+    {
+      where: {
+        id: id_sesion,
+        revoked_at: null,
+        [Op.or]: [
+          { password_confirmed_at: null },
+          { password_confirmed_at: { [Op.lt]: limite } },
+        ],
+      },
+    },
   );
+  return count > 0;
 }
+
+// `apagarLaMecha` vivía aquí y ponía `usuarios.mfa_grace_until` a NULL al
+// registrar un factor. Borrada el 2026-09-08: era la causa del bucle que
+// regalaba catorce días nuevos cada vez que alguien registraba un factor y lo
+// borraba. Con la columna en NULL, `estadoInicialDeSesion` lee "el reloj no ha
+// empezado nunca" y el siguiente login estampa un plazo entero; la vuelta más
+// barata era una passkey, que no necesita buzón. Sin esta función la fecha
+// original sobrevive, y ese mismo login la lee: vencida → `onboarding`, viva →
+// `completa` sin volver a estamparla.
+//
+// Se descartó la alternativa —una columna `mfa_grace_started_at` que recordase
+// que el plazo ya se gastó— porque rompía en silencio tres cosas: la gracia de
+// rescate de 24 h (`proximaGraciaDeRescate`, en `rescueCore.ts`, devuelve NULL
+// para un plazo NULL, y el administrador se queda sin ninguna palanca), el
+// indulto manual documentado en el docblock de `estadoInicialDeSesion`
+// (`factorInventory.ts`), y la capacidad de `estadoEfectivo` de estrechar una
+// sesión viva. Además confiscaba el saldo legítimo de quien borrase su factor
+// a los cuatro días. Borrar la función es menos código y conserva las tres.
+//
+// Dos costes conocidos, los dos reales, y el segundo es el común.
+//
+// **Uno: se pide el factor una vez de más.** A la cuenta que registra su
+// factor **dentro** del plazo le queda una fecha futura en la columna, así que
+// una sesión suya que no haya probado ningún factor —la que abre quien marcó
+// «recordar este equipo», porque `esPruebaDeFactor` declara que
+// `'dispositivo'` no es prueba— se estrecha a `onboarding` el día que esa
+// fecha vence. La salida está abierta a `onboarding`:
+// `POST /api/auth/mfa/verify` para un TOTP, un código por correo o un código
+// de recuperación, y `POST /api/auth/webauthn/login/verify` para una passkey.
+// Las dos promueven la sesión que pruebe algo, y hacen falta las dos:
+// `/mfa/verify` **no verifica passkeys** —sus ramas son `totp`, `correo` y
+// `codigo`—, así que quien solo tenga una llave saldría por ahí únicamente
+// gastando uno de sus diez códigos.
+//
+// **Dos: reemplazar tu propio último factor cuesta cero horas de plazo, y eso
+// es lo correcto.** Marta entra el 1 de marzo, se le estampa el plazo hasta el
+// 15, y el 4 registra una passkey. En septiembre cambia de portátil y la
+// borra: `deleteCredential` le revoca todas las sesiones, vuelve a entrar, y
+// el 15 de marzo hace mucho que pasó → `onboarding`, sin margen ninguno.
+// Antes, la columna vaciada el 4 de marzo le habría dado catorce días. Lo
+// mismo le pasa a quien tiene el correo como único factor y cambia
+// legítimamente de dirección. Es lo honesto: acaba de borrar su único factor,
+// así que no tiene ninguno, y `onboarding` es ese estado — devolverle catorce
+// días por borrar sería reabrir el bucle que esta lápida cierra. Y no es una
+// puerta cerrada: `ONBOARDING_EXTRA` (`sessionState.ts`) abre justo las tres
+// rutas que registran uno nuevo — `/api/auth/totp`,
+// `/api/auth/webauthn/register` y `/api/auth/email`. (`/api/auth/recovery-codes`
+// también está abierta, pero los códigos no son un factor: son la vuelta cuando
+// uno de verdad no se puede alcanzar.)
+//
+// 🔴 **El riesgo que queda, y hay que decirlo:** de esas puertas, el TOTP
+// exige antes el correo verificado (409, ver `MENSAJE_CORREO_NO_VERIFICADO`) y
+// el correo exige relé de correo, así que a quien caiga aquí **sin navegador
+// compatible con passkeys y sin correo entregable** no le queda ninguna, y
+// hace falta consola. Ese caso ya existía; lo que cambia es que ahora llega
+// más gente a `onboarding`. La palanca sigue siendo
+// `UPDATE usuarios SET mfa_grace_until = NULL` — el indulto manual del
+// docblock de `estadoInicialDeSesion`, y ya el único sitio que vacía la
+// columna.

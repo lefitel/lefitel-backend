@@ -62,6 +62,20 @@ describe("what never reaches the log", () => {
     expect(JSON.stringify(nested)).not.toContain("hunter1");
   });
 
+  it("hides stepup_password, which \"password\" alone does not reach (Tarea 9)", async () => {
+    // pino matches a redaction path against the exact object key, not a
+    // substring, so "password" never covered "stepup_password" — the field
+    // the step-up window (plan 4D) sends in the body of a reauthenticated
+    // request.
+    const [top, nested] = await captured((log) => {
+      log.info({ stepup_password: "hunter2" }, "arriba");
+      log.info({ body: { stepup_password: "hunter2" } }, "anidado");
+    });
+
+    expect(JSON.stringify(top)).not.toContain("hunter2");
+    expect(JSON.stringify(nested)).not.toContain("hunter2");
+  });
+
   it("hides the MFA fields wherever in the object they appear (hallazgo B11)", async () => {
     // Belt and suspenders, not the primary defence — see the comment on
     // `REDACT_PATHS` in logger.ts. Nothing in Plan 4B is supposed to log a

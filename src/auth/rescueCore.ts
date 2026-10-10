@@ -220,6 +220,27 @@ export type ResultadoDesarchivo<T> =
  * leave `usuarios.mfa_grace_until` exactly where it found it — the same
  * "a date means write it, `null` means leave the column alone" convention
  * `factorInventory.ts`'s own `graceUntil` already documents.
+ *
+ * 🔴 **Y ese `null` era, hasta el 2026-09-08, lo que le llegaba a casi todo el
+ * que necesitaba un rescate — o sea que esta función no daba nada.** El plan
+ * 4B ponía `usuarios.mfa_grace_until` a NULL en cuanto una cuenta registraba
+ * su primer factor, así que para cualquiera que hubiera registrado algo —que
+ * es exactamente quien puede perderlo— la columna estaba vacía cuando llegaba
+ * el rescate, la rama de arriba devolvía `null`, y no se escribía ninguna
+ * fecha: el administrador se quedaba sin palanca. Borrada aquella escritura
+ * (ver la lápida al pie de `sessionPromotion.ts`), la fecha original
+ * sobrevive y estas 24 horas se estampan de verdad. **Esta función pasa de no
+ * dar nada a dar el plazo que fue escrita para dar.**
+ *
+ * Se lee como un recorte y no lo es, y hay que decirlo aquí porque es donde se
+ * ve el número. Antes, quien perdía su único factor entraba con **catorce
+ * días** frescos en su siguiente login — pero no porque nadie lo hubiera
+ * decidido: era el efecto colateral de la columna vaciada, que
+ * `estadoInicialDeSesion` lee como «el reloj no ha empezado nunca» y responde
+ * estampando `MFA_GRACE_DAYS` enteros. Catorce días accidentales frente a
+ * `RESCUE_GRACE_HOURS`, que sí es una decisión y lleva su justificación
+ * escrita al lado. Y agotarlas no cierra ninguna puerta: `onboarding` sigue
+ * abriendo el registro de un factor nuevo.
  */
 export function proximaGraciaDeRescate(actual: Date | null, ahora: Date): Date | null {
   if (actual === null) return null;

@@ -42,6 +42,9 @@ function probe(cubo: RequestHandler, id: number | undefined = USUARIO) {
         expires_at: new Date(),
         estado: "completa",
         mfa_satisfied_at: null,
+        // Required on `req.user`, and null until somebody types their password
+        // into `requireStepUp`: the ten-minute window of a factor-less account.
+        password_confirmed_at: null,
       };
     }
     next();

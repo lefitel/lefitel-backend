@@ -87,7 +87,6 @@ vi.mock("../auth/sessionStore.js", () => ({
 vi.mock("../auth/sessionPromotion.js", () => ({
   promoverSesion: vi.fn(),
   sellarPruebaDeFactor: vi.fn(),
-  apagarLaMecha: vi.fn(),
 }));
 vi.mock("../auth/rememberedDeviceStore.js", () => ({ revokeAllRememberedDevicesOf: vi.fn() }));
 vi.mock("../auth/recoveryCodeStore.js", () => ({

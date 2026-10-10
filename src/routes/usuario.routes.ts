@@ -15,6 +15,7 @@ import {
   updateUserPass,
   updateUsuario,
 } from "../controllers/usuario.controller.js";
+import { asignarRol } from "../controllers/usuarioRol.controller.js";
 // D1 (§3.2): two listings that are about a *person* now hang off that person.
 // They were `GET /api/evento/usuario/:id_usuario` and `GET /api/bitacora/:id_usuario`,
 // both under a parent that named the rows rather than the subject.
@@ -28,56 +29,47 @@ import { passwordConfirmLimiter } from "../middleware/loginLimiters.js";
 const router = Router();
 
 /**
- * Confirming your own password costs the same on these two routes, out of one
- * bucket, and only when it was wrong.
+ * Confirming your own password costs something on `PUT /userpass/:id`, and
+ * only when it was wrong.
  *
- * Both `updateUserName` and `updateUserPass` compare a password now, and an
- * authenticated endpoint that compares an unlimited number of them is a
- * password oracle for whoever already stole a session — the sentence
- * `passwordConfirmLimiter` exists for. Without this, closing the client-side
- * hole on the rename would have been a net loss: an attacker holding a stolen
- * session would simply guess against a route that counts nothing.
+ * `updateUserPass` compares a password, and an authenticated endpoint that
+ * compares an unlimited number of them is a password oracle for whoever
+ * already stole a session — the sentence `passwordConfirmLimiter` exists for.
+ * The oracle here is a clean one: a caller can send a guess together with a new
+ * password that fails the policy and read the answer off the difference between
+ * 401 (the guess was wrong) and 400 (the guess was right, and the new password
+ * is too short). Unlimited, from one session, counting nothing anywhere. This
+ * closes a hole older than the plan that mounted it.
  *
- * These were the only two routes on that bucket, until `requireStepUp`
- * (`middleware/requireStepUp.ts`) started calling `passwordConfirmLimiter`
- * directly for its own password fallback — mounted ahead of this very
- * function on both of these routes, and on several more besides. `POST
- * /api/auth/confirm-password` was a third caller of a different kind, and it
- * is retired — see `auth.routes.ts`.
+ * 🔴 **It used to be mounted on the rename as well, and is not any more.**
+ * `updateUserName` compared an `oldPass` of its own until the
+ * reauthentication window moved that demand up to the gate. There is nothing
+ * left on `/username/:id` for this to charge for — the gate charges its own
+ * wrong answers, out of this same `pc:<id>` bucket — so leaving the mount there
+ * would be a middleware that reads a body field nobody writes and bills
+ * nobody. What did **not** change is the sharing: the gate on every route and
+ * this one function still count against one bucket per account, because it is
+ * one secret being guessed at.
  *
- * **`updateUserPass` needed it more, and had it least.** It has compared
- * `oldPass` since long before this plan, with no bucket of any kind on the
- * route — and the oracle there is cleaner than a rename's, because a caller can
- * send a guess with a new password that fails the policy and read the answer
- * off the difference between 401 (wrong) and 400 (right, and the new one is too
- * short). Unlimited, from one session, counting nothing anywhere. Mounting this
- * closes a hole that predates the change it accompanies.
- *
- * The lockout cannot serve as that limit. A wrong password on either route
- * deliberately does not move `failed_attempts` — see the blocks in the two
- * handlers — because mistyping your own password while renaming or
- * re-passwording yourself must not be able to shut you out of the ERP.
- *
- * **The same bucket, not one per route**, because it is the same secret being
- * guessed at by the same account. Separate buckets keyed the same way would
- * hand out ten attempts a quarter of an hour to anybody willing to alternate the
- * two, which is what counting several doors onto one room separately gets you.
+ * The lockout cannot serve as that limit. A wrong `oldPass` deliberately does
+ * not move `failed_attempts` — see the block in the handler — because
+ * mistyping your own password while changing it must not be able to shut you
+ * out of the ERP.
  *
  * **What keeps a stranger from emptying somebody else's allowance is this
  * function, not where it is mounted.** Charged only when the request actually
- * confirms a password, decided by `requiresOwnPassword` — the very function both
- * handlers branch on, so the limit and the checks cannot drift apart. Three
- * things follow. An administrator renaming or resetting *other people's*
- * accounts sends no `oldPass` and pays nothing **here** — since decision D6
- * they do send `stepup_password` to the gate ahead of this, which charges only
- * a wrong one; a right one is free, so legitimate administrative work still
- * costs nothing: billing it would answer 429 to the sixth piece of it in a
- * quarter of an hour. Nobody can dodge
- * the budget by mis-spelling the password field, because what is measured is
- * *whose* account is being changed, not what the body happens to carry. And a
- * caller reaching for an account that is not theirs charges nothing at all — not
- * their own bucket and not the target's — because the only bucket this could
- * touch is the caller's own and it is not touched.
+ * confirms a password, decided by `requiresOwnPassword` — the very function the
+ * handler branches on, so the limit and the check cannot drift apart. Three
+ * things follow. An administrator resetting *other people's* passwords sends no
+ * `oldPass` and pays nothing **here**; what they do send is `stepup_password` to
+ * the gate ahead of this, which charges only a wrong one, so legitimate
+ * administrative work still costs nothing — billing it would answer 429 to the
+ * sixth piece of it in a quarter of an hour. Nobody can dodge the budget by
+ * mis-spelling the password field, because what is measured is *whose* account
+ * is being changed, not what the body happens to carry. And a caller reaching
+ * for an account that is not theirs charges nothing at all — not their own
+ * bucket and not the target's — because the only bucket this could touch is the
+ * caller's own and it is not touched.
  *
  * **Mounted after the permission guard, and that order is on purpose even though
  * nothing observable depends on it today.** The two conditions coincide:
@@ -87,11 +79,10 @@ const router = Router();
  * order is asserted structurally in `app.auth.test.ts` rather than through a
  * response, because that is the honest way to pin a property no response can
  * show — and it is worth pinning: the day the charge condition widens (an
- * administrator sending `oldPass` for somebody else, say, which the MFA plan's
- * step-up could easily want), this order becomes the only thing between a
- * stranger and a stranger's allowance. This comment used to claim the protection
- * came from the order, and a test claimed to hold it while passing with the two
- * swapped.
+ * administrator sending `oldPass` for somebody else, say), this order becomes
+ * the only thing between a stranger and a stranger's allowance. This comment
+ * used to claim the protection came from the order, and a test claimed to hold
+ * it while passing with the two swapped.
  */
 function chargeConfirmBudgetOnSelfChange(req: Request, res: Response, next: NextFunction) {
   if (!requiresOwnPassword(req)) return next();
@@ -111,40 +102,54 @@ function chargeConfirmBudgetOnSelfChange(req: Request, res: Response, next: Next
 // comparison, and learns nothing about the route existing. See
 // `middleware/requireStepUp.ts` for what it asks of the caller.
 //
-// 🔴 **`exigeContrasena: true` on every write here — decision D6 of plan 4C
-// (Isaias, 2026-09-02).** Permissions, roles and user accounts demand the
-// caller's password however they logged in, because the password is the one
-// thing that lives neither in an Apple or Google keychain nor on a phone: it
-// is what is missing from whoever has taken those. Before 4C these mounts
-// were content with a factor proved in the last ten minutes.
+// 🔴 **The password on every request is no longer the rule on this router; it
+// is a per-route decision.** Plan 4C's decision D6 (Isaias, 2026-09-02) put
+// `sinVentana: true` on every write here, and Isaias cut that scope on
+// 2026-09-08: §4.1 of
+// `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` puts the
+// ordinary administrative writes inside the ten-minute window and leaves the
+// option on where losing it would be permanent.
 //
-// **And it has no window.** The factor is asked once per ten minutes; the
-// password, on every request this option is on — there is no "password proved
-// recently" equivalent. Five wrong ones in a quarter of an hour shut the
-// shared confirmation budget. Correct ones cost nothing. That is the property
-// people will be surprised by, so it is written here rather than discovered.
+// **The line the design draws.** It keeps the password on every request where
+// what the request does outlives every remedy the victim has: creating an
+// account, archiving one, handing out a role, rewriting somebody else's
+// password, clearing their lockout or their factors. Those survive the victim
+// changing their own password, `logout-all`, a factor reset and the console
+// rescue, because the result lives in another account or another credential.
+// Editing a profile, renaming one and undoing an archive do not, so those three
+// take the window.
 //
-// Thirteen mounts across this router, `rol.routes.ts` and `permiso.routes.ts`
-// carry it; D6 added eleven — the plan counted nine and missed the three at the
-// bottom of this file, which are the ones that rename an account and change its
-// password: precisely the primitives a stolen cookie would reach for. The other
-// two, `desbloquear` and `mfa/reset`, had it since hallazgo F8.
+// **Which mounts carry it is `STEP_UP_OPTIONS` in `routeGuards.test.ts`**, and
+// no figure here: that table compares the whole option object against the real
+// app in both directions, and a number written beside the routes goes stale the
+// first time one is added. This sentence used to carry two, and both were wrong
+// within the week.
+//
+// **The window is not an open door.** Where the option is off the gate still
+// runs: outside the ten minutes every one of these answers 403, and the way
+// through is the caller's own password, or a factor proved recently if the
+// account has one. What the window buys is that one confirmation covers the
+// batch of edits somebody sat down to make.
 router.post(
   "/",
   requirePermission("seguridad", "crear"),
-  requireStepUp({ exigeContrasena: true }),
+  requireStepUp({ sinVentana: true }),
   createUsuario,
 );
 router.delete(
   "/:id",
   requirePermission("seguridad", "archivar"),
-  requireStepUp({ exigeContrasena: true }),
+  requireStepUp({ sinVentana: true }),
   deleteUsuario,
 );
+// The window, and its own reason: undoing an archive must never cost more than
+// the archiving did, and the archiving is the half with no way back — the
+// self-archive refusal in `deleteUsuario` (`usuario.controller.ts`) spells that
+// out, and it is why `DELETE` above keeps the password on every request.
 router.patch(
   "/:id/restore",
   requirePermission("seguridad", "archivar"),
-  requireStepUp({ exigeContrasena: true }),
+  requireStepUp(),
   desarchivarUsuario,
 );
 // `editar` and not `archivar`: lifting a lockout is the same kind of act as
@@ -156,42 +161,35 @@ router.patch(
 // recovery path without closing anything", because whoever holds
 // `seguridad.editar` and a live session "can do far greater damage through the
 // routes above, which do require it". That was true, and it was true only for
-// as long as the routes above accept exactly what this one accepts. They do
-// today: nobody has a factor, so the gate's third branch lets a request with no
-// `stepup_password` through on all of them alike.
+// as long as the routes above accepted exactly what this one accepted. They
+// did while the gate still had a branch that let a factor-less account through
+// on nothing but the cookie — no `stepup_password` needed, on all of them
+// alike. **That branch is gone**, deleted by Task 3 of the
+// reauthentication-window plan: every account has something to type now, so
+// the routes above stopped accepting what this one used to.
 //
-// Plan 4B is what ends that. From the first registered factor, every route
-// above answers 403 to a session that has not proved one — and this route, left
-// ungated, would go on answering 200. That is the shape the argument cannot
-// survive: a stolen administrator cookie, refused everywhere else on this
-// router, still able to clear `failed_attempts` and `locked_until` on any
-// account it chooses. Those two columns are the login lockout, and they are the
-// only brake against guessing a password that lives in the database: the
-// rate limiters that also count per account (`loginLimiters.ts`) keep their
-// counters in a `MemoryStore`, so they reset with the process and never span
-// more than their own window. See `desbloquearUsuario` in
-// `usuario.controller.ts`, which writes both to zero and NULL and files a
-// `critical` line saying what it undid.
+// What ends that argument is what this route protects. `failed_attempts` and
+// `locked_until` are the login lockout, and they are the only brake against
+// guessing a password that lives in the database: the rate limiters that also
+// count per account (`loginLimiters.ts`) keep their counters in a
+// `MemoryStore`, so they reset with the process and never span more than their
+// own window. A stolen administrator cookie clearing those on any account it
+// chooses is not a smaller act than the routes beside it, whatever permission
+// the caller holds. See `desbloquearUsuario` in `usuario.controller.ts`, which
+// writes both to zero and NULL and files a `critical` line saying what it
+// undid.
 //
-// 🔴 **`exigeContrasena: true` — added by the 2026-09-02 closure audit,
-// hallazgo F8 (auditor B-6).** The paragraph above stopped short: it is true
-// that "every route above answers 403 to a session that has not proved one",
-// but only once that account *has* a factor to prove. On deploy day, with
-// zero of nine accounts registered and none verified (plan 4E made a
-// verified address a factor), `tieneAlgunFactor` is `false` for everybody,
-// including whichever administrator's cookie gets stolen — so without this
-// option, this route sat in exactly the gap the paragraph above thought it
-// had closed: a factor-less cookie, no `stepup_password`, and
-// `requireStepUp`'s own third branch waves it through, same as it always
-// did. `exigeContrasena` closes that specific gap: from the very first
-// deploy, lifting a lockout costs the administrator's own current password,
-// not merely a live cookie — the same requirement `requireStepUp.ts`'s own
-// docstring on this option was already written to demand, and which this
-// mount had never actually turned on.
+// 🔴 **`sinVentana: true` — added by the 2026-09-02 closure audit, hallazgo F8
+// (auditor B-6), and it is the half that does not depend on the window.** Every
+// account has to answer this gate with something now, whatever it has
+// registered; what this option adds is that the answer here is the caller's own
+// current password on **every** request, never a window opened ten minutes ago
+// by something else. Lifting somebody's lockout costs a password typed for
+// this, which is the one thing a stolen cookie does not carry.
 router.patch(
   "/:id/desbloquear",
   requirePermission("seguridad", "editar"),
-  requireStepUp({ exigeContrasena: true }),
+  requireStepUp({ sinVentana: true }),
   desbloquearUsuario,
 );
 // The escape hatch from §8 of the MFA design: an administrator clears
@@ -201,23 +199,23 @@ router.patch(
 // unable to log in. See `rescatarMfaDeUsuario` in `usuario.controller.ts`
 // for the refusal this route adds on top of both gates — resetting your own
 // factors through here is rejected even with the permission and a proved
-// factor, because it would leave the caller's own session past
-// `requireStepUp`'s gate on nothing but the cookie.
+// factor, because it would downgrade what the caller's own session has to
+// answer for every later sensitive write, from "the factor **and** the
+// password" to the password alone.
 //
-// 🔴 **`exigeContrasena: true` — same hallazgo F8, and the more severe half
+// 🔴 **`sinVentana: true` — same hallazgo F8, and the more severe half
 // of it.** `rescatarMfaDeUsuario` deletes the target account's rows in all
 // three factor tables and revokes every one of its live sessions and
-// remembered devices — literally the "removes a credential" case
-// `requireStepUp.ts`'s docstring on `exigeContrasena` names by name. Without
-// this option, and with no account anywhere holding a factor yet, a stolen
-// administrator cookie could clear the second factor of every one of the
-// other eight accounts and sign them all out, in eight requests, without
-// ever typing a password. `exigeContrasena` is what makes that cost the
-// administrator's own current password instead of nothing.
+// remembered devices — a route that removes credentials, which is the case
+// `sinVentana` exists for. Without the option, a stolen cookie could wait for
+// the real administrator to open a ten-minute window for something ordinary
+// and then clear the second factor of every other account inside it, one
+// request each, without ever typing a password. `sinVentana` is what makes
+// each of those cost the administrator's own current password.
 router.post(
   "/:id/mfa/reset",
   requirePermission("seguridad", "editar"),
-  requireStepUp({ exigeContrasena: true }),
+  requireStepUp({ sinVentana: true }),
   rescatarMfaDeUsuario,
 );
 router.get("/user/:user", requirePermission("seguridad", "ver"), searchUsuario_user);
@@ -285,33 +283,71 @@ router.get("/:id", requireSelfOrPermission("seguridad", "ver"), searchUsuario);
  */
 router.get("/:id/eventos", requireSelfOrPermission("seguridad", "ver"), getEvento_usuario);
 router.get("/:id/bitacora", requireSelfOrPermission("bitacora", "ver"), getBitacora);
+
+// The only route in the API that writes the `id_rol` of an account that
+// already exists. It came out of `PUT /:id` below, which is also the route a
+// person edits their own profile through: leaving the role there and taking the
+// whole route out of the reauthentication window would have put the second
+// password prompt back on "save my telephone number", which is where this whole
+// piece of work started.
 //
-// 🔴 **D6 reaches these three too, and the plan had left them off.** Editing an
-// account, renaming it, changing its password: for somebody *else's* account
-// these are exactly how a stolen administrator cookie takes the account over,
-// which is the case D6 exists for. For your *own* account the cost is real
-// and named here rather than hidden: the rename and password forms already
-// carry `oldPass`, so the person types their current password twice — once in
-// the form, once in the step-up window. The gate cannot tell target from self
-// and must not learn to; a smaller wart than a password-reset door with no
-// password on it.
+// `roles.editar` and not `seguridad.editar`, the split the permission matrix
+// already draws: whoever may fix a colleague's telephone number must not
+// thereby be able to hand out administrator.
+//
+// `sinVentana` — the caller's own password on every request, never a window —
+// because handing out a role is handing out authority. The account promoted
+// keeps its **own** credentials, so the promotion outlives the victim changing
+// their password, `logout-all`, a factor reset and the console rescue. That is
+// the same test §4.1 of the design applies to `POST /` at the top of this file.
+//
+// Declared ahead of `PUT /:id`: one segment cannot match two, so Express
+// reaches both either way and `routeOrder.test.ts` is silent about the pair —
+// this is §3.2's ordering rule kept by hand, not a shadowing hazard.
+router.put(
+  "/:id/rol",
+  requirePermission("roles", "editar"),
+  requireStepUp({ sinVentana: true }),
+  asignarRol,
+);
+//
+// 🔴 **The three where the split is sharpest, and it does not fall the way the
+// verbs do.** Editing an account and renaming one take the ten-minute window;
+// changing a password keeps `sinVentana`. The reason is not how destructive
+// each is, it is whether the target can undo it: a profile edit or a rename is
+// visible and reversible by the person it happened to, while a password written
+// through `/userpass` locks them out of their own account, and
+// `requiresOwnPassword` is false when the target is somebody else — so on that
+// one route the gate is the only thing asking for a secret at all.
+//
+// **These two are why the window exists.** `PUT /username/:id` is the operation
+// the whole reauthentication design started from: renaming yourself asked for
+// the password twice in one request — once in the form as `oldPass`, and once
+// again in the step-up dialog. Both halves of that are gone now. The form's
+// field went with the handler's own check, so the gate is the only thing that
+// asks; and the window means one confirmation covers ten minutes of ordinary
+// editing instead of one per request. The gate still runs — outside the window
+// this answers 403 like everything else behind it.
 router.put(
   "/:id",
   requireSelfOrPermission("seguridad", "editar"),
-  requireStepUp({ exigeContrasena: true }),
+  requireStepUp(),
   updateUsuario,
 );
+// No `chargeConfirmBudgetOnSelfChange` on this one, unlike its neighbour: the
+// rename compares no password of its own any more, so there is nothing here to
+// bill. The gate above still charges a wrong `stepup_password` against the same
+// per-account bucket, which is where a rename's guessing is counted now.
 router.put(
   "/username/:id",
   requireSelfOrPermission("seguridad", "editar"),
-  requireStepUp({ exigeContrasena: true }),
-  chargeConfirmBudgetOnSelfChange,
+  requireStepUp(),
   updateUserName,
 );
 router.put(
   "/userpass/:id",
   requireSelfOrPermission("seguridad", "editar"),
-  requireStepUp({ exigeContrasena: true }),
+  requireStepUp({ sinVentana: true }),
   chargeConfirmBudgetOnSelfChange,
   updateUserPass,
 );

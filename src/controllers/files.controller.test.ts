@@ -101,6 +101,23 @@ describe("orphans", () => {
     expect(cuerpo(res)).toEqual({ deleted: 1, files: ["c.jpg"] });
   });
 
+  it("keeps a photograph in use whose name has two dots in a row", async () => {
+    // Stored by the old uploader, which kept the original name as it came:
+    // "foto..jpg" became "…_foto..webp". It is on disk and a pole names it, so
+    // it is neither an orphan to delete nor a broken reference to null.
+    const conPuntos = fila({ id: 4, image: "/1712428860328_foto..webp", name: "P-4" });
+    readdir.mockResolvedValue([...EN_DISCO, "1712428860328_foto..webp"] as never);
+    findAll.poste.mockResolvedValue([poste, conPuntos]);
+
+    const borrado = resOf();
+    await deleteOrphanFiles(reqOf(), borrado);
+    expect(cuerpo(borrado)).toEqual({ deleted: 1, files: ["c.jpg"] });
+
+    const limpieza = resOf();
+    await clearBrokenImageRefs(reqOf(), limpieza);
+    expect(conPuntos.update).not.toHaveBeenCalled();
+  });
+
   it("still keeps what the client renders: a leading-slash path per file", async () => {
     // The screen links `path`; only the comparison changed.
     const res = resOf();
@@ -145,5 +162,81 @@ describe("broken references", () => {
     const res = resOf();
     await getBrokenImageRefs(reqOf(), res);
     expect(cuerpo(res)).toContainEqual(expect.objectContaining({ tipo: "Ciudad", id: 9 }));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("cuando el disco de imágenes no dice la verdad", () => {
+  // The scenario is the first deploy: `IMAGES_DIR` has to be a volume the host
+  // mounts, and a mount that is missing or misspelled leaves either an error or
+  // — more often — an empty directory. Both make every stored value look broken,
+  // and one of these two routes writes `image: null` on everything it thinks is
+  // broken, across five tables, in one request.
+  //
+  // Each case asserts the refusal **and** that nothing was written, because a
+  // 409 that had already emptied half the rows would be worse than no guard.
+
+  it("se niega a listar referencias rotas si no pudo leer el directorio", async () => {
+    readdir.mockRejectedValue(Object.assign(new Error("no mount"), { code: "ENOENT" }));
+    const res = resOf();
+
+    await getBrokenImageRefs(reqOf(), res);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(cuerpo(res).message).toMatch(/no se ha modificado nada/i);
+  });
+
+  it("se niega a limpiar si no pudo leer el directorio, y no escribe una sola fila", async () => {
+    readdir.mockRejectedValue(Object.assign(new Error("no mount"), { code: "ENOENT" }));
+    const res = resOf();
+
+    await clearBrokenImageRefs(reqOf(), res);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    for (const f of [poste, evento, usuario]) expect(f.update).not.toHaveBeenCalled();
+  });
+
+  it("se niega a limpiar con el directorio vacío y la base llena, que es el volumen sin montar", async () => {
+    // 🔴 El caso real: `readdir` funciona y devuelve cero. Sin esta guarda son
+    // tres filas puestas a nulo aquí y ~3.500 en producción, con una línea en la
+    // bitácora diciendo que el administrador lo pidió.
+    readdir.mockResolvedValue([] as never);
+    const res = resOf();
+
+    await clearBrokenImageRefs(reqOf(), res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(cuerpo(res).referencias).toBe(3);
+    expect(cuerpo(res).message).toMatch(/volumen sin montar/i);
+    for (const f of [poste, evento, usuario]) expect(f.update).not.toHaveBeenCalled();
+  });
+
+  it("sí limpia con el directorio vacío si la base tampoco tiene referencias", async () => {
+    // La otra dirección, para que la guarda no sea «no limpiar nunca»: sin nada
+    // en disco y sin nada apuntado, no hay ambigüedad y no hay nada que hacer.
+    readdir.mockResolvedValue([] as never);
+    findAll.poste.mockResolvedValue([]);
+    findAll.evento.mockResolvedValue([]);
+    findAll.usuario.mockResolvedValue([]);
+    const res = resOf();
+
+    await clearBrokenImageRefs(reqOf(), res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(cuerpo(res)).toEqual({ cleared: 0 });
+  });
+
+  it("sigue limpiando la referencia genuinamente rota cuando el disco es legible", async () => {
+    // El caso para el que existe el botón, intacto: `zz.jpg` no está en disco.
+    const res = resOf();
+
+    await clearBrokenImageRefs(reqOf(), res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(cuerpo(res)).toEqual({ cleared: 1 });
+    expect(usuario.update).toHaveBeenCalledWith({ image: null });
+    expect(poste.update).not.toHaveBeenCalled();
+    expect(evento.update).not.toHaveBeenCalled();
   });
 });

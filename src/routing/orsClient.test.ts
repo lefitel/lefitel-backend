@@ -67,6 +67,35 @@ describe("pedirRuta", () => {
     expect(res.ok).toBe(false);
   });
 
+  it("corta una petición que no contesta, en vez de esperarla sin límite", async () => {
+    // El plazo total sólo se miraba entre un intento y el siguiente: un ORS que
+    // acepta la conexión y no responde dejaba la petición colgada hasta el
+    // plazo por defecto de `fetch`, que son minutos. La señal es lo único que
+    // puede cortar un intento ya empezado.
+    const fetchFalso = ((_url: string, init: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      })) as unknown as typeof fetch;
+
+    const res = await pedirRuta([[0, 0], [1, 1]], {
+      fetch: fetchFalso,
+      clave: "una-clave",
+      plazoTotalMs: 20,
+    });
+
+    expect(res).toEqual({ ok: false, motivo: "plazo" });
+  });
+
+  it("nombra el fallo de red en vez de dejarlo salir como excepción", async () => {
+    const fetchFalso = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+
+    const res = await pedirRuta([[0, 0], [1, 1]], { fetch: fetchFalso, clave: "una-clave" });
+
+    expect(res).toEqual({ ok: false, motivo: "red" });
+  });
+
   it("distingue la cuota diaria agotada de un tramo sin carreteras", async () => {
     // 403 es la respuesta de ORS al pasarse de las peticiones del día. Sin este
     // motivo, agotar la cuota y no encontrar carretera se ven igual desde el

@@ -29,18 +29,27 @@ const router = Router();
 // permission on the write — see `middleware/requireStepUp.ts` — so a stolen
 // session cannot rewrite who may do what.
 //
-// 🔴 **`exigeContrasena: true` on every write here — decision D6 of plan 4C
-// (Isaias, 2026-09-02).** Permissions, roles and user accounts demand the
-// caller's password however they logged in, because the password is the one
-// thing that lives neither in an Apple or Google keychain nor on a phone: it
-// is what is missing from whoever has taken those. Before 4C these mounts
-// were content with a factor proved in the last ten minutes.
+// 🔴 **`sinVentana: true` on the write here — decision D6 of plan 4C (Isaias,
+// 2026-09-02), and one of the mounts that kept it when Isaias cut D6's scope
+// on 2026-09-08.** The caller's password however they logged in, because the
+// password is the one thing that lives neither in an Apple or Google keychain
+// nor on a phone: it is what is missing from whoever has taken those.
 //
-// **And it has no window.** The factor is asked once per ten minutes; the
-// password, on every request this option is on — there is no "password proved
-// recently" equivalent. Five wrong ones in a quarter of an hour shut the
-// shared confirmation budget. Correct ones cost nothing. That is the property
-// people will be surprised by, so it is written here rather than discovered.
+// **This route is where the authority is.** §4.1 of
+// `docs/specs/2026-09-08-ventana-de-reautenticacion-design.md` put the four
+// `rol` writes inside the ten-minute window on the grounds that a role is a
+// label; this is the route that decides what a label *means*, so somebody who
+// reached it with a stolen cookie would grant themselves the module. It stays
+// out of the window for the same reason `POST /api/usuario/` does.
+//
+// **And it ignores both windows.** There are two of them now, ten minutes
+// wide each: `mfa_satisfied_at`, bought by proving a factor, and
+// `password_confirmed_at`, bought by a correct password on an account that has
+// no factor to prove — the column this whole reauthentication arc exists to
+// add. `sinVentana` means this route honours neither: the password, on every
+// single request. Five wrong ones in a quarter of an hour shut the shared
+// confirmation budget. Correct ones cost nothing. That is the property people
+// will be surprised by, so it is written here rather than discovered.
 //
 // One cost worth knowing: the 409 for editing your *own* role, and the 400 for
 // a save with nothing in it, both now arrive after the password was typed,
@@ -49,7 +58,7 @@ router.get("/", requirePermission("roles", "ver"), getPermisos);
 router.put(
   "/:id_rol",
   requirePermission("roles", "editar"),
-  requireStepUp({ exigeContrasena: true }),
+  requireStepUp({ sinVentana: true }),
   putPermisos,
 );
 

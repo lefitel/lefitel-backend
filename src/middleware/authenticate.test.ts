@@ -628,6 +628,26 @@ describe("what a session's state may reach", () => {
     expect(c.req.user).toMatchObject({ estado: "onboarding", mfa_satisfied_at: null });
   });
 
+  it("copies password_confirmed_at onto req.user too, unchanged", async () => {
+    // 🔴 The step-up window of an account with no factor is measured from
+    // this date, and this line is the only thing that carries it from the row
+    // to the gate. Dropped here it arrives as `undefined`, every comparison
+    // against `NaN` is false, and the window never opens — with a clean
+    // typecheck, because `tsconfig.json` sets `"strict": false`.
+    //
+    // A real date rather than `null`: a copy that was never written would
+    // read `undefined`, which `toMatchObject` accepts against `null` in
+    // neither direction but which a null fixture makes far easier to confuse.
+    const confirmada = new Date(Date.now() - 60_000);
+    findLiveSession.mockResolvedValue(
+      sesionCon("completa", { password_confirmed_at: confirmada }),
+    );
+    const c = call({ cookie: "t", originalUrl: "/api/auth/me" });
+    await authenticate(c.req, c.res, c.next);
+
+    expect(c.req.user?.password_confirmed_at).toBe(confirmada);
+  });
+
   it("reads the path off originalUrl, not off req.path", async () => {
     // The real values, not invented ones: `auth.routes.ts` mounts
     // `authenticate` per-route on a router hung at `/api/auth`

@@ -127,7 +127,7 @@ describe("🔴 POST / demands the password, always — hallazgo C14", () => {
 
     await stepUpGate(req, res, next);
 
-    // 🔴 Without `exigeContrasena: true` this account — no factor, no fresh
+    // 🔴 Without `sinVentana: true` this account — no factor, no fresh
     // proof needed — would simply be waved through by `requireStepUp`'s own
     // "nothing to prove" branch. Mutating the mount to `requireStepUp()` with
     // no options turns this into `next()` and the assertion below goes red.
@@ -141,8 +141,8 @@ describe("🔴 POST / demands the password, always — hallazgo C14", () => {
     if (!stepUpGate) throw new Error("POST / no monta requireStepUp");
     tieneAlgunFactor.mockResolvedValue(true);
     // A session that just proved a factor — recovery code included — inside
-    // the ten-minute window. Without `exigeContrasena`, `requireStepUp`'s
-    // first branch (`satisfecho && !exigeContrasena`) would let this straight
+    // the ten-minute window. Without `sinVentana`, `requireStepUp`'s
+    // first branch (`satisfecho && !sinVentana`) would let this straight
     // through with no password at all — exactly the "printed sheet is a
     // master key" shape hallazgo C14 warns about.
     const { req, res, next } = contexto(

@@ -59,9 +59,12 @@ npm run bench:export -- <carpeta>        # los cinco reportes tipo, con tiempos
 npm run bench:photos -- <carpeta> 3000   # genera las fotos y mide el peor caso
 ```
 
-**Cuidado:** `DB_SYNC=true` reescribe el esquema y solo debe usarse contra
-`osefi_local`. La configuración de producción vive en las variables de entorno de
-Coolify, no en `api/.env` — ese fichero es solo desarrollo local.
+**Cuidado:** el servidor **no** toca el esquema al arrancar. El esquema sale solo
+de las migraciones: `npm run migrate` en local, a mano; en el despliegue las
+aplica la propia imagen antes de arrancar el servidor (el `CMD` del `Dockerfile`),
+y si fallan el contenedor no llega a estar sano y Coolify se queda con la versión
+anterior. La configuración de producción vive en las variables de entorno de Coolify, no en
+`api/.env` — ese fichero es solo desarrollo local.
 
 ## Rendimiento medido
 
@@ -102,11 +105,19 @@ Nada de esto era del generador, pero todo le afectaba:
    contenedor arrancaba con `NODE_ENV` sin definir, y el código lee eso como
    desarrollo: **`sequelize.sync({ alter: true })` reescribía el esquema real en
    cada arranque**. Ahora `NODE_ENV=production` está en la imagen, la conexión sale
-   de qué variables existen y no del nombre del entorno, y sincronizar el esquema
-   exige decir `DB_SYNC=true` a mano.
-2. **La migración salía del `CMD`.** Encadenada con `&&`, una migración fallida
-   dejaba la API caída y el contenedor reiniciándose. Va como comando de
-   pre-despliegue: si falla, aborta el despliegue y deja en pie la versión anterior.
+   de qué variables existen y no del nombre del entorno, y el `sync` desapareció
+   del arranque por completo: el esquema sale solo de las migraciones. La bandera
+   `DB_SYNC` fue el paso intermedio y ya no existe (`b7a2a0c`, 22 ago 2026).
+2. **La migración salió del `CMD` y ha vuelto, con comprobación de salud.**
+   Encadenada con `&&` y sin más, una migración fallida dejaba la API caída y el
+   contenedor reiniciándose. Se sacó a un comando de pre-despliegue de Coolify, y
+   eso no podía funcionar: Coolify lo ejecuta en el contenedor **existente**, la
+   imagen anterior, que no lleva las migraciones nuevas. Ahora la imagen migra y
+   luego arranca, y declara un `HEALTHCHECK`: si la migración falla el contenedor
+   nuevo nunca está sano y Coolify vuelve al anterior. Depende de que la
+   comprobación de salud no esté desactivada en Coolify y de que la aplicación no
+   tenga un puerto mapeado al host ni nombre de contenedor fijo (9 oct 2026; sin
+   probar todavía contra Coolify).
 3. **Registro de migraciones duplicado.** umzug las guardaba con extensión, así que
    la misma migración figuraba como `.ts` y como `.js` — y se ejecutó dos veces.
    Ahora el nombre no lleva extensión, y hay una normalización que arregla lo ya
@@ -1523,3 +1534,167 @@ Estado hoy, migración ya aplicada contra `osefi_local`: rol 1 ve 300 campos en 
 niveles de detalle; los roles 2 y 3 ven 195 en 6, sin un solo dato de personal.
 `check:authorship` dice «la regla dice otra cosa: 0» en las dos tablas, o sea que
 lo escrito coincide exactamente con lo que la regla predecía.
+
+
+## Repaso del 9 de octubre: lo que encontró y cómo quedó
+
+Un repaso ligero —dos lectores, uno por repositorio— sobre el árbol tal como
+estaba, con cinco arreglos de ese mismo día sin commitear. Los cinco salieron
+correctos. Lo que apareció estaba en código ya commiteado, y se arregló entero.
+
+**374 pruebas del generador en `api`, 277 en `web`**; las suites completas,
+2.795 y 1.231. Typecheck y lint limpios (en `web` quedan los seis avisos
+`react-hooks/refs` de la página, que son de estilo: ningún manejador lee hoy un
+valor viejo). Cada prueba nueva se vio caer con su arreglo desactivado.
+
+### Decisiones de Isaias, para no volver a proponerlas
+
+1. **Renombrar una columna no caduca la tabla.** La tabla se queda, la cabecera
+   cambia mientras se teclea y no se gasta ninguna consulta.
+2. **Excel y PDF se apagan mientras se ve la vista de muestra**, con el texto
+   «Pulse Generar para exportar este reporte».
+3. **El valor de un filtro se conserva al cambiar de operador cuando la caja es
+   la misma.** Se sigue borrando al pasar a «entre», a «está en la lista», a
+   «vacío», y en un campo con lista cerrada al cruzar entre «contiene» (texto) y
+   cualquier otro (desplegable).
+4. **La poda juzga por lo que el constructor acepta, no por lo que ofrece el
+   menú** — elegido sabiendo que en `osefi_local` afectaba a 0 de 7 reportes.
+
+### En la pantalla
+
+**Una letra en el nombre de una columna se llevaba la tabla.** `sameShape`
+contaba la etiqueta y `signatureOf` —lo que decide si se debe un refresco— no,
+así que la tabla se cambiaba por la muestra y con «Auto» encendido no volvía.
+Ahora hay una sola regla: `sameQuery` es `signatureOf` comparado, `sameShape`
+ignora las etiquetas, y la tabla dibuja las cabeceras renombradas desde la
+configuración que se está editando (`liveHeaders`).
+
+**Se exportaba un reporte que no estaba en pantalla.** Tras añadir o quitar una
+columna se ve la muestra del reporte nuevo; los botones seguían vivos y el
+fichero salía con las columnas anteriores bajo un «Excel descargado». El cartel
+de tabla caducada no podía avisar: necesita una tabla sobre la que ponerse.
+
+**«Generar» no desarmaba el refresco pendiente.** Volver a la primera página no
+cambia la firma, así que el temporizador armado por la última edición seguía
+vivo, saltaba detrás del clic, colgaba esa misma petición y la repetía. Solo se
+veía en un reporte más lento que lo que quedaba de los 700 ms.
+
+**Una respuesta tardía cambiaba la identidad del reporte abierto.** Actualizar
+A, abrir B antes de la respuesta, y la pantalla quedaba con el nombre de A sobre
+la configuración de B: el siguiente «Actualizar» escribía B dentro de A. Lo
+mismo al archivar: cerraba el reporte abierto mientras tanto. Un contador
+(`identitySeq`) se compara a la vuelta.
+
+**Cambiar las filas por página encendía el cartel de «cambió la
+configuración»**, y si esa página fallaba se quedaba encendido y las flechas de
+orden dejaban de reordenar. El tamaño de página ya no forma parte de la
+comparación, igual que nunca formó parte de la firma.
+
+### En el servidor
+
+**La poda borraba filtros «tiene algún…» válidos.** Las condiciones de dentro de
+un `exists` se escriben relativas a la entidad a la que lleva la relación, y se
+buscaban entre los campos de la raíz del reporte: «postes con algún evento
+pendiente» perdía el filtro al abrirse, también para su autor, y «Actualizar»
+guardaba la pérdida. La copia del cliente tenía el mismo fallo; el cliente no
+puede resolver esas rutas —su catálogo lista los campos de la raíz— así que
+ahora se fía de lo que el servidor ya juzgó.
+
+**La poda borraba lo que el constructor ejecuta y el menú no lista**: una ruta
+con rodeo (`ultimaRevision.evento.description`), un total `rootOnly` del padre,
+y un orden por un campo que no es columna. `pruneConfig` pregunta ahora al
+constructor —`describePath` dice qué es el campo, y construir un reporte de una
+columna dice si este lector puede tenerlo— y devuelve `extraFields`: la ficha de
+cada ruta válida que el catálogo no lleva, para que la pantalla tenga con qué
+pintarla. Viaja en `GET /reportes` y `GET /reportes/:id`. **Guardar no la
+devuelve**: la pantalla la conserva en su estado desde que abrió el reporte.
+
+**La cancelación se perdía si el cliente colgaba antes de que existiera el
+listener.** `close` salta una vez; tras registrarlo se mira `res.destroyed`.
+
+**El tope de «solo esta página» usaba otro tamaño de página que la consulta**:
+sin `limit` suponía 20.000 filas donde `buildQuery` lee 500. Los dos leen ahora
+`pageOf`. La pantalla siempre manda `limit`; afectaba a llamadas directas.
+
+### Comentarios que decían lo contrario del código
+
+Siete, corregidos. El que más pesaba: `catalog.ts` y `types.ts` afirmaban que
+`rols` no tiene `deletedAt`, y lo tiene desde `20260826000001`. La entidad sigue
+sin guarda a propósito —el controlador de roles no deja archivar uno en uso— y
+ahora el comentario lo dice.
+
+### Lo que no se hizo
+
+- **No se abrió la pantalla en un navegador.** Todo lo de arriba está comprobado
+  con pruebas, no mirándolo.
+- **No se midió producción.** El número de reportes guardados con rutas ocultas
+  o filtros `exists` es de `osefi_local`.
+- Quedan sin leer cuatro ficheros de presentación (`TemplateGallery`,
+  `PageHelp`, `CardHelp`, `Skeletons`).
+- Dos residuos menores de la estrella de favorito: un doble clic rápido manda el
+  mismo valor dos veces, y reabrir el reporte desde la lista antes de que esta
+  se refresque devuelve el estado viejo durante un clic.
+
+### La auditoría sobre estos mismos arreglos (9 de octubre, por la tarde)
+
+Tres lentes adversariales —la poda del servidor, el estado de la pantalla y la
+costura entre los dos repos, esta última con 6.559 configuraciones generadas—
+sobre lo de arriba. **No encontraron fuga de datos de personal ni regresión
+entre versiones** (servidor nuevo con pantalla vieja y al revés acaban igual que
+antes). Encontraron catorce defectos, ocho de ellos míos de ese mismo día.
+
+Ahora son **385 pruebas del generador en `api` y 285 en `web`**; suites
+completas, 2.806 y 1.239. Cada arreglo tiene una prueba que cae sin él.
+
+**El listado de reportes guardados se podía tumbar para todos.** Un filtro
+«tiene algún…» con `where: null` se guarda —el constructor lee `if (node.where)`—
+y la poda leía `.op` de ese `null`: 500 en `GET /reportes` para cualquiera que
+lo listara, con solo marcarlo compartido y favorito. Ya pasaba antes; el
+arreglo de la mañana lo había ampliado a la forma anidada. `pruneConfig` ya no
+lanza nunca: lo que no sabe leer lo entrega vacío y contado como omitido.
+
+**La poda «entera» no lo era.** Las relaciones de varios registros alcanzadas
+por un rodeo —26 rutas— se seguían borrando como columna y como orden, y como
+filtro «tiene algún…» el servidor las conservaba y la pantalla las borraba. El
+servidor manda ahora también `extraRelations`, y la pantalla las suma a las del
+catálogo igual que hace con `extraFields`.
+
+**Una regla antigua dejaba pasar cualquier cosa escrita bajo una relación de
+varios registros**: `revisiones.usuario.phone` sobrevivía para quien no puede
+ver un teléfono, valor del filtro incluido. Hoy no se puede guardar así —el
+constructor lo rechaza para todos—, pero la poda existe para no depender de lo
+que haya entrado. Ahora pregunta al constructor.
+
+**En la pantalla:** renombrar con un filtro pendiente exportaba el nombre viejo
+bajo una tabla con el nuevo; un cambio de filas por página fallido guardaba un
+tamaño que la pantalla no mostraba; borrar el nombre propio de una columna con
+resumen pintaba «Descripción (conteo)», que el servidor nunca manda; un orden
+por un campo que no es columna se abría invisible y sin forma de quitarlo;
+guardar y archivar el mismo reporte a la vez lo dejaba abierto ya archivado; y
+el texto «Pulse Generar para exportar» salía cuando Generar no podía ejecutarse.
+
+**Y una prueba mía daba verde falso**: la de «Generar duplicado» pasaba sin
+ejercitar el arreglo si la máquina iba cargada. Ahora afirma primero que el
+botón estaba habilitado.
+
+### Lo que la auditoría dejó abierto
+
+Todo anterior a este trabajo, medido y sin tocar:
+
+1. **`columnHeader` añade «(conteo)» y el servidor no** para una columna normal
+   con resumen: la muestra y el esqueleto enseñan una cabecera que cambia al
+   llegar las filas. Su comentario dice que imita al servidor; no lo hace.
+   Decidir cuál de los dos lados tiene razón es de producto.
+2. **Un total con su propio resumen en un listado** (`numRevisiones` + conteo):
+   el servidor lo ejecuta y la pantalla bloquea Generar y Guardar sin ofrecer
+   cómo quitarlo salvo borrar la columna. 56 casos de menú, 188 de rutas ocultas.
+3. **`revisiones.date` con máximo** se nombra en la pantalla con la ruta cruda
+   («eventos.id (conteo)»): el catálogo no describe los campos de una relación
+   de varios registros. No se puede crear desde el selector.
+4. **La pantalla rechaza mínimo y máximo de un total ajeno en un reporte
+   agrupado**; el servidor los ejecuta, porque solo la suma multiplica.
+5. **Dentro de un «tiene algún…» la poda no pregunta al constructor**, así que
+   un campo calculado cuyas dependencias pasan del tope de profundidad
+   sobrevive ahí. No se puede guardar hoy.
+6. `duplicarReporte` no dice cuánto dejó fuera la copia: el número solo va a la
+   bitácora.

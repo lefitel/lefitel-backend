@@ -30,7 +30,7 @@
 // `parcial` and is asked for a code nobody can produce — shut out by a factor
 // it never finished registering, with no endpoint in the API to undo it.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Op } from "sequelize";
 
 type Fila = Record<string, unknown>;
@@ -576,6 +576,46 @@ describe("estadoInicialDeSesion", () => {
     const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: vencida }, ahora);
     expect(r.estado).toBe("onboarding");
     expect(r.graceUntil).toBeNull();
+  });
+
+  describe("with the second factor optional — MFA_OBLIGATORIO off, which is the default", () => {
+    // The rest of this file runs with the switch on (`vitest.config.ts`), so it
+    // goes on holding the mandatory mechanism in place. These are the three
+    // answers that change when it is off: an account with no factor is never
+    // chased, whatever its deadline column says.
+    beforeEach(() => {
+      vi.stubEnv("MFA_OBLIGATORIO", "");
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("starts no clock on an account with no factor", async () => {
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+      expect(r.estado).toBe("completa");
+      // The whole mechanism hangs off this date: `finishLogin` writes it only
+      // when it is not null, and nothing narrows a session whose account has
+      // none. No date, nobody held back.
+      expect(r.graceUntil).toBeNull();
+    });
+
+    it("ignores a deadline that already ran out", async () => {
+      // A date stamped while the switch was on must not keep closing the ERP
+      // after it is turned off — otherwise "optional" would be true only for
+      // accounts that had never logged in.
+      const vencida = new Date(ahora.getTime() - 1);
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: vencida }, ahora);
+      expect(r.estado).toBe("completa");
+      expect(r.graceUntil).toBeNull();
+    });
+
+    it("still asks for the factor of an account that has one", async () => {
+      // Optional is about having one, not about using the one you have.
+      usuarios = [CORREO_VERIFICADO];
+      const r = await estadoInicialDeSesion({ id: YO, mfa_grace_until: null }, ahora);
+      expect(r.estado).toBe("parcial");
+      expect(r.conFactor).toBe(true);
+    });
   });
 
   it("closes the ERP at the deadline itself, not a login later", async () => {

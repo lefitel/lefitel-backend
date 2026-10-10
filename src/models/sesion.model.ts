@@ -3,10 +3,13 @@ import { sequelize } from "../database/sequelize.js";
 import { UsuarioModel } from "./usuario.model.js";
 import { ISesion } from "../interfaces/index.js";
 
-// `revoked_at`, `user_agent`, `ip_address`, `mfa_satisfied_at` and
-// `mfa_source` are optional here even though `ISesion` requires them, so that
-// `createSession` can create a row without naming all five — they still
-// resolve to `null` on both sides, since the columns below allow it.
+// `revoked_at`, `user_agent`, `ip_address`, `mfa_satisfied_at`,
+// `mfa_source` and `password_confirmed_at` are optional here even though
+// `ISesion` requires them, so that `createSession` can create a row without
+// naming them — they still resolve to `null` on both sides, since the
+// columns below allow it. `password_confirmed_at` is the newest of them and
+// the one with the least to say: a session that has just opened has, by
+// definition, confirmed nothing on itself yet.
 //
 // **`estado` is deliberately not on that list.** It used to be, because the
 // column had a `DEFAULT 'completa'` and the model mirrored it. That default
@@ -31,7 +34,12 @@ import { ISesion } from "../interfaces/index.js";
 // Both are pinned by tests in `factorModels.test.ts`.
 type SesionCreation = Optional<
   ISesion,
-  "revoked_at" | "user_agent" | "ip_address" | "mfa_satisfied_at" | "mfa_source"
+  | "revoked_at"
+  | "user_agent"
+  | "ip_address"
+  | "mfa_satisfied_at"
+  | "mfa_source"
+  | "password_confirmed_at"
 >;
 
 /**
@@ -67,6 +75,11 @@ export const SesionModel: ModelDefined<ISesion, SesionCreation> = sequelize.defi
     // via a remembered device, on purpose.
     mfa_satisfied_at: { type: DataTypes.DATE, allowNull: true },
     mfa_source: { type: DataTypes.STRING(20), allowNull: true },
+    // Written only by the step-up gate, and only for an account that has no
+    // factor at all: the ten-minute window a correct password opens. A
+    // separate column from `mfa_satisfied_at` on purpose — see `ISesion` and
+    // migration `20260908000001` for why the two facts cannot share one.
+    password_confirmed_at: { type: DataTypes.DATE, allowNull: true },
   },
   { tableName: "sesiones", timestamps: false },
 );

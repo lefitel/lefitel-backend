@@ -47,8 +47,7 @@ import { crearToken, consumirToken } from "../auth/tokenStore.js";
 import { enviarCorreo } from "../auth/mailer.js";
 import { hayProveedorDisponible } from "../auth/mailRelay.js";
 import { avisarCorreoCambiado, maskEmail } from "../auth/securityNotice.js";
-import { verifyOwnPassword } from "../auth/credentials.js";
-import { promoverSesion, sellarPruebaDeFactor, apagarLaMecha } from "../auth/sessionPromotion.js";
+import { promoverSesion, sellarPruebaDeFactor } from "../auth/sessionPromotion.js";
 import { tieneCredencialRegistrada } from "../auth/factorInventory.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
@@ -62,19 +61,6 @@ const handler = makeHandler(emailLog);
 
 /** Twin of the message in `authenticate.ts` and `auth.controller.ts`; both mean the row is gone. */
 const CUENTA_INACTIVA = "Su cuenta ya no está activa.";
-
-/**
- * Same wording as `usuario.controller.ts`'s exports of the same name — a
- * second, deliberate copy rather than an import, for the same reason
- * `handler()` used to be one before it moved to `utils/handler.js`:
- * importing either constant from `usuario.controller.ts` pulls that file's
- * own import graph (`RolModel`, `permissions/store.js`'s `can`, `bcryptjs`)
- * into this file's tests to load two sentences. Flagged in the report —
- * if a third caller ever needs these, they are the next candidate for the
- * treatment `handler()` got, in a module with no imports of its own.
- */
-export const CURRENT_PASSWORD_REQUIRED_MESSAGE = "Debe proporcionar su contraseña actual.";
-export const CURRENT_PASSWORD_WRONG_MESSAGE = "La contraseña actual suministrada no es correcta.";
 
 /**
  * One answer for "no email in the body" and "that string is not shaped like
@@ -235,35 +221,32 @@ function previousAddressNoticeBody(nuevaEnmascarada: string): { html: string; te
  * `POST /auth/email/send` — register (or replace) the address on my account
  * and ask me to confirm it.
  *
- * **Requires the caller's current password. This is the fix for a real
- * account-takeover chain, not a nicety.** Without it: steal a live session
- * (an unattended office machine is enough) → set the recovery address to one
- * you control → verify it → wait for the owner to log out → `/password/forgot`
- * → reset the password, which revokes every session — and the legitimate
- * owner is now locked out, by the very feature this plan exists to give them
- * a way back through. The spec had this in its step-up list all along
- * ("cambiar el email propio — y se avisa a la dirección anterior"); it did
- * not make it into this task's brief, and this is that gap closed.
+ * **A confirmed password is the price of reaching this handler, and the gate
+ * on the route is what charges it.** This is the fix for a real
+ * account-takeover chain, not a nicety. Without any confirmation at all:
+ * steal a live session (an unattended office machine is enough) → set the
+ * recovery address to one you control → verify it → wait for the owner to log
+ * out → `/password/forgot` → reset the password, which revokes every session
+ * — and the legitimate owner is now locked out, by the very feature that
+ * exists to give them a way back through. The spec had this in its step-up
+ * list all along ("cambiar el email propio — y se avisa a la dirección
+ * anterior").
  *
- * Required for the **first** address too, not only when replacing a verified
- * one: the attack above works identically against an account with no
- * recovery address yet, and the moment somebody is establishing their own way
- * back in is exactly the moment a confirmation is worth the one extra field.
+ * Charged for the **first** address too, not only when replacing a verified
+ * one: the attack above works identically against an account with no recovery
+ * address yet, and the moment somebody is establishing their own way back in
+ * is exactly the moment a confirmation is worth asking for. That is what
+ * `sinVentana` on the mount buys — the password on every single request here,
+ * never a ten-minute window somebody else's session can walk into.
  *
  * Does not touch Global Constraint #1. That constraint is about the
- * *destination* address — whether it is free, already claimed, or whether
- * Resend is up — and nothing here depends on any of those three. The caller
- * is already authenticated, so a 401 for a missing or wrong password reveals
- * nothing about who has an account; it is the same shape as
- * `usuario.controller.ts`'s `updateUserName`, reusing the exact same pieces:
- * `verifyOwnPassword` (never a fresh `bcryptjs.compare` — see its own
- * comment for the filler hash and the levelled timings that come with it)
- * and `passwordConfirmLimiter`, mounted on this route in `auth.routes.ts`
- * exactly as `chargeConfirmBudgetOnSelfChange` mounts it on the two
- * `usuario` routes — same shared budget, same account, same secret.
+ * *destination* address — whether it is free, already claimed, or whether the
+ * mail provider is up — and nothing here depends on any of those three. The
+ * refusals the gate hands out arrive before this function and say nothing
+ * about who has an account, because the caller is already authenticated.
  *
- * Once confirmed, always the same four things, in this order, for the
- * account behind `req.user.id`:
+ * Then, always the same four things, in this order, for the account behind
+ * `req.user.id`:
  *
  * 1. Write `email` (normalised) and `email_verified_at = NULL`, and in the
  *    *same* transaction, mark every still-pending `token_uso_unico` row of
@@ -303,43 +286,28 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     return res.status(400).json({ message: EMAIL_INVALIDO });
   }
 
-  const pass = (req.body as { pass?: unknown } | undefined)?.pass;
-  // Not a string is not a password, and an empty one is not a confirmation —
-  // refused before the round trip, the same way `verifyOwnPassword` refuses
-  // them, so the two cannot disagree about what counts as "sent nothing".
+  // 🔴 **No password check here, and its absence is the decision.** The route
+  // mounts `requireStepUp({ permiteOnboarding: true, sinVentana: true })`
+  // (`auth.routes.ts`), so the gate compares the caller's password on every
+  // request to this route — window or no window — and asks for the account's
+  // factor on top when it has one. This handler used to compare a second copy
+  // of that same secret, in a field of its own called `pass`, and the two were
+  // one password asked for twice: once by the gate's dialog and once by the
+  // form. Removing the duplicate is what the reauthentication-window work is
+  // for.
   //
-  // 🔴 **This field is the defence, and `requireStepUp` is not** (plan 4E,
-  // S6). The route mounts `requireStepUp({ permiteOnboarding: true })`
-  // without `exigeContrasena`, so for an account with no factor — every one
-  // of the nine on deploy day, and any account that has not verified its
-  // address — the gate takes its "nothing to prove" skip and lets a bare
-  // cookie through. What stops a stolen session from setting the attacker's
-  // address as this account's recovery channel (and, since plan 4E, as its
-  // second factor) is this check and nothing else. Once the address is
-  // verified the gate does refuse, and asks for a code to the *old* mailbox;
-  // before that, this is all there is. Do not "simplify" it away because the
-  // gate looks like it covers it.
-  if (typeof pass !== "string" || pass === "") {
-    return res.status(400).json({ message: CURRENT_PASSWORD_REQUIRED_MESSAGE });
-  }
-  const confirmacion = await verifyOwnPassword({ id: caller.id, pass, ip: req.ip ?? null });
-  if (!confirmacion.ok) {
-    // Archived between `authenticate` and here — the narrow race
-    // `verifyOwnPassword` names. Answered the same way `/api/auth/me`
-    // answers it, and pointedly not as a wrong password: sending somebody
-    // hunting for a typo in a password that was never compared is worse
-    // than telling them their session is over.
-    if (confirmacion.reason === "no-account") {
-      return res.status(401).json({ message: CUENTA_INACTIVA });
-    }
-    return res.status(401).json({ message: CURRENT_PASSWORD_WRONG_MESSAGE });
-  }
+  // A `pass` field still arriving from a tab opened before the change is
+  // simply not read. That is the deploy window handled in the only direction
+  // that can hurt: the field going away while a check for it stayed would have
+  // answered 400 to every request on the one route an account uses to leave
+  // `onboarding`.
 
   const found = await UsuarioModel.findByPk(caller.id, {
     attributes: ["id", "email", "email_verified_at"],
   });
-  // Archived in the instant between `verifyOwnPassword`'s own lookup and
-  // this one — narrower still than the race above, and answered the same way.
+  // Archived between `authenticate` and this lookup. Answered the way
+  // `/api/auth/me` answers the same race — the session is over — and never as
+  // anything about a password: this handler compares none.
   if (!found) {
     return res.status(401).json({ message: CUENTA_INACTIVA });
   }
@@ -390,11 +358,21 @@ export const sendVerificationEmail = handler("sendVerificationEmail", async (req
     // just removed the account's last one. Then everything that was trusted
     // on the strength of a factor goes, the way `deleteTotp` and
     // `deleteCredential` do it: the remembered devices, and every other
-    // session — a session stored `completa` is never narrowed by anything
-    // (`estadoEfectivo` only ever reads the row), so a cookie on another
-    // machine would keep the gated writes that carry no `exigeContrasena`
-    // for the rest of its life on an account with nothing behind it. Only
-    // when the old address *was* verified (otherwise nothing changed) and
+    // session.
+    //
+    // **Why revoking is the only thing that reaches those sessions.**
+    // `estadoEfectivo` does narrow a stored `completa` — that is its one
+    // move — but not this one: a session that proved the address carries
+    // `mfa_satisfied_at`, and clause 3 exempts it for ever. Nothing walks a
+    // proof backwards, so a cookie on another machine would go on holding the
+    // whole ERP up to `SESSION_ABSOLUTE_DAYS` on an account with nothing
+    // behind it any more. The gated writes are the smaller half of that and
+    // no longer the open door they were: with no factor left, every one of
+    // them falls to `requireStepUp`'s password branch, so a stolen cookie on
+    // its own gets at most the ten minutes of a window somebody else opened.
+    // Everything the gates do not cover — which is most of the ERP — it keeps.
+    //
+    // Only when the old address *was* verified (otherwise nothing changed) and
     // only when no credential remains (a passkey or an app still vouches).
     //
     // **`except` this session**, because verifying the new address needs the
@@ -554,22 +532,30 @@ export const verifyEmail = handler("verifyEmail", async (req: Request, res: Resp
 
   // Plan 4E: a verified address is a second factor, so confirming it is
   // registering one, and this does what `confirmTotp` and `registerVerify`
-  // do at the same moment — three writes, one transaction:
+  // do at the same moment — two writes, one transaction:
   //
   // 1. the column;
   // 2. **this session promoted** (`parcial`/`onboarding` → `completa`), or,
   //    when `promoverSesion` matched nothing — a session that opened
   //    `completa` under the grace clock, hallazgo F2/B-1 — **sealed**, so the
   //    ten-minute step-up window opens now rather than refusing the very next
-  //    gated write on an account that just proved a factor;
-  // 3. the grace deadline cleared, because there is nothing left to chase.
+  //    gated write on an account that just proved a factor.
   //
-  // An earlier draft did only the third. The audit traced what that left: a
-  // session stored `onboarding` — everybody who logged in after their own
-  // deadline, which is the population this plan exists for — stays
-  // `onboarding` for its whole life, because `estadoEfectivo` only ever
-  // narrows; every route answers 403 `FACTOR_PENDIENTE`, and the one screen
-  // that code points to still asks for an app or a key.
+  // An earlier draft promoted nothing and only cleared the fourteen-day
+  // deadline. The audit traced what that left: a session stored `onboarding`
+  // — everybody who logged in after their own deadline, which is the
+  // population this plan exists for — stays `onboarding` for its whole life,
+  // because `estadoEfectivo` only ever narrows; every route answers 403
+  // `FACTOR_PENDIENTE`, and the one screen that code points to still asks for
+  // an app or a key.
+  //
+  // 🔴 **And `usuarios.mfa_grace_until` is deliberately left where it is.**
+  // Clearing it here used to be the third write, and it was the cheapest lap
+  // of a loop: verify the address (deadline cleared), change the address (the
+  // verification cleared, the deadline still gone), log in again, and the
+  // login stamps a fresh fourteen days because a NULL deadline reads as "the
+  // clock never started". See the tombstone at the foot of
+  // `auth/sessionPromotion.ts`.
   //
   // `caller.id_sesion` and `redeemed.id_usuario` name the same account:
   // `consumirToken` above was scoped with `soloDelUsuario: caller.id`.
@@ -583,7 +569,6 @@ export const verifyEmail = handler("verifyEmail", async (req: Request, res: Resp
       if (!promovida) {
         await sellarPruebaDeFactor(caller.id_sesion, "correo", { transaction });
       }
-      await apagarLaMecha(redeemed.id_usuario, { transaction });
     });
   } catch (err) {
     if (isEmailUniqueViolation(err)) {

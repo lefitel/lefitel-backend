@@ -15,6 +15,23 @@ describe("imageFileName", () => {
     expect(imageFileName("foto.jpg")).toBe("foto.jpg");
   });
 
+  it("accepts a name with two dots in a row: without a separator it goes nowhere", () => {
+    // The uploader used to keep the original name unsanitised, so a photograph
+    // called "foto..jpg" or "…10.20.30 a. m..png" is stored as "…_foto..webp".
+    // Refusing it made the Archivos screen call a photograph in use an orphan.
+    expect(imageFileName("/1712428860328_foto..webp")).toBe("1712428860328_foto..webp");
+    expect(imageFileName("images/captura a. m..webp")).toBe("captura a. m..webp");
+    expect(resolveImagePath("/1712428860328_foto..webp", ROOT))
+      .toBe(path.join(ROOT, "1712428860328_foto..webp"));
+  });
+
+  it("still refuses the two names that are navigation by themselves", () => {
+    expect(imageFileName("..")).toBeNull();
+    expect(imageFileName(".")).toBeNull();
+    expect(imageFileName("/..")).toBeNull();
+    expect(imageFileName("images/..")).toBeNull();
+  });
+
   it("answers null for anything that is not a plain name", () => {
     expect(imageFileName("../x.jpg")).toBeNull();
     expect(imageFileName("a/b.jpg")).toBeNull();

@@ -6,7 +6,7 @@
 // them turned out satisfiable by a doc comment or a slice that covered the
 // wrong region. A pure function is tested by calling it.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   puedeAlcanzar,
   puedeVerArchivosEstaticos,
@@ -167,6 +167,30 @@ describe("the state actually in force, once a session has been open a while", ()
 
   it("turns a complete session into onboarding once the deadline has passed", () => {
     expect(estadoEfectivo(sesion(), VENCIDO, AHORA)).toBe("onboarding");
+  });
+
+  describe("with the second factor optional — MFA_OBLIGATORIO off, which is the default", () => {
+    // Every other test here runs with the switch on (`vitest.config.ts`).
+    beforeEach(() => {
+      vi.stubEnv("MFA_OBLIGATORIO", "");
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("leaves a complete session complete, however long ago the deadline passed", () => {
+      // This runs in front of every request in the API. With the switch off it
+      // must not close the ERP to an account for having no factor — including
+      // one whose deadline was stamped back when the switch was on.
+      expect(estadoEfectivo(sesion(), VENCIDO, AHORA)).toBe("completa");
+    });
+
+    it("still returns the other two states untouched", () => {
+      // `parcial` is an account that has a factor and has not proved it; no
+      // switch changes that.
+      expect(estadoEfectivo(sesion({ estado: "parcial" }), VENCIDO, AHORA)).toBe("parcial");
+      expect(estadoEfectivo(sesion({ estado: "onboarding" }), VENCIDO, AHORA)).toBe("onboarding");
+    });
   });
 
   it("leaves a complete session alone while the deadline is still ahead", () => {

@@ -51,8 +51,8 @@ const die = createShutdown({
  *
  * `process.exit()` right here, rather than `die()`: this runs at the top of the
  * module, so merely setting the exit code would let everything below it —
- * connecting, migrating, listening — run to completion first. And there is
- * nothing queued ahead of this line for the exit to cut off.
+ * connecting, checking the MFA key, listening — run to completion first. And
+ * there is nothing queued ahead of this line for the exit to cut off.
  */
 const missing = requiredEnv(process.env.NODE_ENV).filter((v) => !process.env[v]);
 if (missing.length > 0) {

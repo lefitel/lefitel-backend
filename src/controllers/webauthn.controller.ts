@@ -31,7 +31,7 @@ import {
   buscarCredencialDe,
   marcarCredencialUsada,
 } from "../auth/passkeyStore.js";
-import { promoverSesion, sellarPruebaDeFactor, apagarLaMecha } from "../auth/sessionPromotion.js";
+import { promoverSesion, sellarPruebaDeFactor } from "../auth/sessionPromotion.js";
 import { tieneAlgunFactor, tieneCredencialRegistrada } from "../auth/factorInventory.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
@@ -88,6 +88,26 @@ const NOMBRE_MAX = 100;
  * which would otherwise fail later on the unique index with an error nobody
  * can act on. It is advisory: the server still has to survive a duplicate,
  * which `registerVerify` does.
+ *
+ * 🔴 **No verified-address check here, and its absence is the decision — this
+ * is the exit from `onboarding` that does not need a mailbox.** `setupTotp`
+ * refuses with 409 until `email_verified_at` is set (Decision 5 of the MFA
+ * design, §5), and `POST /auth/email/send` is itself a gated route. That is
+ * fine for the TOTP door because it is not the last one. Asking the same of
+ * this route would close the last one: an account whose address bounces, is
+ * mistyped, or belongs to a mailbox nobody can reach would have **no** way to
+ * register any factor, and registering a factor is the only thing that ends
+ * `onboarding` — every account reaches that state on its own, `MFA_GRACE_DAYS`
+ * after its first login (`estadoInicialDeSesion`). The result is the sealed
+ * room: 403 to the whole ERP with no door out from inside the API, and the
+ * only remedy a shell in the production container. The asymmetry with
+ * `setupTotp` is therefore deliberate and must not be "tidied up" into
+ * consistency — the one door that depends on nothing external is what keeps
+ * the mail chain from being a single point of lockout for the whole payroll.
+ *
+ * What still holds the line is that this route is gated: `sinVentana` means
+ * the caller's own password on every request, so "no verified address needed"
+ * is not "no proof needed". See `webauthn.routes.ts`.
  */
 export const registerOptions = handler("registerOptions", async (req: Request, res: Response) => {
   const caller = req.user;
@@ -136,8 +156,8 @@ export const registerOptions = handler("registerOptions", async (req: Request, r
  * Verify the passkey the browser just created, and do everything else the
  * first factor of an account has to trigger.
  *
- * 🔴 **Six writes, and not one of them is inherited.** `confirmTotp` does the
- * same six for the TOTP path; a new endpoint gets none of them for free, and
+ * 🔴 **Five writes, and not one of them is inherited.** `confirmTotp` does the
+ * same work for the TOTP path; a new endpoint gets none of it for free, and
  * each omission has its own distinct failure:
  *
  * 1. **The credential row.** The obvious one.
@@ -150,12 +170,14 @@ export const registerOptions = handler("registerOptions", async (req: Request, r
  *    passkey; `promoverSesion` matches no row (its `WHERE` covers only
  *    `parcial` and `onboarding`) and returns false; nobody stamps
  *    `mfa_satisfied_at`. From that instant `tieneAlgunFactor` says true, so
- *    `requireStepUp`'s "nothing to prove" branch stops applying, and **no
- *    protected write works again in that session.**
- * 4. **`apagarLaMecha`** — otherwise `mfa_grace_until` stays permanently
- *    expired, a landmine for the next thing that reads that column alone.
- * 5. **`mfa_satisfied_at` only when `userVerified`** — see `registerOptions`.
- * 6. 🔴 **The ten recovery codes, when the account has none.** This is the one
+ *    the gate stops accepting the password on its own and starts demanding a
+ *    factor proved recently — which that session has never proved. **Every
+ *    protected write answers `sin-factor-reciente` until the person proves the
+ *    passkey they just registered**, one more ceremony at
+ *    `/webauthn/login/verify` for somebody who had already done exactly that a
+ *    second earlier.
+ * 4. **`mfa_satisfied_at` only when `userVerified`** — see `registerOptions`.
+ * 5. 🔴 **The ten recovery codes, when the account has none.** This is the one
  *    that gets forgotten, and for a passkey-only account it is the difference
  *    between a lost phone and a lost account. Today they are minted in exactly
  *    one place — confirming a TOTP — and the manual endpoint that issues them
@@ -164,6 +186,14 @@ export const registerOptions = handler("registerOptions", async (req: Request, r
  * **The condition is `contarCodigosRestantes(id) === 0`, never
  * `tieneAlgunFactor`.** `totp.controller.ts` explains why: gating on the
  * factor count would kill a printed sheet that is still perfectly valid.
+ *
+ * 🔴 **A sixth write was here and is gone: clearing `usuarios.mfa_grace_until`.**
+ * This route was the cheapest way to renew the fourteen-day deadline for ever,
+ * because it is the only factor a person can register and delete without a
+ * mailbox: register a passkey (the deadline was cleared), delete it, log in
+ * again, and the login stamps a whole new fourteen days, since a cleared
+ * deadline reads as "the clock never started". The tombstone at the foot of
+ * `auth/sessionPromotion.ts` has the reasoning and the cost.
  *
  * 🔴 **And the bcrypt runs outside the transaction.** Ten hashes at cost 12 are
  * **2646 ms measured**; inside, they hold row locks on three tables and one of
@@ -295,7 +325,6 @@ export const registerVerify = handler("registerVerify", async (req: Request, res
       if (!promovida) {
         await sellarPruebaDeFactor(caller.id_sesion, "passkey", { transaction });
       }
-      await apagarLaMecha(caller.id, { transaction });
 
       // Decided again in here: the read above ran outside and another request
       // could have issued codes in between. Regenerating over a sheet that
@@ -345,7 +374,7 @@ export const registerVerify = handler("registerVerify", async (req: Request, res
     },
     // `critical`, matching `TOTP_CONFIRMED`: registering a credential is the
     // exact event a stolen cookie produces when it is used to take an account,
-    // and the whole argument for `exigeContrasena` rests on somebody being
+    // and the whole argument for `sinVentana` rests on somebody being
     // able to notice it. `info` was a line nobody would read.
     severity: "critical",
     ip_address: req.ip ?? null,

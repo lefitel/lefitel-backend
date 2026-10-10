@@ -247,8 +247,10 @@ function call(
  * built on this fixture was answering with `estado: undefined` — a value
  * `authenticate` cannot produce, copied verbatim into the response body, and
  * one that happens to fall on the withholding side of the permission-matrix
- * gate. `"completa"` and `null` are what a session that opened on a password
- * alone really carries, which is every session this plan can produce.
+ * gate. `password_confirmed_at` joined them with the reauthentication window
+ * and follows the same rule. `"completa"` and the nulls are what a session that
+ * opened on a password alone really carries, which is every session this plan
+ * can produce.
  */
 const YO_CON_SESION = {
   id: YO,
@@ -257,6 +259,9 @@ const YO_CON_SESION = {
   expires_at: CADUCA,
   estado: "completa" as const,
   mfa_satisfied_at: null,
+  // Required on `req.user`, and null until somebody types their password
+  // into `requireStepUp`: the ten-minute window of a factor-less account.
+  password_confirmed_at: null,
 };
 
 /**
@@ -781,9 +786,15 @@ describe("GET /api/auth/me", () => {
       await me(c.req, c.res);
 
       expect(c.status, estado).toBe(200);
-      expect(Object.keys(c.payload ?? {}).sort(), estado).toEqual([
-        "estado", "expires_at", "usuario",
-      ]);
+      // The whole list of keys, so that adding one is a decision somebody has
+      // to come here and write down. `metodos` is one such decision (9 October
+      // 2026, see the handler): the factor list, for `parcial` alone — the
+      // state whose next screen has to draw it.
+      expect(Object.keys(c.payload ?? {}).sort(), estado).toEqual(
+        estado === "parcial"
+          ? ["estado", "expires_at", "metodos", "usuario"]
+          : ["estado", "expires_at", "usuario"],
+      );
       // Absent, and absent because it was never asked for.
       expect(permissionsFor, estado).not.toHaveBeenCalled();
     }
@@ -834,6 +845,33 @@ describe("GET /api/auth/me", () => {
 
     expect(c.status).toBe(200);
     expect((c.payload?.usuario as { email: string }).email).toBe("isaias@osefi.net");
+  });
+
+  it("tells a session that owes a factor which factors the account has, and no other session", async () => {
+    // The second-step screen draws one tab per way in. Without this list it
+    // drew all of them for everybody and opened on the authenticator app, so
+    // an account with only a verified address was asked for a code it had no
+    // way to produce. Decided by Isaias on 9 October 2026, knowing what it
+    // costs: whoever holds only the password now learns which factors guard
+    // the account. It was withheld before for exactly that reason.
+    //
+    // Only `parcial`: it is the one state whose next screen is that one.
+    // `onboarding` has no factor to list, and `completa` has no use for it.
+    findByPk.mockResolvedValue(storedUser({ email: "isaias@osefi.net", email_verified_at: new Date("2026-08-22T09:00:00.000Z") }));
+    passkeyCount.mockResolvedValue(1);
+    totpCount.mockResolvedValue(0);
+
+    const parcial = call(sesionCompleta({ estado: "parcial" }));
+    await me(parcial.req, parcial.res);
+    expect(parcial.status).toBe(200);
+    // In the order the screen should offer them: `metodosDeReautenticacion`.
+    expect(parcial.payload?.metodos).toEqual(["passkey", "correo"]);
+
+    for (const estado of ["onboarding", "completa"] as const) {
+      const c = call(sesionCompleta({ estado }));
+      await me(c.req, c.res);
+      expect(c.payload, estado).not.toHaveProperty("metodos");
+    }
   });
 
   it("leaves a missing email alone instead of masking null", async () => {

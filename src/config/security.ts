@@ -65,10 +65,12 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
  *
  * A different budget from the two above and not a copy of them, because it is
  * the *only* thing standing between a stolen session and an unlimited password
- * oracle. Renaming your own account and changing your own password both compare
- * a password, and neither moves the per-account lockout — see `verifyOwnPassword`
- * for why a caller confirming their own password must not be able to lock
- * themselves out — so this is the whole of the limit on both.
+ * oracle. Two things compare a password from inside a live session: the step-up
+ * gate (`middleware/requireStepUp.ts`), on every route it guards, and
+ * `updateUserPass`'s own `oldPass` check. Neither moves the per-account
+ * lockout — see `verifyOwnPassword` for why a caller confirming their own
+ * password must not be able to lock themselves out — so this is the whole of
+ * the limit on both.
  *
  * **Five *wrong passwords*, not five requests, and the difference is the whole
  * reason the number survives.** It used to be five requests: every call counted,
@@ -77,9 +79,12 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
  * the budget doing nothing wrong, and was told to wait on a bucket shared with
  * the rename. The premise written here was "nobody legitimately reaches five in
  * a quarter of an hour", and with a charge on every request that premise was
- * simply false. `confirmCostsNothing` in `middleware/loginLimiters.ts` is what
- * makes it true: only the answer that means "the password you typed is not
- * yours" costs anything.
+ * simply false. Only the answer that means "the password you typed is not
+ * yours" costs anything now, and the two chargers keep that promise by
+ * different means: `confirmCostsNothing` in `middleware/loginLimiters.ts`
+ * refunds the rest for `passwordConfirmLimiter`'s own callers, while the
+ * step-up gate charges the store directly and refunds a right answer on the
+ * spot — see `consumirCupoDeConfirmacion` in that same file.
  *
  * So the two sides of the number are:
  *
@@ -99,12 +104,14 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
  * hour and leaves a `PASSWORD_CONFIRM_FAILED` line in the bitácora for every
  * one of them.
  *
- * **One bucket for both routes, deliberately** — see `usuario.routes.ts`. They
- * are two doors onto one secret, and counting them separately would hand out ten
- * attempts a quarter of an hour to anybody willing to alternate. Sharing is what
- * made the old charge-everything rule hurt (a rename you could not perform
- * because you had been fighting the password form) and the refund is what fixes
- * that, rather than splitting the bucket and giving the guesser double.
+ * **One bucket for every door onto that secret, deliberately** — see
+ * `usuario.routes.ts`. The step-up gate guards many routes and
+ * `updateUserPass` compares its own `oldPass`, but there is one password
+ * behind all of them; counting each door separately would hand out a fresh
+ * five a quarter of an hour to anybody willing to alternate. Sharing is what
+ * made the old charge-everything rule hurt (an operation you could not perform
+ * because you had been fighting the password form) and the refund is what
+ * fixes that, rather than splitting the bucket and giving the guesser more.
  */
 export const PASSWORD_CONFIRM_LIMIT = 5;
 
@@ -267,15 +274,32 @@ export const EMAIL_CODE_DAILY_LIMIT = 12;
 export const EMAIL_CODE_VERIFY_LIMIT = 20;
 
 /**
- * How long a proved factor keeps opening the sensitive operations.
+ * How long a re-authentication keeps opening the sensitive operations.
  *
  * Ten minutes is long enough to create three users in a row without
  * re-authenticating, and short enough that an unlocked laptop left on a desk is
  * not a standing authorisation to edit the permission matrix.
+ *
+ * **One number, three jobs, and they are deliberately the same number.** It
+ * bounds `sesiones.mfa_satisfied_at`, the window a proved factor opens; it
+ * bounds `sesiones.password_confirmed_at`, the window a correct password opens
+ * for an account that has no factor to prove; and `sellarContrasena`
+ * (`auth/sessionPromotion.ts`) reads it a third time, to refuse to re-stamp a
+ * window that is still inside itself — which is what makes the ten minutes run
+ * from the first confirmation instead of renewing on every request. A route
+ * mounted with `sinVentana` honours none of the three. See
+ * `middleware/requireStepUp.ts`.
  */
 export const STEP_UP_WINDOW_MINUTES = 10;
 
-/** The field a caller re-enters their password in when they have no factor yet. */
+/**
+ * The field a caller re-enters their current password in for the step-up gate.
+ *
+ * Not only the accounts with no factor: since the free-pass branch was deleted
+ * (2026-09-08) every account has to send this when the gate asks, and the
+ * mounts carrying `sinVentana` ask on every single request — so an account
+ * that has just proved a factor sends it too.
+ */
 export const STEP_UP_PASSWORD_FIELD = "stepup_password";
 
 /**
@@ -290,13 +314,54 @@ export const STEP_UP_PASSWORD_FIELD = "stepup_password";
  * verification email on the Saturday the deploy happened.
  *
  * Read in exactly one place — `estadoInicialDeSesion` in
- * `auth/factorInventory.ts`, which stamps `usuarios.mfa_grace_until` on the
- * first login and never again. Because the deadline is a stored date and not
+ * `auth/factorInventory.ts`, which is the only thing that ever *decides* a
+ * deadline. Two callers then write what it decides: `terminarLogin`
+ * (`auth/finishLogin.ts`) and, since 2026-09-08, the session rotation in
+ * `updateUserPass`. Still once per account — the branch that answers with a
+ * date is the one for a column that has never been stamped — but no longer
+ * "on the first login": whichever of the two gets there first starts the
+ * clock. Because the deadline is a stored date and not
  * this number applied at read time, shortening or lengthening the constant
  * later moves nobody who has already logged in once: their fourteen days were
  * fixed the day they started.
  */
 export const MFA_GRACE_DAYS = 14;
+
+/**
+ * Whether an account is *required* to have a second factor. Off unless the
+ * environment says `MFA_OBLIGATORIO=true`.
+ *
+ * **Off is the decision, not a missing setting** (Isaias, 9 October 2026, with
+ * the alternatives in front of him: the design this arc was built to —
+ * "dos factores obligatorios" — and mandatory for administrators only). With
+ * it off, a second factor is something a person chooses to set up. An account
+ * that has one is still asked for it at every login; an account that has none
+ * logs in with its password, for as long as it likes.
+ *
+ * **What turning it on does** is everything `MFA_GRACE_DAYS` above describes:
+ * the first login stamps a deadline, and past it the ERP closes to that account
+ * until it registers a factor. None of that machinery was removed — it is
+ * dormant, and the test suite still runs with this on (`vitest.config.ts`)
+ * precisely so it does not rot while nobody is using it.
+ *
+ * **It is read in exactly two places, and both have to agree:**
+ * `estadoInicialDeSesion` (`auth/factorInventory.ts`), which decides at login,
+ * and `estadoEfectivo` (`auth/sessionState.ts`), which re-decides on every
+ * request. Off, the first never stamps a deadline and the second never acts on
+ * one — including a deadline stamped while this was on, so switching it off
+ * frees everybody at their next request rather than only people who had never
+ * logged in.
+ *
+ * A function and not a constant, like the mail and keyring settings in this
+ * file: read when asked, so a test can flip it with `vi.stubEnv`.
+ *
+ * Exactly `"true"`. Anything else — unset, empty, `1`, `yes` — is off, because
+ * the failure worth avoiding is a typo closing the ERP to the whole company a
+ * fortnight later.
+ */
+export function mfaObligatorio(): boolean {
+  return process.env.MFA_OBLIGATORIO === "true";
+}
 
 /**
  * How long `--reset-mfa` (and its endpoint twin, `POST

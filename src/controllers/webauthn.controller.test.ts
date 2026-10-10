@@ -43,11 +43,9 @@ vi.mock("../auth/passkeyStore.js", async (importOriginal) => ({
 
 const promoverSesion = vi.fn();
 const sellarPruebaDeFactor = vi.fn();
-const apagarLaMecha = vi.fn();
 vi.mock("../auth/sessionPromotion.js", () => ({
   promoverSesion: (...a: unknown[]) => promoverSesion(...a),
   sellarPruebaDeFactor: (...a: unknown[]) => sellarPruebaDeFactor(...a),
-  apagarLaMecha: (...a: unknown[]) => apagarLaMecha(...a),
 }));
 
 const contarCodigosRestantes = vi.fn();
@@ -89,8 +87,15 @@ vi.mock("../auth/rememberedDeviceStore.js", () => ({
 }));
 
 const usuarioFindByPk = vi.fn();
+// `update` is mocked although this controller no longer calls it: it is the
+// witness for "registering a factor does not clear the grace deadline", the
+// loop closed on 2026-09-08 (see the tombstone in `auth/sessionPromotion.ts`).
+const usuarioUpdate = vi.fn();
 vi.mock("../models/usuario.model.js", () => ({
-  UsuarioModel: { findByPk: (...a: unknown[]) => usuarioFindByPk(...a) },
+  UsuarioModel: {
+    findByPk: (...a: unknown[]) => usuarioFindByPk(...a),
+    update: (...a: unknown[]) => usuarioUpdate(...a),
+  },
 }));
 
 // The fake invokes the callback with a fixed token standing in for the real
@@ -184,7 +189,6 @@ beforeEach(() => {
   consumirReto.mockResolvedValue({ id_usuario: 42, id_sesion: "sesion-de-isaias" });
   promoverSesion.mockResolvedValue(true);
   sellarPruebaDeFactor.mockResolvedValue(undefined);
-  apagarLaMecha.mockResolvedValue(undefined);
   contarCodigosRestantes.mockResolvedValue(0);
   prepararCodigos.mockResolvedValue({ codigos: ["a", "b"], filas: [], ahora: new Date() });
   escribirCodigos.mockResolvedValue(undefined);
@@ -415,10 +419,16 @@ describe("registerVerify — the six writes, one test each", () => {
     expect(sellarPruebaDeFactor).not.toHaveBeenCalled();
   });
 
-  it("4. puts out the grace-period fuse", async () => {
+  it("4. no apaga la mecha: registrar una passkey no compra catorce dias nuevos", async () => {
+    // Esta ruta era la vuelta mas barata del bucle que se cerro el
+    // 2026-09-08, porque es el unico factor que se registra y se borra sin
+    // buzon: registrar borraba `usuarios.mfa_grace_until`, y NULL lo lee
+    // `estadoInicialDeSesion` como "el reloj no ha empezado nunca", asi que el
+    // siguiente login estampaba catorce dias enteros. Este handler no escribe
+    // en `usuarios` en absoluto.
     await registrar();
 
-    expect(apagarLaMecha).toHaveBeenCalledWith(42, { transaction: TRANSACCION });
+    expect(usuarioUpdate).not.toHaveBeenCalled();
   });
 
   // 🔴 The one that gets forgotten, and for a passkey-only account it is the

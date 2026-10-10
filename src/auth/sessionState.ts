@@ -20,6 +20,7 @@
 // somebody adds a fourth state.
 export type { EstadoSesion } from "../interfaces/index.js";
 import type { EstadoSesion } from "../interfaces/index.js";
+import { mfaObligatorio } from "../config/security.js";
 
 
 /**
@@ -248,12 +249,14 @@ export function puedeVerArchivosEstaticos(estado: EstadoSesion): boolean {
  * login's tail, now `terminarLogin` in `auth/finishLogin.ts`) fires solely when
  * `estadoInicialDeSesion` hands back a date, and the two branches that matter — an account that has a factor, and a
  * deadline already decided — both hand back `null`, which means "leave the
- * column alone". Plan 4B's `apagarLaMecha` (`sessionPromotion.ts`) now clears
- * it when an account confirms its first factor, from `confirmTotp` and
- * `registerVerify` both — so for an account that complied the column is NULL
- * again, not a past date. The rule below does not depend on that: it was
- * written for the world where the stamp stayed in the past for ever, and it
- * still has to hold for any account whose clearing write was lost.
+ * column alone". Plan 4B added a write that cleared it when an account
+ * confirmed its first factor, and 2026-09-08 took that write back out: a
+ * cleared deadline reads as "the clock never started", so registering a
+ * factor and deleting it again bought a fresh `MFA_GRACE_DAYS` at the next
+ * login, over and over. So the sentence this paragraph opens with is true
+ * again — nothing in `src/` clears this column — and the rule below is
+ * written for exactly that world, which is the world it was written for in
+ * the first place.
  *
  * A first version of this function narrowed on that stamp alone, and the
  * consequence was a permanent lockout waiting for plan 4B to arm it: register a
@@ -315,16 +318,19 @@ export function puedeVerArchivosEstaticos(estado: EstadoSesion): boolean {
  * column's entire declared purpose and which it cannot skip without breaking
  * step-up loudly on the very next gated write. Clause 2 depends on nothing. And
  * if both were somehow missed, the result is no longer the inescapable lockout
- * described above: `onboarding` opens everything `parcial` opens **plus six**,
- * `/api/auth/mfa` and `/api/auth/webauthn/login` among them, so the endpoint
+ * described above: `onboarding` opens everything `parcial` opens **plus
+ * seven**, `/api/auth/mfa` and `/api/auth/webauthn/login` among them, so the endpoint
  * that verifies a factor is still reachable and a second attempt still gets out.
  * Degraded, not sealed shut.
  *
- * **And a request to 4B that is not load-bearing:** when an account registers
- * its first factor, clear `usuarios.mfa_grace_until`. `estadoInicialDeSesion`'s
- * own first branch already says a date in that column "reads as: this account is
- * still being chased", and after registration it is not. That is data hygiene
- * and a third line of defence; the two clauses above do not wait for it.
+ * 🔴 **And the request this paragraph used to make of 4B, withdrawn:** it asked
+ * that registering a first factor clear `usuarios.mfa_grace_until`, as data
+ * hygiene. It was built, and it turned the deadline into something anybody
+ * could renew — clear it, delete the factor, log in, collect a fresh
+ * `MFA_GRACE_DAYS`. Nothing clears that column now (see the tombstone at the
+ * foot of `sessionPromotion.ts`), which is exactly the world the two clauses
+ * above were written for: they never depended on the clearing write, and this
+ * is the reason they must not start to.
  *
  * ---
  *
@@ -381,6 +387,14 @@ export function estadoEfectivo(
 ): EstadoSesion {
   const guardado = sesion.estado;
   if (guardado !== "completa") return guardado;
+
+  // The only move this function makes is closing the ERP to an account whose
+  // deadline for setting up a factor has passed. With the second factor
+  // optional (`mfaObligatorio`, off by default) there is no such deadline to
+  // enforce — and this has to say so itself rather than rely on the column
+  // being empty: a date stamped while the switch was on would otherwise go on
+  // closing the ERP after it was turned off.
+  if (!mfaObligatorio()) return guardado;
 
   // An unreadable deadline leaves the state alone, and that is the same answer
   // `estadoInicialDeSesion` gives it — "the clock never started", which is what

@@ -204,6 +204,19 @@ export interface ISesion {
   estado: EstadoSesion;
   mfa_satisfied_at: Date | null;
   mfa_source: string | null;
+  /**
+   * When this session last confirmed its password, and **not** a second
+   * spelling of `mfa_satisfied_at`. That one means "a FACTOR was proved
+   * here", and `estadoEfectivo` reads it to decide an account has nothing
+   * left to set up: a password confirmation written there would let an
+   * account with no factor at all read as `completa` past its fourteen-day
+   * deadline. Two separate columns is what keeps those two facts apart —
+   * see the migration `20260908000001` for the longer version.
+   *
+   * Null on every session until somebody types their password into the
+   * step-up gate, which is every session in production the day this ships.
+   */
+  password_confirmed_at: Date | null;
 }
 
 /**

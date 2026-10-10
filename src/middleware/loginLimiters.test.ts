@@ -18,7 +18,9 @@ import app from "../app.js";
 import {
   accountBucketKey,
   confirmCostsNothing,
+  consumirCupoDeConfirmacion,
   costsNothing,
+  devolverCupoDeConfirmacion,
   estaBloqueada,
   ipBucketKey,
   loginAccountIpLimiter,
@@ -335,6 +337,9 @@ describe("the key the confirmation bucket counts against", () => {
         expires_at: new Date(),
         estado: "completa",
         mfa_satisfied_at: null,
+        // Required on `req.user`, and null until somebody types their password
+        // into `requireStepUp`: the ten-minute window of a factor-less account.
+        password_confirmed_at: null,
       },
     }) as unknown as Request;
 
@@ -386,10 +391,10 @@ describe("the key the confirmation bucket counts against", () => {
  * `standardHeaders` is on, `RateLimit-Remaining` would have told a guesser which
  * attempt was the right one through the very uniformity that was hiding it.
  *
- * That endpoint is retired. The two routes left on this bucket —
- * `PUT /usuario/username/:id` and `PUT /usuario/userpass/:id` — answer a wrong
- * current password with **401 and nothing else**, and answer everything else
- * with something that is not a 401. So the status already tells the caller what
+ * That endpoint is retired. The route left on this bucket through *this*
+ * option — `PUT /usuario/userpass/:id` — answers a wrong current password with
+ * **401 and nothing else**, and answers everything else with something that is
+ * not a 401. So the status already tells the caller what
  * the header could, there is no uniformity left to leak through, and charging
  * every request stopped buying anything. What it cost instead was the case the
  * audit bet the deploy on: the *legitimate* work of changing your own password —
@@ -412,6 +417,9 @@ describe("what the confirmation bucket spends", () => {
     expires_at: new Date(),
     estado: "completa" as const,
     mfa_satisfied_at: null,
+    // Required on `req.user`, and null until somebody types their password
+    // into `requireStepUp`: the ten-minute window of a factor-less account.
+    password_confirmed_at: null,
   };
 
   /**
@@ -528,6 +536,135 @@ describe("what the confirmation bucket spends", () => {
 });
 
 /**
+ * `consumirCupoDeConfirmacion` and `devolverCupoDeConfirmacion` — the atomic
+ * charge and refund `requireStepUp.ts` moved to for Task 1 of the
+ * reauthentication-window plan (2026-09-08).
+ *
+ * They replace a read (`passwordConfirmLimiter.getKey`) followed, only if the
+ * password then turned out wrong, by a separate charge through the limiter
+ * itself. That gap between the read and the charge was the bug: `bcrypt`
+ * takes long enough (~250ms) that several requests in flight at once could
+ * all read "nothing spent yet" before any of them had charged anything, so a
+ * stolen session bought far more than `PASSWORD_CONFIRM_LIMIT` guesses.
+ * `requireStepUp.test.ts` mocks these two functions out entirely to stay a
+ * unit test of that gate's own decisions — so the arithmetic and the
+ * concurrency guarantee itself are pinned here instead, against the real
+ * `MemoryStore` these two call directly (see the store's own docstring in
+ * `loginLimiters.ts` for why going straight to the store, rather than through
+ * `passwordConfirmLimiter`, is what makes the charge atomic at all).
+ */
+describe("consumirCupoDeConfirmacion / devolverCupoDeConfirmacion", () => {
+  const CUENTAS = [501, 502, 503, 504, 505];
+
+  beforeEach(async () => {
+    for (const id of CUENTAS) {
+      await passwordConfirmLimiter.resetKey(`pc:${id}`);
+    }
+  });
+
+  it("lets the first PASSWORD_CONFIRM_LIMIT charges through and refuses the next one", async () => {
+    for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
+      const cupo = await consumirCupoDeConfirmacion(501);
+      expect(cupo.permitido, `intento ${i + 1}`).toBe(true);
+    }
+    const agotado = await consumirCupoDeConfirmacion(501);
+    expect(agotado.permitido).toBe(false);
+  });
+
+  it("counts `restantes` down to zero and never below it", async () => {
+    const primero = await consumirCupoDeConfirmacion(502);
+    expect(primero.restantes).toBe(PASSWORD_CONFIRM_LIMIT - 1);
+
+    for (let i = 1; i < PASSWORD_CONFIRM_LIMIT; i++) {
+      await consumirCupoDeConfirmacion(502);
+    }
+    // One past the limit: refused, and `restantes` still reads zero rather
+    // than a negative number — the `Math.max` this function's own docstring
+    // in `requireStepUp.ts` used to carry, moved here with the rest of the
+    // arithmetic.
+    const agotado = await consumirCupoDeConfirmacion(502);
+    expect(agotado.restantes).toBe(0);
+  });
+
+  it("shares the exact bucket passwordConfirmLimiter itself reads, under the same pc:<id> key", async () => {
+    // The whole point of building the store explicitly and handing it to
+    // `passwordConfirmLimiter` through its `store` option, rather than a
+    // second, private store: `chargeConfirmBudgetOnSelfChange`
+    // (`usuario.routes.ts`) still charges through `passwordConfirmLimiter` as
+    // ordinary middleware, and the two have to land on the same counter or
+    // the shared budget silently doubles.
+    await consumirCupoDeConfirmacion(503);
+    await consumirCupoDeConfirmacion(503);
+    expect(await passwordConfirmLimiter.getKey("pc:503")).toEqual(
+      expect.objectContaining({ totalHits: 2 }),
+    );
+  });
+
+  it("gives a charge back: a spent budget has room again after a refund", async () => {
+    for (let i = 0; i < PASSWORD_CONFIRM_LIMIT; i++) {
+      await consumirCupoDeConfirmacion(504);
+    }
+    await devolverCupoDeConfirmacion(504);
+    const cupo = await consumirCupoDeConfirmacion(504);
+    expect(cupo.permitido).toBe(true);
+  });
+
+  /**
+   * The measurement the whole task rests on — and a test that had to be
+   * rebuilt once already, for a reason worth writing down.
+   *
+   * 🔴 **The first version of this test fired all ten calls from a bare
+   * `Array.from`, with no `await` anywhere between them, and it failed —
+   * `permitidos` came back `0`, not `PASSWORD_CONFIRM_LIMIT`.** Not because
+   * the fix is wrong; because that construction is not what "ten requests in
+   * the same tick" means for code that reaches this function the way
+   * `requireStepUp.ts` does. `MemoryStore.increment()` returns the *same*
+   * mutable `client` object on every call, and `consumirCupoDeConfirmacion`
+   * only reads `totalHits` off it after its own `await` — a microtask tick
+   * later. Ten calls fired with no `await` between them all run their
+   * synchronous `client.totalHits++` before *any* of the ten continuations
+   * gets to read the field, so every one of them reads the same final count
+   * (10, all over budget) instead of its own place in the sequence (measured
+   * directly — see the sibling reproduction this comment is describing).
+   *
+   * 🔴 **Corrected in fix round 1: it is not true that every real caller
+   * reaches this only after a database round trip of its own.**
+   * `requireStepUp.ts` skips `tieneAlgunFactor` by short-circuit evaluation
+   * whenever the step-up window is already satisfied, so that path can reach
+   * `consumirCupoDeConfirmacion` with no `await` of its own beforehand. The
+   * function stays safe regardless — see its own docstring in
+   * `loginLimiters.ts` for why a stale-high read of `totalHits` can only make
+   * it *more* likely to refuse, never let more than the limit through, no
+   * matter how calls for one id interleave.
+   *
+   * **What the `setImmediate` gap below actually buys, then, is not safety —
+   * it is fairness.** Fired with no gap at all (the first version of this
+   * test), every call can read the same final, over-the-limit count and this
+   * bucket refuses all ten instead of admitting `PASSWORD_CONFIRM_LIMIT` of
+   * them — safe, but needlessly strict, and not what this bucket is supposed
+   * to do to ten people who each deserve their own attempt. A real gap
+   * between concurrent requests reaching this line — genuine I/O somewhere in
+   * their own chain, not necessarily this exact call — is what Node's
+   * "microtask queue drains fully between callbacks" guarantee turns into
+   * *exact* sequencing (1, 2, 3, ...) rather than merely safe-but-pessimistic
+   * refusal. `setImmediate` stands in for that real gap, so this test
+   * measures the guarantee this bucket actually promises under ordinary
+   * traffic, not only the weaker one it can never violate even under a
+   * pattern no real caller produces.
+   */
+  it("never lets more than PASSWORD_CONFIRM_LIMIT charges through, out of many concurrent requests", async () => {
+    const unaPeticionConcurrente = () =>
+      new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
+        consumirCupoDeConfirmacion(505),
+      );
+    const llamadas = Array.from({ length: PASSWORD_CONFIRM_LIMIT + 5 }, unaPeticionConcurrente);
+    const resultados = await Promise.all(llamadas);
+    const permitidos = resultados.filter((r) => r.permitido).length;
+    expect(permitidos).toBe(PASSWORD_CONFIRM_LIMIT);
+  });
+});
+
+/**
  * The one thing `requireStepUp` needed from this bucket that neither route
  * above had a use for: a way to charge a wrong password that does not answer
  * 401.
@@ -542,6 +679,16 @@ describe("what the confirmation bucket spends", () => {
  * in `confirmCostsNothing` itself for the fix. These two tests are what pin
  * that fix in place, through the real limiter, the way the rest of this
  * describe block pins the 401 rule.
+ *
+ * 🔴 **Historical, since Task 1 of the reauthentication-window plan
+ * (2026-09-08).** `requireStepUp.ts` no longer sets `stepUpPasswordWrong` at
+ * all — it charges and refunds through `consumirCupoDeConfirmacion` /
+ * `devolverCupoDeConfirmacion` directly, never through this limiter's own
+ * deferred `requestWasSuccessful` machinery. `confirmCostsNothing` and the
+ * flag it reads stay correct and still active for `chargeConfirmBudgetOnSelfChange`'s
+ * own charge; this describe block's own tests below construct the flag by
+ * hand rather than through `requireStepUp`, so they still pass, but they no
+ * longer describe a caller that exists in this codebase today.
  */
 describe("confirmCostsNothing reads the flag directly, as a pure function", () => {
   const conFlag = (flag: boolean | undefined, statusCode: number) => {
@@ -619,6 +766,9 @@ describe("the flag a caller sets when its own answer cannot be a 401", () => {
     expires_at: new Date(),
     estado: "completa" as const,
     mfa_satisfied_at: null,
+    // Required on `req.user`, and null until somebody types their password
+    // into `requireStepUp`: the ten-minute window of a factor-less account.
+    password_confirmed_at: null,
   };
 
   /** Same shape as `appConSesion` above, except the route answers 403 and
@@ -869,6 +1019,9 @@ describe("the key the passkey bucket counts against", () => {
         expires_at: new Date(),
         estado: "parcial",
         mfa_satisfied_at: null,
+        // Required on `req.user`, and null until somebody types their password
+        // into `requireStepUp`: the ten-minute window of a factor-less account.
+        password_confirmed_at: null,
       },
     }) as unknown as Request;
 

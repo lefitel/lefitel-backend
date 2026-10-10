@@ -414,6 +414,11 @@ async function authenticateBySession(
     // session of the account it was stolen from.
     estado,
     mfa_satisfied_at: sesion.mfa_satisfied_at,
+    // The other half of what the step-up gate reads, and the half that only
+    // means anything for an account with no factor at all: when this session
+    // last typed its password. Copied off the row for the same reason as the
+    // line above — the gate must not have to go and ask.
+    password_confirmed_at: sesion.password_confirmed_at,
   };
   next();
 }

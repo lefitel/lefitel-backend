@@ -36,6 +36,9 @@
 import { describe, it, expect } from "vitest";
 import { up } from "../migrations/20260826000003-create-factor-tables.js";
 import { up as upPrefijo } from "../migrations/20260902000001-recovery-code-prefix.js";
+import { up as upSesion } from "../migrations/20260822000001-create-sesion.js";
+import { up as upMfa } from "../migrations/20260826000002-add-mfa-columns.js";
+import { up as upConfirmacion } from "../migrations/20260908000001-add-password-confirmed-at.js";
 import { CredencialWebauthnModel } from "./credencialWebauthn.model.js";
 import { FactorTotpModel } from "./factorTotp.model.js";
 import { CodigoRecuperacionModel } from "./codigoRecuperacion.model.js";
@@ -76,7 +79,7 @@ const MODELOS: { Model: FactorModel; tabla: string }[] = [
  * `codigoRecuperacion.model.ts` forget a column a real, already-applied
  * migration put on the table.
  */
-async function tablasDeLaMigracion() {
+function acumulador() {
   const tablas: Record<string, Record<string, unknown>> = {};
   const qi = {
     createTable: (nombre: string, columnas: Record<string, unknown>) => {
@@ -91,10 +94,43 @@ async function tablasDeLaMigracion() {
     sequelize: {
       query: () => Promise.resolve(),
       transaction: (cb: (t: unknown) => Promise<void>) => cb({ id: "t" }),
+      // `20260826000002` gives `usuarios.pass_changed_at` a `now()` default
+      // through this. Recorded like any other value: nothing here reads it,
+      // and the column set is what these tests compare.
+      literal: (sql: string) => ({ sql }),
     },
   };
+  return { tablas, qi };
+}
+
+async function tablasDeLaMigracion() {
+  const { tablas, qi } = acumulador();
   await up({ context: qi as never });
   await upPrefijo({ context: qi as never });
+  return tablas;
+}
+
+/**
+ * The same accumulator, run over the migrations that shape `sesiones` — the
+ * table the reauthentication window writes to.
+ *
+ * Three, in the order they were written: `20260822000001` creates the table,
+ * `20260826000002` adds the three MFA columns (and two on `usuarios`, which
+ * is why that table comes back too), and `20260908000001` adds
+ * `password_confirmed_at`.
+ *
+ * `20260827000001` is deliberately not among them: it hardens constraints and
+ * renames indexes with raw SQL and adds or removes no column, so running it
+ * would change nothing here except giving the fake above more shapes to
+ * imitate. A migration that ever does add a column with raw `ALTER TABLE`
+ * would be invisible to this helper — the same limit `tablasDeLaMigracion`
+ * has always had.
+ */
+async function tablasDeSesiones() {
+  const { tablas, qi } = acumulador();
+  await upSesion({ context: qi as never });
+  await upMfa({ context: qi as never });
+  await upConfirmacion({ context: qi as never });
   return tablas;
 }
 
@@ -141,17 +177,34 @@ describe("the factor models name the tables their migration creates", () => {
 });
 
 describe("the two tables that gained columns declare them too", () => {
-  it("usuario carries the grace deadline and the password date", () => {
-    const attrs = UsuarioModel.getAttributes();
-    expect(attrs).toHaveProperty("mfa_grace_until");
-    expect(attrs).toHaveProperty("pass_changed_at");
+  it("usuario declares every column its migrations add to it", async () => {
+    // Read off the migration rather than typed out here, which is the whole
+    // change: the version before this named `mfa_grace_until` and
+    // `pass_changed_at` by hand, so the next column added to `usuarios` and
+    // forgotten in the model would have left this green.
+    //
+    // `arrayContaining` and not set equality, unlike `sesiones` below:
+    // `usuarios` is created by a migration these tests do not run, so what is
+    // provable here is "nothing the ALTERs add is missing", never "no extra".
+    const tablas = await tablasDeSesiones();
+    const anadidas = Object.keys(tablas.usuarios ?? {});
+    expect(anadidas.length).toBeGreaterThan(0);
+    expect(Object.keys(UsuarioModel.getAttributes())).toEqual(expect.arrayContaining(anadidas));
   });
 
-  it("sesion carries the state and the proof of a factor", () => {
-    const attrs = SesionModel.getAttributes();
-    expect(attrs).toHaveProperty("estado");
-    expect(attrs).toHaveProperty("mfa_satisfied_at");
-    expect(attrs).toHaveProperty("mfa_source");
+  it("sesion declares exactly the columns its migrations leave on the table", async () => {
+    // 🔴 Set equality, and it replaced three `toHaveProperty` calls that
+    // named `estado`, `mfa_satisfied_at` and `mfa_source` by hand.
+    // `toHaveProperty` can only ever check the columns somebody remembered to
+    // list, so it was blind to exactly the mistake this file exists to catch:
+    // a column added by a migration and forgotten in the model. Task 5 of the
+    // reauthentication-window plan (2026-09-08) is the case that proved it —
+    // `password_confirmed_at` would have gone in with every test green, and,
+    // with `"strict": false`, a clean typecheck too.
+    const tablas = await tablasDeSesiones();
+    expect(Object.keys(SesionModel.getAttributes()).sort()).toEqual(
+      Object.keys(tablas.sesiones).sort(),
+    );
   });
 
   it("leaves sesion.estado with no default, so nothing mints a session by omission", () => {

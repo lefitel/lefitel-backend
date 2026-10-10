@@ -19,11 +19,20 @@
 // serious of the three: `/email/send` used to require nothing but a live
 // session, which chains into a real account takeover — steal a session, set
 // the recovery address to one you control, verify it, wait, then
-// `/password/forgot` and reset the legitimate owner out entirely. The tests
-// below for `verifyOwnPassword` and the previous-address notice are what
-// close that, and the red demonstration for this round removes the
-// `verifyOwnPassword` call itself rather than a single condition inside it —
-// see "the account-takeover fix" below.
+// `/password/forgot` and reset the legitimate owner out entirely. The
+// previous-address notice below is this file's half of closing that.
+//
+// 🔴 **The other half is no longer in this file, and looking for it here is
+// the mistake to avoid.** The password that stops that chain is compared by
+// the gate on the route — `requireStepUp({ permiteOnboarding: true,
+// sinVentana: true })` in `auth.routes.ts` — before this handler runs, against
+// a field of the gate's own. This handler used to compare a second copy of the
+// same secret under the name `pass`, and asking twice for one password is what
+// the reauthentication-window work exists to stop. So there is nothing to
+// assert here about a password: what these tests hold instead is that the
+// handler adds **no** lock of its own behind the gate's, which is what
+// "no longer asks for a password of its own" below is for. The gate's end is
+// driven through the real stack in `app.auth.test.ts`.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Request, Response } from "express";
@@ -74,30 +83,31 @@ vi.mock("../auth/mailRelay.js", () => ({
   hayProveedorDisponible: (...a: unknown[]) => hayPresupuestoDeCorreo(...a),
 }));
 
-// Mocked wholesale rather than let the real `credentials.js` load: that
-// module imports `UsuarioModel` (fine, already mocked above) but also
-// `bcryptjs`, `config/security.js`'s `fillerHash`/`bcryptCostOf` and
-// `middleware/loginLimiters.js`'s `estaBloqueada` — none of which this file
-// has any business exercising to prove what `sendVerificationEmail` does
-// with `verifyOwnPassword`'s answer. What is under test here is the
-// controller's own branching on `{ ok, reason }`, not `verifyOwnPassword`
-// itself — that function's own suite is `auth/verifyOwnPassword.test.ts`.
+// Kept as a mock even though this controller no longer calls it, and that is
+// the point: the assertion it exists for is `not.toHaveBeenCalled()`. A spy
+// that can register a call is the only thing that can say "no password was
+// compared here" out loud — without it, re-adding a comparison would be
+// invisible to this file.
+//
+// Mocked wholesale rather than letting the real `credentials.js` load, as it
+// always was: that module pulls in `bcryptjs`, `config/security.js`'s
+// `fillerHash`/`bcryptCostOf` and `middleware/loginLimiters.js`'s
+// `estaBloqueada`, none of which this file has any business exercising. Its own
+// suite is `auth/verifyOwnPassword.test.ts`.
 const verifyOwnPassword = vi.fn();
 vi.mock("../auth/credentials.js", () => ({
   verifyOwnPassword: (...a: unknown[]) => verifyOwnPassword(...a),
 }));
 
 // Plan 4E: verifying the address registers a factor, so `verifyEmail` does
-// what `confirmTotp` does — promote, seal, clear the deadline — and changing
-// the address may remove the last factor, so `sendVerificationEmail` asks
-// whether a credential remains and revokes the remembered devices if not.
+// what `confirmTotp` does — promote and seal — and changing the address may
+// remove the last factor, so `sendVerificationEmail` asks whether a credential
+// remains and revokes the remembered devices if not.
 const promoverSesion = vi.fn();
 const sellarPruebaDeFactor = vi.fn();
-const apagarLaMecha = vi.fn();
 vi.mock("../auth/sessionPromotion.js", () => ({
   promoverSesion: (...a: unknown[]) => promoverSesion(...a),
   sellarPruebaDeFactor: (...a: unknown[]) => sellarPruebaDeFactor(...a),
-  apagarLaMecha: (...a: unknown[]) => apagarLaMecha(...a),
 }));
 const tieneCredencialRegistrada = vi.fn();
 vi.mock("../auth/factorInventory.js", () => ({
@@ -126,8 +136,6 @@ const {
   EMAIL_ENVIO_RESPUESTA,
   TOKEN_REQUERIDO,
   TOKEN_INVALIDO,
-  CURRENT_PASSWORD_REQUIRED_MESSAGE,
-  CURRENT_PASSWORD_WRONG_MESSAGE,
 } = await import("./email.controller.js");
 
 const A = 7;
@@ -183,13 +191,13 @@ function call(
 
 /**
  * The caller `authenticate` hands these handlers, with every field it declares
- * required — the last two included, even though nothing in `email.controller.ts`
- * reads either. A fixture short of them is a caller the middleware cannot
- * produce, and this file has no business being the place that finds out what a
- * handler does with one.
+ * required — the session ones included, even though nothing in
+ * `email.controller.ts` reads them. A fixture short of any of them is a caller
+ * the middleware cannot produce, and this file has no business being the place
+ * that finds out what a handler does with one.
  *
- * `"completa"` and `null` are what a session opened on a password alone carries,
- * which is every session there is today.
+ * `"completa"` and the two nulls are what a session opened on a password alone
+ * carries, which is every session there is today.
  */
 const YO_CON_SESION = {
   id: A,
@@ -198,10 +206,10 @@ const YO_CON_SESION = {
   expires_at: new Date(),
   estado: "completa" as const,
   mfa_satisfied_at: null,
+  // Required on `req.user`, and null until somebody types their password
+  // into `requireStepUp`: the ten-minute window of a factor-less account.
+  password_confirmed_at: null,
 };
-
-/** The current password, standing in for whatever the caller actually typed. */
-const PASS = "una-clave-de-prueba";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -216,7 +224,6 @@ beforeEach(() => {
   hayPresupuestoDeCorreo.mockReturnValue(true);
   promoverSesion.mockResolvedValue(true);
   sellarPruebaDeFactor.mockResolvedValue(true);
-  apagarLaMecha.mockResolvedValue(undefined);
   tieneCredencialRegistrada.mockResolvedValue(false);
   revokeAllRememberedDevicesOf.mockResolvedValue(0);
   revokeAllSessionsOf.mockResolvedValue(0);
@@ -256,7 +263,7 @@ describe("POST /auth/email/send", () => {
   // a value 422; SMTP does not.
   it("refuses an address with a comma or a semicolon in it — nodemailer would read two recipients", async () => {
     for (const email of ["a,b@evil.com", "isaias@osefi.net,otro@evil.com", "isaias@osefi.net;otro@evil.com"]) {
-      const c = call(YO_CON_SESION, { email, pass: "la-mia" });
+      const c = call(YO_CON_SESION, { email });
       await sendVerificationEmail(c.req, c.res);
       expect(c.status, email).toBe(400);
       expect(c.message, email).toBe(EMAIL_INVALIDO);
@@ -273,86 +280,78 @@ describe("POST /auth/email/send", () => {
   });
 
   /**
-   * The account-takeover fix (Ronda de arreglo 2). Without a password
-   * confirmation, a stolen session is enough to redirect the account's
-   * recovery address to one the attacker controls, verify it, wait for the
-   * owner to log out, and reset the password out from under them — which
-   * revokes every session, including the legitimate owner's. `verifyOwnPassword`
-   * is the exact piece `usuario.controller.ts`'s `updateUserName` already
-   * uses for the same question, reused rather than a fresh `bcryptjs.compare`.
+   * The account-takeover fix, and where it lives now.
+   *
+   * The chain it closes is unchanged and still real: steal a live session, set
+   * the recovery address to one you control, verify it, wait for the owner to
+   * log out, and reset their password out from under them. What moved is
+   * **who asks**. This handler used to compare a password of its own, in a
+   * field called `pass`, and said in a comment beside the check that it was
+   * the only thing asking. Since the route mounts
+   * `requireStepUp({ permiteOnboarding: true, sinVentana: true })`
+   * (`auth.routes.ts`) the gate compares the caller's password on **every**
+   * request to this route, window or no window, and adds the account's factor
+   * on top when it has one — which the handler's own check never could.
+   *
+   * Two secrets asked for twice was the whole complaint this arc started
+   * from, so the handler's copy goes and the gate keeps it. These tests are
+   * what makes putting it back visible: the first one goes red the moment
+   * anything in this handler reads a password again.
    */
-  describe("requires the caller's current password", () => {
-    it("refuses a body with no password, and never touches the row — comparing the row, not just the status", async () => {
+  describe("no longer asks for a password of its own — the gate does", () => {
+    it("accepts a body with no password at all, and goes on to do the work", async () => {
+      // The break-it test of this half. Restore the `pass` check in
+      // `sendVerificationEmail` and this answers 400 instead of doing the job.
+      //
+      // 200 **and** the transaction, not merely "not a 400": the point is that
+      // the request reaches the work, and a 400 from some other branch would
+      // satisfy a status-only assertion just as well.
       const c = call(YO_CON_SESION, { email: "a@osefi.net" });
       await sendVerificationEmail(c.req, c.res);
 
-      expect(c.status).toBe(400);
-      expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
-      expect(verifyOwnPassword).not.toHaveBeenCalled();
-      expect(update).not.toHaveBeenCalled();
-      expect(transaction).not.toHaveBeenCalled();
-    });
-
-    it("refuses a non-string password without crashing, and never touches the row", async () => {
-      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: 12345 });
-      await sendVerificationEmail(c.req, c.res);
-
-      expect(c.status).toBe(400);
-      expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
-      expect(update).not.toHaveBeenCalled();
-    });
-
-    it("refuses the wrong current password, and never touches the row", async () => {
-      verifyOwnPassword.mockResolvedValue({ ok: false, reason: "wrong-password" });
-      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: "no-es-la-mia" });
-      await sendVerificationEmail(c.req, c.res);
-
-      expect(c.status).toBe(401);
-      expect(c.message).toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
-      expect(verifyOwnPassword).toHaveBeenCalledWith({ id: A, pass: "no-es-la-mia", ip: "203.0.113.9" });
-      expect(update).not.toHaveBeenCalled();
-      expect(transaction).not.toHaveBeenCalled();
-      expect(findByPk).not.toHaveBeenCalled();
-    });
-
-    it("answers 401 without a wrong-password sentence when the account is gone by the time the password is checked", async () => {
-      // `no-account`: archived between `authenticate` and `verifyOwnPassword`'s
-      // own lookup. Answered the same way `/api/auth/me` answers the same
-      // race, and pointedly not as a wrong password — telling somebody to
-      // look for a typo in a password nothing ever compared is worse than
-      // telling them their session is over.
-      verifyOwnPassword.mockResolvedValue({ ok: false, reason: "no-account" });
-      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
-      await sendVerificationEmail(c.req, c.res);
-
-      expect(c.status).toBe(401);
-      expect(c.message).not.toBe(CURRENT_PASSWORD_WRONG_MESSAGE);
-      expect(findByPk).not.toHaveBeenCalled();
-      expect(update).not.toHaveBeenCalled();
-    });
-
-    it("answers 401 for the narrower race between verifyOwnPassword's own lookup and this handler's second one", async () => {
-      findByPk.mockResolvedValue(null);
-      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
-      await sendVerificationEmail(c.req, c.res);
-
-      expect(c.status).toBe(401);
-      expect(update).not.toHaveBeenCalled();
-      expect(transaction).not.toHaveBeenCalled();
-    });
-
-    it("proceeds once the password is confirmed", async () => {
-      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
-      await sendVerificationEmail(c.req, c.res);
-
-      expect(verifyOwnPassword).toHaveBeenCalledWith({ id: A, pass: PASS, ip: "203.0.113.9" });
       expect(c.status).toBe(200);
       expect(transaction).toHaveBeenCalledOnce();
+      expect(update).toHaveBeenCalled();
+      // Nothing here compares a password any more. The gate did that before
+      // this function ran, against `stepup_password`.
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+    });
+
+    it("ignores a `pass` field a stale bundle still sends, rather than comparing it", async () => {
+      // The deploy window, from the other side. A tab opened before this
+      // change still puts `pass` on the body; the field is simply not read,
+      // so an old client keeps working and nothing compares a second secret.
+      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: "lo-que-sea" });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(200);
+      expect(verifyOwnPassword).not.toHaveBeenCalled();
+    });
+
+    it("still answers 401 when the account was archived mid-request, and says the session is over", async () => {
+      // The race survives the move: archived between `authenticate` and this
+      // handler's own lookup. It used to be caught twice — once by
+      // `verifyOwnPassword`'s `no-account`, once by the `findByPk` here — and
+      // only the second catcher is left, so this is now the route's only 401.
+      //
+      // Matched on the reason and not the number: 401 is what `authenticate`
+      // answers too, and the sentence is what says this branch ran. Loosely,
+      // because the wording lives in three files by design (see
+      // `CUENTA_INACTIVA`'s own comment) and a byte-for-byte copy here would
+      // be a fourth.
+      findByPk.mockResolvedValue(null);
+      const c = call(YO_CON_SESION, { email: "a@osefi.net" });
+      await sendVerificationEmail(c.req, c.res);
+
+      expect(c.status).toBe(401);
+      expect(c.message).toMatch(/ya no está activa/i);
+      expect(update).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
     });
   });
 
   it("trims and lowercases the address before writing, minting and mailing", async () => {
-    const c = call(YO_CON_SESION, { email: "  Isaias@Osefi.NET  ", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "  Isaias@Osefi.NET  " });
     await sendVerificationEmail(c.req, c.res);
 
     expect(c.status).toBe(200);
@@ -365,7 +364,7 @@ describe("POST /auth/email/send", () => {
   });
 
   it("sets email_verified_at to NULL on every write, even the first one", async () => {
-    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
 
     const [values] = update.mock.calls[0] as [Record<string, unknown>];
@@ -373,7 +372,7 @@ describe("POST /auth/email/send", () => {
   });
 
   it("invalidates every pending token of the account, any purpose, in the same transaction as the email write", async () => {
-    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
 
     const [, usuarioOptions] = update.mock.calls[0] as [unknown, { transaction: unknown }];
@@ -391,7 +390,7 @@ describe("POST /auth/email/send", () => {
 
   it("answers the exact same body whether the mail actually sent or not", async () => {
     enviarCorreo.mockResolvedValue({ ok: true });
-    const enviado = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+    const enviado = call(YO_CON_SESION, { email: "a@osefi.net" });
     await sendVerificationEmail(enviado.req, enviado.res);
 
     vi.clearAllMocks();
@@ -402,7 +401,7 @@ describe("POST /auth/email/send", () => {
     crearToken.mockResolvedValue(TOKEN_CRUDO);
     verifyOwnPassword.mockResolvedValue({ ok: true });
     enviarCorreo.mockResolvedValue({ ok: false });
-    const caido = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+    const caido = call(YO_CON_SESION, { email: "a@osefi.net" });
     await sendVerificationEmail(caido.req, caido.res);
 
     expect(enviado.status).toBe(caido.status);
@@ -411,7 +410,7 @@ describe("POST /auth/email/send", () => {
   });
 
   it("logs EMAIL_SEND on every call, with the destination address and no token", async () => {
-    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
 
     expect(logAction).toHaveBeenCalledWith(
@@ -427,7 +426,7 @@ describe("POST /auth/email/send", () => {
 
   it("logs EMAIL_CHANGED, as critical, only when a verified address is being replaced", async () => {
     findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
-    const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
 
     expect(logAction).toHaveBeenCalledWith(
@@ -441,7 +440,7 @@ describe("POST /auth/email/send", () => {
 
   it("does not log EMAIL_CHANGED for a first-time or still-unverified address", async () => {
     findByPk.mockResolvedValue(usuarioRow({ email: null, email_verified_at: null }));
-    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
 
     expect(logAction).not.toHaveBeenCalledWith(
@@ -450,7 +449,7 @@ describe("POST /auth/email/send", () => {
   });
 
   it("never puts the plain token in the response, whatever it is", async () => {
-    const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "a@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
 
     expect(JSON.stringify(c.payload)).not.toContain(TOKEN_CRUDO);
@@ -465,7 +464,7 @@ describe("POST /auth/email/send", () => {
   describe("notifying the previous address", () => {
     it("mails the new address and the previous one, masked, when replacing a verified address", async () => {
       findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
-      const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+      const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
       await sendVerificationEmail(c.req, c.res);
 
       expect(c.status).toBe(200);
@@ -483,7 +482,7 @@ describe("POST /auth/email/send", () => {
 
     it("mails only the new address when there is no previous address at all", async () => {
       findByPk.mockResolvedValue(usuarioRow({ email: null, email_verified_at: null }));
-      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      const c = call(YO_CON_SESION, { email: "a@osefi.net" });
       await sendVerificationEmail(c.req, c.res);
 
       expect(c.status).toBe(200);
@@ -495,7 +494,7 @@ describe("POST /auth/email/send", () => {
       // There is a previous address, but it was never confirmed — nobody
       // relies on it as a recovery channel yet, so there is nobody to warn.
       findByPk.mockResolvedValue(usuarioRow({ email: "sin-verificar@osefi.net", email_verified_at: null }));
-      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      const c = call(YO_CON_SESION, { email: "a@osefi.net" });
       await sendVerificationEmail(c.req, c.res);
 
       expect(c.status).toBe(200);
@@ -518,7 +517,7 @@ describe("POST /auth/email/send", () => {
     it("leaves the verified address intact when there is no mail budget left", async () => {
       hayPresupuestoDeCorreo.mockReturnValue(false);
       findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
-      const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+      const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
       await sendVerificationEmail(c.req, c.res);
 
       // The uniform response, unmoved — Constraint #1 still holds even here.
@@ -538,7 +537,7 @@ describe("POST /auth/email/send", () => {
 
     it("still runs the transaction and sends when the budget has room", async () => {
       hayPresupuestoDeCorreo.mockReturnValue(true);
-      const c = call(YO_CON_SESION, { email: "a@osefi.net", pass: PASS });
+      const c = call(YO_CON_SESION, { email: "a@osefi.net" });
       await sendVerificationEmail(c.req, c.res);
 
       expect(c.status).toBe(200);
@@ -765,11 +764,19 @@ describe("POST /auth/email/verify — verifying registers a factor (plan 4E)", (
     expect(sellarPruebaDeFactor).toHaveBeenCalledWith(YO_CON_SESION.id_sesion, "correo", { transaction: TRANSACCION });
   });
 
-  it("clears the grace deadline: there is nothing left to chase", async () => {
+  it("no toca el plazo de gracia: verificar el correo no compra catorce dias nuevos", async () => {
+    // La vuelta mas barata del bucle que se cerro el 2026-09-08, y la unica
+    // que necesita buzon: verificar la direccion borraba el plazo, cambiarla
+    // borraba la verificacion, y el siguiente login leia NULL —"el reloj no ha
+    // empezado nunca"— y estampaba catorce dias enteros. La unica escritura
+    // que este handler puede hacer sobre `usuarios` es la de la columna del
+    // correo.
     tokenBueno();
     const c = call(YO_CON_SESION, { token: "un-token" });
     await verifyEmail(c.req, c.res);
-    expect(apagarLaMecha).toHaveBeenCalledWith(A, { transaction: TRANSACCION });
+    for (const [values] of update.mock.calls as [Record<string, unknown>][]) {
+      expect(values).not.toHaveProperty("mfa_grace_until");
+    }
   });
 
   it("promotes nothing when the column write collides with another verified account", async () => {
@@ -783,7 +790,7 @@ describe("POST /auth/email/verify — verifying registers a factor (plan 4E)", (
     await verifyEmail(c.req, c.res);
     expect(c.status).toBe(400);
     expect(promoverSesion).not.toHaveBeenCalled();
-    expect(apagarLaMecha).not.toHaveBeenCalled();
+    expect(sellarPruebaDeFactor).not.toHaveBeenCalled();
   });
 
   it("names the session and the source in the bitácora line", async () => {
@@ -805,7 +812,7 @@ describe("POST /auth/email/send — changing the address may remove the last fac
     tieneCredencialRegistrada.mockResolvedValue(false);
     revokeAllRememberedDevicesOf.mockResolvedValue(2);
     revokeAllSessionsOf.mockResolvedValue(3);
-    const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
     expect(c.status).toBe(200);
     expect(tieneCredencialRegistrada).toHaveBeenCalledWith(A, { transaction: TRANSACCION });
@@ -823,7 +830,7 @@ describe("POST /auth/email/send — changing the address may remove the last fac
   it("leaves devices and sessions alone when a passkey or an app still vouches for them", async () => {
     findByPk.mockResolvedValue(usuarioRow({ email: "vieja@osefi.net", email_verified_at: new Date() }));
     tieneCredencialRegistrada.mockResolvedValue(true);
-    const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
     expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
@@ -837,19 +844,34 @@ describe("POST /auth/email/send — changing the address may remove the last fac
 
   it("asks nothing when the old address was never verified: no factor was removed", async () => {
     findByPk.mockResolvedValue(usuarioRow({ email: "sin-verificar@osefi.net", email_verified_at: null }));
-    const c = call(YO_CON_SESION, { email: "nueva@osefi.net", pass: PASS });
+    const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
     expect(tieneCredencialRegistrada).not.toHaveBeenCalled();
     expect(revokeAllRememberedDevicesOf).not.toHaveBeenCalled();
     expect(revokeAllSessionsOf).not.toHaveBeenCalled();
   });
 
-  it("still requires the caller's password — the gate does not cover an account with no factor (S6)", async () => {
+  it("serves an account with no factor and no address, which is every account on deploy day", async () => {
+    /**
+     * The sealed-room case, measured from the handler's side.
+     *
+     * This route is the only way out of `onboarding`: a verified address is
+     * the prerequisite for `/auth/totp/setup` (409 without one) and a factor
+     * is the only way out of that state. So an account with nothing — no
+     * factor, no address, which is what every account looks like the day this
+     * ships — has to get through here. It used to be refused by this
+     * handler's own `pass` check whenever the client did not send that field,
+     * and the client stopped sending it in this same change.
+     *
+     * What still asks is the gate, on the route, with `permiteOnboarding`
+     * and `sinVentana` — a password on every request, plus a factor for
+     * whoever has one. `app.auth.test.ts` drives that end of it; this pins
+     * that the handler adds no second lock behind it.
+     */
     findByPk.mockResolvedValue(usuarioRow({ email: null, email_verified_at: null }));
     const c = call(YO_CON_SESION, { email: "nueva@osefi.net" });
     await sendVerificationEmail(c.req, c.res);
-    expect(c.status).toBe(400);
-    expect(c.message).toBe(CURRENT_PASSWORD_REQUIRED_MESSAGE);
-    expect(transaction).not.toHaveBeenCalled();
+    expect(c.status).toBe(200);
+    expect(transaction).toHaveBeenCalledOnce();
   });
 });

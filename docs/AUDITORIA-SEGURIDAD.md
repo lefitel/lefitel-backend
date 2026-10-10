@@ -188,6 +188,11 @@ se rechaza diga lo que diga la bandera, con un mensaje que explica por qué. La
 bandera también quedó en `false` en `.env`, pero eso es lo de menos: apagar un
 interruptor no es cerrar un agujero, y el arreglo es la guarda.
 
+**Actualización (22 ago 2026, `b7a2a0c`).** El párrafo de arriba describe la guarda,
+que fue el paso intermedio. Hoy `index.ts` **no sincroniza en ningún caso**: el
+`sync({ alter: true })` y la bandera `DB_SYNC` se retiraron enteros, y el esquema
+sale solo de las migraciones.
+
 ### 8. El rol del cliente no se refresca nunca — ✅ CERRADO (19 ago 2026)
 
 **Arreglo aplicado**, como efecto del punto 2. `GET /api/login` devolvía el contenido

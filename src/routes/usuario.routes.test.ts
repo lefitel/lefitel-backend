@@ -1,6 +1,6 @@
 // `usuario.routes.ts` — proving the *wiring* of one thing only: that
 // `PATCH /:id/desbloquear` and `POST /:id/mfa/reset` mount `requireStepUp`
-// with `exigeContrasena: true` — hallazgo F8 of the 2026-09-02 closure audit.
+// with `sinVentana: true` — hallazgo F8 of the 2026-09-02 closure audit.
 //
 // Not a full wiring suite for this router. `routeGuards.test.ts` already
 // proves, across the whole app, that both routes carry `requirePermissionGate`
@@ -59,26 +59,44 @@ vi.mock("../controllers/usuario.controller.js", () => ({
   updateUserPass: stub("updateUserPass"),
   updateUsuario: stub("updateUsuario"),
 }));
+// The role sub-resource lives in its own controller and is stubbed for the same
+// reason as its neighbours above: importing the real one pulls in `UsuarioModel`
+// and `RolModel`, which this file has no business touching to prove a
+// configuration object.
+vi.mock("../controllers/usuarioRol.controller.js", () => ({
+  asignarRol: stub("asignarRol"),
+}));
 
-// The same four dependencies `totp.routes.test.ts` and
-// `recoveryCodes.routes.test.ts` mock, for the same reason: `requireStepUp.ts`
-// runs for real below, and these are what it would otherwise touch a
-// database or a real limiter through. `requirePermission.js` is left real —
-// its own check is never invoked here, only looked past to reach
-// `stepUpGate` by name, and importing it touches no database at module load.
+// The dependencies `totp.routes.test.ts` and `recoveryCodes.routes.test.ts`
+// mock too, for the same reason: `requireStepUp.ts` runs for real below, and
+// these are what it would otherwise touch a database or a real limiter
+// through. `requirePermission.js` is left real — its own check is never
+// invoked here, only looked past to reach `stepUpGate` by name, and importing
+// it touches no database at module load.
 const verifyOwnPassword = vi.fn();
+/**
+ * `sessionPromotion.js` joined the list with Task 5 of the reauthentication
+ * plan (2026-09-08): the gate now stamps the ten-minute window on the session
+ * row when it accepts a password, and the real `sellarContrasena` would send
+ * that UPDATE to whichever database this process is configured with. Both
+ * tests below supply a **correct** password, so both reach it.
+ */
+const sellarContrasena = vi.fn();
 const tieneAlgunFactor = vi.fn();
 const logAction = vi.fn();
 const passwordConfirmLimiter = vi.fn() as ReturnType<typeof vi.fn> & { getKey: ReturnType<typeof vi.fn> };
 passwordConfirmLimiter.getKey = vi.fn();
 const passwordConfirmKey = vi.fn();
 vi.mock("../auth/credentials.js", () => ({ verifyOwnPassword: (...a: unknown[]) => verifyOwnPassword(...a) }));
+vi.mock("../auth/sessionPromotion.js", () => ({
+  sellarContrasena: (...a: unknown[]) => sellarContrasena(...a),
+}));
 vi.mock("../auth/factorInventory.js", () => ({
   tieneAlgunFactor: (...a: unknown[]) => tieneAlgunFactor(...a),
   // Añadido por el plan 4C: `requireStepUp` lo llama al rechazar con
   // `sin-factor-reciente`. Hoy ninguna prueba de este fichero llega a ese
   // rechazo, así que sin esta línea seguirían pasando — hasta la Tarea 10,
-  // que pone `exigeContrasena` en estas mismas monturas y las lleva justo
+  // que pone `sinVentana` en estas mismas monturas y las lleva justo
   // por ahí. Está antes de hacer falta a propósito: el fallo que evita es
   // «la función no existe», que no se parece en nada a su causa.
   metodosDeReautenticacion: async () => ["totp"],
@@ -133,6 +151,7 @@ function contexto(user: Record<string, unknown> | undefined, body: unknown = {})
 beforeEach(() => {
   verifyOwnPassword.mockReset();
   tieneAlgunFactor.mockReset().mockResolvedValue(false);
+  sellarContrasena.mockReset().mockResolvedValue(true);
   logAction.mockReset();
   passwordConfirmKey.mockReset().mockReturnValue("pc:usuario-routes");
   passwordConfirmLimiter.getKey.mockReset().mockResolvedValue(undefined);

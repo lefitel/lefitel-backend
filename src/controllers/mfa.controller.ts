@@ -805,8 +805,11 @@ export const stepup = handler("stepup", async (req: Request, res: Response) => {
     // now that an account whose only factor is its verified address may hold
     // a sheet of them, then change its address and have no factor at all,
     // and still be `completa` under a fresh grace clock. A code re-sealing
-    // that session would open every gated write short of the D6 routes to a
-    // sheet plus a cookie. Same rule, same sentence, same charge as `verify`.
+    // that session would open every gated write short of the ones mounted
+    // with `sinVentana` — `STEP_UP_OPTIONS` in `routeGuards.test.ts` names
+    // them, and D6's original "every administrative write" is no longer the
+    // answer — to a sheet plus a cookie. Same rule, same sentence, same charge
+    // as `verify`.
     sinFactorConfirmado = true;
   } else {
     try {

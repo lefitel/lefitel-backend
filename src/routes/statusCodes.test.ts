@@ -177,7 +177,8 @@ const dosXX = (texto: string): number[] => {
  * resource it cannot then read.
  *
  * **`204` where the write reports nothing**: the ten archives, the ten
- * restores, the account unlock, the file delete, and resolve/reopen. That last
+ * restores, the account unlock, the role assignment, the file delete, and
+ * resolve/reopen. That last
  * pair is a decision of Isaias's on 2026-09-05 and it resolves a contradiction
  * the spec carried: §3.5 said they stay `200` (true, in the sense that they are
  * not creations) while §9's rule said every empty write answers `204`. They
@@ -229,6 +230,10 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "PATCH /api/tipo-obs/:id/restore": 204,
   "PATCH /api/usuario/:id/restore": 204,
   "PATCH /api/usuario/:id/desbloquear": 204,
+  // El sub-recurso del rol, y `204` por lo mismo que su vecino de arriba: lo
+  // único que escribe es el número que el que llama acaba de mandar, así que no
+  // hay nada que devolverle.
+  "PUT /api/usuario/:id/rol": 204,
   "POST /api/evento/:id/reopen": 204,
   "POST /api/evento/:id/resolve": 204,
 
@@ -316,12 +321,13 @@ describe("the ledger of every write", () => {
   it("holds the count of each code, so a table filled with 200 cannot pass", () => {
     const cuenta = (codigo: number) => Object.values(ESPERADO).filter((c) => c === codigo).length;
 
-    // Fifteen and twenty-four are the numbers §3.5 predicted, recounted here on
-    // the day C4 was done. They live in this assertion and nowhere else: five
-    // figures of the spec went stale in twenty-four hours because several
-    // sessions share the tree.
+    // Fifteen and twenty-four were the numbers §3.5 predicted, recounted on the
+    // day C4 was done; the second is twenty-five since `PUT /api/usuario/:id/rol`
+    // exists. They live in this assertion and nowhere else: five figures of the
+    // spec went stale in twenty-four hours because several sessions share the
+    // tree.
     expect(cuenta(201), "las altas que contestan 201").toBe(15);
-    expect(cuenta(204), "las escrituras que no contestan nada").toBe(24);
+    expect(cuenta(204), "las escrituras que no contestan nada").toBe(25);
     // 47 desde que `POST /api/ruta/query` existe: una lectura con cuerpo, que
     // no crea ni archiva nada. Sube por el mismo motivo que subiría cualquier
     // otra — este número se recuenta, no se estima.

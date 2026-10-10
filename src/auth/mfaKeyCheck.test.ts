@@ -153,7 +153,10 @@ describe("comprobarLlaveAlArrancar", () => {
     // Step 4's actual point: a check written as "only look when there is a
     // row" would let a deploy with no usable key at all boot silently, and
     // nobody would notice until the first person tried to register a factor.
-    // No `usarLlaveUnica()` here — the variable is simply unset.
+    // No `usarLlaveUnica()` here — and the variable is removed rather than
+    // assumed absent: the import chain loads `dotenv`, so on a machine whose
+    // `.env` defines the key this test saw a working one and failed.
+    vi.stubEnv("MFA_ENCRYPTION_KEY_ACTIVE", undefined);
     filas = [];
 
     return comprobarLlaveAlArrancar().then((resultado) => {

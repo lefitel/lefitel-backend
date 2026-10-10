@@ -67,9 +67,13 @@ router.post("/login", loginRateLimit, login);
 //
 // The step-up the MFA design asks for reads the same way: see
 // `docs/specs/2026-08-21-autenticacion-mfa-design.md` §step-up, where the first
-// enrolment of a factor "exige reintroducir la contraseña" — i.e. `pass` on
-// `POST /auth/totp/setup`, not a confirmation call before it. Everything else on
-// that list is satisfied by `mfa_satisfied_at` and no password at all.
+// enrolment of a factor "exige reintroducir la contraseña" — i.e. the password
+// travelling in the write itself, not a confirmation call before it. Where that
+// demand ended up is `requireStepUp`, which asks for it on every route carrying
+// `sinVentana` and, on the rest, accepts a window opened in the last
+// `STEP_UP_WINDOW_MINUTES` — by a proved factor, or by a correct password on an
+// account with no factor to prove. What no route accepts any more is a live
+// cookie and nothing else.
 //
 // What it cost while it was mounted: it was the only endpoint in the API that
 // compared a password with **no operation behind it**, any authenticated session
@@ -79,8 +83,10 @@ router.post("/login", loginRateLimit, login);
 // `passwordConfirmLimiter`, which can now refund the legitimate work it was
 // charging for.
 //
-// `verifyOwnPassword` in `auth/credentials.ts` is what stays: it has a real
-// caller in `updateUserName`, and `auth/verifyOwnPassword.test.ts` holds it.
+// `verifyOwnPassword` in `auth/credentials.ts` is what stays, and its one
+// caller in `src/` is now the step-up gate (`middleware/requireStepUp.ts`),
+// which asks that question on behalf of every route behind it instead of each
+// handler asking it again. `auth/verifyOwnPassword.test.ts` holds it.
 
 router.get("/me", authenticate, me);
 router.post("/logout", authenticate, logout);
@@ -111,11 +117,13 @@ router.get("/sessions", authenticate, sessions);
  * that made that branch reachable at all: `ONBOARDING_EXTRA` in
  * `auth/sessionState.ts` opens `/api/auth/sessions`, so `authenticate` lets
  * that state get this far, and the recomputed `req.user.estado` — see the
- * field's own comment in `authenticate.ts` — is what the gate reads. Twelve of
- * the fourteen mounts live under `/api/usuario`, `/api/rol` and
- * `/api/permiso`, which no state below `completa` reaches at all; the
- * fourteenth is `/email/send` below, and it is the opposite case — a door
- * `onboarding` has to keep.
+ * field's own comment in `authenticate.ts` — is what the gate reads. Most of
+ * the other mounts live under `/api/usuario`, `/api/rol` and `/api/permiso`,
+ * which no state below `completa` reaches at all, so on those the option would
+ * change nothing either way; the ones where it is a real decision are the
+ * credential routes and `/email/send` below, and every one of them is the
+ * opposite case — a door `onboarding` has to keep. Which mount carries which
+ * option is `STEP_UP_OPTIONS` in `routeGuards.test.ts`, not a figure here.
  *
  * No permission gate above it, unlike the other mounts: there is no role that
  * may or may not close its own sessions, which is why the route also sits in
@@ -152,52 +160,85 @@ router.delete("/sessions/:id", authenticate, requireStepUp(), endSession);
  * reasons that have nothing to do with who is asking.
  *
  * `passwordConfirmLimiter` on `/email/send` only, and mounted **before**
- * `emailSendLimiter` — Ronda de arreglo 2 of Task 4's report. The handler
- * now requires the caller's current password (an account-takeover fix, see
- * its own comment), reusing the exact same budget `usuario.routes.ts` mounts
- * on the rename and the password change: one account, one secret being
- * confirmed, one bucket. Mounted first so that somebody already out of
+ * `emailSendLimiter` — Ronda de arreglo 2 of Task 4's report. This route
+ * confirms the caller's current password (an account-takeover fix, see the
+ * handler's own comment) and draws on the exact same budget
+ * `usuario.routes.ts` mounts on the password change: one account, one secret
+ * being confirmed, one bucket. Mounted first so that somebody already out of
  * guesses on that shared budget gets refused here, before `emailSendLimiter`
  * would otherwise charge the account's own 5/hour quota — and the company's
  * shared 100/day one — for a request that never had the right password to
  * begin with.
+ *
+ * ⚠️ Since the password moved from the handler to the gate below, this mount
+ * is a belt to the gate's braces rather than the only counter on the route:
+ * `requireStepUp` runs first and charges the same `pc:<id>` bucket itself. It
+ * charges **before** it compares anything — one atomic call — and gives the
+ * charge straight back for a right password, and again for an attempt it
+ * refuses over budget, so nothing is left spent on a comparison that never
+ * happened. Left mounted because it costs nothing on a request the gate lets
+ * through and it is the piece that stands between an exhausted confirmation
+ * budget and the mail quota; taken out, that ordering argument would have to
+ * be re-derived from the gate's internals.
  */
 /**
- * `requireStepUp({ permiteOnboarding: true })` on `/email/send`, and the
- * option is the whole point of the line.
+ * `requireStepUp({ permiteOnboarding: true, sinVentana: true })` on
+ * `/email/send`, and both options are the whole point of the line.
  *
- * **Why the gate at all, when the handler already demands the password.** It
- * does, and that is as strong as anything the other mounts accept today — but
- * only because nobody has a factor yet. The gate's second branch exists to
- * say "with a factor on the account, a password is not an acceptable answer";
- * once plan 4B registers one, every gated route starts refusing passwords and
- * this route, alone, would go on taking them — the route whose own comment
- * calls itself "the fix for a real account-takeover chain". The `pass` check
- * in `email.controller.ts` stays: it is what a caller sends today, and the
- * gate's third branch lets a request with no `stepup_password` through while
- * the account has nothing to prove, so nothing that works today stops working.
+ * **Why the gate and not the handler.** The handler used to demand the
+ * password itself, under another name (`pass`), and until this option went on
+ * that field was the *only* thing asking. `sinVentana` moved the demand to the
+ * gate, which is where every other route in the API asks for a password, and
+ * which is the only place that can also require a factor from an account that
+ * has one. The handler's own copy is gone: two comparisons of one secret in one
+ * request is the double prompt this arc exists to remove, and keeping the
+ * check while the client stopped sending the field would have answered 400 to
+ * everybody.
  *
- * **Why the option.** `ONBOARDING_EXTRA` opens `/api/auth/email` on purpose,
- * and the plain gate would close it: measured, mounting `requireStepUp()`
- * here turns `app.auth.test.ts`'s "leaves the doors that finish the setup open
- * to that same session" from 400 to 403. Verifying an address is the
- * prerequisite for registering a factor (§5: `/auth/totp/*` answers 409
- * without it), and registering a factor is the only way out of `onboarding` —
- * so the plain gate would seal in every account that reached its deadline.
- * The option lets that one state past the state check and nothing else; an
- * `onboarding` session on an account that *does* have a factor is still
- * refused, by the factor check below it.
+ * 🔴 **Why no window here.** A verified address is a factor since plan 4E
+ * (`auth/factorInventory.ts`), so this route registers a credential — and on a
+ * route that registers or removes one, a window is a way in. Somebody holding
+ * the cookie waits for the owner to confirm their password for something
+ * ordinary, changes the recovery address to their own inside those ten
+ * minutes, and verifies it from their own inbox. The console rescue does not
+ * clear `email_verified_at` (`auth/rescueCore.ts`), so that factor outlives
+ * the remedy.
+ *
+ * **Why `permiteOnboarding`.** `ONBOARDING_EXTRA` opens `/api/auth/email` on
+ * purpose, and the plain gate would close it: `app.auth.test.ts`'s "leaves the
+ * doors that finish the setup open to that same session" is what measures it —
+ * mount `requireStepUp()` without the option and that test's 400 becomes a
+ * 403. Verifying an address is the prerequisite for registering a **TOTP**
+ * (§5: `POST /auth/totp/setup` answers 409 without it), and registering a
+ * factor is the only way out of `onboarding` — so the plain gate would leave
+ * every account that reached its deadline with one door left, the passkey,
+ * which is deliberately the one that needs no mailbox (see `registerOptions`
+ * in `webauthn.controller.ts`). Closing this route is closing two of the three
+ * exits for the sake of a state check the option exists to answer. It lets
+ * that one state past that check and nothing else; an `onboarding` session on
+ * an account that *does* have a factor is still refused, by the factor check
+ * below it.
+ *
+ * 🔴 **And `sinVentana` is not a factor requirement.** It means "the password
+ * on every request, **plus** the factor if the account has one" — never "a
+ * factor is required". On deploy day nobody has one, and `/auth/totp/setup`
+ * answers 409 without a verified address: read the other way round, this pair
+ * of options would be the sealed room the paragraph above is about.
  *
  * **Before `passwordConfirmLimiter`, deliberately.** Both draw on the same
- * `pc:<id>` budget. The gate reads it without spending and charges only a
- * password it has already confirmed wrong — and then refuses, so the limiter
- * never runs in that request. One wrong password therefore costs one of the
- * five, whichever of the two compared it; mounted the other way round, a
- * request carrying a wrong `stepup_password` would be charged twice for the
- * same guess. Both still sit ahead of `emailSendLimiter`, which is the order
- * the comment above is about and which this line does not disturb.
+ * `pc:<id>` budget. Since Task 1 of the reauthentication-window plan the gate
+ * charges that budget **before** it compares anything — one atomic call, so
+ * concurrent guesses cannot all read "nothing spent yet" during the same
+ * `bcrypt` round trip — and gives the charge straight back when the password
+ * turns out to be right. A wrong one keeps its charge and the gate refuses, so
+ * the limiter below never runs in that request. One wrong password therefore
+ * costs one of the five, whichever of the two compared it; mounted the other
+ * way round, a request carrying a wrong `stepup_password` would be charged
+ * twice for the same guess. Both still sit ahead of `emailSendLimiter`, which
+ * is the order the comment above is about and which this line does not
+ * disturb.
  */
-router.post("/email/send", authenticate, requireStepUp({ permiteOnboarding: true }), passwordConfirmLimiter, emailSendLimiter, sendVerificationEmail);
+router.post("/email/send", authenticate, requireStepUp({ permiteOnboarding: true, sinVentana: true }), passwordConfirmLimiter, emailSendLimiter, sendVerificationEmail);
 router.post("/email/verify", authenticate, emailVerifyLimiter, verifyEmail);
 
 /**
