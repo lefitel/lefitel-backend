@@ -13,6 +13,7 @@ import {
   KIND_LABEL,
   OPERATORS_BY_KIND,
   OPERATOR_LABEL,
+  PERIODS,
 } from "./constraints.js";
 import {
   ReportConfigError,
@@ -23,6 +24,7 @@ import {
   type FieldKind,
   type ExistsCondition,
   type FilterCondition,
+  type Period,
   type FieldSemantic,
   type FilterGroup,
   type Operator,
@@ -48,8 +50,63 @@ export const MAX_SORTS = 10;
 export const MAX_CONDITIONS = 100;
 
 const OPERATORS: Operator[] = [
-  "eq", "neq", "gt", "gte", "lt", "lte", "between", "in", "like", "isnull", "notnull",
+  "eq", "neq", "gt", "gte", "lt", "lte", "between", "period", "in", "like", "isnull", "notnull",
 ];
+
+/**
+ * Both ends of a named period, as SQL that yields two instants.
+ *
+ * **The clock is the database's, and that is what keeps this file pure.** The
+ * obvious way to resolve "last month" is to read the date here and bind two
+ * days — which would make `buildQuery` depend on when it is called, and send
+ * every one of its ten callers looking for a clock to pass. Written as SQL, the
+ * same configuration always builds the same string; `now()` is the
+ * transaction's start, so the count and the rows of one run agree on what
+ * today is even across midnight.
+ *
+ * `now() AT TIME ZONE zone` is the wall clock in the report's zone, a plain
+ * `timestamp`; every bound is arithmetic on that, and the outer
+ * `AT TIME ZONE` turns the wall clock back into the instant it stands for.
+ * Both overloads are pinned by their operand's type here — `timestamptz` going
+ * in, `timestamp` coming out — so there is no cast to forget; see `dayStart`
+ * below for the bug that an ambiguous operand caused.
+ *
+ * The range is half-open: from `desde` inclusive to `hasta` exclusive.
+ *
+ * `clock` exists for the tests, which pin an instant to check the calendar
+ * arithmetic against Postgres itself. It is SQL, never user input.
+ */
+export function periodBounds(period: Period, clock = "now()"): { desde: string; hasta: string } {
+  const local = `(${clock} AT TIME ZONE '${REPORT_TIME_ZONE}')`;
+  const dia = `date_trunc('day', ${local})`;
+  const semana = `date_trunc('week', ${local})`;
+  const mes = `date_trunc('month', ${local})`;
+  const instante = (wallClock: string) => `((${wallClock}) AT TIME ZONE '${REPORT_TIME_ZONE}')`;
+  const rango = (desde: string, hasta: string) => ({ desde: instante(desde), hasta: instante(hasta) });
+
+  switch (period) {
+    case "hoy":
+      return rango(dia, `${dia} + interval '1 day'`);
+    case "ayer":
+      return rango(`${dia} - interval '1 day'`, dia);
+    case "ultimos_7_dias":
+      return rango(`${dia} - interval '7 days'`, dia);
+    case "ultimos_30_dias":
+      return rango(`${dia} - interval '30 days'`, dia);
+    case "esta_semana":
+      return rango(semana, `${semana} + interval '7 days'`);
+    case "semana_pasada":
+      return rango(`${semana} - interval '7 days'`, semana);
+    case "este_mes":
+      return rango(mes, `${mes} + interval '1 month'`);
+    case "mes_pasado":
+      return rango(`${mes} - interval '1 month'`, mes);
+    default:
+      // The set is closed and checked by the caller; an unknown name must
+      // never fall through into a string that reaches Postgres.
+      throw new ReportConfigError(`Periodo no permitido: ${String(period)}`);
+  }
+}
 
 /** Operators that need no value at all. */
 const NULLARY_OPERATORS: Operator[] = ["isnull", "notnull"];
@@ -739,6 +796,21 @@ function buildCondition(
 
   if (value === undefined || value === null) {
     throw new ReportConfigError(`El filtro sobre "${resolved.label}" no tiene valor.`);
+  }
+
+  // A named period, before the value is normalised: its value is a name from a
+  // closed list, not a date, and `normalizeValue` would refuse it as one. The
+  // name is compared against the list and then dropped — nothing of it is
+  // bound and nothing of it is written, so the only SQL here is ours.
+  if (operator === "period") {
+    if (typeof value !== "string" || !PERIODS.includes(value as Period)) {
+      throw new ReportConfigError(
+        `El filtro «${OPERATOR_LABEL.period}» sobre «${resolved.label}» necesita uno de los periodos de la lista.`,
+      );
+    }
+    // The column stays bare on both sides, so an index on it still applies.
+    const { desde, hasta } = periodBounds(value as Period);
+    return `${expr} >= ${desde} AND ${expr} < ${hasta}`;
   }
 
   // A list belongs to the two operators that take one. Anywhere else an array

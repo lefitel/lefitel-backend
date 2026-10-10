@@ -4,10 +4,10 @@
 // are not allowed to use, so there is nothing for the client to hide.
 
 import { catalog, MAX_DEPTH, MAX_ROWS } from "./catalog.js";
-import { AGGS_BY_KIND, OPERATORS_BY_KIND } from "./constraints.js";
+import { AGGS_BY_KIND, OPERATORS_BY_KIND, PERIODS, PERIOD_LABEL } from "./constraints.js";
 import { MAX_COLUMNS, MAX_CONDITIONS, MAX_FILTER_VALUE, MAX_SORTS } from "./sqlBuilder.js";
 import type {
-  AggFn, CalculatedDef, EntityDef, FieldDef, FieldKind, FieldSemantic, Operator,
+  AggFn, CalculatedDef, EntityDef, FieldDef, FieldKind, FieldSemantic, Operator, Period,
 } from "./types.js";
 import { isVisible, type Viewer } from "./viewer.js";
 
@@ -366,8 +366,18 @@ export interface CatalogLimits {
   maxFilterValue: number;
 }
 
+/** One named period a date filter may take, with the words the picker shows. */
+export interface CatalogPeriod {
+  key: Period;
+  label: string;
+}
+
 /** Builds the full catalog view for a viewer, one entry per allowed root. */
-export function buildCatalogView(viewer: Viewer): { roots: CatalogRootView[]; limits: CatalogLimits } {
+export function buildCatalogView(viewer: Viewer): {
+  roots: CatalogRootView[];
+  limits: CatalogLimits;
+  periods: CatalogPeriod[];
+} {
   const roots = catalog.roots
     // A root this viewer may not use is not offered: `usuario` is a level of
     // detail made entirely of other people's personal data, and offering it
@@ -398,5 +408,8 @@ export function buildCatalogView(viewer: Viewer): { roots: CatalogRootView[]; li
       maxDepth: MAX_DEPTH,
       maxFilterValue: MAX_FILTER_VALUE,
     },
+    // Published for the same reason: the values the "está en el periodo"
+    // operator accepts, in the order to list them.
+    periods: PERIODS.map((key) => ({ key, label: PERIOD_LABEL[key] })),
   };
 }

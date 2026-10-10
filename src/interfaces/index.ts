@@ -164,6 +164,62 @@ export interface IReporteVista {
   deletedAt?: Date | null;
 }
 
+/**
+ * A saved report sent by email on a schedule. See
+ * `models/reporteProgramacion.model.ts` for what each vocabulary means.
+ */
+export interface IReporteProgramacion {
+  id: number;
+  id_reporte: number;
+  /** The owner: whose permissions the report is generated under. */
+  id_usuario: number;
+  frecuencia: "diaria" | "semanal" | "mensual";
+  /** ISO weekday, 1 = Monday. Set exactly when `frecuencia` is `semanal`. */
+  dia_semana?: number | null;
+  /** 1–28. Set exactly when `frecuencia` is `mensual`. */
+  dia_mes?: number | null;
+  /** 0–23, in the report's time zone. */
+  hora: number;
+  formato: "excel" | "pdf";
+  con_fotos: boolean;
+  activa: boolean;
+  motivo_pausa?: string | null;
+  fallos_seguidos: number;
+  /** `null` exactly when the schedule is not active. */
+  proxima_ejecucion?: Date | null;
+  created_at?: Date;
+  updated_at?: Date;
+  deleted_at?: Date | null;
+}
+
+/** A recipient: a user of the system or an outside address, never both. */
+export interface IReporteProgramacionDestinatario {
+  id: number;
+  id_programacion: number;
+  id_usuario?: number | null;
+  email?: string | null;
+  rechazos_seguidos: number;
+  baja_at?: Date | null;
+  baja_token_hash?: string | null;
+  created_at?: Date;
+}
+
+/** One run that was due. `(id_programacion, programada_para)` is unique. */
+export interface IReporteEjecucion {
+  id: number;
+  id_programacion: number;
+  programada_para: Date;
+  manual: boolean;
+  estado: "en_curso" | "enviado" | "vacio" | "demasiado_grande" | "fallido" | "omitido";
+  iniciada_at: Date;
+  terminada_at?: Date | null;
+  filas?: number | null;
+  bytes?: number | null;
+  enviados: number;
+  no_enviados: number;
+  detalle?: string | null;
+}
+
 
 /** One cell of the permission matrix: what a role may do in a module. */
 export interface IPermiso {

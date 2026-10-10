@@ -230,3 +230,43 @@ describe("resendProvider", () => {
     expect(await resendProvider().enviar(CORREO, "osefi@osefi.net", { plazo_ms: 10_000 })).toMatchObject({ ok: false, clase: "averia" });
   });
 });
+
+describe("attachments — the scheduled reports' only way out", () => {
+  const ADJUNTO = { nombre: "informe.xlsx", tipo: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", contenido: Buffer.from("bytes") };
+
+  it("hands them to the SMTP transport under nodemailer's own names", async () => {
+    await smtpProvider(CFG, fabrica).enviar({ ...CORREO, adjuntos: [ADJUNTO] }, "osefi@osefi.net", { plazo_ms: 10_000 });
+    expect(sendMail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [{ filename: "informe.xlsx", content: ADJUNTO.contenido, contentType: ADJUNTO.tipo }],
+      }),
+    );
+  });
+
+  it("hands them to Resend under the SDK's own names", async () => {
+    vi.stubEnv("RESEND_API_KEY", "re_test");
+    send.mockResolvedValue({ data: { id: "email_123" }, error: null });
+    await resendProvider().enviar({ ...CORREO, adjuntos: [ADJUNTO] }, "osefi@osefi.net", { plazo_ms: 10_000 });
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [{ filename: "informe.xlsx", content: ADJUNTO.contenido, contentType: ADJUNTO.tipo }],
+      }),
+    );
+  });
+
+  it("sends no `attachments` key at all for a message without them, and none for an empty list", async () => {
+    // An empty `attachments: []` is harmless to both libraries today; the key
+    // is left out so the eight account flows go on sending exactly the object
+    // they always sent.
+    vi.stubEnv("RESEND_API_KEY", "re_test");
+    send.mockResolvedValue({ data: { id: "x" }, error: null });
+    for (const correo of [CORREO, { ...CORREO, adjuntos: [] }]) {
+      sendMail.mockClear();
+      send.mockClear();
+      await smtpProvider(CFG, fabrica).enviar(correo, "osefi@osefi.net", { plazo_ms: 10_000 });
+      await resendProvider().enviar(correo, "osefi@osefi.net", { plazo_ms: 10_000 });
+      expect(sendMail.mock.calls[0][0]).not.toHaveProperty("attachments");
+      expect(send.mock.calls[0][0]).not.toHaveProperty("attachments");
+    }
+  });
+});

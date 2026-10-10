@@ -45,7 +45,7 @@ import {
   MAIL_SMTP_DNS_TIMEOUT_MS,
   type ProveedorConfigurado,
 } from "../config/security.js";
-import type { CorreoAEnviar } from "./mailer.js";
+import type { Adjunto, CorreoAEnviar } from "./mailer.js";
 
 /**
  * What a failed attempt means to the relay:
@@ -108,8 +108,28 @@ export interface TransporteSmtp {
     html: string;
     text: string;
     headers: Record<string, string>;
+    attachments?: ArchivoAdjunto[];
   }): Promise<{ messageId?: string }>;
   close(): void;
+}
+
+/** One attachment, under the names nodemailer and Resend's SDK happen to share. */
+interface ArchivoAdjunto {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+}
+
+/**
+ * The attachments as a spreadable fragment: the key is absent, not empty,
+ * when there is nothing to attach — so a message without files is handed to
+ * both libraries as exactly the object it always was.
+ */
+function conAdjuntos(adjuntos: Adjunto[] | undefined): { attachments?: ArchivoAdjunto[] } {
+  if (!adjuntos || adjuntos.length === 0) return {};
+  return {
+    attachments: adjuntos.map((a) => ({ filename: a.nombre, content: a.contenido, contentType: a.tipo })),
+  };
 }
 
 export interface OpcionesDeTransporte {
@@ -259,6 +279,7 @@ export function smtpProvider(
             html: correo.html,
             text: correo.texto,
             headers: cfg.cabeceras,
+            ...conAdjuntos(correo.adjuntos),
           }),
           plazo(opciones.plazo_ms),
         ]);
@@ -348,6 +369,7 @@ export function resendProvider(claveVar = "RESEND_API_KEY"): ProveedorDeCorreo {
             subject: correo.asunto,
             html: correo.html,
             text: correo.texto,
+            ...conAdjuntos(correo.adjuntos),
           }),
           plazo(opciones.plazo_ms),
         ]);

@@ -45,11 +45,12 @@ export interface ReportTemplate {
  *
  * Two rules they all keep:
  *
- *  - **No absolute dates.** The date operators are `between`, `gte`, `lte`,
- *    `isnull` and `notnull`; none of them is relative. A template filtered to
- *    "this month" would be filtered to one fixed month forever, and would go on
- *    calling itself "del mes" long after it stopped being one. Where recency
- *    matters it is expressed by sorting, which never expires.
+ *  - **No absolute dates.** A template filtered to one fixed month would be
+ *    filtered to it forever, and would go on calling itself "del mes" long
+ *    after it stopped being one. When these six were written no date operator
+ *    was relative, so recency is expressed by sorting, which never expires.
+ *    Since then `period` exists ("el mes pasado", "esta semana") and a
+ *    template may use it; none does yet.
  *  - **Nothing personal.** Not one of them reads a `staffOnly` field, so all six
  *    survive `pruneConfig` intact for every role that can open this screen.
  *    That is what makes them a starting point for the Cliente role rather than

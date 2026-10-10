@@ -23,7 +23,28 @@ export type Operator =
   | "between"
   | "in"
   | "like"
-  | "isnull" | "notnull";
+  | "isnull" | "notnull"
+  // Dates only: "falls inside this named period". The value is a `Period`.
+  | "period";
+
+/**
+ * A stretch of time named relative to the day the report runs, in the report's
+ * zone. What makes a saved report — and above all a scheduled one — answer for
+ * "last week" every week instead of for one fixed week forever.
+ *
+ * The two `ultimos_*` are whole days ending yesterday: a report sent on Monday
+ * morning for "the last seven days" covers Monday to Sunday, not six days and
+ * the first hours of a seventh. Weeks start on Monday.
+ */
+export type Period =
+  | "hoy"
+  | "ayer"
+  | "ultimos_7_dias"
+  | "ultimos_30_dias"
+  | "esta_semana"
+  | "semana_pasada"
+  | "este_mes"
+  | "mes_pasado";
 
 /** Aggregate functions allowed in summary mode. */
 export type AggFn = "count" | "sum" | "avg" | "min" | "max";
@@ -203,7 +224,7 @@ export interface ColumnSpec {
 export interface FilterCondition {
   path: string;
   operator: Operator;
-  /** Absent for isnull / notnull. Array for between / in. */
+  /** Absent for isnull / notnull. Array for between / in. A `Period` name for period. */
   value?: unknown;
 }
 

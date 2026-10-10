@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { buildQuery, buildCountQuery } from "./sqlBuilder.js";
 import { catalog, MAX_ROWS } from "./catalog.js";
 import { buildCatalogView } from "./catalogView.js";
+import { OPERATORS_BY_KIND, PERIODS, PERIOD_LABEL } from "./constraints.js";
 import {
   ReportConfigError,
   type AggFn,
@@ -1494,5 +1495,65 @@ describe("buildCountQuery checks what its comment says it checks", () => {
       CLIENTE,
     );
     expect(withColumn.sql).toBe(bare.sql);
+  });
+});
+
+describe("a named period — the date filter that does not expire", () => {
+  const conPeriodo = (value: unknown, path = "date") =>
+    base({ filters: { op: "and", conditions: [{ path, operator: "period" as Operator, value }] } });
+
+  it("is advertised for dates and for nothing else", () => {
+    expect(OPERATORS_BY_KIND.date).toContain("period");
+    for (const kind of ["string", "number", "boolean", "image"] as const) {
+      expect(OPERATORS_BY_KIND[kind], kind).not.toContain("period");
+    }
+  });
+
+  it("builds a half-open range on the bare column, read off the database's clock in the report's zone", () => {
+    const { sql, binds } = buildQuery(conPeriodo("mes_pasado"), ADMIN);
+    // The column stays bare on both sides, so an index on it still applies.
+    expect(sql).toMatch(/t0\."date" >= \(.*\) AND t0\."date" < \(.*\)/s);
+    expect(sql).toContain("now() AT TIME ZONE 'America/La_Paz'");
+    expect(sql).toContain("date_trunc('month'");
+    // Nothing about the period is bound: the name never reaches Postgres, and
+    // the only parameters are the ones the rest of the query already had.
+    expect(binds).not.toContain("mes_pasado");
+  });
+
+  it("builds a different range for every period it offers", () => {
+    const vistos = new Set(PERIODS.map((p) => buildQuery(conPeriodo(p), ADMIN).sql));
+    expect(vistos.size).toBe(PERIODS.length);
+    expect(PERIODS.length).toBe(8);
+  });
+
+  it("has a Spanish label for every period, and none of them is the key", () => {
+    for (const p of PERIODS) {
+      expect(PERIOD_LABEL[p], p).toBeTruthy();
+      expect(PERIOD_LABEL[p]).not.toBe(p);
+    }
+  });
+
+  it("refuses a period it does not know, naming the field and never echoing SQL", () => {
+    for (const malo of ["siglo_pasado", "", "mes_pasado'; DROP TABLE eventos; --", 7, ["hoy"], { periodo: "hoy" }]) {
+      expect(() => buildQuery(conPeriodo(malo), ADMIN), JSON.stringify(malo)).toThrow(ReportConfigError);
+    }
+    expect(() => buildQuery(conPeriodo("siglo_pasado"), ADMIN)).toThrow(/Fecha/i);
+  });
+
+  it("refuses it on a field that is not a date", () => {
+    expect(() => buildQuery(conPeriodo("hoy", "description"), ADMIN)).toThrow(ReportConfigError);
+  });
+
+  it("counts with the same range it lists with", () => {
+    const filas = buildQuery(conPeriodo("semana_pasada"), ADMIN).sql;
+    const cuenta = buildCountQuery(conPeriodo("semana_pasada"), ADMIN).sql;
+    const rango = /t0\."date" >= \(.*?\) AND t0\."date" < \(.*?AT TIME ZONE 'America\/La_Paz'\)/s;
+    expect(rango.exec(cuenta)?.[0]).toBe(rango.exec(filas)?.[0]);
+    expect(rango.exec(filas)).not.toBeNull();
+  });
+
+  it("publishes the periods and their labels with the catalog, so the screen does not keep a second list", () => {
+    const { periods } = buildCatalogView(ADMIN);
+    expect(periods).toEqual(PERIODS.map((key) => ({ key, label: PERIOD_LABEL[key] })));
   });
 });

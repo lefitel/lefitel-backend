@@ -6,12 +6,12 @@
 // raw Postgres error back — and, worse, save that report and have it fail
 // forever on every execution.
 
-import type { AggFn, FieldKind, Operator } from "./types.js";
+import type { AggFn, FieldKind, Operator, Period } from "./types.js";
 
 export const OPERATORS_BY_KIND: Record<FieldKind, Operator[]> = {
   string: ["eq", "neq", "like", "in", "isnull", "notnull"],
   number: ["eq", "neq", "gt", "gte", "lt", "lte", "between", "in", "isnull", "notnull"],
-  date: ["eq", "neq", "gt", "gte", "lt", "lte", "between", "isnull", "notnull"],
+  date: ["eq", "neq", "gt", "gte", "lt", "lte", "between", "period", "isnull", "notnull"],
   boolean: ["eq", "neq", "isnull", "notnull"],
   image: ["isnull", "notnull"],
 };
@@ -50,10 +50,39 @@ export const OPERATOR_LABEL: Record<Operator, string> = {
   lt: "es menor que",
   lte: "es menor o igual que",
   between: "está entre",
+  period: "está en el periodo",
   in: "está en la lista",
   like: "contiene",
   isnull: "está vacío",
   notnull: "tiene valor",
+};
+
+/**
+ * The named periods, in the order the picker lists them: nearest first.
+ *
+ * Published with the catalog (`buildCatalogView`) for the same reason the
+ * limits are: a second list kept by hand on the client is a list that drifts.
+ */
+export const PERIODS: Period[] = [
+  "hoy",
+  "ayer",
+  "ultimos_7_dias",
+  "ultimos_30_dias",
+  "esta_semana",
+  "semana_pasada",
+  "este_mes",
+  "mes_pasado",
+];
+
+export const PERIOD_LABEL: Record<Period, string> = {
+  hoy: "Hoy",
+  ayer: "Ayer",
+  ultimos_7_dias: "Últimos 7 días (sin contar hoy)",
+  ultimos_30_dias: "Últimos 30 días (sin contar hoy)",
+  esta_semana: "Esta semana",
+  semana_pasada: "La semana pasada",
+  este_mes: "Este mes",
+  mes_pasado: "El mes pasado",
 };
 
 export const AGG_LABEL: Record<AggFn, string> = {

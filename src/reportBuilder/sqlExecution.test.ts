@@ -15,7 +15,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { QueryTypes } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
-import { buildQuery, buildCountQuery } from "./sqlBuilder.js";
+import { buildQuery, buildCountQuery, periodBounds } from "./sqlBuilder.js";
+import { PERIODS } from "./constraints.js";
+import type { Period } from "./types.js";
 import { buildCatalogView } from "./catalogView.js";
 import { catalog } from "./catalog.js";
 import { runReport, countReport } from "./execute.js";
@@ -667,5 +669,73 @@ describe.skipIf(!dbAvailable)("a calendar day means the same day to Postgres", (
 
     expect(new Set(counts).size, `por zona: ${counts.join(", ")}`).toBe(1);
     expect(counts[0]).toBe(await trueCount("2026-01-17"));
+  });
+});
+
+describe.skipIf(!dbAvailable)("named periods — the bounds Postgres actually computes", () => {
+  /** Both bounds of a period at a given instant, as La Paz wall-clock text. */
+  async function limites(period: Period, ahora: string): Promise<[string, string]> {
+    const { desde, hasta } = periodBounds(period, `timestamptz '${ahora}'`);
+    const [fila] = (await sequelize.query(
+      `SELECT to_char(${desde} AT TIME ZONE 'America/La_Paz', 'YYYY-MM-DD HH24:MI') AS desde,
+              to_char(${hasta} AT TIME ZONE 'America/La_Paz', 'YYYY-MM-DD HH24:MI') AS hasta`,
+      { type: QueryTypes.SELECT, logging: false },
+    )) as { desde: string; hasta: string }[];
+    return [fila.desde, fila.hasta];
+  }
+
+  // Wednesday 11 March 2026, 09:30 in La Paz.
+  const MIERCOLES = "2026-03-11 13:30:00+00";
+
+  it("computes each period from an ordinary weekday morning", async () => {
+    const esperado: Record<Period, [string, string]> = {
+      hoy: ["2026-03-11 00:00", "2026-03-12 00:00"],
+      ayer: ["2026-03-10 00:00", "2026-03-11 00:00"],
+      // Whole days, ending yesterday: a Monday report must not lose last Monday.
+      ultimos_7_dias: ["2026-03-04 00:00", "2026-03-11 00:00"],
+      ultimos_30_dias: ["2026-02-09 00:00", "2026-03-11 00:00"],
+      // Weeks start on Monday.
+      esta_semana: ["2026-03-09 00:00", "2026-03-16 00:00"],
+      semana_pasada: ["2026-03-02 00:00", "2026-03-09 00:00"],
+      este_mes: ["2026-03-01 00:00", "2026-04-01 00:00"],
+      mes_pasado: ["2026-02-01 00:00", "2026-03-01 00:00"],
+    };
+    for (const period of PERIODS) {
+      expect(await limites(period, MIERCOLES), period).toEqual(esperado[period]);
+    }
+  });
+
+  it("reads the day in La Paz, not in UTC: at 02:00 UTC it is still the evening before", async () => {
+    // 1 March 2026, 02:00 UTC is 28 February, 22:00 in La Paz. Under a UTC
+    // reading "hoy" would be the 1st and "este mes" would be March.
+    const ahora = "2026-03-01 02:00:00+00";
+    expect(await limites("hoy", ahora)).toEqual(["2026-02-28 00:00", "2026-03-01 00:00"]);
+    expect(await limites("este_mes", ahora)).toEqual(["2026-02-01 00:00", "2026-03-01 00:00"]);
+    expect(await limites("mes_pasado", ahora)).toEqual(["2026-01-01 00:00", "2026-02-01 00:00"]);
+  });
+
+  it("gives last month its real length, across a year boundary too", async () => {
+    // 15 January 2026, noon in La Paz.
+    expect(await limites("mes_pasado", "2026-01-15 16:00:00+00")).toEqual(["2025-12-01 00:00", "2026-01-01 00:00"]);
+  });
+
+  it("treats Sunday as the last day of the week and Monday as the first", async () => {
+    // Sunday 15 March 2026 and Monday 16 March 2026, noon in La Paz.
+    expect(await limites("esta_semana", "2026-03-15 16:00:00+00")).toEqual(["2026-03-09 00:00", "2026-03-16 00:00"]);
+    expect(await limites("esta_semana", "2026-03-16 16:00:00+00")).toEqual(["2026-03-16 00:00", "2026-03-23 00:00"]);
+  });
+
+  it("runs a report filtered by every period, and its count agrees with its rows", async () => {
+    for (const period of PERIODS) {
+      const config = {
+        root: "evento",
+        columns: [{ path: "description" }],
+        filters: { op: "and" as const, conditions: [{ path: "date", operator: "period" as const, value: period }] },
+      };
+      const built = buildQuery(config, ADMIN);
+      expect(await explain(built.sql, built.binds), period).toBeNull();
+      const resultado = await runReport({ ...config, limit: 5 }, ADMIN);
+      expect(resultado.total, period).toBe(await countReport(config, ADMIN));
+    }
   });
 });

@@ -39,6 +39,14 @@
 // Sidelined and exhausted providers are skipped before the clock is read:
 // they cost no time, so four sidelined providers never hide a live fifth.
 //
+// **Attachments.** A message may carry files (the scheduled reports do). Their
+// total size is checked against `MAIL_ADJUNTOS_MAX_BYTES` before the walk
+// starts: over it nothing is asked of anybody and nothing is charged, and the
+// answer is `motivo: "adjunto"` for the caller to send something smaller in
+// its place. An attempt that carries a file gets
+// `MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS` instead of the eight seconds sized
+// for a login code.
+//
 // **`hayProveedorDisponible` is the first step of the loop, exported.** It is
 // what a controller asks before doing something destructive — burning the
 // pending verification link, burning the pending login code — and it has to
@@ -54,9 +62,11 @@
 
 import {
   configuracionDeCorreo,
+  MAIL_ADJUNTOS_MAX_BYTES,
   MAIL_PLAZO_DIFERIDO_MS,
   MAIL_PLAZO_MINIMO_INTENTO_MS,
   MAIL_PLAZO_POR_INTENTO_MS,
+  MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS,
   MAIL_PROVIDER_COOLDOWN_MS,
   MAIL_DAILY_WINDOW_MS,
   type ConfiguracionDeCorreo,
@@ -79,8 +89,10 @@ const relayLog = log("mailRelay");
 /**
  * Why nothing went out, when nothing did. `"error"` is `mailer.ts`'s only:
  * the relay itself threw, which is a bug here and not a state of the chain.
+ * `"adjunto"` is the message's own fault — its files are over the ceiling —
+ * and says nothing about any provider.
  */
-export type MotivoDeRelevo = "desarrollo" | "destinatario" | "sin-proveedor" | "plazo" | "error";
+export type MotivoDeRelevo = "desarrollo" | "destinatario" | "sin-proveedor" | "plazo" | "adjunto" | "error";
 
 export type ResultadoRelevo =
   | { ok: true; proveedor: string; id: string | null; motivo?: undefined }
@@ -191,7 +203,8 @@ function apartar(e: EstadoDeProveedor, hasta: number, motivo: string): void {
 /**
  * Walk the chain. `plazo_ms` bounds the whole walk — the interactive flows
  * pass twelve seconds, the detached ones sixty (`MAIL_PLAZO_DIFERIDO_MS`);
- * each attempt gets at most `MAIL_PLAZO_POR_INTENTO_MS` of what is left.
+ * each attempt gets at most `MAIL_PLAZO_POR_INTENTO_MS` of what is left, or
+ * `MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS` when the message carries a file.
  */
 export async function enviar(
   correo: CorreoAEnviar,
@@ -208,6 +221,17 @@ export async function enviar(
     );
     return { ok: false, motivo: "desarrollo" };
   }
+
+  const adjuntos = correo.adjuntos ?? [];
+  const bytesAdjuntos = adjuntos.reduce((suma, a) => suma + a.contenido.length, 0);
+  if (bytesAdjuntos > MAIL_ADJUNTOS_MAX_BYTES) {
+    relayLog.error(
+      { flujo: correo.flujo, para, adjuntos: adjuntos.length, bytes: bytesAdjuntos, tope: MAIL_ADJUNTOS_MAX_BYTES },
+      "correo NO enviado: sus adjuntos superan el tope; no se intentó con ningún proveedor",
+    );
+    return { ok: false, motivo: "adjunto" };
+  }
+  const plazoPorIntento = adjuntos.length > 0 ? MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS : MAIL_PLAZO_POR_INTENTO_MS;
 
   const plazoTotal = opciones.plazo_ms ?? MAIL_PLAZO_DIFERIDO_MS;
   const inicio = Date.now();
@@ -231,7 +255,7 @@ export async function enviar(
     const empezo = Date.now();
     let r: ResultadoEnvio;
     try {
-      r = await e.proveedor.enviar(correo, from, { plazo_ms: Math.min(MAIL_PLAZO_POR_INTENTO_MS, restante) });
+      r = await e.proveedor.enviar(correo, from, { plazo_ms: Math.min(plazoPorIntento, restante) });
     } catch (err) {
       // Both adapters catch their own failures; a throw here is a bug in one
       // of them, and it must not take the login down with it. Filed as an

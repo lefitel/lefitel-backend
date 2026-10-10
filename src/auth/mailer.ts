@@ -74,7 +74,20 @@ export type FlujoDeCorreo =
   // Plan 4E: the six-digit login code. On the login path, so the relay's
   // reserved share of each provider's budget is for this flow and the
   // security notices — see `mailBudget.ts`.
-  | "mfa/codigo";
+  | "mfa/codigo"
+  // A saved report sent on a schedule, and the notices about one that could
+  // not be. The first flow that is about the work rather than the account,
+  // and the only one that carries a file. Not reserved, on purpose: a
+  // schedule must never be what crowds out a login code.
+  | "informe/programado";
+
+/** One file attached to a message. `contenido` is the raw bytes, not base64. */
+export interface Adjunto {
+  nombre: string;
+  /** Media type, e.g. `application/pdf`. */
+  tipo: string;
+  contenido: Buffer;
+}
 
 export interface CorreoAEnviar {
   para: string;
@@ -94,6 +107,12 @@ export interface CorreoAEnviar {
    * instead of by the compiler refusing to build.
    */
   texto: string;
+  /**
+   * Files to attach. Their total size is checked by the relay against
+   * `MAIL_ADJUNTOS_MAX_BYTES` before any provider is asked; over it, nothing
+   * is sent and the answer is `motivo: "adjunto"`.
+   */
+  adjuntos?: Adjunto[];
 }
 
 /**

@@ -43,6 +43,7 @@ describe("the operator names the user reads", () => {
     lt: "es menor que",
     lte: "es menor o igual que",
     between: "está entre",
+    period: "está en el periodo",
     in: "está en la lista",
     like: "contiene",
     isnull: "está vacío",
@@ -50,7 +51,7 @@ describe("the operator names the user reads", () => {
   };
 
   it("are the same words the picker offers", () => {
-    // Eight of eleven diverged. An error quoting an operator the user cannot
+    // Eight of the original eleven diverged. An error quoting an operator the user cannot
     // find in the dropdown is an error they cannot act on.
     expect(OPERATOR_LABEL).toEqual(SHOWN_IN_THE_PICKER);
   });

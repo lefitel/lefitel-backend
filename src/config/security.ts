@@ -988,6 +988,28 @@ export const MAIL_PLAZO_POR_INTENTO_MS = 8_000;
 export const MAIL_PLAZO_MINIMO_INTENTO_MS = 4_000;
 
 /**
+ * Attachments — the scheduled reports are the only messages that carry one.
+ *
+ * `MAIL_ADJUNTOS_MAX_BYTES` is the ceiling for everything attached to one
+ * message, counted as raw bytes before encoding. Ten megabytes and not the
+ * 25 the exporter allows (`MAX_EXPORT_BYTES`): base64 adds a third, and the
+ * message has to fit the strictest provider on the chain whichever one ends
+ * up carrying it — a file that only the first provider accepts would turn
+ * every relay into a refusal. The relay checks it before asking anybody, so
+ * an oversized file costs no attempt and no quota. Measured on the real data
+ * the general report is 96 KB as a workbook, 1,8 MB with its 1.955
+ * photographs and 4,0 MB as a document.
+ *
+ * `MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS` replaces the eight seconds above for
+ * a message that carries a file. Eight seconds is sized for a six-digit code;
+ * megabytes cut off at eight would be filed `ambiguo` — charged, relayed to
+ * the next provider, and quite possibly delivered twice. Nobody is waiting on
+ * a screen for these.
+ */
+export const MAIL_ADJUNTOS_MAX_BYTES = 10 * 1024 * 1024;
+export const MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS = 90_000;
+
+/**
  * nodemailer's per-phase timeouts, replacing its defaults of two minutes per
  * connection, thirty seconds per greeting and ten minutes per socket.
  */

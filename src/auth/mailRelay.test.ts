@@ -13,8 +13,8 @@ vi.mock("../utils/logger.js", () => ({ log: () => ({ error, warn, info, debug: v
 
 const { configurarRelevo, reiniciarRelevo, enviar, hayProveedorDisponible, estadoDeLaCadena } =
   await import("./mailRelay.js");
-const { MAIL_PROVIDER_COOLDOWN_MS, MAIL_DAILY_WINDOW_MS, MAIL_PLAZO_POR_INTENTO_MS, MAIL_RESERVA_FRACCION } =
-  await import("../config/security.js");
+const seguridad = await import("../config/security.js");
+const { MAIL_PROVIDER_COOLDOWN_MS, MAIL_DAILY_WINDOW_MS, MAIL_PLAZO_POR_INTENTO_MS, MAIL_RESERVA_FRACCION } = seguridad;
 type ProveedorDeCorreo = import("./mailProviders.js").ProveedorDeCorreo;
 type ResultadoEnvio = import("./mailProviders.js").ResultadoEnvio;
 type ProveedorConfigurado = import("../config/security.js").ProveedorConfigurado;
@@ -353,5 +353,64 @@ describe("when nothing can go out", () => {
   it("answers desarrollo, sending nothing, when no chain is configured", async () => {
     configurarRelevo({ ok: true, modo: "desarrollo", from: null, proveedores: [], descartados: [] });
     expect(await enviar(CORREO)).toEqual({ ok: false, motivo: "desarrollo" });
+  });
+});
+
+describe("attachments", () => {
+  const { MAIL_ADJUNTOS_MAX_BYTES, MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS } = seguridad;
+  const INFORME = { ...CORREO, flujo: "informe/programado" as const, asunto: "Informe semanal" };
+  const adjunto = (bytes: number) => ({ nombre: "informe.xlsx", tipo: "application/octet-stream", contenido: Buffer.alloc(bytes) });
+
+  it("refuses a message over the ceiling before asking any provider, and charges nobody", async () => {
+    const f = cadena({ nombre: "a", cupo: 10 }, { nombre: "b", cupo: 10 });
+    const antes = estadoDeLaCadena().map((e) => e.restante);
+
+    const r = await enviar({ ...INFORME, adjuntos: [adjunto(MAIL_ADJUNTOS_MAX_BYTES + 1)] });
+
+    expect(r).toEqual({ ok: false, motivo: "adjunto" });
+    expect(f.get("a")!.enviar).not.toHaveBeenCalled();
+    expect(f.get("b")!.enviar).not.toHaveBeenCalled();
+    expect(estadoDeLaCadena().map((e) => e.restante)).toEqual(antes);
+  });
+
+  it("adds the attachments up: two that fit alone and not together are refused", async () => {
+    const f = cadena({ nombre: "a" });
+    const mitad = Math.floor(MAIL_ADJUNTOS_MAX_BYTES / 2) + 1;
+    const r = await enviar({ ...INFORME, adjuntos: [adjunto(mitad), adjunto(mitad)] });
+    expect(r).toEqual({ ok: false, motivo: "adjunto" });
+    expect(f.get("a")!.enviar).not.toHaveBeenCalled();
+  });
+
+  it("sends one that is exactly at the ceiling", async () => {
+    cadena({ nombre: "a" });
+    const r = await enviar({ ...INFORME, adjuntos: [adjunto(MAIL_ADJUNTOS_MAX_BYTES)] });
+    expect(r).toMatchObject({ ok: true, proveedor: "a" });
+  });
+
+  it("gives an attempt carrying a file the long per-attempt deadline, and a plain message the short one", async () => {
+    // Eight seconds is sized for a six-digit code. Megabytes cut off at eight
+    // seconds would be filed `ambiguo` — charged, relayed, and delivered twice.
+    const f = cadena({ nombre: "a" });
+    await enviar({ ...INFORME, adjuntos: [adjunto(1024)] }, { plazo_ms: 10 * 60_000 });
+    await enviar(INFORME, { plazo_ms: 10 * 60_000 });
+    const a = f.get("a")!.enviar;
+    expect(a).toHaveBeenNthCalledWith(1, expect.anything(), expect.anything(), { plazo_ms: MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS });
+    expect(a).toHaveBeenNthCalledWith(2, expect.anything(), expect.anything(), { plazo_ms: MAIL_PLAZO_POR_INTENTO_MS });
+    expect(MAIL_PLAZO_POR_INTENTO_CON_ADJUNTO_MS).toBeGreaterThan(MAIL_PLAZO_POR_INTENTO_MS);
+  });
+});
+
+describe("the scheduled reports' flow", () => {
+  it("is not one of the reserved flows: it stops at the unreserved share of each provider", async () => {
+    // The reserve exists so that nothing a stranger — or a schedule — can ask
+    // for is able to crowd out the login code.
+    const f = cadena({ nombre: "a", cupo: 4 });
+    const informe = { ...CORREO, flujo: "informe/programado" as const };
+    const techo = 4 - Math.floor(4 * MAIL_RESERVA_FRACCION);
+    for (let i = 0; i < techo; i++) expect((await enviar(informe)).ok).toBe(true);
+    expect(await enviar(informe)).toEqual({ ok: false, motivo: "sin-proveedor" });
+    expect(f.get("a")!.enviar).toHaveBeenCalledTimes(techo);
+    // …and the login code still goes out by the same provider.
+    expect((await enviar(CORREO)).ok).toBe(true);
   });
 });
