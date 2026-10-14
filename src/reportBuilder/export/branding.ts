@@ -57,8 +57,3 @@ export function loadBranding(): Promise<Branding> {
   });
   return cached;
 }
-
-/** Only for tests, which need a cold start. */
-export function resetBrandingCache(): void {
-  cached = null;
-}

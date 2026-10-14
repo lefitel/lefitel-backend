@@ -46,7 +46,7 @@ export const MAX_EXPORT_ROWS = 20_000;
  * what binds is the person receiving it: 80.000 cells is about 25 MB, which is
  * the largest attachment most mail servers accept.
  */
-export const MAX_EXPORT_CELLS: Record<ExportFormat, number> = {
+const MAX_EXPORT_CELLS: Record<ExportFormat, number> = {
   excel: 200_000,
   pdf: 80_000,
 };

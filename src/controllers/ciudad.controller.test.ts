@@ -62,6 +62,26 @@ describe("GET /api/ciudad/", () => {
     expect(pedidas()).toEqual([...DE_POSTES, ...DE_EVENTOS]);
   });
 
+  it("counts a city's poles through the tramos that touch it, and no longer names the two columns", async () => {
+    permisos.add("postes.ver").add("eventos.ver");
+    await getCiudad(reqOf(), resOf());
+    const opciones = findAndCountAll.mock.calls[0][0] as { attributes: { include: [{ val: string }, string][] } };
+    const sql = opciones.attributes.include.map(([l]) => l.val).join(" ");
+    expect(sql).not.toMatch(/id_ciudadA|id_ciudadB/);
+    expect(sql).toContain('"id_ciudad_min" = "ciudad"."id"');
+    // A neighbour is a city reached over a tramo that has a live pole on it.
+    expect(sql).toContain('"postes"."deletedAt" IS NULL');
+  });
+
+  it("builds `vecinas` over the tramos, and only names live cities", async () => {
+    permisos.add("postes.ver");
+    await getCiudad(reqOf(), resOf());
+    const opciones = findAndCountAll.mock.calls[0][0] as { attributes: { include: [{ val: string }, string][] } };
+    const vecinas = opciones.attributes.include.find(([, alias]) => alias === "vecinas")![0].val;
+    expect(vecinas).toContain('"tramos" AS "tv"');
+    expect(vecinas).toContain('"vecina"."deletedAt" IS NULL');
+  });
+
   it("is not opened by a write permission on the same module", async () => {
     // `editar` without `ver` is a row the Seguridad screen can produce.
     permisos.add("postes.editar").add("eventos.archivar");

@@ -297,5 +297,3 @@ export async function buildExcel(input: ExcelInput): Promise<Buffer> {
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);
 }
-
-export { cellValue, displayWidth };

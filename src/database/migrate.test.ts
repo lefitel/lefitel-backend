@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { QueryTypes } from "sequelize";
 import { sequelize } from "./sequelize.js";
-import { normaliseMigrationNames } from "./migrate.js";
+import { normaliseMigrationNames, upperBoundOption } from "./migrate.js";
 
 /**
  * Exercised against a scratch table, never the real registry: a mistake here
@@ -104,3 +104,26 @@ describe.skipIf(!dbAvailable)("normaliseMigrationNames", () => {
     expect(await names()).toEqual(["20260101000001-rename-file.ts-backup"]);
   });
 });
+
+describe("upperBoundOption", () => {
+  const known = ["20261010000003-a", "20261010000004-b", "20261010000005-c"];
+
+  it("asks for no bound when MIGRAR_HASTA is absent or empty", () => {
+    expect(upperBoundOption(undefined, known)).toEqual({});
+    expect(upperBoundOption("", known)).toEqual({});
+  });
+
+  it("passes a known name straight to umzug as `to`", () => {
+    expect(upperBoundOption("20261010000004-b", known)).toEqual({ to: "20261010000004-b" });
+  });
+
+  it("refuses an unknown name in Spanish, without listing the migrations", () => {
+    expect(() => upperBoundOption("20261010000004", known)).toThrow(/MIGRAR_HASTA.*no es ninguna migración/);
+    expect(() => upperBoundOption("20261010000004", known)).not.toThrow(/000003/);
+  });
+
+  it("refuses the name with its extension, which is never how they are recorded", () => {
+    expect(() => upperBoundOption("20261010000004-b.ts", known)).toThrow(/sin extensión/);
+  });
+});
+

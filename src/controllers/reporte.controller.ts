@@ -5,17 +5,17 @@ import { EventoObsModel } from "../models/eventoObs.model.js";
 import { RevisionModel, REVISION_PUBLIC_ATTRIBUTES } from "../models/revision.model.js";
 import { PosteModel, POSTE_PUBLIC_ATTRIBUTES } from "../models/poste.model.js";
 import { SolucionModel, SOLUCION_PUBLIC_ATTRIBUTES } from "../models/solucion.model.js";
-import { CiudadModel } from "../models/ciudad.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { TipoObsModel } from "../models/tipoObs.model.js";
-import { ICiudad, IEvento, IEventoObs, IObs, IPoste, ITipoObs } from "../interfaces/index.js";
+import { IEvento, IEventoObs, IObs, IPoste, ITipoObs } from "../interfaces/index.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
 import { leerFiltro, leerFiltroSinRango } from "./reporteFiltro.js";
+import { INCLUDE_TRAMO, presentarTramo, presentarTramos, type TramoPresentado } from "../tramos/presentacion.js";
 
 const reporteLog = log("reporte");
 const handler = makeHandler(reporteLog);
@@ -23,8 +23,8 @@ const handler = makeHandler(reporteLog);
 // ─── Tipos para datos con asociaciones (resultado de toJSON) ──────────────────
 
 interface IPosteConEventos extends IPoste {
-  ciudadA: Pick<ICiudad, "id" | "name"> | null;
-  ciudadB: Pick<ICiudad, "id" | "name"> | null;
+  id_tramo: number;
+  tramo: unknown;
   eventos: Pick<IEvento, "id" | "state">[];
 }
 
@@ -37,10 +37,7 @@ interface IEventoObsConOb extends IEventoObs {
 interface IEventoConSolucion extends IEvento {
   solucions: { date: Date }[];
   revisions: { id: number }[];
-  poste: (Pick<IPoste, "id" | "id_ciudadA" | "id_ciudadB"> & {
-    ciudadA: Pick<ICiudad, "id" | "name"> | null;
-    ciudadB: Pick<ICiudad, "id" | "name"> | null;
-  }) | null;
+  poste: (Pick<IPoste, "id"> & { id_tramo: number; tramo: unknown }) | null;
 }
 
 // IDs de eventos que tienen al menos una revisión dentro del rango de fechas
@@ -66,6 +63,15 @@ const getEventIdsRepairedInRange = async (fechaInicial: Date, fechaFinal: Date):
   return rows.map((r) => r.dataValues.id_evento as number);
 };
 
+/**
+ * The pole filter of the reports that only narrow by tramo when one is named.
+ * Empty when none is, so that the query is the one it always was. `required`
+ * is what turns the include into an inner join: without it the filter narrows
+ * nothing, since every incident would come back with a null pole.
+ */
+const soloDelTramo = (tramo: number | null) =>
+  tramo === null ? {} : { required: true, where: { id_tramo: tramo } };
+
 export const getReporteGeneral = handler("getReporteGeneral", async (req: Request, res: Response) => {
   const filtro = leerFiltro(req.query);
   if (typeof filtro === "string") return res.status(400).json({ message: filtro });
@@ -81,11 +87,11 @@ export const getReporteGeneral = handler("getReporteGeneral", async (req: Reques
       {
         model: PosteModel,
         attributes: [...POSTE_PUBLIC_ATTRIBUTES],
+        ...soloDelTramo(filtro.tramo),
         include: [
           { model: MaterialModel },
           { model: PropietarioModel },
-          { model: CiudadModel, as: "ciudadA" },
-          { model: CiudadModel, as: "ciudadB" },
+          INCLUDE_TRAMO,
         ],
       },
       { model: SolucionModel, attributes: [...SOLUCION_PUBLIC_ATTRIBUTES] },
@@ -97,23 +103,15 @@ export const getReporteGeneral = handler("getReporteGeneral", async (req: Reques
       },
     ],
   });
-  res.status(200).json(data);
+  res.status(200).json(presentarTramos(data));
 });
 
 export const getReporteTramo = handler("getReporteTramo", async (req: Request, res: Response) => {
   const filtro = leerFiltro(req.query);
   if (typeof filtro === "string") return res.status(400).json({ message: filtro });
   const { fechaInicial: fi, fechaFinal: ff, excludeOld } = filtro;
-  const { tramoInicial: TramoInicial, tramoFinal: TramoFinal } = filtro;
 
-  const posteWhere = (TramoInicial && TramoFinal)
-    ? {
-        [Op.or]: [
-          { id_ciudadA: TramoInicial, id_ciudadB: TramoFinal },
-          { id_ciudadA: TramoFinal,   id_ciudadB: TramoInicial },
-        ],
-      }
-    : undefined;
+  const posteWhere = filtro.tramo !== null ? { id_tramo: filtro.tramo } : undefined;
 
   const eventIds = await getEventIdsInRange(fi, ff);
   const eventoWhere: Record<string, unknown> = { id: { [Op.in]: eventIds } };
@@ -132,24 +130,22 @@ export const getReporteTramo = handler("getReporteTramo", async (req: Request, r
           { model: MaterialModel },
           { model: AdssPosteModel },
           { model: PropietarioModel },
-          { model: CiudadModel, as: "ciudadA" },
-          { model: CiudadModel, as: "ciudadB" },
+          INCLUDE_TRAMO,
         ],
       },
       { model: SolucionModel, attributes: [...SOLUCION_PUBLIC_ATTRIBUTES] },
       { model: RevisionModel, attributes: [...REVISION_PUBLIC_ATTRIBUTES] },
     ],
   });
-  res.status(200).json(data);
+  res.status(200).json(presentarTramos(data));
 });
 
 export const getReporteRecorrido = handler("getReporteRecorrido", async (req: Request, res: Response) => {
   // The one report that cannot answer anything without a stretch: it draws the
-  // line between two cities.
+  // line of one tramo.
   const filtro = leerFiltro(req.query, { tramo: "obligatorio" });
   if (typeof filtro === "string") return res.status(400).json({ message: filtro });
   const { fechaInicial: fi, fechaFinal: ff, excludeOld } = filtro;
-  const { tramoInicial: TramoInicial, tramoFinal: TramoFinal } = filtro;
 
   const eventIds = await getEventIdsInRange(fi, ff);
   const eventoWhere: Record<string, unknown> = { id: { [Op.in]: eventIds } };
@@ -162,17 +158,11 @@ export const getReporteRecorrido = handler("getReporteRecorrido", async (req: Re
         model: PosteModel,
         attributes: [...POSTE_PUBLIC_ATTRIBUTES],
         required: true,
-        where: {
-          [Op.or]: [
-            { id_ciudadA: TramoInicial, id_ciudadB: TramoFinal },
-            { id_ciudadA: TramoFinal,   id_ciudadB: TramoInicial },
-          ],
-        },
+        where: { id_tramo: filtro.tramo },
         include: [
           { model: MaterialModel },
           { model: PropietarioModel },
-          { model: CiudadModel, as: "ciudadA" },
-          { model: CiudadModel, as: "ciudadB" },
+          INCLUDE_TRAMO,
         ],
       },
       { model: SolucionModel, attributes: [...SOLUCION_PUBLIC_ATTRIBUTES] },
@@ -184,7 +174,7 @@ export const getReporteRecorrido = handler("getReporteRecorrido", async (req: Re
       },
     ],
   });
-  res.status(200).json(data);
+  res.status(200).json(presentarTramos(data));
 });
 
 // ─── Estado de la Red ─────────────────────────────────────────────────────────
@@ -204,10 +194,10 @@ export const getEstadoRed = handler("getEstadoRed", async (req: Request, res: Re
   }
 
   const postes = await PosteModel.findAll({
-    attributes: ["id", "id_ciudadA", "id_ciudadB"],
+    ...(filtro.tramo !== null ? { where: { id_tramo: filtro.tramo } } : {}),
+    attributes: ["id", "id_tramo"],
     include: [
-      { model: CiudadModel, as: "ciudadA", attributes: ["id", "name"] },
-      { model: CiudadModel, as: "ciudadB", attributes: ["id", "name"] },
+      INCLUDE_TRAMO,
       {
         model: EventoModel,
         attributes: ["id", "state"],
@@ -217,33 +207,24 @@ export const getEstadoRed = handler("getEstadoRed", async (req: Request, res: Re
     ],
   });
 
-  const tramoMap = new Map<string, {
-    ciudadAId: number; ciudadBId: number;
-    ciudadAName: string; ciudadBName: string;
+  const tramoMap = new Map<number, {
+    tramo: TramoPresentado;
     totalPostes: number; conPendientes: number;
     totalPendientes: number; totalEventos: number;
   }>();
 
   for (const p of postes) {
     const pd = p.toJSON() as unknown as IPosteConEventos;
-    // Normalizar tramo: el de menor id siempre como ciudadA. Así (1,2) y (2,1) se cuentan juntos.
-    const aIsMin = pd.id_ciudadA <= pd.id_ciudadB;
-    const minId = aIsMin ? pd.id_ciudadA : pd.id_ciudadB;
-    const maxId = aIsMin ? pd.id_ciudadB : pd.id_ciudadA;
-    const minName = (aIsMin ? pd.ciudadA?.name : pd.ciudadB?.name) ?? `#${minId}`;
-    const maxName = (aIsMin ? pd.ciudadB?.name : pd.ciudadA?.name) ?? `#${maxId}`;
-    const key = `${minId}-${maxId}`;
-    if (!tramoMap.has(key)) {
-      tramoMap.set(key, {
-        ciudadAId: minId,
-        ciudadBId: maxId,
-        ciudadAName: minName,
-        ciudadBName: maxName,
-        totalPostes: 0, conPendientes: 0,
-        totalPendientes: 0, totalEventos: 0,
+    // Cannot happen (`id_tramo` is NOT NULL and the include is `paranoid: false`);
+    // if it ever does, the pole is left out rather than failing the whole report.
+    if (!pd.tramo) continue;
+    if (!tramoMap.has(pd.id_tramo)) {
+      tramoMap.set(pd.id_tramo, {
+        tramo: presentarTramo(pd.tramo),
+        totalPostes: 0, conPendientes: 0, totalPendientes: 0, totalEventos: 0,
       });
     }
-    const row = tramoMap.get(key)!;
+    const row = tramoMap.get(pd.id_tramo)!;
     const eventos = pd.eventos ?? [];
     row.totalPostes++;
     const pending = eventos.filter((e) => !e.state).length;
@@ -276,11 +257,23 @@ export const getObsFrecuencia = handler("getObsFrecuencia", async (req: Request,
   const rows = await EventoObsModel.findAll({
     where: { id_evento: { [Op.in]: eventIds } },
     attributes: ["id_obs"],
-    include: [{
-      model: ObsModel,
-      attributes: ["id", "name", "criticality"],
-      include: [{ model: TipoObsModel, as: "tipoObs", attributes: ["id", "name"] }],
-    }],
+    include: [
+      {
+        model: ObsModel,
+        attributes: ["id", "name", "criticality"],
+        include: [{ model: TipoObsModel, as: "tipoObs", attributes: ["id", "name"] }],
+      },
+      // Only to restrict: no column of the incident or the pole is read, and an
+      // inner join on a tramo's poles drops the observations of the rest.
+      ...(filtro.tramo !== null
+        ? [{
+            model: EventoModel,
+            attributes: [],
+            required: true,
+            include: [{ model: PosteModel, attributes: [], ...soloDelTramo(filtro.tramo) }],
+          }]
+        : []),
+    ],
   });
 
   const map = new Map<number, { tipoObs: string; obs: string; criticality: number | null; count: number }>();
@@ -339,26 +332,24 @@ export const getTiemposResumen = handler("getTiemposResumen", async (req: Reques
       },
       {
         model: PosteModel,
-        attributes: ["id", "id_ciudadA", "id_ciudadB"],
-        include: [
-          { model: CiudadModel, as: "ciudadA", attributes: ["id", "name"] },
-          { model: CiudadModel, as: "ciudadB", attributes: ["id", "name"] },
-        ],
+        attributes: ["id", "id_tramo"],
+        ...soloDelTramo(filtro.tramo),
+        include: [INCLUDE_TRAMO],
       },
     ],
   });
 
-  const tramoMap = new Map<string, {
-    ciudadAId: number | null; ciudadBId: number | null;
-    ciudadAName: string; ciudadBName: string; dias: number[]; visitas: number[];
-  }>();
+  const tramoMap = new Map<number, { tramo: TramoPresentado; dias: number[]; visitas: number[] }>();
 
   let descartados = 0;
 
   for (const e of eventos) {
     const ed = e.toJSON() as unknown as IEventoConSolucion;
     const p = ed.poste;
-    if (!p || !ed.date) continue;
+    // A pole without its tramo cannot happen (`id_tramo` is NOT NULL and the
+    // include is `paranoid: false`); if it ever does, the evento is left out
+    // rather than failing the whole report.
+    if (!p || !p.tramo || !ed.date) continue;
 
     // Fecha de reparación = fecha de la solución. Sin solución no hay nada que
     // medir: el evento no llegó a cerrarse.
@@ -381,34 +372,17 @@ export const getTiemposResumen = handler("getTiemposResumen", async (req: Reques
     }
     const dias = Math.round((fin - inicio) / (1000 * 60 * 60 * 24));
 
-    // Normalizar tramo: el de menor id siempre como ciudadA. Así (1,2) y (2,1) se cuentan juntos.
-    const aIsMin = p.id_ciudadA <= p.id_ciudadB;
-    const minId = aIsMin ? p.id_ciudadA : p.id_ciudadB;
-    const maxId = aIsMin ? p.id_ciudadB : p.id_ciudadA;
-    const minName = (aIsMin ? p.ciudadA?.name : p.ciudadB?.name) ?? `#${minId}`;
-    const maxName = (aIsMin ? p.ciudadB?.name : p.ciudadA?.name) ?? `#${maxId}`;
-    const key = `${minId}-${maxId}`;
-    if (!tramoMap.has(key)) {
-      tramoMap.set(key, {
-        ciudadAId: minId,
-        ciudadBId: maxId,
-        ciudadAName: minName,
-        ciudadBName: maxName,
-        dias: [],
-        visitas: [],
-      });
+    if (!tramoMap.has(p.id_tramo)) {
+      tramoMap.set(p.id_tramo, { tramo: presentarTramo(p.tramo), dias: [], visitas: [] });
     }
-    tramoMap.get(key)!.dias.push(dias);
-    tramoMap.get(key)!.visitas.push((ed.revisions ?? []).length);
+    tramoMap.get(p.id_tramo)!.dias.push(dias);
+    tramoMap.get(p.id_tramo)!.visitas.push((ed.revisions ?? []).length);
   }
 
   const result = [...tramoMap.values()]
     .filter((t) => t.dias.length > 0)
     .map((t) => ({
-      ciudadAId: t.ciudadAId,
-      ciudadBId: t.ciudadBId,
-      ciudadAName: t.ciudadAName,
-      ciudadBName: t.ciudadBName,
+      tramo: t.tramo,
       count: t.dias.length,
       avgVisitas: Math.round((t.visitas.reduce((s, v) => s + v, 0) / t.visitas.length) * 10) / 10,
       avgDias: Math.round(t.dias.reduce((s, d) => s + d, 0) / t.dias.length),
@@ -419,29 +393,3 @@ export const getTiemposResumen = handler("getTiemposResumen", async (req: Reques
 
   res.status(200).json({ tramos: result, descartados });
 });
-
-// ─── The former names, and where they read from ──────────────────────────────
-//
-// `reportBuilder/regression.test.ts` imports three of the six by the names they
-// had while they were `PUT`, and hands them the filter in the **body**, which is
-// where it used to be. That file has uncommitted changes belonging to another
-// session, so editing it would mix their work into this task's commit: it is
-// left alone.
-//
-// These aliases are the bridge, and they do two things — keep the old name, and
-// read the filter out of the body when there is no query. **They are mounted on
-// no route**: `reporte.routes.ts` uses the new names, so there is no way to
-// reach these over HTTP. They exist for one consumer inside this repository, and
-// they go the moment that session changes its `fakeReq` to put the filter in
-// `query`, which is one line of theirs.
-const desdeElCuerpo =
-  (manejador: (req: Request, res: Response) => Promise<unknown>) =>
-  (req: Request, res: Response): Promise<unknown> =>
-    manejador({ ...req, query: req.query ?? req.body } as Request, res);
-
-export const putReporteGeneral = desdeElCuerpo(getReporteGeneral);
-export const putReporteTramo = desdeElCuerpo(getReporteTramo);
-export const putReporteRecorrido = desdeElCuerpo(getReporteRecorrido);
-export const putEstadoRed = desdeElCuerpo(getEstadoRed);
-export const putObsFrecuencia = desdeElCuerpo(getObsFrecuencia);
-export const putTiemposResumen = desdeElCuerpo(getTiemposResumen);

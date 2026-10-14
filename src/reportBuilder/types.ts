@@ -147,9 +147,9 @@ export interface CalculatedDef {
   sql: (alias: string, dep: (path: string) => string) => string;
   /**
    * Expressions to GROUP BY when this field is grouped, when grouping by the
-   * displayed value would be wrong. `tramo` renders city names but must group
-   * by city ids: three cities in the data share a name, and grouping by text
-   * would silently merge distinct tramos.
+   * displayed value would be wrong. `tramo` renders a name but must group by the
+   * tramo id: two tramos can read the same, and grouping by text would silently
+   * merge them.
    *
    * Defaults to [sql] when absent.
    */
@@ -165,13 +165,25 @@ export interface CalculatedDef {
   /** Set when the expression exposes personal data. See FieldDef. */
   staffOnly?: boolean;
   /**
+   * The same claim as `FieldDef.optionList`, for a value that is not a stored
+   * column of its own table: the department of a tramo is read by a subquery
+   * from a closed list of nine names, and filtering it as free text answers a
+   * typo with an empty report that reads like an empty answer. The list is
+   * keyed by entity and field name, like the stored ones, and `fieldOptions.ts`
+   * must have a reader for it — a test refuses a mark with none.
+   */
+  optionList?: boolean;
+  /**
    * Only offered by the picker when this entity is the report's root.
    *
    * For summaries that only mean something as "one row per X". A city's three
-   * counts are the reason a city root exists, and they are also inherited by
-   * every path that reaches a city — so adding them took the field list of an
-   * event report from 78 entries to 132, and "eventos en los tramos de la
-   * ciudad A del poste de este evento" is not a column anybody was looking for.
+   * counts are the reason a city root exists, and a user's four the reason a
+   * user root does; without this flag each would be inherited by every path
+   * that reaches the entity. That is what happened while a pole reached its two
+   * cities: the city counts took the field list of an event report from 78
+   * entries to 132, and "eventos en los tramos de la ciudad A del poste de este
+   * evento" is not a column anybody was looking for. A user is still reached
+   * through "Registrado por", so the flag still prunes that menu.
    *
    * This prunes the *menu*, not the language: a stored configuration that names
    * one still builds, still runs and still opens whole — `pruneConfig` asks the
@@ -213,7 +225,7 @@ export interface Catalog {
 // ─── Report configuration (persisted as JSONB, sent by the client) ────────────
 
 export interface ColumnSpec {
-  /** Dotted path from the root, e.g. "poste.ciudadA.name". */
+  /** Dotted path from the root, e.g. "poste.propietario.name". */
   path: string;
   /** Aggregate to apply. Required in summary mode unless the path is grouped. */
   agg?: AggFn;

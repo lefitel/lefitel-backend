@@ -110,7 +110,7 @@ interface EstadoDeProveedor {
 /** How each provider is built from its configuration — injectable so the relay's tests use fakes. */
 export type FabricaDeProveedores = (cfg: ProveedorConfigurado) => ProveedorDeCorreo;
 
-export function fabricaDeProveedoresReal(fabricaSmtp?: FabricaDeTransporte): FabricaDeProveedores {
+function fabricaDeProveedoresReal(fabricaSmtp?: FabricaDeTransporte): FabricaDeProveedores {
   return (cfg) => (cfg.tipo === "resend" ? resendProvider(cfg.claveVar) : smtpProvider(cfg, fabricaSmtp));
 }
 

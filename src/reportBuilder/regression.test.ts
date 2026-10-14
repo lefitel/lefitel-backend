@@ -8,10 +8,11 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { QueryTypes } from "sequelize";
 import type { Request, Response } from "express";
 import {
-  putEstadoRed,
-  putObsFrecuencia,
-  putTiemposResumen,
+  getEstadoRed,
+  getObsFrecuencia,
+  getTiemposResumen,
 } from "../controllers/reporte.controller.js";
+import { nombreDeTramo, type Extremo } from "../tramos/nombre.js";
 import { sequelize } from "../database/sequelize.js";
 import { runReport } from "./execute.js";
 import type { ReportConfig } from "./types.js";
@@ -41,19 +42,27 @@ afterAll(async () => {
 
 const num = (v: unknown) => (v === null || v === undefined ? 0 : Number(v));
 
-function fakeReq(body: unknown): Request {
-  return { body, user: { id: 1, id_rol: ADMIN }, params: {} } as unknown as Request;
+// The fixed reports read their filter from the URL (`req.query`), as they do
+// behind the router.
+function fakeReq(query: unknown): Request {
+  return { query, user: { id: 1, id_rol: ADMIN }, params: {} } as unknown as Request;
 }
+
+/** The tramo as the fixed reports present it: its name is composed from its two ends. */
+const nombreDe = (tramo: unknown): string => {
+  const [a, b] = (tramo as { ciudades: [Extremo, Extremo] }).ciudades;
+  return nombreDeTramo(a, b);
+};
 
 /**
  * Most legacy handlers answer with a list of rows, so that is the default.
- * `putTiemposResumen` answers with an object wrapping one instead, and saying
+ * `getTiemposResumen` answers with an object wrapping one instead, and saying
  * so at that call site is the honest fix: hard-coding the list here made the
  * return type a lie for one caller, and the compiler said so.
  */
 async function callLegacy<T = Record<string, unknown>[]>(
   handler: (req: Request, res: Response) => Promise<unknown>,
-  body: unknown,
+  query: unknown,
 ): Promise<T> {
   const res = {
     code: 0,
@@ -61,7 +70,7 @@ async function callLegacy<T = Record<string, unknown>[]>(
     status(c: number) { res.code = c; return res; },
     json(d: unknown) { res.data = d; return res; },
   };
-  await handler(fakeReq(body), res as unknown as Response);
+  await handler(fakeReq(query), res as unknown as Response);
   if (res.code !== 200) throw new Error(`legacy respondió ${res.code}`);
   return res.data as T;
 }
@@ -89,7 +98,7 @@ const revisionEnRango = {
 describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
   it("estado de la red: postes, eventos and pending per tramo", async () => {
 
-    const legacy = await callLegacy(putEstadoRed, {});
+    const legacy = await callLegacy(getEstadoRed, {});
     const config: ReportConfig = {
       root: "poste",
       columns: [
@@ -107,7 +116,7 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
       `${o.tramo}|${o.postes}|${o.eventos}|${o.pendientes}`;
     const legacyRows = legacy
       .map((r) => ({
-        tramo: `${r.ciudadAName} - ${r.ciudadBName}`,
+        tramo: nombreDe(r.tramo),
         postes: num(r.totalPostes),
         eventos: num(r.totalEventos),
         pendientes: num(r.totalPendientes),
@@ -125,7 +134,7 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
 
   it("observaciones frecuentes: count per observation", async () => {
 
-    const legacy = await callLegacy(putObsFrecuencia, { fechaInicial: FROM, fechaFinal: TO });
+    const legacy = await callLegacy(getObsFrecuencia, { fechaInicial: FROM, fechaFinal: TO });
     const config: ReportConfig = {
       root: "eventoObs",
       columns: [{ path: "ob.name" }, { path: "id", agg: "count" }],
@@ -138,7 +147,7 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
     };
     const built = await runReport(config, ADMIN);
 
-    // putObsFrecuencia filters by id_evento without checking the event is live,
+    // getObsFrecuencia filters by id_evento without checking the event is live,
     // so it also counts observations of archived events. The builder excludes
     // them on purpose; discount them to compare like with like.
     const archivedRows = (await sequelize.query(
@@ -168,7 +177,7 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
     // period by the repair date. Selecting by revision date, as this test used
     // to, answers a different question: what was visited, not what was fixed.
     const { tramos: legacy } = await callLegacy<{ tramos: Record<string, unknown>[] }>(
-      putTiemposResumen,
+      getTiemposResumen,
       { fechaInicial: FROM, fechaFinal: TO },
     );
     const config: ReportConfig = {
@@ -199,7 +208,7 @@ describe.skipIf(!dbAvailable)("regression against the existing reports", () => {
       `${o.tramo}|${o.count}|${o.avg}|${o.min}|${o.max}`;
     const legacyRows = legacy
       .map((r) => ({
-        tramo: `${r.ciudadAName} - ${r.ciudadBName}`,
+        tramo: nombreDe(r.tramo),
         count: num(r.count), avg: num(r.avgDias), min: num(r.minDias), max: num(r.maxDias),
       }))
       .map(key);

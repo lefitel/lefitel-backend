@@ -58,7 +58,10 @@ const { ObsModel } = await import("../models/obs.model.js");
 const { PosteModel } = await import("../models/poste.model.js");
 const { PropietarioModel } = await import("../models/propietario.model.js");
 const { TipoObsModel } = await import("../models/tipoObs.model.js");
+const { TramoModel } = await import("../models/tramo.model.js");
+const { DepartamentoModel } = await import("../models/departamento.model.js");
 const { EventoModel } = await import("../models/evento.model.js");
+const { INCLUDE_TRAMO } = await import("../tramos/presentacion.js");
 
 const sesionFindOne = vi.spyOn(SesionModel, "findOne");
 const usuarioFindByPk = vi.spyOn(UsuarioModel, "findByPk");
@@ -83,6 +86,8 @@ const obsFindAll = vi.spyOn(ObsModel, "findAll");
 const posteFindAll = vi.spyOn(PosteModel, "findAll");
 const propietarioFindAll = vi.spyOn(PropietarioModel, "findAll");
 const tipoObsFindAll = vi.spyOn(TipoObsModel, "findAll");
+const tramoFindAll = vi.spyOn(TramoModel, "findAll");
+const departamentoFindAll = vi.spyOn(DepartamentoModel, "findAll");
 
 /**
  * The two queries that prove the ordering, by never running.
@@ -108,12 +113,24 @@ const COOKIE = `${SESSION_COOKIE_NAME}=${TOKEN}`;
  */
 const PASS_CAMBIADA = new Date(Date.now() - 365 * 86_400_000);
 
-/** Two live cities, and one that is archived and therefore never served. */
+/** Two live cities. */
 const CIUDADES = [
   { id: 3, name: "Tacna", lat: -18.01, lng: -70.25 },
   { id: 7, name: "Ilo", lat: -17.64, lng: -71.34 },
 ];
-const ARCHIVADA = 9;
+
+/** A tramo row as `INCLUDE_TRAMO` brings it back: the two ends by id, with their names. */
+const crudo = (extra: Record<string, unknown> = {}) => ({
+  id: 14,
+  id_ciudad_min: 3,
+  id_ciudad_max: 7,
+  id_departamento: 5,
+  deletedAt: null,
+  ciudadMin: { id: 3, name: "Sucre", lat: -19.04, lng: -65.26 },
+  ciudadMax: { id: 7, name: "Potosí", lat: -19.58, lng: -65.75 },
+  departamento: { id: 5, name: "Potosí" },
+  ...extra,
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -147,14 +164,11 @@ beforeEach(() => {
   obsFindAll.mockResolvedValue([{ id: 1, name: "Poste inclinado", id_tipoObs: 2 }] as never);
   propietarioFindAll.mockResolvedValue([{ id: 1, name: "Electrosur" }] as never);
   tipoObsFindAll.mockResolvedValue([{ id: 2, name: "Estructural" }] as never);
-  // Both directions of one tramo, one repeat, and one pair reaching a city that
-  // is not in `CIUDADES` — the three cases `tramosEntre` decides.
-  posteFindAll.mockResolvedValue([
-    { id_ciudadA: 3, id_ciudadB: 7 },
-    { id_ciudadA: 7, id_ciudadB: 3 },
-    { id_ciudadA: 3, id_ciudadB: 7 },
-    { id_ciudadA: 3, id_ciudadB: ARCHIVADA },
-  ] as never);
+  // Left rejecting: the tramos no longer come from the pole register, and a bare
+  // spy would call through to the configured database if anything went back to it.
+  posteFindAll.mockRejectedValue(new Error("PosteModel.findAll corrió: las opciones ya no leen el registro de postes") as never);
+  tramoFindAll.mockResolvedValue([crudo()] as never);
+  departamentoFindAll.mockResolvedValue([{ id: 5, name: "Potosí" }] as never);
   // Left rejecting: nothing in this file should reach either, and a bare spy
   // would answer `undefined` and let a shadowed route look merely empty.
   posteFindOne.mockRejectedValue(new Error("searchPoste corrió: /options quedó tapada por /:id") as never);
@@ -206,13 +220,14 @@ describe("the options endpoints are mounted where they can be reached", () => {
 });
 
 describe("what each endpoint answers with", () => {
-  it("gives the pole form its four lists and nothing else", async () => {
+  it("gives the pole form its lists and nothing else", async () => {
     const res = await request(app).get("/api/poste/options").set("Cookie", COOKIE);
 
-    // Both directions: a missing block and an extra one both fail. `PosteSheet`
-    // reads all four, and a block nobody asked for is a column of the database
-    // being published by accident.
-    expect(Object.keys(res.body).sort()).toEqual(["adss", "ciudad", "material", "propietario"]);
+    // Both directions: a missing block and an extra one both fail. A block
+    // nobody asked for is a column of the database being published by accident.
+    // The tramos and the departments are there so the form can offer a tramo, and
+    // create one, without another gate.
+    expect(Object.keys(res.body).sort()).toEqual(["adss", "ciudad", "departamento", "material", "propietario", "tramos"]);
   });
 
   it("gives both incident forms their two lists and nothing else", async () => {
@@ -284,14 +299,10 @@ describe("what each block asks the database for", () => {
     expect(consulta(adssFindAll)?.attributes).toEqual(["id", "name"]);
     expect(consulta(materialFindAll)?.attributes).toEqual(["id", "name"]);
     expect(consulta(propietarioFindAll)?.attributes).toEqual(["id", "name"]);
-    // The pole query behind `tramos`. `group` is what makes it one row per
-    // distinct pair instead of one row per pole: without it the dedupe still
-    // answers correctly and the database does the work of the whole register.
-    expect(consulta(posteFindAll)?.attributes).toEqual(["id_ciudadA", "id_ciudadB"]);
-    expect(consulta(posteFindAll)?.group).toEqual(["id_ciudadA", "id_ciudadB"]);
-    // By the grouped columns: the only order a grouped query can carry, and the
-    // one block of the six that the first version of this file left unordered.
-    expect(consulta(posteFindAll)?.order).toEqual([["id_ciudadA", "ASC"], ["id_ciudadB", "ASC"]]);
+    // The tramos are read from their own table now, in the columns the
+    // presenter needs and in id order before it sorts them by name.
+    expect(consulta(tramoFindAll)?.attributes).toEqual(INCLUDE_TRAMO.attributes);
+    expect(consulta(tramoFindAll)?.order).toEqual([["id", "ASC"]]);
   });
 
   it("asks for plain rows, not model instances", async () => {
@@ -328,38 +339,75 @@ describe("what each block asks the database for", () => {
     // the kind of thing that gets pasted in from a neighbouring controller,
     // where it is there on purpose so an archived city can still label a pole
     // that exists. Asserted as absence for that reason.
-    for (const spy of [ciudadFindAll, adssFindAll, materialFindAll, propietarioFindAll, obsFindAll, posteFindAll]) {
+    for (const spy of [ciudadFindAll, adssFindAll, materialFindAll, propietarioFindAll, obsFindAll, tramoFindAll]) {
       expect(consulta(spy)).not.toHaveProperty("paranoid");
       expect(consulta(spy)).not.toHaveProperty("where");
     }
   });
 });
 
-describe("the tramos block, which is computed and not selected", () => {
-  it("collapses both directions of a tramo into one entry", async () => {
+describe("the tramos block", () => {
+  it("serves every live tramo, presented and in the order of its name", async () => {
+    tramoFindAll.mockResolvedValue([
+      crudo({ id: 2, ciudadMin: { id: 1, name: "Tarija" }, ciudadMax: { id: 9, name: "Sucre" } }),
+      crudo({ id: 1, ciudadMin: { id: 3, name: "Beni" }, ciudadMax: { id: 4, name: "Oruro" } }),
+    ] as never);
     const res = await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
-
-    // Four rows go in — (3,7), (7,3) and (3,7) again, plus one reaching an
-    // archived city — and one pair comes out, keyed by min/max. A tramo is
-    // bidirectional: Tacna→Ilo and Ilo→Tacna are the same stretch of line.
-    expect(res.body.tramos).toEqual([{ id_ciudadA: 3, id_ciudadB: 7 }]);
+    expect(res.body.tramos.map((t: { nombre: string }) => t.nombre)).toEqual(["Beni – Oruro", "Sucre – Tarija"]);
+    expect(JSON.stringify(res.body.tramos)).not.toMatch(/id_ciudad_(min|max)|id_ciudadA/);
   });
 
-  it("drops a pair naming a city this same response does not serve", async () => {
-    const res = await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
+  it("leaves archived tramos out of a list of choices, and keeps their cities' names in", async () => {
+    await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
+    // The tramo itself: default paranoid, so `paranoid` is not passed as false.
+    expect((consulta(tramoFindAll) as { paranoid?: boolean })?.paranoid).not.toBe(false);
+    // Its cities: asked for even when archived, so the name is whole.
+    const incluye = (consulta(tramoFindAll) as unknown as { include: { as?: string; paranoid: boolean }[] }).include;
+    const ciudades = incluye.filter((i) => i.as);
+    expect(ciudades).toHaveLength(2);
+    expect(ciudades.every((i) => i.paranoid === false)).toBe(true);
+  });
 
-    const ciudadesServidas = new Set((res.body.ciudad as { id: number }[]).map((c) => c.id));
-    const nombradas = (res.body.tramos as { id_ciudadA: number; id_ciudadB: number }[])
-      .flatMap((t) => [t.id_ciudadA, t.id_ciudadB]);
+  it("no longer derives tramos from the pole register", async () => {
+    await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
+    expect(posteFindAll).not.toHaveBeenCalled();
+  });
 
-    // The invariant, not the fixture: every city a tramo names must be in the
-    // `ciudad` block beside it. `PosteModel.findAll` is paranoid about poles and
-    // says nothing about their cities, so without the filter this response can
-    // offer a neighbour the combobox cannot render and the line cannot be drawn
-    // to. `GET /api/poste/tramos`, the endpoint this logic came from, did
-    // exactly that; C2 retired it, and this block is now the only source.
-    expect(nombradas.filter((id) => !ciudadesServidas.has(id))).toEqual([]);
-    expect(nombradas).not.toContain(ARCHIVADA);
+  it("gives the pole form its tramos and the departments, so it can create a tramo without another gate", async () => {
+    const res = await request(app).get("/api/poste/options").set("Cookie", COOKIE);
+    expect(Object.keys(res.body).sort()).toEqual(["adss", "ciudad", "departamento", "material", "propietario", "tramos"]);
+    expect(res.body.departamento).toEqual([{ id: 5, name: "Potosí" }]);
+    expect(res.body.tramos.map((t: { nombre: string }) => t.nombre)).toEqual(["Potosí – Sucre"]);
+    expect(consulta(departamentoFindAll)?.order).toEqual([["id", "ASC"]]);
+  });
+});
+
+describe("the tramo dialog's lists", () => {
+  it("asks for the cities with their coordinates and photo, so the network editor can draw and edit them", async () => {
+    await request(app).get("/api/tramo/options").set("Cookie", COOKIE);
+
+    expect(consulta(ciudadFindAll)?.attributes).toEqual(["id", "name", "lat", "lng", "image"]);
+  });
+
+  it("answers each city with id, name, lat, lng and image and nothing more, beside the departments", async () => {
+    const conFoto = [
+      { id: 3, name: "Tacna", lat: -18.01, lng: -70.25, image: "uploads/tacna.jpg" },
+      { id: 7, name: "Ilo", lat: -17.64, lng: -71.34, image: null },
+    ];
+    ciudadFindAll.mockResolvedValue(conFoto as never);
+
+    const res = await request(app).get("/api/tramo/options").set("Cookie", COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(["ciudad", "departamento"]);
+    expect(res.body.ciudad).toEqual(conFoto);
+    expect(res.body.departamento).toEqual([{ id: 5, name: "Potosí" }]);
+  });
+
+  it("does not widen the pole form's cities with the photo", async () => {
+    await request(app).get("/api/poste/options").set("Cookie", COOKIE);
+
+    expect(consulta(ciudadFindAll)?.attributes).not.toContain("image");
   });
 });
 
@@ -390,7 +438,7 @@ describe("who may call them", () => {
     await request(app).get("/api/evento/options").set("Cookie", COOKIE);
     await request(app).get("/api/reporte/options").set("Cookie", COOKIE);
 
-    for (const spy of [adssFindAll, ciudadFindAll, materialFindAll, obsFindAll, propietarioFindAll, tipoObsFindAll, posteFindAll]) {
+    for (const spy of [adssFindAll, ciudadFindAll, materialFindAll, obsFindAll, propietarioFindAll, tipoObsFindAll, tramoFindAll, departamentoFindAll]) {
       expect(spy).toHaveBeenCalled();
     }
     // And the one write on the request path never ran. If this ever fails, the

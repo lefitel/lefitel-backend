@@ -26,15 +26,6 @@ export interface Viewer {
 }
 
 /**
- * A viewer who may see nothing personal.
- *
- * Exists so that a caller with no session, or one whose permissions could not
- * be read, still has a viewer to pass — and the one it gets is the closed one.
- * A permission system that guesses "yes" when it is unsure is not one.
- */
-export const anonymous = (role = -1): Viewer => ({ role, staff: false });
-
-/**
  * Whether a catalog entry is visible to this viewer.
  *
  * One line, in one place, deliberately: the previous version of this question

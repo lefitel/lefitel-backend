@@ -227,7 +227,7 @@ export async function getCatalogo(req: Request, res: Response) {
  * Well above any page a person reads — the screen asks for a hundred rows — and
  * below what puts the process in trouble.
  */
-export const MAX_CONSULTA_CELLS = 300_000;
+const MAX_CONSULTA_CELLS = 300_000;
 
 /** What the builder falls back to when the caller names no page size. */
 const DEFAULT_CONSULTA_ROWS = 500;

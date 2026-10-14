@@ -14,6 +14,7 @@ import {
   type Dependencias,
   type Destinatario,
   type Programacion,
+  type ResultadoDeEntrega,
 } from "./run.js";
 
 const TURNO = new Date("2026-03-16T11:00:00Z"); // Monday 16 March, 07:00 in La Paz.
@@ -35,6 +36,8 @@ const PROGRAMACION: Programacion = {
 const CONFIG = { root: "evento", columns: [{ path: "description" }] } as ReportConfig;
 
 const dest = (over: Partial<Destinatario> & { id: number; email: string }): Destinatario => ({
+  // What the screen would call them: an account by name, an outside address by itself.
+  nombre: over.externo ? over.email : `Cuenta ${over.id}`,
   externo: false,
   staff: false,
   rechazos_seguidos: 0,
@@ -81,6 +84,7 @@ function falsas(over: Partial<Dependencias> & { ctx?: Contexto } = {}) {
       return { ok: true, proveedor: "resend", id: "x" };
     }),
     anotarEntrega: vi.fn(async () => undefined),
+    anotarEntregaDeEjecucion: vi.fn(async (_id: number, _entrega: { destinatario: Destinatario; resultado: ResultadoDeEntrega }) => undefined),
     enlaceDeBaja: vi.fn(async (id: number) => `https://www.osefi.net/baja/token-${id}`),
     reprogramar: vi.fn(async () => undefined),
     registrar: vi.fn(),
@@ -483,5 +487,164 @@ describe("\"send it now\"", () => {
     // The person who pressed the button reads the result on screen; no notice.
     expect(mal.enviados).toHaveLength(0);
     expect(mal.cierres).toHaveLength(1);
+  });
+});
+
+describe("who a run was sent to, written down as it goes", () => {
+  /** What the history was told, as [recipient id, result], in the order it was told. */
+  const anotadas = (deps: ReturnType<typeof falsas>["deps"]) =>
+    vi.mocked(deps.anotarEntregaDeEjecucion).mock.calls.map(([, e]) => [e.destinatario.id, e.resultado]);
+
+  const mezcla = [
+    dest({ id: 1, email: "bien@osefi.net" }),
+    dest({ id: 2, email: "rebota@fuera.com", externo: true }),
+    dest({ id: 3, email: "sin-suerte@osefi.net" }),
+  ];
+  const respuestas: Record<string, ResultadoDeCorreo> = {
+    "rebota@fuera.com": { ok: false, motivo: "destinatario", proveedor: "resend" },
+    "sin-suerte@osefi.net": { ok: false, motivo: "sin-proveedor" },
+  };
+
+  it("writes one row per recipient, to the run it belongs to, with what happened to each", async () => {
+    const { deps } = falsas({
+      ctx: contexto({ destinatarios: mezcla }),
+      enviar: vi.fn(async (c: CorreoAEnviar) => respuestas[c.para] ?? { ok: true }),
+    });
+    await ejecutarTurno(deps, PROGRAMACION, TURNO);
+
+    // Delivered; the address itself refused; any other failure of the send.
+    expect(anotadas(deps)).toEqual([[1, "entregado"], [2, "rechazado"], [3, "no_enviado"]]);
+    expect(vi.mocked(deps.anotarEntregaDeEjecucion).mock.calls.every(([id]) => id === 100)).toBe(true);
+  });
+
+  it("hands over the recipient itself, so the row can say who it was for", async () => {
+    const cliente = dest({ id: 2, email: "cliente@fuera.com", externo: true, nombre: "cliente@fuera.com" });
+    const { deps } = falsas({ ctx: contexto({ destinatarios: [cliente] }) });
+    await ejecutarTurno(deps, PROGRAMACION, TURNO);
+    expect(vi.mocked(deps.anotarEntregaDeEjecucion).mock.calls[0][1].destinatario).toBe(cliente);
+  });
+
+  it("writes «sin_cupo» for those the day's ceiling held back", async () => {
+    const { deps } = falsas({
+      ctx: contexto({ destinatarios: [1, 2, 3].map((id) => dest({ id, email: `d${id}@osefi.net` })) }),
+      enviadosHoy: vi.fn(async () => MAX_CORREOS_DE_INFORMES_AL_DIA - 1),
+    });
+    await ejecutarTurno(deps, PROGRAMACION, TURNO);
+    expect(anotadas(deps)).toEqual([[1, "entregado"], [2, "sin_cupo"], [3, "sin_cupo"]]);
+  });
+
+  it("writes «sin_cupo» for every recipient when nothing was left of the day at all", async () => {
+    const { deps } = falsas({
+      ctx: contexto({ destinatarios: [1, 2].map((id) => dest({ id, email: `d${id}@osefi.net` })) }),
+      enviadosHoy: vi.fn(async () => MAX_CORREOS_DE_INFORMES_AL_DIA),
+    });
+    await ejecutarTurno(deps, PROGRAMACION, TURNO);
+    expect(anotadas(deps)).toEqual([[1, "sin_cupo"], [2, "sin_cupo"]]);
+  });
+
+  it("writes nothing for a recipient the run does not write to: unsubscribed, or refused too often", async () => {
+    const { deps } = falsas({
+      ctx: contexto({
+        destinatarios: [
+          dest({ id: 1, email: "bien@osefi.net" }),
+          dest({ id: 2, email: "baja@fuera.com", externo: true, deBaja: true }),
+          dest({ id: 3, email: "rebota@fuera.com", externo: true, rechazos_seguidos: RECHAZOS_PARA_DEJAR }),
+        ],
+      }),
+    });
+    await ejecutarTurno(deps, PROGRAMACION, TURNO);
+    expect(anotadas(deps)).toEqual([[1, "entregado"]]);
+  });
+
+  it("writes them for a manual run as well", async () => {
+    const { deps } = falsas();
+    await ejecutarTurno(deps, PROGRAMACION, TURNO, { manual: true });
+    expect(anotadas(deps)).toEqual([[1, "entregado"]]);
+  });
+
+  it("writes each one when its send finishes, not all at the end: a run that dies half way tells the truth", async () => {
+    const { deps } = falsas({ ctx: contexto({ destinatarios: mezcla }) });
+    await ejecutarTurno(deps, PROGRAMACION, TURNO);
+
+    const orden = (f: { mock: { invocationCallOrder: number[] } }, i: number) => f.mock.invocationCallOrder[i];
+    // Send 1, write 1, send 2, write 2, send 3, write 3.
+    for (let i = 0; i < 3; i++) {
+      expect(orden(deps.anotarEntregaDeEjecucion as never, i)).toBeGreaterThan(orden(deps.enviar as never, i));
+      if (i < 2) expect(orden(deps.anotarEntregaDeEjecucion as never, i)).toBeLessThan(orden(deps.enviar as never, i + 1));
+    }
+  });
+
+  it("writes nothing when the exporter was taken and the run is given back: nothing was sent", async () => {
+    const { deps } = falsas({
+      exportar: vi.fn(async () => {
+        throw Object.assign(new Error("ocupado"), { name: "ExportBusyError" });
+      }),
+    });
+    await ejecutarTurno(deps, PROGRAMACION, TURNO);
+    expect(deps.liberar).toHaveBeenCalledWith(100);
+    expect(deps.anotarEntregaDeEjecucion).not.toHaveBeenCalled();
+  });
+
+  it("never breaks the run: when writing a row fails, everybody still gets the message and the run closes as sent", async () => {
+    const { deps, enviados, cierres } = falsas({
+      ctx: contexto({ destinatarios: [1, 2, 3].map((id) => dest({ id, email: `d${id}@osefi.net` })) }),
+      anotarEntregaDeEjecucion: vi.fn(async () => {
+        throw new Error("la tabla no existe");
+      }),
+    });
+    const r = await ejecutarTurno(deps, PROGRAMACION, TURNO);
+
+    expect(r).toEqual({ tipo: "ejecutado", estado: "enviado", enviados: 3, no_enviados: 0 });
+    expect(enviados.map((e) => e.correo.para)).toEqual(["d1@osefi.net", "d2@osefi.net", "d3@osefi.net"]);
+    expect(cierres[0].cierre).toMatchObject({ estado: "enviado", enviados: 3, no_enviados: 0 });
+    // The schedule's own bookkeeping carries on too.
+    expect(deps.anotarEntrega).toHaveBeenCalledTimes(3);
+    expect(deps.reprogramar).toHaveBeenCalledWith(7, expect.objectContaining({ fallos_seguidos: 0, activa: true }));
+    // And it is said, once per failed row, with who and which run.
+    const avisos = vi.mocked(deps.registrar).mock.calls.filter(([nivel]) => nivel === "warn");
+    expect(avisos).toHaveLength(3);
+    expect(avisos[0][1]).toMatchObject({ id_ejecucion: 100, id_destinatario: 1, resultado: "entregado" });
+  });
+
+  it("is written before the counters on the address: when those throw mid-loop, the history still says who got it", async () => {
+    const { deps, cierres } = falsas({
+      ctx: contexto({ destinatarios: [1, 2].map((id) => dest({ id, email: `d${id}@osefi.net` })) }),
+      anotarEntrega: vi.fn(async () => {
+        throw new Error("la base se fue");
+      }),
+    });
+    await ejecutarTurno(deps, PROGRAMACION, TURNO);
+
+    // The run stopped at the first recipient; that one's row was already written.
+    expect(anotadas(deps)).toEqual([[1, "entregado"]]);
+    expect(cierres).toHaveLength(1);
+  });
+
+  it("never breaks the run when the dependency throws at once instead of rejecting", async () => {
+    const { deps, enviados, cierres } = falsas({
+      ctx: contexto({ destinatarios: [1, 2].map((id) => dest({ id, email: `d${id}@osefi.net` })) }),
+      anotarEntregaDeEjecucion: vi.fn((): Promise<void> => {
+        throw new Error("sincrónico");
+      }),
+    });
+    const r = await ejecutarTurno(deps, PROGRAMACION, TURNO);
+
+    expect(r).toEqual({ tipo: "ejecutado", estado: "enviado", enviados: 2, no_enviados: 0 });
+    expect(enviados).toHaveLength(2);
+    expect(cierres[0].cierre.estado).toBe("enviado");
+    expect(vi.mocked(deps.registrar).mock.calls.filter(([nivel]) => nivel === "warn")).toHaveLength(2);
+  });
+
+  it("does not break the run either when the failure is in the «sin_cupo» branch", async () => {
+    const { deps, cierres } = falsas({
+      ctx: contexto({ destinatarios: [1, 2].map((id) => dest({ id, email: `d${id}@osefi.net` })) }),
+      enviadosHoy: vi.fn(async () => MAX_CORREOS_DE_INFORMES_AL_DIA),
+      anotarEntregaDeEjecucion: vi.fn(async () => {
+        throw new Error("x");
+      }),
+    });
+    const r = await ejecutarTurno(deps, PROGRAMACION, TURNO);
+    expect(r).toMatchObject({ estado: "fallido", enviados: 0, no_enviados: 2 });
+    expect(cierres).toHaveLength(1);
   });
 });

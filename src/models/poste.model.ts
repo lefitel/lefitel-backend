@@ -2,8 +2,8 @@ import { DataTypes, ModelDefined, Optional } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { PropietarioModel } from "./propietario.model.js";
 import { UsuarioModel } from "./usuario.model.js";
-import { CiudadModel } from "./ciudad.model.js";
 import { MaterialModel } from "./material.model.js";
+import { TramoModel } from "./tramo.model.js";
 import { IPoste } from "../interfaces/index.js";
 type PosteCreation = Optional<IPoste, "id">;
 export const PosteModel: ModelDefined<IPoste, PosteCreation> = sequelize.define("poste", {
@@ -37,11 +37,7 @@ export const PosteModel: ModelDefined<IPoste, PosteCreation> = sequelize.define(
     type: DataTypes.INTEGER,
     allowNull: false,
   },
-  id_ciudadA: {
-    type: DataTypes.INTEGER,
-    allowNull: false,
-  },
-  id_ciudadB: {
+  id_tramo: {
     type: DataTypes.INTEGER,
     allowNull: false,
   },
@@ -71,7 +67,7 @@ export const PosteModel: ModelDefined<IPoste, PosteCreation> = sequelize.define(
  */
 export const POSTE_PUBLIC_ATTRIBUTES = [
   "id", "name", "date", "lat", "lng",
-  "id_propietario", "id_material", "id_ciudadA", "id_ciudadB",
+  "id_propietario", "id_material", "id_tramo",
 ] as const;
 
 //Relacion con poste
@@ -81,11 +77,8 @@ PosteModel.belongsTo(PropietarioModel, { foreignKey: "id_propietario" });
 MaterialModel.hasMany(PosteModel, { foreignKey: "id_material" });
 PosteModel.belongsTo(MaterialModel, { foreignKey: "id_material" });
 
-CiudadModel.hasMany(PosteModel, { foreignKey: "id_ciudadA", as: "ciudadA" });
-PosteModel.belongsTo(CiudadModel, { foreignKey: "id_ciudadA", as: "ciudadA" });
-
-CiudadModel.hasMany(PosteModel, { foreignKey: "id_ciudadB", as: "ciudadB" });
-PosteModel.belongsTo(CiudadModel, { foreignKey: "id_ciudadB", as: "ciudadB" });
+TramoModel.hasMany(PosteModel, { foreignKey: "id_tramo" });
+PosteModel.belongsTo(TramoModel, { foreignKey: "id_tramo" });
 
 UsuarioModel.hasMany(PosteModel, { foreignKey: "id_usuario" });
 PosteModel.belongsTo(UsuarioModel, { foreignKey: "id_usuario" });

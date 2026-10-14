@@ -20,6 +20,7 @@ import { PERIODS } from "./constraints.js";
 import type { Period } from "./types.js";
 import { buildCatalogView } from "./catalogView.js";
 import { catalog } from "./catalog.js";
+import { sqlNombreDelTramo } from "../tramos/nombre.js";
 import { runReport, countReport } from "./execute.js";
 import type { Viewer } from "./viewer.js";
 
@@ -139,8 +140,8 @@ describe.skipIf(!dbAvailable)("archived records stay out of every root", () => {
   });
 
   it("leaves no group of orphans behind", async () => {
-    // Grouped by tramo, the archived events' revisions collected into a
-    // ninetieth group keyed on null.
+    // Grouped by tramo, the archived events' revisions collected into one more
+    // group, keyed on null.
     const result = await runReport(
       {
         root: "revision",
@@ -151,7 +152,18 @@ describe.skipIf(!dbAvailable)("archived records stay out of every root", () => {
       ADMIN,
     );
 
-    expect(result.rows).toHaveLength(89);
+    // 83 tramos have a pole with an inspection on a live event: measured with
+    // `select count(distinct p.id_tramo) from revicions r join eventos e on
+    // e.id = r.id_evento and e."deletedAt" is null join postes p on p.id =
+    // e.id_poste where r."deletedAt" is null`. Grouped by the old pair of city
+    // ids the same rows gave 89 (measured on an unmigrated copy, pairs taken
+    // without direction; 107 if A->B and B->A count apart). The six that went
+    // away are exactly the pairs that differ only by a merged-away city, which
+    // now fall into one tramo each: 34-59 + 34-78, 56-57 + 56-76, 59-77 +
+    // 77-78, 59-60 + 78-79, 60-61 + 61-79, and 86-87 + 87-98. That is the
+    // city merge (77 -> 58, 78 -> 59, 76 -> 57, 79 -> 60, 86 -> 98), not a lost
+    // pole: applying the merge to the old pairs gives 83.
+    expect(result.rows).toHaveLength(83);
     expect(result.rows.some((row) => row.c0 === null)).toBe(false);
   });
 });
@@ -212,15 +224,18 @@ describe.skipIf(!dbAvailable)("the three roots that were missing", () => {
       const [truth] = await sequelize.query<{ postes: number; eventos: number; pend: number }>(
         `SELECT
            (SELECT count(*)::int FROM "postes" p WHERE p."deletedAt" IS NULL
-              AND (p."id_ciudadA" = c."id" OR p."id_ciudadB" = c."id")) AS postes,
+              AND p."id_tramo" IN (SELECT t."id" FROM "tramos" t
+                                    WHERE t."id_ciudad_min" = c."id" OR t."id_ciudad_max" = c."id")) AS postes,
            (SELECT count(*)::int FROM "eventos" e
               JOIN "postes" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL
              WHERE e."deletedAt" IS NULL
-               AND (p."id_ciudadA" = c."id" OR p."id_ciudadB" = c."id")) AS eventos,
+               AND p."id_tramo" IN (SELECT t."id" FROM "tramos" t
+                                    WHERE t."id_ciudad_min" = c."id" OR t."id_ciudad_max" = c."id")) AS eventos,
            (SELECT count(*)::int FROM "eventos" e
               JOIN "postes" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL
              WHERE e."deletedAt" IS NULL AND e."state" IS NOT TRUE
-               AND (p."id_ciudadA" = c."id" OR p."id_ciudadB" = c."id")) AS pend
+               AND p."id_tramo" IN (SELECT t."id" FROM "tramos" t
+                                    WHERE t."id_ciudad_min" = c."id" OR t."id_ciudad_max" = c."id")) AS pend
            FROM "ciudads" c WHERE c."name" = $1 AND c."deletedAt" IS NULL LIMIT 1`,
         { bind: [row[key]], type: QueryTypes.SELECT, logging: false },
       );
@@ -252,7 +267,8 @@ describe.skipIf(!dbAvailable)("the three roots that were missing", () => {
     const [truth] = await sequelize.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM "ciudads" c WHERE c."deletedAt" IS NULL
          AND NOT EXISTS (SELECT 1 FROM "postes" p WHERE p."deletedAt" IS NULL
-           AND (p."id_ciudadA" = c."id" OR p."id_ciudadB" = c."id"))`,
+           AND p."id_tramo" IN (SELECT t."id" FROM "tramos" t
+                                    WHERE t."id_ciudad_min" = c."id" OR t."id_ciudad_max" = c."id"))`,
       { type: QueryTypes.SELECT, logging: false },
     );
 
@@ -283,10 +299,13 @@ describe.skipIf(!dbAvailable)("the three roots that were missing", () => {
       { type: QueryTypes.SELECT, logging: false },
     );
 
-    // Nearly twice: every pole counts at both ends, except the two whose two
-    // ends are the same city. Asserted rather than left as a surprise.
-    expect(suma).toBeGreaterThan(Number(postes.n));
-    expect(suma).toBeLessThanOrEqual(Number(postes.n) * 2);
+    // Exactly twice: every pole counts at both ends of its tramo, and the CHECK
+    // on `tramos` forbids a tramo whose two ends are the same city. It holds
+    // while no live pole stands on a tramo with an archived city (an archived
+    // city has no row here to count it): 0 today, and 3.082 = 2 x 1.541 on the
+    // local copy. If that ever changes this fails, and the count is then
+    // between one and two times the poles.
+    expect(suma).toBe(Number(postes.n) * 2);
   });
 
   it("counts what each person registered, and only what the schema records", async () => {
@@ -737,5 +756,133 @@ describe.skipIf(!dbAvailable)("named periods — the bounds Postgres actually co
       const resultado = await runReport({ ...config, limit: 5 }, ADMIN);
       expect(resultado.total, period).toBe(await countReport(config, ADMIN));
     }
+  });
+});
+
+describe.skipIf(!dbAvailable)("a report rooted at tramo", () => {
+  // Read-only, like everything in this file: SELECTs and EXPLAINs.
+  const rowsOf = async (config: Parameters<typeof buildQuery>[0]) => {
+    const built = buildQuery(config, ADMIN);
+    const rows = await sequelize.query<Record<string, unknown>>(built.sql, {
+      bind: built.binds,
+      type: QueryTypes.SELECT,
+      logging: false,
+    });
+    return { rows, keys: built.columns.map((c) => c.key) };
+  };
+  const scalar = async (sql: string): Promise<number> => {
+    const [row] = await sequelize.query<{ n: number }>(sql, { type: QueryTypes.SELECT, logging: false });
+    return Number(row.n);
+  };
+
+  it("adds up, unlike the city's: each pole stands on exactly one tramo", async () => {
+    const { rows, keys } = await rowsOf({
+      root: "tramo",
+      columns: [{ path: "numPostes" }, { path: "numEventos" }, { path: "numPendientes" }],
+      limit: 50_000,
+    });
+    const total = (key: string) => rows.reduce((sum, row) => sum + Number(row[key]), 0);
+
+    // The same three numbers by hand, over the poles that stand on a live tramo.
+    const truth = {
+      postes: await scalar(
+        `SELECT count(*)::int AS n FROM "postes" p JOIN "tramos" t ON t."id" = p."id_tramo" AND t."deletedAt" IS NULL
+          WHERE p."deletedAt" IS NULL`,
+      ),
+      eventos: await scalar(
+        `SELECT count(*)::int AS n FROM "eventos" e
+           JOIN "postes" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL
+           JOIN "tramos" t ON t."id" = p."id_tramo" AND t."deletedAt" IS NULL
+          WHERE e."deletedAt" IS NULL`,
+      ),
+      pendientes: await scalar(
+        `SELECT count(*)::int AS n FROM "eventos" e
+           JOIN "postes" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL
+           JOIN "tramos" t ON t."id" = p."id_tramo" AND t."deletedAt" IS NULL
+          WHERE e."deletedAt" IS NULL AND e."state" IS NOT TRUE`,
+      ),
+    };
+
+    expect(total(keys[0])).toBe(truth.postes);
+    expect(total(keys[1])).toBe(truth.eventos);
+    expect(total(keys[2])).toBe(truth.pendientes);
+    // Equal totals of zero would prove nothing, so each is guarded the way the
+    // city's are. On the local copy they are 1.541, 1.376 and 437.
+    expect(truth.postes).toBeGreaterThan(0);
+    expect(truth.eventos).toBeGreaterThan(0);
+    expect(truth.pendientes).toBeGreaterThan(0);
+  });
+
+  it("shows the tramos with no poles, which is why the root exists", async () => {
+    // What this does and does not prove: the local data has NO live tramo
+    // without a live pole today (84 live tramos, 0 empty) — the migration made
+    // tramos only out of existing poles — so both sides below are 0 and the
+    // equality cannot tell a root that keeps the empty tramos from one that
+    // drops them. That property is held by the pure-builder tests ("keeps a
+    // tramo with no poles"): no join to poles, no filter, a COUNT(*) subquery.
+    // The day somebody creates an empty tramo this starts proving it, and a
+    // `> 0` guard like the city's belongs here then.
+    const { rows } = await rowsOf({
+      root: "tramo",
+      columns: [{ path: "nombre" }, { path: "numPostes" }],
+      filters: { op: "and", conditions: [{ path: "numPostes", operator: "eq", value: 0 }] },
+      limit: 50_000,
+    });
+    const truth = await scalar(
+      `SELECT count(*)::int AS n FROM "tramos" t WHERE t."deletedAt" IS NULL
+         AND NOT EXISTS (SELECT 1 FROM "postes" p WHERE p."id_tramo" = t."id" AND p."deletedAt" IS NULL)`,
+    );
+    expect(rows).toHaveLength(truth);
+  });
+
+  it("lists every live tramo once, and names each the way the SQL twin does", async () => {
+    const { rows, keys } = await rowsOf({
+      root: "tramo",
+      columns: [{ path: "id" }, { path: "nombre" }],
+      limit: 50_000,
+    });
+    const live = await scalar(`SELECT count(*)::int AS n FROM "tramos" WHERE "deletedAt" IS NULL`);
+    expect(rows).toHaveLength(live);
+    for (const row of rows.slice(0, 20)) {
+      const [name] = await sequelize.query<{ nombre: string }>(
+        `SELECT ${sqlNombreDelTramo("$1::int")} AS nombre`,
+        { bind: [row[keys[0]]], type: QueryTypes.SELECT, logging: false },
+      );
+      expect(row[keys[1]]).toBe(name.nombre);
+    }
+  });
+
+  it("groups by department, and 'no department' is the filter 'está vacío'", async () => {
+    const porDepartamento = await rowsOf({
+      root: "tramo",
+      columns: [{ path: "departamento" }, { path: "id", agg: "count" }, { path: "numPostes", agg: "sum" }],
+      groupBy: ["departamento"],
+      limit: 50_000,
+    });
+    const live = await scalar(`SELECT count(*)::int AS n FROM "tramos" WHERE "deletedAt" IS NULL`);
+    const [, tramos] = porDepartamento.keys;
+    expect(porDepartamento.rows.reduce((s, r) => s + Number(r[tramos]), 0)).toBe(live);
+
+    const sin = await rowsOf({
+      root: "tramo",
+      columns: [{ path: "id" }],
+      filters: { op: "and", conditions: [{ path: "departamento", operator: "isnull" }] },
+      limit: 50_000,
+    });
+    const truth = await scalar(
+      `SELECT count(*)::int AS n FROM "tramos" WHERE "deletedAt" IS NULL AND "id_departamento" IS NULL`,
+    );
+    expect(sin.rows).toHaveLength(truth);
+  });
+
+  it("groups by the tramo, not by its name", async () => {
+    const { rows } = await rowsOf({
+      root: "tramo",
+      columns: [{ path: "nombre" }, { path: "id", agg: "count" }],
+      groupBy: ["nombre"],
+      limit: 50_000,
+    });
+    const live = await scalar(`SELECT count(*)::int AS n FROM "tramos" WHERE "deletedAt" IS NULL`);
+    expect(rows).toHaveLength(live);
   });
 });

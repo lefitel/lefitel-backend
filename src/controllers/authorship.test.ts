@@ -65,6 +65,14 @@ vi.mock("../models/obs.model.js", () => ({ ObsModel: { findAll: vi.fn().mockReso
 vi.mock("../models/poste.model.js", () => ({ PosteModel: { findByPk: vi.fn().mockResolvedValue(null), findOne: vi.fn() } }));
 vi.mock("../models/propietario.model.js", () => ({ PropietarioModel: {} }));
 vi.mock("../models/ciudad.model.js", () => ({ CiudadModel: {} }));
+vi.mock("../models/departamento.model.js", () => ({ DepartamentoModel: {} }));
+// A pole stands on a tramo; the one these cases use is live.
+vi.mock("../models/tramo.model.js", () => ({
+  TramoModel: { findOne: vi.fn().mockResolvedValue({ id: 1 }), findByPk: vi.fn() },
+  TRAMO_PUBLIC_ATTRIBUTES: ["id", "id_ciudad_min", "id_ciudad_max", "id_departamento", "deletedAt"],
+}));
+// Pulled in by `tramo.controller.ts`, which the pole controller imports for one sentence.
+vi.mock("../permissions/store.js", () => ({ can: async () => true }));
 // `USUARIO_AS_AUTHOR` is spread with `[...]` inside poste.controller, so the
 // mock has to carry it or the module throws on load rather than failing a test.
 vi.mock("../models/usuario.model.js", () => ({ UsuarioModel: {}, USUARIO_AS_AUTHOR: ["id", "name", "lastname"] }));
@@ -194,7 +202,7 @@ describe("an edit cannot reassign the author", () => {
     const { logAction } = await import("../utils/logAction.js");
     const { PosteModel } = await import("../models/poste.model.js");
     vi.mocked(PosteModel.findOne).mockResolvedValue({
-      dataValues: { id: 8, name: "P-8", image: null, id_usuario: 3 },
+      dataValues: { id: 8, name: "P-8", image: null, id_usuario: 3, id_tramo: 1 },
       set,
       save: vi.fn(),
     } as never);

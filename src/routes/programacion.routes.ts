@@ -2,7 +2,9 @@ import { Router } from "express";
 import {
   deleteProgramacion,
   getDestinatariosPosibles,
+  getDestinatariosDeEjecucion,
   getEjecucionesDeProgramacion,
+  getHistorialDeEjecuciones,
   getProgramaciones,
   postEjecutarProgramacion,
   postProgramacion,
@@ -38,6 +40,14 @@ const router = Router();
 
 router.get("/", requirePermission("generador", "ver"), getProgramaciones);
 router.get("/recipients", requirePermission("generador", "programar"), getDestinatariosPosibles);
+// The runs of all the schedules the viewer may see; `/:id/runs` is one
+// schedule's. No GET route has a bare `/:id` segment, so `runs` cannot be read
+// as an id whatever the order; it sits here, with the other fixed addresses,
+// so that adding one never depends on it.
+router.get("/runs", requirePermission("generador", "ver"), getHistorialDeEjecuciones);
+// Who one of those runs was sent to. Same guard; the controller applies the
+// same visibility rule as the history.
+router.get("/runs/:id/recipients", requirePermission("generador", "ver"), getDestinatariosDeEjecucion);
 router.get("/:id/runs", requirePermission("generador", "ver"), getEjecucionesDeProgramacion);
 
 router.post("/", requirePermission("generador", "programar"), writeLimiter, requireStepUp(), postProgramacion);

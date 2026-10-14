@@ -21,7 +21,7 @@
 export type Criticidad = number | null;
 
 /** The nine levels, in the order the catalogue defines them. */
-export const ETIQUETAS_CRITICIDAD: Readonly<Record<number, string>> = {
+const ETIQUETAS_CRITICIDAD: Readonly<Record<number, string>> = {
   1: "Catastrófico",
   2: "Ferretería suelta",
   3: "Sujeto a árbol",
@@ -33,7 +33,7 @@ export const ETIQUETAS_CRITICIDAD: Readonly<Record<number, string>> = {
   9: "Mantenimiento",
 };
 
-export const SIN_CLASIFICAR = "Sin clasificar";
+const SIN_CLASIFICAR = "Sin clasificar";
 
 /**
  * The name of a level, or "Sin clasificar".

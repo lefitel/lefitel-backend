@@ -205,6 +205,7 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "POST /api/revision/": 201,
   "POST /api/rol/": 201,
   "POST /api/tipo-obs/": 201,
+  "POST /api/tramo/": 201,
   "POST /api/files/": 201,
   "POST /api/usuario/": 201,
 
@@ -221,6 +222,7 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "DELETE /api/propietario/:id": 204,
   "DELETE /api/rol/:id": 204,
   "DELETE /api/tipo-obs/:id": 204,
+  "DELETE /api/tramo/:id": 204,
   "DELETE /api/usuario/:id": 204,
   "PATCH /api/adss/:id/restore": 204,
   "PATCH /api/ciudad/:id/restore": 204,
@@ -231,6 +233,7 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "PATCH /api/propietario/:id/restore": 204,
   "PATCH /api/rol/:id/restore": 204,
   "PATCH /api/tipo-obs/:id/restore": 204,
+  "PATCH /api/tramo/:id/restore": 204,
   "PATCH /api/usuario/:id/restore": 204,
   "PATCH /api/usuario/:id/desbloquear": 204,
   // El sub-recurso del rol, y `204` por lo mismo que su vecino de arriba: lo
@@ -295,6 +298,7 @@ const ESPERADO: Record<string, 200 | 201 | 204> = {
   "PUT /api/propietario/:id": 200,
   "PUT /api/rol/:id": 200,
   "PUT /api/tipo-obs/:id": 200,
+  "PUT /api/tramo/:id": 200,
   "PUT /api/usuario/:id": 200,
   "PUT /api/usuario/username/:id": 200,
   "PUT /api/usuario/userpass/:id": 200,
@@ -338,12 +342,14 @@ describe("the ledger of every write", () => {
     // Sixteen, twenty-seven and fifty since the scheduled reports: creating a
     // schedule (201); removing one and unsubscribing from one (204); changing
     // one, sending it now, and asking what an unsubscribe link would stop (200).
-    expect(cuenta(201), "las altas que contestan 201").toBe(16);
-    expect(cuenta(204), "las escrituras que no contestan nada").toBe(27);
+    // And one more of each since `/api/tramo`: its creation (201), its archive and
+    // its restore (204), and its edit (200).
+    expect(cuenta(201), "las altas que contestan 201").toBe(17);
+    expect(cuenta(204), "las escrituras que no contestan nada").toBe(29);
     // 47 desde que `POST /api/ruta/query` existe: una lectura con cuerpo, que
     // no crea ni archiva nada. Sube por el mismo motivo que subiría cualquier
-    // otra — este número se recuenta, no se estima.
-    expect(cuenta(200), "el resto de las escrituras").toBe(50);
+    // otra — este número se recuenta, no se estima. 51 con `PUT /api/tramo/:id`.
+    expect(cuenta(200), "el resto de las escrituras").toBe(51);
   });
 
   it("never writes two different 2xx in one handler", () => {

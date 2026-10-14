@@ -16,7 +16,7 @@ export interface CatalogFieldView {
   path: string;
   label: string;
   kind: FieldKind;
-  /** Human-readable grouping for the UI, e.g. "Poste › Ciudad A". */
+  /** Human-readable grouping for the UI, e.g. "Poste › Tramo". */
   group: string;
   operators: Operator[];
   aggregates: AggFn[];
@@ -60,6 +60,7 @@ const ROW_MEANING: Record<string, string> = {
   eventoObs: "Una fila por observación registrada en un evento",
   solucion: "Una fila por solución aplicada",
   ciudad: "Una fila por ciudad",
+  tramo: "Una fila por tramo",
   usuario: "Una fila por usuario",
 };
 
@@ -77,6 +78,7 @@ const ROW_NOUN: Record<string, [one: string, many: string]> = {
   eventoObs: ["observación", "observaciones"],
   solucion: ["solución", "soluciones"],
   ciudad: ["ciudad", "ciudades"],
+  tramo: ["tramo", "tramos"],
   usuario: ["usuario", "usuarios"],
 };
 
@@ -128,6 +130,8 @@ function fieldView(
 /** A value derived in SQL, as the picker lists it. */
 function calculatedView(
   calc: CalculatedDef,
+  name: string,
+  entityKey: string,
   path: string,
   group: string,
   throughRelation: boolean,
@@ -150,6 +154,7 @@ function calculatedView(
     calculated: true,
     semantic: calc.semantic,
     aggregate: calc.innerAgg !== undefined,
+    optionList: calc.optionList === true ? `${entityKey}.${name}` : undefined,
   };
 }
 
@@ -196,7 +201,7 @@ function walkRelations(
  * and this is where they come from.
  *
  * Null for anything that is not a field this viewer may use. It says nothing
- * about to-many relations, which are never fields; see `toManyTarget`.
+ * about to-many relations, which are never fields; see `describeToMany`.
  */
 export function describePath(
   entityKey: string,
@@ -220,18 +225,9 @@ export function describePath(
   const calc = own(landing.entity.calculated, leaf);
   if (calc) {
     if (!isVisible(calc.staffOnly, viewer)) return null;
-    return calculatedView(calc, path, landing.group, throughRelation);
+    return calculatedView(calc, leaf, landing.key, path, landing.group, throughRelation);
   }
   return null;
-}
-
-/**
- * The entity a to-many path leads to, or null when it is not one this viewer
- * may use. What an `exists` filter needs: its inner conditions are written
- * relative to that entity, not to the report's root.
- */
-export function toManyTarget(entityKey: string, path: string, viewer: Viewer): string | null {
-  return describeToMany(entityKey, path, viewer)?.target ?? null;
 }
 
 /**
@@ -284,8 +280,8 @@ function collect(
    * report offered were that, and adding one relation to Solución silently
    * doubled it to sixty-six of a hundred and eighteen.
    *
-   * Siblings are not cycles: `ciudadA` and `ciudadB` both point at Ciudad from
-   * the same pole and neither is an ancestor of the other, so both survive.
+   * Siblings are not cycles: an event and its pole both point at Usuario
+   * ("Registrado por") and neither is an ancestor of the other, so both survive.
    * That is why this is the ancestor chain and not everything seen so far.
    *
    * This prunes the menu, not the language: a stored configuration naming one
@@ -320,7 +316,7 @@ function collect(
     const path = withPrefix(name);
     if (seen.has(path)) continue;
     seen.add(path);
-    out.fields.push(calculatedView(calc, path, group, prefix !== ""));
+    out.fields.push(calculatedView(calc, name, entityKey, path, group, prefix !== ""));
   }
 
   for (const [name, relation] of Object.entries(entity.relations)) {

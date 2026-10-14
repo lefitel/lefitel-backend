@@ -59,6 +59,7 @@ export const BITACORA_ACTIONS = {
   CREATE_REPORTE_VISTA:    a("Nuevo informe guardado", "crear"),
   CREATE_ROL:              a("Nuevo rol", "crear"),
   CREATE_TIPO_OBS:         a("Nuevo tipo de observación", "crear"),
+  CREATE_TRAMO:            a("Nuevo tramo", "crear"),
   CREATE_USUARIO:          a("Nuevo usuario", "crear"),
   DUPLICATE_REPORTE_VISTA: a("Duplicó informe guardado", "crear"),
 
@@ -76,6 +77,7 @@ export const BITACORA_ACTIONS = {
   UPDATE_REPORTE_VISTA: a("Editó informe guardado", "editar"),
   UPDATE_ROL:           a("Editó rol", "editar"),
   UPDATE_TIPO_OBS:      a("Editó tipo de observación", "editar"),
+  UPDATE_TRAMO:         a("Editó tramo", "editar"),
   UPDATE_USUARIO:       a("Editó usuario", "editar"),
 
   DELETE_ADSS:          a("Archivó ferretería", "archivar"),
@@ -89,6 +91,7 @@ export const BITACORA_ACTIONS = {
   DELETE_REPORTE_VISTA: a("Archivó informe guardado", "archivar"),
   DELETE_ROL:           a("Archivó rol", "archivar"),
   DELETE_TIPO_OBS:      a("Archivó tipo de observación", "archivar"),
+  DELETE_TRAMO:         a("Archivó tramo", "archivar"),
   DELETE_USUARIO:       a("Archivó usuario", "archivar"),
 
   RESTORE_ADSS:        a("Desarchivó ferretería", "restaurar"),
@@ -100,6 +103,7 @@ export const BITACORA_ACTIONS = {
   RESTORE_PROPIETARIO: a("Desarchivó propietario", "restaurar"),
   RESTORE_ROL:         a("Desarchivó rol", "restaurar"),
   RESTORE_TIPO_OBS:    a("Desarchivó tipo de observación", "restaurar"),
+  RESTORE_TRAMO:       a("Desarchivó tramo", "restaurar"),
   RESTORE_USUARIO:     a("Desarchivó usuario", "restaurar"),
 
   REABRIR_EVENTO: a("Reabrió evento", "eventos"),
@@ -220,6 +224,7 @@ export const BITACORA_ENTITIES = {
   Evento:               "Evento",
   Revisión:             "Revisión",
   Ciudad:               "Ciudad",
+  Tramo:                "Tramo",
   Material:             "Material",
   Propietario:          "Propietario",
   Adss:                 "Ferretería",

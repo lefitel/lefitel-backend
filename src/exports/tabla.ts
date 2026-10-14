@@ -35,7 +35,7 @@ import type { FieldKind, FieldSemantic, ResultColumn } from "../reportBuilder/ty
 export type Formato = "excel" | "csv" | "pdf";
 
 /** The only three values `format` accepts, and the order the menu lists them. */
-export const FORMATOS: readonly Formato[] = ["excel", "csv", "pdf"] as const;
+const FORMATOS: readonly Formato[] = ["excel", "csv", "pdf"] as const;
 
 export const esFormato = (valor: unknown): valor is Formato =>
   FORMATOS.includes(valor as Formato);

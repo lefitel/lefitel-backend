@@ -173,12 +173,27 @@ describe("what the builder accepts and the menu does not list", () => {
   it("keeps a parent's root-only total", () => {
     const config: ReportConfig = {
       root: "poste",
-      columns: [{ path: "name" }, { path: "ciudadA.numPostes" }],
+      columns: [{ path: "name" }, { path: "usuario.numPostes" }],
     };
 
     const pruned = pruneConfig(config, STAFF);
     expect(pruned.omitted).toBe(0);
-    expect(pruned.extraFields.map((f) => f.path)).toEqual(["ciudadA.numPostes"]);
+    expect(pruned.extraFields.map((f) => f.path)).toEqual(["usuario.numPostes"]);
+  });
+
+  it("keeps the tramo reached at the deepest allowed path", () => {
+    // `tramo` costs no join of its own, so three hops to the pole is all it
+    // takes. It used to need two more (its two cities) and was dropped from
+    // here: the case that tested that dropping has nothing left to test, since
+    // no calculated field in the catalog declares joins any more.
+    const config: ReportConfig = {
+      root: "evento",
+      columns: [{ path: "id" }, { path: "solucion.evento.poste.tramo" }],
+    };
+
+    const pruned = pruneConfig(config, STAFF);
+    expect(pruned.omitted).toBe(0);
+    expect(pruned.config.columns).toHaveLength(2);
   });
 
   it("keeps an order by a field the report does not show", () => {
@@ -315,25 +330,11 @@ describe("a to-many relation the menu does not list", () => {
 });
 
 describe("what only the builder can refuse", () => {
-  it("drops a hidden field whose own joins run past the depth limit", () => {
-    // `describePath` finds it — three hops and a calculated leaf — and nothing
-    // in that description shows that the leaf needs a fourth. Building it does.
-    // Without that question this path would be kept and the report could not run.
-    const config: ReportConfig = {
-      root: "evento",
-      columns: [{ path: "id" }, { path: "solucion.evento.poste.tramo" }],
-    };
-
-    const pruned = pruneConfig(config, STAFF);
-    expect(pruned.config.columns).toEqual([{ path: "id" }]);
-    expect(pruned.extraFields).toEqual([]);
-  });
-
   it("drops a grouping by a hidden total", () => {
     const config: ReportConfig = {
       root: "evento",
-      columns: [{ path: "poste.ciudadA.numPostes" }, { path: "id", agg: "count" }],
-      groupBy: ["poste.ciudadA.numPostes"],
+      columns: [{ path: "poste.usuario.numPostes" }, { path: "id", agg: "count" }],
+      groupBy: ["poste.usuario.numPostes"],
     };
 
     expect(pruneConfig(config, STAFF).config.groupBy).toEqual([]);

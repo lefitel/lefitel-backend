@@ -15,7 +15,7 @@ import { uploadLimiter } from "../middleware/uploadLimiters.js";
 const router = Router();
 
 /** The ceiling, named because the refusal below quotes it back to the caller. */
-export const MAX_UPLOAD_MB = 5;
+const MAX_UPLOAD_MB = 5;
 
 // The gate used to sit on the mount in app.ts as `requireRole(1)`, which drew no
 // line between listing files and deleting them. Reading the module and erasing

@@ -52,10 +52,10 @@ import { USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 import { sinLiterales, cierra, lineaDe } from "../testkit/sourceText.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const DIRECTORIOS = [here];
+const DIRECTORIOS = [here, join(here, "..", "tramos")];
 
 /** Models whose full row must never reach a client. */
-const GUARDED = ["UsuarioModel", "RevisionModel", "SolucionModel", "PosteModel", "EventoModel"] as const;
+const GUARDED = ["UsuarioModel", "RevisionModel", "SolucionModel", "PosteModel", "EventoModel", "TramoModel"] as const;
 const GUARDADOS = GUARDED.join("|");
 
 interface Entrada {

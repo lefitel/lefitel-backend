@@ -22,10 +22,9 @@
 // the model.
 //
 // Every column here was checked against the client that will consume it in C2,
-// not guessed. `ciudad` carries `lat`/`lng` because `PosteSheet` draws a map and
-// `ReportRecorrido` traces a line with them — the sheet guards with
-// `if (!a?.lat …)` and the report with the positive `if (a?.lat && a?.lng && …)`,
-// so both render nothing at all, with no error, if the columns are missing.
+// not guessed. `ciudad` carries `lat`/`lng` in every endpoint that lists cities,
+// the tramo one included: the network map draws every city from the tramo
+// options, and the pole form and the report screens draw theirs from the others.
 // `obs` carries `id_tipoObs` because both incident forms group the list by type
 // with `filter(o => o.id_tipoObs === …)`, which without the column yields an
 // empty group that reads as "no observations configured". Nothing here carries
@@ -37,11 +36,13 @@ import { Request, Response } from "express";
 import { FindOptions } from "sequelize";
 import { AdssModel } from "../models/adss.model.js";
 import { CiudadModel } from "../models/ciudad.model.js";
+import { DepartamentoModel } from "../models/departamento.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { ObsModel } from "../models/obs.model.js";
-import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { TipoObsModel } from "../models/tipoObs.model.js";
+import { TramoModel } from "../models/tramo.model.js";
+import { INCLUDE_TRAMO, presentarTramo, type TramoPresentado } from "../tramos/presentacion.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
 
@@ -74,6 +75,14 @@ const NOMBRE = ["id", "name"] as const;
  * come back half-filled.
  */
 const CIUDAD_DIBUJABLE = ["id", "name", "lat", "lng"] as const;
+/**
+ * A city the network editor is going to draw and edit: the same, plus its photo.
+ *
+ * Kept apart from `CIUDAD_DIBUJABLE` on purpose: the pole and report forms only
+ * need to place a city, and the photo is a column they have no use for. `image` is
+ * nullable on the model, so a city may come back without one.
+ */
+const CIUDAD_EDITABLE = [...CIUDAD_DIBUJABLE, "image"] as const;
 /** An observation the caller is going to group by type. */
 const OBS_AGRUPABLE = ["id", "name", "id_tipoObs"] as const;
 
@@ -106,62 +115,32 @@ const lista = (model: Catalogo, columnas: readonly string[]) =>
   model.findAll({ attributes: [...columnas], order: [["id", "DESC"]], raw: true });
 
 /**
- * The distinct city pairs poles actually run between.
+ * Every live tramo, presented and in the order of its name.
  *
- * The dedupe is the one `GET /api/poste/tramos` did before this endpoint
- * existed: a tramo is bidirectional, so `(3,7)` and `(7,3)` are one entry, keyed
- * by min/max. **C2 retired that route** — this block is now the only place the
- * pairs come from, and `useTramoNeighbors` reads them from here.
+ * All of them, with poles or without: a tramo created a minute ago has none,
+ * and it is exactly the one the pole form is about to need. The earlier version
+ * of this block derived the pairs from the pole register and so could only
+ * ever offer stretches that already had a pole on them.
  *
- * **What is deliberately different from what that route returned: pairs naming a
- * city that is no longer live are dropped.** `PosteModel.findAll` is paranoid
- * and excludes archived *poles*, but says nothing about their cities, so the old
- * endpoint could return a pair whose city is absent from the `ciudad` block of
- * this same response — a neighbour the combobox cannot render and the line
- * cannot be drawn to. Filtering against the cities actually being served is what
- * makes the two blocks consistent with each other.
- *
- * It is a visible change, and small: a city whose only neighbour is archived
- * drops out of the "Tramo desde" combobox on the three report screens. Today it
- * is offered and leads nowhere — picking it leaves "Tramo hasta" empty.
- *
- * What it does **not** do is hide the network's topology, and §6 says so: the
- * same pairs come straight out of `GET /api/poste/?export=true`, which carries
- * no permission at all until C5.
+ * The tramo is read paranoid — an archived stretch is not a choice — but its
+ * two cities are not, so one that was archived still gives the tramo its name.
  */
-async function tramosEntre(ciudadesVivas: Set<number>) {
-  const filas = await PosteModel.findAll({
-    attributes: ["id_ciudadA", "id_ciudadB"],
-    group: ["id_ciudadA", "id_ciudadB"],
-    // Ordered, for the reason `lista()` gives at length above — and this was
-    // the one block in this file that was not, which an audit caught: a
-    // `GROUP BY` without `ORDER BY` hands back whatever order the hash
-    // aggregate produced, so the Tramo combobox could reorder between loads.
-    // By the grouped columns, which is the only order a grouped query can have.
-    order: [["id_ciudadA", "ASC"], ["id_ciudadB", "ASC"]],
-    raw: true,
-  }) as unknown as { id_ciudadA: number; id_ciudadB: number }[];
+const tramosVivos = async (): Promise<TramoPresentado[]> => {
+  const filas = await TramoModel.findAll({
+    attributes: INCLUDE_TRAMO.attributes,
+    include: INCLUDE_TRAMO.include,
+    order: [["id", "ASC"]],
+  });
+  return filas.map(presentarTramo).sort((a, b) => (a.nombre < b.nombre ? -1 : a.nombre > b.nombre ? 1 : a.id - b.id));
+};
 
-  const vistos = new Set<string>();
-  const tramos: { id_ciudadA: number; id_ciudadB: number }[] = [];
-  for (const { id_ciudadA, id_ciudadB } of filas) {
-    if (!ciudadesVivas.has(id_ciudadA) || !ciudadesVivas.has(id_ciudadB)) continue;
-    const menor = Math.min(id_ciudadA, id_ciudadB);
-    const mayor = Math.max(id_ciudadA, id_ciudadB);
-    const clave = `${menor}-${mayor}`;
-    if (vistos.has(clave)) continue;
-    vistos.add(clave);
-    tramos.push({ id_ciudadA: menor, id_ciudadB: mayor });
-  }
-  return tramos;
-}
+/** The nine departments, in the order they were seeded: the order people recite them in. */
+const departamentos = () =>
+  DepartamentoModel.findAll({ attributes: [...NOMBRE], order: [["id", "ASC"]], raw: true });
 
 /**
- * `postes:ver`, and the pole form's four lists in one round trip.
- *
- * Six requests today, across the pair that will consume this: `PosteSheet` makes
- * four of them (five while editing, counting `getAdssPoste`) and the inline
- * editing in `poste/index.tsx` two more.
+ * `postes:ver`, and the pole form's lists in one round trip: the four
+ * catalogues, the tramos a pole can stand on and the departments.
  *
  * **`ver` is not what every caller is gated by, and this paragraph used to name
  * the wrong screens.** It said `poste/index.tsx` and `PosteSheet` render behind
@@ -186,19 +165,20 @@ async function tramosEntre(ciudadesVivas: Set<number>) {
  * screens now say what happened instead of showing an empty form: see
  * `estadoOpciones` in each.
  *
- * Worth knowing beside it: this is the **only gated read on that router**.
- * `GET /api/poste/` and `/:id` carry no permission at all — they are named in
- * `READ_GATE_NOT_APPLICABLE` — so C2 can only ever tighten what a role may see
- * here, never widen it.
+ * Worth knowing beside it: `GET /api/poste/` and `/:id` are gated by the same
+ * `postes.ver` (see `poste.routes.ts`), so this endpoint asks no more than the
+ * pole list itself does.
  */
 export const getOpcionesPoste = handler("getOpcionesPoste", async (_req: Request, res: Response) => {
-  const [adss, material, propietario, ciudad] = await Promise.all([
+  const [adss, material, propietario, ciudad, tramos, departamento] = await Promise.all([
     lista(AdssModel, NOMBRE),
     lista(MaterialModel, NOMBRE),
     lista(PropietarioModel, NOMBRE),
     lista(CiudadModel, CIUDAD_DIBUJABLE),
+    tramosVivos(),
+    departamentos(),
   ]);
-  res.status(200).json({ adss, material, propietario, ciudad });
+  res.status(200).json({ adss, material, propietario, ciudad, tramos, departamento });
 });
 
 /**
@@ -224,19 +204,34 @@ export const getOpcionesEvento = handler("getOpcionesEvento", async (_req: Reque
 /**
  * `reportes:ver`, for the three report screens.
  *
- * The widest of the three, and the only one whose blocks depend on each other:
- * `tramos` is filtered against the `ciudad` block, so the cities are fetched
- * first and the pairs after. `reportes` has exactly one action in the permission
+ * The widest of the three. `reportes` has exactly one action in the permission
  * vocabulary — `ver` — so it is the only pair this route could ask for.
  */
 export const getOpcionesReporte = handler("getOpcionesReporte", async (_req: Request, res: Response) => {
-  const ciudad = await lista(CiudadModel, CIUDAD_DIBUJABLE) as unknown as { id: number }[];
-  const [adss, material, propietario, obs, tramos] = await Promise.all([
+  const [ciudad, adss, material, propietario, obs, tramos] = await Promise.all([
+    lista(CiudadModel, CIUDAD_DIBUJABLE),
     lista(AdssModel, NOMBRE),
     lista(MaterialModel, NOMBRE),
     lista(PropietarioModel, NOMBRE),
     lista(ObsModel, NOMBRE),
-    tramosEntre(new Set(ciudad.map((c) => c.id))),
+    tramosVivos(),
   ]);
   res.status(200).json({ ciudad, adss, material, propietario, obs, tramos });
+});
+
+/**
+ * `tramos:ver`, for the tramo dialog and the network map on the Tramos screen.
+ *
+ * The cities carry `lat` and `lng`: the map draws every live city from this
+ * list, including those that have no tramo yet, which `GET /api/tramo/` cannot
+ * give it because it only knows cities through the tramos they end. They also
+ * carry `image`, which the map's city card shows and replaces.
+ *
+ * The same dialog opened from the pole form does not come here: that form is
+ * reached with `postes.*` and possibly without `tramos.ver`, and it already
+ * holds both lists from `/api/poste/options`.
+ */
+export const getOpcionesTramo = handler("getOpcionesTramo", async (_req: Request, res: Response) => {
+  const [ciudad, departamento] = await Promise.all([lista(CiudadModel, CIUDAD_EDITABLE), departamentos()]);
+  res.status(200).json({ ciudad, departamento });
 });

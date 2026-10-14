@@ -101,10 +101,18 @@ describe.skipIf(!dbAvailable)("buildExport against real data", () => {
     const strip = (workbook.worksheets[0].getCell(3, 1).value as ExcelJS.CellRichTextValue)
       .richText.map((run) => run.text).join("");
 
-    // Eighty-nine rows, and each one is a tramo. Saying "89 eventos" — which
+    // Eighty-three rows, and each one is a tramo: the tramos with a pole that
+    // has a live event (`select count(distinct p.id_tramo) from eventos e join
+    // postes p on p.id = e.id_poste and p."deletedAt" is null where
+    // e."deletedAt" is null`). Grouped by the old pair of city ids the same
+    // events gave 89 (measured on an unmigrated copy, pairs without direction;
+    // 107 if A->B and B->A count apart). Twelve old pairs collapsed into six
+    // because they differed only by a city that was merged into another
+    // (77 -> 58, 78 -> 59, 76 -> 57, 79 -> 60, 86 -> 98): applying that merge
+    // to the old pairs gives exactly 83. Saying "89 eventos" — which
     // this test used to require — is false twice over: they are not events, and
     // there are 1.376 of those. The count has to describe what is on the page.
-    expect(strip).toMatch(/^89 grupos$/);
+    expect(strip).toMatch(/^83 grupos$/);
     expect(strip).not.toContain("eventos");
     // An aggregate loses its meaning, so nothing pretends to be a state here.
     expect(strip).not.toContain("resueltos");

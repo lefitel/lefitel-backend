@@ -1,13 +1,13 @@
 import { Request, Response } from "express";
 import { EventoModel } from "../models/evento.model.js";
 import { PosteModel } from "../models/poste.model.js";
-import { CiudadModel } from "../models/ciudad.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { RevisionModel } from "../models/revision.model.js";
 import { SolucionModel } from "../models/solucion.model.js";
 import { EventoObsModel } from "../models/eventoObs.model.js";
 import { ObsModel } from "../models/obs.model.js";
+import { INCLUDE_TRAMO, presentarTramos } from "../tramos/presentacion.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -36,14 +36,13 @@ export const getDashboard = handler("getDashboard", async (req: Request, res: Re
       ],
     }),
     PosteModel.findAll({
-      attributes: ["id", "name", "lat", "lng", "date"],
+      attributes: ["id", "name", "lat", "lng", "date", "id_tramo"],
       include: [
-        { model: CiudadModel, as: "ciudadA", attributes: ["id", "name"] },
-        { model: CiudadModel, as: "ciudadB", attributes: ["id", "name"] },
+        INCLUDE_TRAMO,
         { model: PropietarioModel, attributes: ["name"] },
         { model: MaterialModel, attributes: ["name"] },
       ],
     }),
   ]);
-  res.status(200).json({ eventos, postes });
+  res.status(200).json(presentarTramos({ eventos, postes }));
 });

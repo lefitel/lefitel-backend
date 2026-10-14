@@ -21,7 +21,7 @@ import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import type { Request } from "express";
 
 /** One minute. Short on purpose: this meters a burst, not a day's work. */
-export const UPLOAD_WINDOW_MS = 60_000;
+const UPLOAD_WINDOW_MS = 60_000;
 
 /**
  * Uploads per account per minute.

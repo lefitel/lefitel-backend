@@ -126,10 +126,35 @@ export async function normaliseMigrationNames(
   return result;
 }
 
+/**
+ * Turns `MIGRAR_HASTA` into umzug's `up({ to })`: stop after that migration.
+ *
+ * It exists for one job: rehearsing a later migration on a restored production
+ * dump, which only has the oldest ones applied. Absent or empty means no bound,
+ * so a normal run is untouched. The name is the one in `SequelizeMeta` — no
+ * extension. An unknown name fails here, in Spanish, rather than with umzug's own
+ * message.
+ */
+export function upperBoundOption(hasta: string | undefined, known: string[]): { to?: string } {
+  if (!hasta) return {};
+  if (!known.includes(hasta)) {
+    throw new Error(
+      `MIGRAR_HASTA="${hasta}" no es ninguna migración. ` +
+      `Va el nombre sin extensión, tal como queda en SequelizeMeta (AAAAMMDDNNNNNN-descripcion).`,
+    );
+  }
+  return { to: hasta };
+}
+
 async function runMigrations() {
   await sequelize.authenticate();
   await normaliseMigrationNames();
-  const applied = await migrator.up();
+  const executed = (await migrator.executed()).map((m) => m.name);
+  const known = [...executed, ...(await migrator.pending()).map((m) => m.name)];
+  const bound = upperBoundOption(process.env.MIGRAR_HASTA, known);
+  // umzug only looks for `to` among the pending ones and throws if it was already
+  // applied; reaching the bound already is not an error.
+  const applied = bound.to && executed.includes(bound.to) ? [] : await migrator.up(bound);
   if (applied.length === 0) {
     migrateLog.info("no hay migraciones pendientes");
   } else {

@@ -23,7 +23,10 @@
 //    `variantes`. If one cannot be built nobody receives anything: half the
 //    recipients holding a report the other half never got is worse than a
 //    late report.
-// 5. **Send, recipient by recipient**, inside the day's ceiling.
+// 5. **Send, recipient by recipient**, inside the day's ceiling — and write
+//    down, as each one finishes, who it was for and what became of it. That
+//    record is the history's answer to "who got this one?", and it is never
+//    allowed to cost a report: see `anotarLaEntrega`.
 // 6. **Close the run and schedule the next one.** Always, including when
 //    step 4 or 5 threw: a run left `en_curso` would read as "still sending"
 //    for ever.
@@ -68,8 +71,27 @@ export interface Programacion extends Horario {
   fallos_seguidos: number;
 }
 
+/**
+ * What became of one recipient in one run. Written out again in the model
+ * (`ReporteEntregaModel`), and held together with it by the migration's test.
+ *
+ * - `entregado` — the mail chain accepted the message.
+ * - `rechazado` — the address itself was refused (counts against the address).
+ * - `no_enviado` — the send failed for any other reason; says nothing about the address.
+ * - `sin_cupo` — held back by the day's ceiling; nothing was attempted.
+ */
+export type ResultadoDeEntrega = "entregado" | "rechazado" | "no_enviado" | "sin_cupo";
+
 export interface Destinatario {
   id: number;
+  /**
+   * What the screen called them when this run was loaded: an account's name and
+   * surname, an outside address's address. Copied into the history row, so it
+   * still reads after the account is renamed or removed.
+   */
+  nombre: string;
+  /** The account, for the history row. `null` or absent for an outside address. */
+  id_usuario?: number | null;
   /** Where the message goes: the user's verified address, or the outside one. */
   email: string;
   /** No account: never receives staff data, and gets an unsubscribe link. */
@@ -128,6 +150,15 @@ export interface Dependencias {
   enviadosHoy(): Promise<number>;
   enviar(correo: CorreoAEnviar, opciones: { plazo_ms: number }): Promise<ResultadoDeCorreo>;
   anotarEntrega(id_destinatario: number, resultado: "entregado" | "rechazado"): Promise<void>;
+  /**
+   * Record, in this run's history, who it was for and what became of them.
+   * Called once per recipient the run writes to, as each finishes. May throw:
+   * `ejecutarTurno` swallows it, because a history row is not worth a report.
+   */
+  anotarEntregaDeEjecucion(
+    id_ejecucion: number,
+    entrega: { destinatario: Destinatario; resultado: ResultadoDeEntrega },
+  ): Promise<void>;
   enlaceDeBaja(id_destinatario: number): Promise<string | null>;
   reprogramar(
     id_programacion: number,
@@ -147,7 +178,7 @@ const esDemasiadoGrande = (e: unknown): boolean =>
   ["ExportTooLargeError", "ExportTooHeavyError"].includes((e as Error | undefined)?.name ?? "");
 
 /** Recipients a message may still be sent to. */
-export const destinatariosActivos = (todos: Destinatario[]): Destinatario[] =>
+const destinatariosActivos = (todos: Destinatario[]): Destinatario[] =>
   todos.filter((d) => !d.deBaja && d.rechazos_seguidos < RECHAZOS_PARA_DEJAR);
 
 /**
@@ -158,7 +189,7 @@ export const destinatariosActivos = (todos: Destinatario[]): Destinatario[] =>
  * person who set the schedule up is allowed to hand out. An outside address
  * never does, whatever else is true.
  */
-export const recibeDatosDePersonal = (d: Destinatario, dueno: { staff: boolean }): boolean =>
+const recibeDatosDePersonal = (d: Destinatario, dueno: { staff: boolean }): boolean =>
   !d.externo && d.staff && dueno.staff;
 
 /** What one variant of the report turned out to be. */
@@ -253,6 +284,24 @@ export async function ejecutarTurno(
   };
   let liberada = false;
 
+  /**
+   * The history row of one recipient. **A failure here is logged and nothing
+   * else**: the report is what was asked for, and a run that sent to ten people
+   * must not be reported as failed — nor stop sending to the other nine —
+   * because the table that says who got it was unwritable.
+   */
+  const anotarLaEntrega = async (destinatario: Destinatario, resultado: ResultadoDeEntrega) => {
+    try {
+      await deps.anotarEntregaDeEjecucion(id_ejecucion, { destinatario, resultado });
+    } catch (e) {
+      deps.registrar(
+        "warn",
+        { id_programacion: p.id, id_ejecucion, id_destinatario: destinatario.id, resultado, err: e },
+        "informe programado: no se pudo anotar a quién se envió",
+      );
+    }
+  };
+
   try {
     // ── The files: one per kind of reader, at most two. ──────────────────
     const variantes = new Map<boolean, Variante>();
@@ -296,6 +345,7 @@ export async function ejecutarTurno(
       if (quedan === 0) {
         sinCupo += 1;
         cierre.no_enviados += 1;
+        await anotarLaEntrega(d, "sin_cupo");
         continue;
       }
       const variante = variantes.get(recibeDatosDePersonal(d, dueno)) as Variante;
@@ -319,6 +369,9 @@ export async function ejecutarTurno(
         },
         { plazo_ms: PLAZO_DE_ENVIO_MS },
       );
+      // Written first, before the counters on the address: if what follows
+      // throws, the history still says who got it.
+      await anotarLaEntrega(d, r.ok ? "entregado" : r.motivo === "destinatario" ? "rechazado" : "no_enviado");
       if (r.ok) {
         cierre.enviados += 1;
         quedan -= 1;

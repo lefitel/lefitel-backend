@@ -7,12 +7,15 @@
 // any of that — the mapping lives here and only here.
 
 import type { Catalog, EntityDef } from "./types.js";
+import { sqlNombreDelTramo } from "../tramos/nombre.js";
 
 // Physical table names, kept in one place so the typo is contained.
 const TABLE = {
   evento: "eventos",
   poste: "postes",
   ciudad: "ciudads",
+  tramo: "tramos",
+  departamento: "departamentos",
   material: "materials",
   propietario: "propietarios",
   obs: "obs",
@@ -26,13 +29,21 @@ const TABLE = {
 
 // ─── Leaf entities (no outgoing relations worth exposing) ─────────────────────
 
+/** `p` is a pole; true when it stands on a tramo the city `a` is one end of. */
+const enUnTramoDe = (a: string): string =>
+  `p."id_tramo" IN (SELECT t."id" FROM "${TABLE.tramo}" t` +
+  ` WHERE t."id_ciudad_min" = ${a}."id" OR t."id_ciudad_max" = ${a}."id")`;
+
 const ciudad: EntityDef = {
   table: TABLE.ciudad,
   label: "Ciudad",
   paranoid: true,
   fields: {
-    // Exposed because three cities share a name: without the id, two rows of a
-    // city-rooted report are indistinguishable.
+    // Exposed because a name does not identify a city: nothing in the table
+    // forces names to be unique, and the id is the one thing that does. Today
+    // the live names are distinct (94 of 94), so here it is a stable key to
+    // match a row against, not a disambiguator; the archived duplicates the
+    // tramo migration left behind are never listed, the root being paranoid.
     id: { column: "id", kind: "number", label: "ID de la ciudad" },
     name: { column: "name", kind: "string", label: "Nombre", optionList: true },
     lat: { column: "lat", kind: "number", label: "Latitud", decimals: true },
@@ -44,12 +55,12 @@ const ciudad: EntityDef = {
    *
    * **Every one of these counts a pole in both of its cities**, and that is not
    * a defect: a pole stands on a tramo between two cities and belongs to both
-   * ends. But it means the column does not add up — summed over the 98 cities,
-   * "Postes en sus tramos" gives 3.080 against 1.541 real poles (twice, less
-   * the two poles whose two ends are the same city). The generator never totals
-   * a column for you, so the risk is somebody doing it in a spreadsheet, and
-   * the only defence is the header: every label here says "en sus tramos" so
-   * the unit is named where it will be read.
+   * ends. But it means the column does not add up — summed over the 94 cities,
+   * "Postes en sus tramos" gives 3.082 against 1.541 real poles (exactly twice:
+   * no tramo has the same city at both ends). The generator never totals a
+   * column for you, so the risk is somebody doing it in a spreadsheet, and the
+   * only defence is the header: every label here says "en sus tramos" so the
+   * unit is named where it will be read.
    *
    * A city is reached through no relation, so these are the only way to see it
    * from here — and the reason a city root exists at all is the zeros:
@@ -64,7 +75,7 @@ const ciudad: EntityDef = {
       rootOnly: true,
       sql: (a) =>
         `(SELECT COUNT(*) FROM "${TABLE.poste}" p WHERE p."deletedAt" IS NULL` +
-        ` AND (p."id_ciudadA" = ${a}."id" OR p."id_ciudadB" = ${a}."id"))`,
+        ` AND ${enUnTramoDe(a)})`,
     },
     numEventos: {
       kind: "number",
@@ -75,7 +86,7 @@ const ciudad: EntityDef = {
         `(SELECT COUNT(*) FROM "${TABLE.evento}" e` +
         ` JOIN "${TABLE.poste}" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL` +
         ` WHERE e."deletedAt" IS NULL` +
-        ` AND (p."id_ciudadA" = ${a}."id" OR p."id_ciudadB" = ${a}."id"))`,
+        ` AND ${enUnTramoDe(a)})`,
     },
     // `state` is nullable with no default and the app treats anything but true
     // as pending, so IS NOT TRUE keeps eventos = pendientes + resueltos.
@@ -88,7 +99,120 @@ const ciudad: EntityDef = {
         `(SELECT COUNT(*) FROM "${TABLE.evento}" e` +
         ` JOIN "${TABLE.poste}" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL` +
         ` WHERE e."deletedAt" IS NULL AND e."state" IS NOT TRUE` +
-        ` AND (p."id_ciudadA" = ${a}."id" OR p."id_ciudadB" = ${a}."id"))`,
+        ` AND ${enUnTramoDe(a)})`,
+    },
+  },
+};
+
+/**
+ * A stretch of line between two cities, and the second dimension that earns a
+ * root for the same reason the first did: the zeros. A tramo with no pole on it
+ * never shows up in a report that starts from poles, events or inspections, and
+ * "which stretches have we not covered" is the question this root answers.
+ * Until now a tramo existed here only as two calculated columns of `poste`.
+ *
+ * **It has no direction, and nothing here may give it one.** `id_ciudad_min` and
+ * `id_ciudad_max` are the two city ids in numeric order and nothing more, so a
+ * relation or a field for either end would be an "A" and a "B" that the data
+ * does not have. That is why there is no relation to a city: the name already
+ * carries both, written once by `tramos/nombre.ts`, and the two columns reach
+ * the SQL only inside that function.
+ *
+ * **Unlike the city's, these counts add up.** A pole stands on exactly one
+ * tramo, so each pole and each event is counted once, on one row, and the
+ * column totals to the poles, events and pending events of the live tramos —
+ * which is why the labels do not say "en sus tramos". The city's three count a
+ * pole at both of its ends and sum to twice the real figure; the label there is
+ * the only defence, and here there is nothing to defend against.
+ *
+ * **The author is staff-only here, and on a pole it is not.** On a pole or an
+ * event the name of whoever registered it is provenance that the client
+ * screens already print ("Creador"), so the user entity leaves it open. Nothing
+ * prints a tramo's author, so the same name here would be a new disclosure
+ * rather than a column the screens already show.
+ *
+ * Reached from no other entity, on purpose: `poste` keeps its two scalar
+ * columns (`tramo`, `departamento`) so that a pole's tramo costs no hop from
+ * the deeper roots, and a relation back here would spend one. That also means
+ * the `rootOnly` flag below prunes nothing today; it states that these are
+ * "one row per tramo" summaries, as the city's and the user's are.
+ */
+const tramo: EntityDef = {
+  table: TABLE.tramo,
+  label: "Tramo",
+  paranoid: true,
+  fields: {
+    id: { column: "id", kind: "number", label: "ID del tramo" },
+    createdAt: { column: "createdAt", kind: "date", label: "Fecha de registro" },
+  },
+  relations: {
+    // Staff-only, unlike `poste.usuario`: no screen prints a tramo's author, so
+    // there is no provenance column to defend, and the design keeps it out of
+    // other people's responses (§6 of the tramo design; the model says the
+    // author is shown behind `seguridad.ver` and nowhere else). A viewer
+    // without it does not see the relation, cannot build a path through it,
+    // and a saved report carrying one is pruned.
+    usuario: {
+      kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario", staffOnly: true,
+    },
+  },
+  calculated: {
+    // The field that names the row, as `name` does on the catalogue entities —
+    // but it cannot carry `optionList`, which marks a stored column and is
+    // read from a model, so a filter on it is a text box.
+    nombre: {
+      kind: "string",
+      label: "Tramo",
+      sql: (a) => sqlNombreDelTramo(`${a}."id"`),
+      // By the id, as `poste.tramo` does and for the same reason: two stretches
+      // can read the same, and grouping by text would merge them into one row.
+      groupKeys: (a) => [`${a}."id"`, sqlNombreDelTramo(`${a}."id"`)],
+    },
+    // NULL when the tramo has none (`id_departamento` is nullable), which the
+    // ordinary "está vacío" / "tiene valor" operators of a text field express.
+    // `departamentos` has no `deletedAt`, so there is nothing to guard. A closed
+    // list of nine, so the filter is offered its values (`fieldOptions.ts`).
+    departamento: {
+      kind: "string",
+      optionList: true,
+      label: "Departamento",
+      sql: (a) =>
+        `(SELECT d."name" FROM "${TABLE.departamento}" d WHERE d."id" = ${a}."id_departamento")`,
+    },
+    numPostes: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Postes",
+      rootOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.poste}" p WHERE p."deletedAt" IS NULL` +
+        ` AND p."id_tramo" = ${a}."id")`,
+    },
+    // Events on live poles only, as the city's count does (the user's
+    // `numEventos` has no pole guard: it counts every live event the person
+    // registered). An event whose pole was archived is not work in hand.
+    numEventos: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Eventos",
+      rootOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.evento}" e` +
+        ` JOIN "${TABLE.poste}" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL` +
+        ` WHERE e."deletedAt" IS NULL AND p."id_tramo" = ${a}."id")`,
+    },
+    // `state` is nullable with no default and the app treats anything but true
+    // as pending, so IS NOT TRUE keeps eventos = pendientes + resueltos.
+    numPendientes: {
+      kind: "number",
+      innerAgg: "count",
+      label: "Eventos pendientes",
+      rootOnly: true,
+      sql: (a) =>
+        `(SELECT COUNT(*) FROM "${TABLE.evento}" e` +
+        ` JOIN "${TABLE.poste}" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL` +
+        ` WHERE e."deletedAt" IS NULL AND e."state" IS NOT TRUE` +
+        ` AND p."id_tramo" = ${a}."id")`,
     },
   },
 };
@@ -313,23 +437,6 @@ const solucion: EntityDef = {
   },
 };
 
-/**
- * Renders a tramo as "Ciudad A - Ciudad B" with the lower city id first.
- *
- * Archived cities fall out of the paranoid join, so their name is null; the
- * existing reports print "#<id>" in that case (reporte.controller.ts:228) and
- * this keeps that behaviour instead of showing an empty tramo.
- */
-const tramoExpr = (a: string, dep: (path: string) => string): string => {
-  const nameA = `COALESCE(${dep("ciudadA")}."name", '#' || ${a}."id_ciudadA")`;
-  const nameB = `COALESCE(${dep("ciudadB")}."name", '#' || ${a}."id_ciudadB")`;
-  return (
-    `CASE WHEN ${a}."id_ciudadA" <= ${a}."id_ciudadB"` +
-    ` THEN ${nameA} || ' - ' || ${nameB}` +
-    ` ELSE ${nameB} || ' - ' || ${nameA} END`
-  );
-};
-
 // ─── Core entities ────────────────────────────────────────────────────────────
 
 const poste: EntityDef = {
@@ -347,29 +454,32 @@ const poste: EntityDef = {
   relations: {
     propietario: { kind: "toOne", target: "propietario", label: "Propietario", localKey: "id_propietario" },
     material: { kind: "toOne", target: "material", label: "Material", localKey: "id_material" },
-    ciudadA: { kind: "toOne", target: "ciudad", label: "Ciudad A", localKey: "id_ciudadA" },
-    ciudadB: { kind: "toOne", target: "ciudad", label: "Ciudad B", localKey: "id_ciudadB" },
     usuario: { kind: "toOne", target: "usuario", label: "Registrado por", localKey: "id_usuario" },
     eventos: { kind: "toMany", target: "evento", label: "Eventos", foreignKey: "id_poste" },
   },
   calculated: {
-    // Mirrors reporte.controller.ts:225 — the lower city id always comes first,
-    // so tramo (A,B) and (B,A) collapse into the same group.
+    // The name a tramo has everywhere else: `tramos/nombre.ts`, whose SQL twin
+    // this is. A scalar subquery rather than a relation, and that is the point:
+    // a pole is already two hops away from an inspection or a repair, and the
+    // cities sit two further — one more than MAX_DEPTH allows. Costing no hop
+    // is what keeps this field offered from every root.
     tramo: {
       kind: "string",
       label: "Tramo",
-      deps: ["ciudadA", "ciudadB"],
-      sql: (a, dep) => tramoExpr(a, dep),
-      // Group by the id pair, not by the rendered name: the data contains
-      // distinct cities sharing a name (Millares, Olivos, Pailas), and grouping
-      // by text would merge tramos that are not the same. The name expression
-      // is included so Postgres accepts it in the SELECT list; it is functionally
-      // dependent on the ids, so it does not change the grouping.
-      groupKeys: (a, dep) => [
-        `LEAST(${a}."id_ciudadA", ${a}."id_ciudadB")`,
-        `GREATEST(${a}."id_ciudadA", ${a}."id_ciudadB")`,
-        tramoExpr(a, dep),
-      ],
+      sql: (a) => sqlNombreDelTramo(`${a}."id_tramo"`),
+      // By the id, not by the rendered name: two stretches can read the same.
+      // The name is listed so Postgres accepts it in the SELECT; it depends on
+      // the id, so it does not change the grouping.
+      groupKeys: (a) => [`${a}."id_tramo"`, sqlNombreDelTramo(`${a}."id_tramo"`)],
+    },
+    departamento: {
+      kind: "string",
+      optionList: true,
+      label: "Departamento del tramo",
+      sql: (a) =>
+        `(SELECT d."name" FROM "${TABLE.tramo}" t` +
+        ` JOIN "${TABLE.departamento}" d ON d."id" = t."id_departamento"` +
+        ` WHERE t."id" = ${a}."id_tramo")`,
     },
     numEventos: {
       kind: "number",
@@ -383,7 +493,7 @@ const poste: EntityDef = {
         ` WHERE ev."id_poste" = ${a}."id" AND ev."deletedAt" IS NULL)`,
     },
     // `state` is nullable with no default, and the app treats any non-true
-    // value as pending (reporte.controller.ts:244 uses !e.state). IS NOT TRUE
+    // value as pending (the fixed reports count `!e.state` as pending). IS NOT TRUE
     // keeps numEventos = numPendientes + numResueltos even with null states.
     numPendientes: {
       kind: "number",
@@ -457,7 +567,7 @@ const evento: EntityDef = {
         `CASE WHEN ${a}."state" IS NOT TRUE AND ${a}."date" IS NOT NULL` +
         ` THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - ${a}."date")) / 86400))::int END`,
     },
-    // Mirrors putTiemposResumen: evento.date → the solution's date. The repair
+    // Mirrors getTiemposResumen: evento.date → the solution's date. The repair
     // closes the evento; a revision is a site visit and closes nothing, so
     // measuring to the last revision measured the wrong thing entirely.
     //
@@ -541,6 +651,7 @@ export const catalog: Catalog = {
     revision,
     eventoObs,
     ciudad,
+    tramo,
     material,
     propietario,
     obs,
@@ -555,14 +666,16 @@ export const catalog: Catalog = {
    * the generator can answer. The four facts came first — an event, a pole, an
    * inspection, an observation. `solucion` is the fifth fact and was missing.
    *
-   * `ciudad` and `usuario` are dimensions, and a dimension earns a root for one
-   * reason only: **the zeros**. Grouping events by city shows the cities that
-   * have events and never the 13 with no pole at all; the same for the accounts
-   * that have registered nothing. Everything else a dimension can answer is
-   * already reachable by grouping, which is why propietario (12), obs (32),
-   * tipoObs (4), material (3) and rol (3) are deliberately not here.
+   * `ciudad`, `tramo` and `usuario` are dimensions, and a dimension earns a root
+   * for one reason only: **the zeros**. Grouping events by city shows the cities
+   * that have events and never the 13 with no pole at all; grouping poles by
+   * tramo shows the tramos that have poles and never one that has none; the same
+   * for the accounts that have registered nothing. Everything else a dimension
+   * can answer is already reachable by grouping, which is why propietario (12),
+   * obs (32), tipoObs (4), material (3), rol (3) and departamento (9, only ever
+   * a name beside a tramo) are deliberately not here.
    */
-  roots: ["evento", "poste", "revision", "eventoObs", "solucion", "ciudad", "usuario"],
+  roots: ["evento", "poste", "revision", "eventoObs", "solucion", "ciudad", "tramo", "usuario"],
 };
 
 /** Maximum relation hops allowed in a path, counted from the root. */

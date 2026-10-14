@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { buildQuery, buildCountQuery } from "./sqlBuilder.js";
 import { catalog, MAX_ROWS } from "./catalog.js";
-import { buildCatalogView } from "./catalogView.js";
+import { buildCatalogView, rowNoun } from "./catalogView.js";
+import { sqlNombreDelTramo } from "../tramos/nombre.js";
+import { pruneConfig } from "./prune.js";
 import { OPERATORS_BY_KIND, PERIODS, PERIOD_LABEL } from "./constraints.js";
 import {
   ReportConfigError,
@@ -49,13 +51,13 @@ describe("buildQuery — shape", () => {
 
   it("chains relations up to three hops", () => {
     const { sql } = buildQuery(
-      { root: "revision", columns: [{ path: "evento.poste.ciudadA.name" }] },
+      { root: "revision", columns: [{ path: "evento.poste.propietario.name" }] },
       ADMIN,
     );
     expect(sql).toContain('FROM "revicions" t0');
     expect(sql).toContain('LEFT JOIN "eventos"');
     expect(sql).toContain('LEFT JOIN "postes"');
-    expect(sql).toContain('LEFT JOIN "ciudads"');
+    expect(sql).toContain('LEFT JOIN "propietarios"');
   });
 
   it("omits the deletedAt guard for tables that lack the column", () => {
@@ -880,7 +882,7 @@ describe("buildQuery — injection attempts", () => {
   it("rejects a path deeper than the maximum", () => {
     expect(() =>
       buildQuery(
-        { root: "revision", columns: [{ path: "evento.poste.ciudadA.name.extra" }] },
+        { root: "revision", columns: [{ path: "evento.poste.propietario.name.extra" }] },
         ADMIN,
       ),
     ).toThrow(ReportConfigError);
@@ -978,8 +980,11 @@ describe("buildQuery — role isolation", () => {
     // stop saying which two.
     const personales = buildCatalogView(ADMIN).roots
       .flatMap((root) => root.fields.map((f) => ({ root: root.key, path: f.path })))
-      // A person as the root is the other block's subject, not this one's.
-      .filter(({ root, path }) => root !== "usuario"
+      // A person as the root is the other block's subject, not this one's. A
+      // tramo is the deliberate exception to "authorship is provenance": no
+      // screen prints its author, so its `usuario` relation is staff-only
+      // whole and "a report rooted at tramo" owns the test of that.
+      .filter(({ root, path }) => root !== "usuario" && root !== "tramo"
         && /(^|\.)usuario(\.|$)|(^|\.)rol(\.|$)/.test(path));
 
     const esProcedencia = (path: string) => /(^|\.)usuario\.(name|lastname)$/.test(path);
@@ -1083,7 +1088,8 @@ describe("buildQuery — deterministic paging", () => {
       ADMIN,
     );
     expect(sql).toContain("ORDER BY");
-    expect(sql).toContain("LEAST(");
+    // The first group key is the tramo id.
+    expect(sql).toMatch(/ORDER BY\s+t0\."id_tramo"/);
   });
 });
 
@@ -1317,8 +1323,8 @@ describe("buildCountQuery — root validation", () => {
     // Both builders had the same two checks written out twice, and a third had
     // to be added to both. They share one function now, and this is what says
     // they still agree.
-    for (const root of ["evento", "poste", "revision", "eventoObs", "solucion", "ciudad"]) {
-      const columns = [{ path: root === "ciudad" ? "name" : "id" }];
+    for (const root of ["evento", "poste", "revision", "eventoObs", "solucion", "ciudad", "tramo"]) {
+      const columns = [{ path: root === "ciudad" ? "name" : root === "tramo" ? "nombre" : "id" }];
       expect(() => buildQuery({ root, columns }, ADMIN), `buildQuery ${root}`).not.toThrow();
       expect(() => buildCountQuery({ root, columns }, ADMIN), `count ${root}`).not.toThrow();
     }
@@ -1348,6 +1354,7 @@ describe("buildQuery — a root that is personal data", () => {
     // And nothing else disappeared with it.
     expect(forEveryone).toContain("solucion");
     expect(forEveryone).toContain("ciudad");
+    expect(forEveryone).toContain("tramo");
   });
 });
 
@@ -1375,15 +1382,16 @@ describe("the picker does not offer its way home the long way round", () => {
   });
 
   it("still offers two relations that point at the same entity", () => {
-    // `ciudadA` and `ciudadB` both lead to Ciudad from the same pole. Neither
-    // is inside the other, so pruning cycles must not touch them — the tramo is
-    // the pair, and losing one end would lose the report.
+    // The event and its pole each lead to Usuario ("Registrado por"). Neither
+    // is inside the other's chain, so pruning cycles must not touch them. The
+    // catalog no longer has two such relations from one entity (that was
+    // `ciudadA`/`ciudadB`), so this is the same rule through two parents.
     const groups = buildCatalogView(ADMIN).roots
-      .find((r) => r.key === "poste")!
+      .find((r) => r.key === "evento")!
       .fields.map((f) => f.group);
 
-    expect(groups).toContain("Poste › Ciudad A");
-    expect(groups).toContain("Poste › Ciudad B");
+    expect(groups).toContain("Evento › Registrado por");
+    expect(groups).toContain("Evento › Poste › Registrado por");
   });
 });
 
@@ -1555,5 +1563,290 @@ describe("a named period — the date filter that does not expire", () => {
   it("publishes the periods and their labels with the catalog, so the screen does not keep a second list", () => {
     const { periods } = buildCatalogView(ADMIN);
     expect(periods).toEqual(PERIODS.map((key) => ({ key, label: PERIOD_LABEL[key] })));
+  });
+});
+
+describe("the tramo of a pole", () => {
+  const RAICES: [string, string][] = [
+    ["poste", "tramo"], ["evento", "poste.tramo"], ["revision", "evento.poste.tramo"],
+    ["eventoObs", "evento.poste.tramo"], ["solucion", "evento.poste.tramo"],
+  ];
+
+  for (const [root, path] of RAICES) {
+    it(`resolves from ${root} without spending a hop on it`, () => {
+      const q = buildQuery({ root, columns: [{ path }], limit: 10 }, ADMIN);
+      expect(q.sql).toContain('FROM "tramos" t');
+      expect(q.sql).not.toMatch(/id_ciudadA|id_ciudadB/);
+    });
+
+    it(`offers the department beside it from ${root}`, () => {
+      const q = buildQuery({ root, columns: [{ path: path.replace(/tramo$/, "departamento") }], limit: 10 }, ADMIN);
+      expect(q.sql).toContain('"departamentos"');
+    });
+  }
+
+  it("groups by the tramo id, so two stretches with one name stay two rows", () => {
+    const q = buildQuery({
+      root: "poste", columns: [{ path: "tramo" }, { path: "id", agg: "count" }], groupBy: ["tramo"], limit: 10,
+    }, ADMIN);
+    expect(q.sql).toMatch(/GROUP BY[^;]*"id_tramo"/);
+  });
+
+  it("no longer knows Ciudad A or Ciudad B", () => {
+    expect(() => buildQuery({ root: "poste", columns: [{ path: "ciudadA.name" }], limit: 10 }, ADMIN))
+      .toThrow(/no existe en el catálogo/);
+  });
+
+  it("offers the tramo and its department under Poste, and no Ciudad A", () => {
+    const labels = buildCatalogView(ADMIN).roots.find((r) => r.key === "poste")!.fields.map((f) => f.label);
+    expect(labels).toContain("Tramo");
+    expect(labels).toContain("Departamento del tramo");
+    expect(labels).not.toContain("Ciudad A");
+  });
+
+  it("offers evento.poste.tramo from revision", () => {
+    const paths = buildCatalogView(ADMIN).roots.find((r) => r.key === "revision")!.fields.map((f) => f.path);
+    expect(paths).toContain("evento.poste.tramo");
+  });
+});
+
+describe("a report rooted at tramo", () => {
+  // A tramo is a root for the same reason a city is: the zeros. Grouping poles
+  // by tramo shows the tramos that have poles and never one that has none.
+  const TRAMO = (over: Partial<ReportConfig> = {}): ReportConfig => ({
+    root: "tramo",
+    columns: [{ path: "nombre" }],
+    limit: 10,
+    ...over,
+  });
+
+  const ESTADO: ReportConfig = TRAMO({
+    columns: [
+      { path: "nombre" },
+      { path: "departamento" },
+      { path: "numPostes" },
+      { path: "numEventos" },
+      { path: "numPendientes" },
+    ],
+    sort: [{ path: "nombre", dir: "asc" }],
+  });
+
+  const DEPARTAMENTO = '(SELECT d."name" FROM "departamentos" d WHERE d."id" = t0."id_departamento")';
+  const POSTES = '(SELECT COUNT(*) FROM "postes" p WHERE p."deletedAt" IS NULL AND p."id_tramo" = t0."id")';
+
+  it("is a root, offered to everybody who can open the generator", () => {
+    expect(catalog.roots).toContain("tramo");
+    const root = (viewer: Viewer) => buildCatalogView(viewer).roots.find((r) => r.key === "tramo");
+    for (const viewer of [ADMIN, OPERATIVO]) {
+      expect(root(viewer)?.label, String(viewer.role)).toBe("Tramo");
+      expect(root(viewer)?.rowMeaning).toBe("Una fila por tramo");
+    }
+  });
+
+  it("reads from the tramos table, each column under its own label", () => {
+    const { sql, columns } = buildQuery(ESTADO, ADMIN);
+    expect(sql).toContain('FROM "tramos" t0');
+    expect(columns.map((c) => c.label)).toEqual([
+      "Tramo", "Departamento", "Postes", "Eventos", "Eventos pendientes",
+    ]);
+    expect(columns.map((c) => c.kind)).toEqual(["string", "string", "number", "number", "number"]);
+  });
+
+  it("names the tramo with the one SQL twin, on its own id", () => {
+    const { sql } = buildQuery(TRAMO(), ADMIN);
+    expect(sql).toContain(sqlNombreDelTramo('t0."id"'));
+  });
+
+  it("reads the department by a scalar subquery and joins nothing for it", () => {
+    const { sql } = buildQuery(TRAMO({ columns: [{ path: "departamento" }] }), ADMIN);
+    expect(sql).toContain(DEPARTAMENTO);
+    expect(sql).not.toMatch(/JOIN "departamentos"/);
+  });
+
+  it("counts live poles, live events on live poles, and the pending ones with IS NOT TRUE", () => {
+    const { sql } = buildQuery(ESTADO, ADMIN);
+    expect(sql).toContain(POSTES);
+    expect(sql).toContain(
+      '(SELECT COUNT(*) FROM "eventos" e JOIN "postes" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL' +
+        ' WHERE e."deletedAt" IS NULL AND p."id_tramo" = t0."id")',
+    );
+    expect(sql).toContain(
+      '(SELECT COUNT(*) FROM "eventos" e JOIN "postes" p ON p."id" = e."id_poste" AND p."deletedAt" IS NULL' +
+        ' WHERE e."deletedAt" IS NULL AND e."state" IS NOT TRUE AND p."id_tramo" = t0."id")',
+    );
+  });
+
+  it("leaves archived tramos out by default, and the counts ignore archived poles and events", () => {
+    const { sql } = buildQuery(ESTADO, ADMIN);
+    expect(sql).toContain('WHERE t0."deletedAt" IS NULL');
+    // Every counting subquery carries the pole guard and the two that go
+    // through events carry the event guard too: a count that forgot one would
+    // disagree with the pole listing or the event listing.
+    const counts = sql.match(/\(SELECT COUNT\(\*\) FROM .*?"id_tramo" = t0\."id"\)/g) ?? [];
+    expect(counts).toHaveLength(3);
+    for (const count of counts) expect(count).toContain('p."deletedAt" IS NULL');
+    expect(counts.filter((c) => c.includes('e."deletedAt" IS NULL'))).toHaveLength(2);
+  });
+
+  it("counts the same way it lists", () => {
+    const { sql } = buildCountQuery(TRAMO(), ADMIN);
+    expect(sql).toContain('FROM "tramos" t0');
+    expect(sql).toContain('WHERE t0."deletedAt" IS NULL');
+  });
+
+  it("filters on the department, and 'has no department' is the ordinary empty-value operator", () => {
+    const con = buildQuery(TRAMO({
+      filters: { op: "and", conditions: [{ path: "departamento", operator: "eq", value: "Potosí" }] },
+    }), ADMIN);
+    expect(con.sql).toContain(`${DEPARTAMENTO} = $1`);
+    expect(con.binds[0]).toBe("Potosí");
+
+    const sin = buildQuery(TRAMO({
+      filters: { op: "and", conditions: [{ path: "departamento", operator: "isnull" }] },
+    }), ADMIN);
+    expect(sin.sql).toContain(`${DEPARTAMENTO} IS NULL`);
+  });
+
+  it("filters on the name like it does on poste.tramo", () => {
+    const { sql, binds } = buildQuery(TRAMO({
+      filters: { op: "and", conditions: [{ path: "nombre", operator: "like", value: "Sucre" }] },
+    }), ADMIN);
+    expect(sql).toContain(`${sqlNombreDelTramo('t0."id"')} ILIKE $1`);
+    expect(binds[0]).toBe("%Sucre%");
+  });
+
+  it("groups by department with a count of tramos and a sum of poles", () => {
+    const { sql } = buildQuery(TRAMO({
+      columns: [
+        { path: "departamento" },
+        { path: "id", agg: "count" },
+        { path: "numPostes", agg: "sum" },
+      ],
+      groupBy: ["departamento"],
+    }), ADMIN);
+    expect(sql).toContain(`${DEPARTAMENTO} AS "c0"`);
+    expect(sql).toContain('COUNT(t0."id") AS "c1"');
+    // The inner count is already a count: summing it is what "poles per
+    // department" means, and COUNT() over it would count tramos instead.
+    expect(sql).toContain(`SUM(${POSTES}) AS "c2"`);
+    expect(sql).toContain(`GROUP BY ${DEPARTAMENTO}`);
+  });
+
+  it("groups by the tramo id, so two stretches that read the same stay two rows", () => {
+    const { sql } = buildQuery(TRAMO({
+      columns: [{ path: "nombre" }, { path: "numPostes", agg: "sum" }],
+      groupBy: ["nombre"],
+    }), ADMIN);
+    expect(sql).toContain('GROUP BY t0."id", ');
+  });
+
+  it("orders by the name, with the id as the tiebreaker", () => {
+    const { sql } = buildQuery(ESTADO, ADMIN);
+    expect(sql).toContain(`ORDER BY ${sqlNombreDelTramo('t0."id"')} ASC NULLS LAST, t0."id" ASC`);
+  });
+
+  it("offers the totals only at this root, and refuses them from any other", () => {
+    // Nothing leads to a tramo — see the entity's note — so these three are
+    // reachable from one place only.
+    expect(() => buildQuery({ root: "poste", columns: [{ path: "numPostes" }], limit: 1 }, ADMIN))
+      .toThrow(/no existe en el catálogo/);
+    expect(() => buildQuery({ root: "poste", columns: [{ path: "tramo.numPostes" }], limit: 1 }, ADMIN))
+      .toThrow(ReportConfigError);
+    expect(Object.values(catalog.entities).flatMap((e) => Object.values(e.relations))
+      .filter((r) => r.target === "tramo")).toEqual([]);
+
+    const view = buildCatalogView(ADMIN);
+    const propios = view.roots.find((r) => r.key === "tramo")!.fields.map((f) => f.path);
+    expect(propios).toEqual(expect.arrayContaining(["numPostes", "numEventos", "numPendientes"]));
+    // `rootOnly`: through "Registrado por" the user's own totals stay hidden.
+    expect(propios.filter((p) => /^usuario\.num/.test(p))).toEqual([]);
+  });
+
+  it("marks the counts as totals, and does not claim they overlap", () => {
+    const fields = buildCatalogView(ADMIN).roots.find((r) => r.key === "tramo")!.fields;
+    for (const path of ["numPostes", "numEventos", "numPendientes"]) {
+      const f = fields.find((x) => x.path === path)!;
+      expect(f.aggregate, path).toBe(true);
+      // Unlike the city's, these add up: each pole stands on exactly one tramo.
+      expect(f.label.toLowerCase(), path).not.toContain("en sus tramos");
+    }
+    expect(() => buildQuery(TRAMO({
+      columns: [{ path: "numPostes" }], groupBy: ["numPostes"],
+    }), ADMIN)).toThrow(/ya es un resumen/);
+  });
+
+  it("has no direction: no relation to a city, and no word that orders the two ends", () => {
+    const entity = catalog.entities.tramo;
+    expect(Object.keys(entity.relations)).toEqual(["usuario"]);
+    expect(Object.keys(entity.fields).sort()).toEqual(["createdAt", "id"]);
+
+    const view = buildCatalogView(ADMIN).roots.find((r) => r.key === "tramo")!;
+    const dicho = view.fields.map((f) => `${f.label} ${f.group} ${f.path}`).join(" | ");
+    expect(dicho).not.toMatch(/primer|segund|inicio|final|origen|destino|ciudad|\bA\b|\bB\b|_min|_max/i);
+
+    // The two ends reach the SQL only inside the shared name.
+    const { sql } = buildQuery(ESTADO, ADMIN);
+    expect(sql.split(sqlNombreDelTramo('t0."id"')).join("")).not.toMatch(/id_ciudad/);
+  });
+
+  it("keeps who registered it for staff, which a pole does not", () => {
+    // No screen prints a tramo's author and the design (§6) keeps it out of
+    // other people's responses, so the relation is staff-only here even though
+    // `poste.usuario` is open to whoever may read the pole.
+    const rutas = (viewer: Viewer, root: string) =>
+      buildCatalogView(viewer).roots.find((r) => r.key === root)!.fields.map((f) => f.path);
+    expect(rutas(OPERATIVO, "tramo").filter((p) => p.startsWith("usuario"))).toEqual([]);
+    expect(rutas(ADMIN, "tramo")).toContain("usuario.name");
+    // The contrast that makes the flag a decision rather than an accident.
+    expect(rutas(OPERATIVO, "poste")).toContain("usuario.name");
+
+    const { sql, columns } = buildQuery(TRAMO({ columns: [{ path: "usuario.name" }] }), ADMIN);
+    expect(sql).toContain('LEFT JOIN "usuarios" t1 ON t1."id" = t0."id_usuario" AND t1."deletedAt" IS NULL');
+    expect(columns[0].label).toBe("Nombre del usuario");
+    for (const path of ["usuario.name", "usuario.lastname", "usuario.user"]) {
+      expect(() => buildQuery(TRAMO({ columns: [{ path }] }), OPERATIVO), path).toThrow(/permiso/);
+    }
+    expect(() => buildQuery(TRAMO({
+      filters: { op: "and", conditions: [{ path: "usuario.name", operator: "eq", value: "x" }] },
+    }), OPERATIVO)).toThrow(/permiso/);
+  });
+
+  it("prunes the author out of a saved report for somebody who may not see it", () => {
+    const guardado = TRAMO({
+      columns: [{ path: "nombre" }, { path: "usuario.name" }],
+      filters: { op: "and", conditions: [{ path: "usuario.name", operator: "eq", value: "Isaias" }] },
+      sort: [{ path: "usuario.name", dir: "asc" }],
+    });
+    const sin = pruneConfig(guardado, OPERATIVO);
+    expect(sin.omitted).toBeGreaterThan(0);
+    expect(sin.config.columns.map((c) => c.path)).toEqual(["nombre"]);
+    expect(JSON.stringify(sin.config)).not.toContain("usuario");
+    expect(sin.extraFields).toEqual([]);
+
+    const con = pruneConfig(guardado, ADMIN);
+    expect(con.omitted).toBe(0);
+    expect(con.config.columns.map((c) => c.path)).toEqual(["nombre", "usuario.name"]);
+  });
+
+  it("keeps a tramo with no poles: the counts are subqueries and nothing filters or joins on poles", () => {
+    // The property the root exists for, held where the local data cannot show
+    // it (it has no tramo without a pole). A JOIN to poles would drop the empty
+    // tramo and a filter would too; a COUNT(*) subquery reads 0 for it.
+    const { sql } = buildQuery(ESTADO, ADMIN);
+    expect(sql).not.toMatch(/JOIN "postes" t\d/);
+    expect(sql.split("\n").find((l) => l.startsWith("WHERE"))).toBe('WHERE t0."deletedAt" IS NULL');
+    expect(sql.split("\n").find((l) => l.startsWith("FROM"))).toBe('FROM "tramos" t0');
+  });
+
+  it("carries its id and its registration date under their own labels", () => {
+    const fields = buildCatalogView(ADMIN).roots.find((r) => r.key === "tramo")!.fields;
+    const registro = fields.find((x) => x.path === "createdAt")!;
+    expect([registro.label, registro.kind]).toEqual(["Fecha de registro", "date"]);
+    expect(fields.find((x) => x.path === "id")!.label).toBe("ID del tramo");
+  });
+
+  it("is named for the indicator strip, in both numbers", () => {
+    expect(rowNoun("tramo", 1)).toBe("tramo");
+    expect(rowNoun("tramo", 52)).toBe("tramos");
   });
 });

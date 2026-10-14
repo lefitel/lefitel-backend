@@ -278,8 +278,12 @@ cierra la clase entera.
   `include` producen SQL impredecible y `limit` corta filas del JOIN, no de la raíz.
 - **Nada del usuario se convierte en identificador SQL.** Las rutas se buscan en el
   catálogo, los valores van por bind, los operadores son un conjunto cerrado.
-- **El tramo agrupa por par de ids, no por nombre.** Hay tres ciudades con nombre
-  repetido: agrupar por texto fusiona tramos distintos.
+- **El tramo agrupa por su id, no por nombre.** Desde que el tramo es una tabla
+  propia (`tramos`), `poste.tramo` y `tramo.nombre` agrupan por el id del tramo y
+  llevan el nombre solo para mostrarlo: dos tramos pueden llamarse igual, y
+  agrupar por texto los fusionaría. (Antes se agrupaba por el par de ids de las
+  dos ciudades, y había tres ciudades con nombre repetido.) El nombre se calcula
+  en un único sitio, `src/tramos/nombre.ts`.
 - **Los campos declaran su significado** (`semantic`), para que los exportadores no
   adivinen por una etiqueta que el usuario renombra.
 - **Los indicadores cuentan filas y nombran la unidad.** Esto se escribió como
@@ -1041,6 +1045,32 @@ pulsando «Cobertura por ciudad».
 `buildCatalogView`. `templatesFor` llama a `pruneConfig`, y `pruneConfig` llama a
 `buildCatalogView` — meterlas ahí habría recursado hasta agotar la pila, en la
 primera petición.
+
+### Séptima plantilla y raíz Tramo — 13 de octubre de 2026
+
+Al hacerse el tramo una tabla, el generador ganó una **raíz Tramo** («Una fila por
+tramo») y una séptima plantilla, **«Tramos y su estado»**: nombre, departamento,
+postes, eventos y pendientes de cada tramo, ordenada por nombre y sin filtros.
+Devuelve 84 tramos en la copia local. La raíz existe por la misma razón que la de
+Ciudad, **los ceros**: agrupando postes por tramo solo salen los tramos que tienen
+postes, y uno sin ninguno no aparecería en ningún reporte. La copia local no
+tiene hoy ningún tramo sin poste (la migración los creó a partir de los postes),
+así que esa propiedad la sujetan las pruebas del constructor —sin unión a postes,
+sin filtro, conteos en subconsulta— y no un dato.
+
+- **Los totales sí suman**, al contrario que los de Ciudad: un poste está en un
+  solo tramo, así que «Postes», «Eventos» y «Eventos pendientes» suman 1.541,
+  1.376 y 437, y por eso sus etiquetas no dicen «en sus tramos». Los de Ciudad
+  suman exactamente el doble (3.082 = 2 × 1.541).
+- **El tramo no tiene sentido ni extremos nombrados.** No hay relación ni campo
+  para ninguna de sus dos ciudades: cualquier par de columnas les daría un orden
+  que el tramo no tiene. El nombre ya lleva las dos.
+- **El autor del tramo es solo para quien tiene `seguridad.ver`**, al contrario
+  que el del poste: ninguna pantalla imprime quién registró un tramo, así que no
+  hay procedencia que defender y el diseño lo saca de las respuestas ajenas.
+- **«Departamento» ofrece sus nueve valores** en el filtro (como las listas de
+  Propietario o Material), tanto en el tramo como en el poste. Hoy los 84 tramos
+  tienen el departamento vacío, así que «está vacío» los devuelve todos.
 
 ### La pantalla, rehecha los días 4 y 5 de septiembre
 

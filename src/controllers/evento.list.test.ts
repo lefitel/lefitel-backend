@@ -26,6 +26,7 @@ import type { Request, Response } from "express";
 
 const findAndCountAll = vi.fn();
 const findAll = vi.fn();
+const findOne = vi.fn();
 
 vi.mock("../database/sequelize.js", () => ({
   sequelize: { transaction: (cb: (t: unknown) => unknown) => cb({}) },
@@ -34,6 +35,7 @@ vi.mock("../models/evento.model.js", () => ({
   EventoModel: {
     findAndCountAll: (...a: unknown[]) => findAndCountAll(...a),
     findAll: (...a: unknown[]) => findAll(...a),
+    findOne: (...a: unknown[]) => findOne(...a),
   },
 }));
 vi.mock("../models/eventoObs.model.js", () => ({ EventoObsModel: {} }));
@@ -43,6 +45,11 @@ vi.mock("../models/poste.model.js", () => ({
   POSTE_PUBLIC_ATTRIBUTES: ["id", "name"],
 }));
 vi.mock("../models/ciudad.model.js", () => ({ CiudadModel: {} }));
+vi.mock("../models/departamento.model.js", () => ({ DepartamentoModel: {} }));
+vi.mock("../models/tramo.model.js", () => ({
+  TramoModel: {},
+  TRAMO_PUBLIC_ATTRIBUTES: ["id", "id_ciudad_min", "id_ciudad_max", "id_departamento", "deletedAt"],
+}));
 vi.mock("../models/propietario.model.js", () => ({ PropietarioModel: {} }));
 vi.mock("../models/revision.model.js", () => ({
   RevisionModel: {},
@@ -56,7 +63,9 @@ vi.mock("../models/usuario.model.js", () => ({
 vi.mock("../utils/logAction.js", () => ({ logAction: vi.fn() }));
 vi.mock("../utils/fileUtils.js", () => ({ deleteImageFile: vi.fn() }));
 
-const { getEvento } = await import("./evento.controller.js");
+const { getEvento, searchEvento } = await import("./evento.controller.js");
+const { INCLUDE_TRAMO } = await import("../tramos/presentacion.js");
+const { PosteModel } = await import("../models/poste.model.js");
 
 function res() {
   const r = {
@@ -202,6 +211,64 @@ describe("getEvento — filtros de prioridad y estado", () => {
   });
 });
 
+// The tramo's card lists the incidents still open on that tramo. The tramo
+// list already counts them (`pendientes`), and this has to list the same rows.
+describe("getEvento — los eventos de un tramo", () => {
+  const poste = (options: Awaited<ReturnType<typeof query>>) =>
+    options.include.find((i) => i.model === PosteModel) as { where?: Record<string, unknown>; required?: boolean };
+
+  it("narrows to the incidents on that tramo's poles, through the pole and not the incident", async () => {
+    const options = await query({ tramo: "14" });
+
+    // An incident has no tramo of its own: the condition belongs in the pole.
+    expect(options.where).not.toHaveProperty("id_tramo");
+    expect(poste(options).where).toMatchObject({ id_tramo: 14 });
+    // And it must narrow, not merely decorate: a left join would answer every incident.
+    expect(poste(options).required).toBe(true);
+  });
+
+  it("leaves out the incidents of an archived pole, as the count on the tramo's row does", async () => {
+    // The pole include is `paranoid: false`, so that an archived pole still
+    // names itself on its incident. For this question that would list rows
+    // the count beside it never counted.
+    const options = await query({ tramo: "14" });
+
+    expect(poste(options).where).toMatchObject({ deletedAt: null });
+  });
+
+  it("combines with the pending filter, which is what the card asks for", async () => {
+    const options = await query({ tramo: "14", filterColumn: "state", filterValue: "pending" });
+
+    expect(options.where["state"]).toEqual({ [Op.not]: true });
+    expect(poste(options).where).toMatchObject({ id_tramo: 14, deletedAt: null });
+  });
+
+  it("combines with a filter by pole name without either replacing the other", async () => {
+    const options = await query({ tramo: "14", filterColumn: "poste", filterValue: "P-0" });
+
+    expect(poste(options).where).toMatchObject({ id_tramo: 14, deletedAt: null });
+    expect(poste(options).where).toHaveProperty("name");
+  });
+
+  it.each(["abc", "", "0", "-3", "1.5", "99999999999"])(
+    "refuses a tramo it cannot read (%j) rather than answering every incident",
+    async (tramo) => {
+      const r = res();
+      await getEvento({ query: { tramo } } as unknown as Request, r);
+
+      expect(r.status).toHaveBeenCalledWith(400);
+      expect(findAndCountAll).not.toHaveBeenCalled();
+    },
+  );
+
+  it("touches nothing of the pole when no tramo is asked for", async () => {
+    const options = await query({});
+
+    expect(poste(options).where).toBeUndefined();
+    expect(poste(options).required).toBeUndefined();
+  });
+});
+
 describe("getEvento — orden por gravedad", () => {
   it("ordena por la peor observación, con las sin clasificar al final", async () => {
     const options = await query({ sortBy: "criticality", sortOrder: "asc" });
@@ -219,5 +286,81 @@ describe("getEvento — orden por gravedad", () => {
     const sortSql = sql((sorted.order[0] as [unknown, string])[0]);
     const filterSql = sql(bandConditions(filtered.where)[0]);
     expect(filterSql.startsWith(sortSql)).toBe(true);
+  });
+});
+
+// ── The pole of each incident stands on a tramo ──────────────────────────────
+
+/** A tramo row as `INCLUDE_TRAMO` brings it back: the two ends by id, not by name. */
+const tramoCrudo = (extra: Record<string, unknown> = {}) => ({
+  id: 14, id_ciudad_min: 3, id_ciudad_max: 7, id_departamento: null, deletedAt: null,
+  ciudadMin: { id: 3, name: "Sucre", lat: -19.04, lng: -65.26 },
+  ciudadMax: { id: 7, name: "Potosí", lat: -19.58, lng: -65.75 },
+  departamento: null, ...extra,
+});
+
+describe("getEvento — el tramo del poste", () => {
+  it("sends the pole of each incident with its tramo, archived or not, and never the two cities", async () => {
+    const fila = {
+      id: 5, description: "Cable suelto", id_poste: 40,
+      poste: { id: 40, name: "P-001", id_tramo: 14, tramo: tramoCrudo({ deletedAt: "2026-10-01T00:00:00.000Z" }) },
+    };
+    findAndCountAll.mockResolvedValue({ count: 1, rows: [{ toJSON: () => fila }] });
+    const r = res();
+    await getEvento({ query: {} } as unknown as Request, r);
+
+    const cuerpo = r.json.mock.calls[0][0] as { data: { poste: { id_tramo: number; tramo: { nombre: string; archivado: boolean } } }[] };
+    expect(cuerpo.data[0].poste.id_tramo).toBe(14);
+    expect(cuerpo.data[0].poste.tramo.archivado).toBe(true);
+    expect(cuerpo.data[0].poste.tramo.nombre).toBe("Potosí – Sucre");
+    expect(JSON.stringify(cuerpo)).not.toMatch(/ciudadA|ciudadB|id_ciudad_min/);
+  });
+
+  it("orders by the name of the tramo through the incident's own column", async () => {
+    const options = await query({ sortBy: "tramo", sortOrder: "asc" });
+    const [expresion, direccion] = options.order[0] as [{ val: string }, string];
+    // The list paginates with a subquery, where the include's alias does not
+    // exist; the incident's own column does. Read off `.val`, because
+    // `JSON.stringify` would escape the quotes of the identifier.
+    expect(expresion.val).toContain('"evento"."id_poste"');
+    expect(JSON.stringify(options.order)).not.toContain("ciudadA");
+    expect(expresion.val).toMatch(/\) COLLATE "C"$/);
+    expect(direccion).toBe("ASC");
+    // Many incidents share a tramo: the id keeps them from shuffling between pages.
+    expect(options.order[1]).toEqual(["id", "ASC"]);
+  });
+
+  it("applies the later keys of a multi-column sort, and puts the id tie-breaker last", async () => {
+    const options = await query({ sortBy: ["tramo", "date"], sortOrder: ["asc", "desc"] });
+    expect(options.order).toHaveLength(3);
+    expect((options.order[0] as [{ val: string }, string])[1]).toBe("ASC");
+    expect(options.order[1]).toEqual(["date", "DESC"]);
+    expect(options.order[2]).toEqual(["id", "ASC"]);
+  });
+
+  it("asks for the tramo of an archived pole too", async () => {
+    const options = await query({});
+    const poste = options.include.find((i) => i.model === PosteModel) as unknown as
+      { attributes: string[]; paranoid: boolean; include: unknown[] };
+    expect(poste.paranoid).toBe(false);
+    expect(poste.attributes).toContain("id_tramo");
+    expect(poste.attributes).not.toContain("id_ciudadA");
+    expect(poste.include).toContain(INCLUDE_TRAMO);
+    expect(INCLUDE_TRAMO.paranoid).toBe(false);
+  });
+
+  it("sends the detail of an incident with its pole's tramo presented, from the same include", async () => {
+    findOne.mockResolvedValue({
+      toJSON: () => ({ id: 5, poste: { id: 40, id_tramo: 14, tramo: tramoCrudo() } }),
+    });
+    const r = res();
+    await searchEvento({ params: { id: "5" } } as unknown as Request, r);
+
+    const cuerpo = r.json.mock.calls[0][0] as { poste: { tramo: { nombre: string } } };
+    expect(cuerpo.poste.tramo.nombre).toBe("Potosí – Sucre");
+    expect(JSON.stringify(cuerpo)).not.toMatch(/ciudadA|ciudadB|id_ciudad_min/);
+    const poste = (findOne.mock.calls[0][0] as { include: { model: unknown; include: unknown[] }[] })
+      .include.find((i) => i.model === PosteModel);
+    expect(poste?.include).toContain(INCLUDE_TRAMO);
   });
 });

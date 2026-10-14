@@ -116,53 +116,30 @@ describe("excludeOld", () => {
 });
 
 describe("the stretch of line", () => {
-  it("is null when the report does not name one", () => {
-    const r = leerFiltro({ ...RANGO });
-    expect(typeof r !== "string" && r.tramoInicial).toBeNull();
-    expect(typeof r !== "string" && r.tramoFinal).toBeNull();
+  it("reads the tramo as one id", () => {
+    expect(leerFiltro({ ...RANGO, tramo: "14" })).toMatchObject({ tramo: 14 });
+    expect(leerFiltro({ ...RANGO })).toMatchObject({ tramo: null });
   });
 
-  it("reads two ids", () => {
-    const r = leerFiltro({ ...RANGO, TramoInicial: "3", TramoFinal: "7" });
-    expect(typeof r !== "string" && r.tramoInicial).toBe(3);
-    expect(typeof r !== "string" && r.tramoFinal).toBe(7);
-  });
-
-  it("refuses an id that is not one, rather than covering the whole network", () => {
-    // The silent version of this is the dangerous one: read loosely,
-    // `TramoInicial=abc` becomes "no stretch given" and the report answers for
-    // every pole in the system while the screen names two cities.
-    expect(falla(leerFiltro({ ...RANGO, TramoInicial: "abc", TramoFinal: "7" }))).toMatch(/tramo/);
-    expect(falla(leerFiltro({ ...RANGO, TramoInicial: "3", TramoFinal: "-2" }))).toMatch(/tramo/);
-    expect(falla(leerFiltro({ ...RANGO, TramoInicial: "0", TramoFinal: "7" }))).toMatch(/tramo/);
-    expect(falla(leerFiltro({ ...RANGO, TramoInicial: "3.5", TramoFinal: "7" }))).toMatch(/tramo/);
-  });
-
-  it("refuses a repeated one, which would otherwise widen the report to everything", () => {
-    // The same finding as `excludeOld`, and here it is the expensive one: read
-    // as absent, `?TramoInicial=1&TramoInicial=2` means *no stretch*, so the
-    // report covers every pole in the network while the URL names two cities.
-    expect(falla(leerFiltro({ ...RANGO, TramoInicial: ["1", "2"], TramoFinal: "7" }))).toMatch(/tramo/);
+  it("refuses a tramo it cannot read", () => {
+    for (const tramo of ["abc", "1.5", "-3", ["1", "2"], "", "  "]) {
+      expect(leerFiltro({ ...RANGO, tramo } as never)).toBe("El tramo indicado no es válido.");
+    }
   });
 
   it("refuses an id larger than the column can hold", () => {
-    // `id_ciudadA` is an `integer`. Anything past its ceiling is refused by
-    // Postgres with `integer out of range`, which arrives as the neutral 500
-    // this file exists to prevent — so it is refused here instead.
-    expect(falla(leerFiltro({ ...RANGO, TramoInicial: "99999999999", TramoFinal: "7" }))).toMatch(/tramo/);
-    // And the largest one that does fit is still accepted.
-    const r = leerFiltro({ ...RANGO, TramoInicial: "2147483647", TramoFinal: "7" });
-    expect(typeof r !== "string" && r.tramoInicial).toBe(2147483647);
+    expect(leerFiltro({ ...RANGO, tramo: "99999999999" })).toBe("El tramo indicado no es válido.");
+    expect(leerFiltro({ ...RANGO, tramo: "2147483647" })).toMatchObject({ tramo: 2147483647 });
   });
 
-  it("demands both ends only where the report cannot work without them", () => {
-    // `recorrido` traces a line between two cities; the others merely narrow by
-    // one if it is given.
-    expect(falla(leerFiltro({ ...RANGO }, { tramo: "obligatorio" }))).toMatch(/dos ciudades/);
-    expect(falla(leerFiltro({ ...RANGO, TramoInicial: "3" }, { tramo: "obligatorio" }))).toMatch(/dos ciudades/);
-    expect(typeof leerFiltro({ ...RANGO, TramoInicial: "3", TramoFinal: "7" }, { tramo: "obligatorio" })).not.toBe("string");
-    // And the same filter without the demand is fine.
-    expect(typeof leerFiltro({ ...RANGO })).not.toBe("string");
+  it("asks for the tramo by name on the report that cannot answer without one", () => {
+    expect(leerFiltro({ ...RANGO }, { tramo: "obligatorio" })).toBe("Indique el tramo.");
+  });
+
+  it("refuses the two-city filter of the previous client, on every report", () => {
+    const viejo = { ...RANGO, TramoInicial: "3", TramoFinal: "7" };
+    expect(leerFiltro(viejo)).toMatch(/dos ciudades/);
+    expect(leerFiltroSinRango({ TramoInicial: "3" })).toMatch(/dos ciudades/);
   });
 });
 
@@ -197,6 +174,6 @@ describe("estado-red, which may be asked without a period", () => {
     // Shared with the five above rather than written twice, and asserted so that
     // it stays shared.
     expect(falla(leerFiltroSinRango({ excludeOld: "1" }))).toMatch(/true o false/);
-    expect(falla(leerFiltroSinRango({ TramoInicial: "abc" }))).toMatch(/tramo/);
+    expect(falla(leerFiltroSinRango({ tramo: "abc" }))).toMatch(/tramo/);
   });
 });

@@ -11,6 +11,7 @@
 // no mark, so the two cannot drift apart.
 
 import { CiudadModel } from "../models/ciudad.model.js";
+import { DepartamentoModel } from "../models/departamento.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
@@ -22,7 +23,8 @@ import { log } from "../utils/logger.js";
  * Above this, the list does not travel and the field keeps the free text box it
  * had before.
  *
- * The largest of the six is 98 cities, so there is five times the room. It is
+ * The largest of the six is 94 cities (measured on the local database after
+ * the cities were merged and tidied), so there is five times the room. It is
  * not there for today's data: these tables are administered by hand from
  * Parámetros and none of them grows with use, but the day somebody loads a real
  * register of towns the generator has to degrade to what it does now instead of
@@ -35,15 +37,16 @@ export const MAX_OPTION_VALUES = 500;
  * and is short enough that nobody notices the wait after adding an owner. */
 const TTL_MS = 60_000;
 
-/** Any of the six catalogue models, as far as this file is concerned. */
+/** Any of the catalogue models, as far as this file is concerned. */
 type Catalogo = { findAll(opciones: object): Promise<unknown[]> };
 
 /**
  * Which model answers each key, keyed exactly as `catalogView` builds it:
  * the catalog's entity key, a dot, and the field name.
  *
- * All six models are `paranoid: true` — `rols` gained `deletedAt` in
- * 20260826000001 — so an archived row is excluded without asking. That matters
+ * All the models but `departamento` are `paranoid: true` — `rols` gained
+ * `deletedAt` in 20260826000001 — so an archived row is excluded without
+ * asking; `departamentos` has no `deletedAt` and nothing archives a department. That matters
  * more here than in a report: a filter offering an owner nobody can have any
  * more is a choice that returns nothing.
  */
@@ -54,6 +57,11 @@ const SOURCE: Record<string, Catalogo> = {
   "tipoObs.name": TipoObsModel,
   "obs.name": ObsModel,
   "rol.name": RolModel,
+  // Calculated fields (`optionList` on a `CalculatedDef`): the department of a
+  // tramo, and of a pole's tramo. One table answers both keys, because the
+  // catalogue keys a list by the entity it was reached on.
+  "tramo.departamento": DepartamentoModel,
+  "poste.departamento": DepartamentoModel,
 };
 
 export type OptionLists = Record<string, string[]>;
@@ -72,25 +80,24 @@ async function readOne(model: Catalogo): Promise<string[]> {
   })) as unknown as { name: string | null }[];
 
   // Deduplicated, because the list is of *values* and the filter compares
-  // values: 98 cities carry 95 distinct names — Millares, Olivos and Pailas
-  // each name more than one city — and offering the same word three times
-  // reads as a bug while behaving identically. What it does not do is make the
-  // filter more precise: picking "Millares" still matches all three, exactly as
-  // typing it does today, because the condition is on the name and not on the
-  // city.
+  // values: before the duplicate cities were merged, 98 cities carried 95
+  // distinct names — Millares, Olivos and Pailas each named more than one city —
+  // and offering the same word three times reads as a bug while behaving
+  // identically. Today the 94 live cities carry 94 distinct names, so this only
+  // matters for a catalogue edited by hand later (and for the other five).
+  // What it does not do is make the filter more precise: the condition is on
+  // the name and not on the city.
   //
   // **Exactly as stored, spaces and all.** This tidied the values at first, and
   // that was the very failure this feature exists to remove, handed back with
-  // the screen's own authority behind it: 17 of the 98 cities are stored with a
-  // trailing space — `Yacuiba ` carries 121 poles, `Palos Blancos ` 103 — and a
-  // filter compares exactly, so the tidy `Yacuiba` matches none of them. A
-  // value nobody can reach by typing it is bad; a value the screen *offers* and
-  // that then finds nothing is worse.
-  //
-  // The cost is one pair that reads the same: `Ventillas` and `Ventillas ` are
-  // two different cities, and in the list they look identical. Both work, which
-  // is the part that matters. Cleaning the data is what fixes the appearance,
-  // and that is a decision about production rows, not about a dropdown.
+  // the screen's own authority behind it: 17 of the 98 cities used to be stored
+  // with a trailing space — `Yacuiba ` carried 121 poles, `Palos Blancos ` 103 —
+  // and a filter compares exactly, so the tidy `Yacuiba` matched none of them.
+  // A value nobody can reach by typing it is bad; a value the screen *offers*
+  // and that then finds nothing is worse. The city migration has since
+  // normalised those names (none of the 94 live ones has a trailing space),
+  // but the other five catalogues are not covered by it, and the rule is cheaper
+  // to keep than to re-derive.
   const seen = new Set<string>();
   for (const row of rows) {
     // Only what cannot be picked at all: a blank row in a list is not a choice.

@@ -18,13 +18,13 @@ sharp.cache({ files: 0 });
 
 /** Longest side in pixels, and JPEG quality. The numbers reportGeneral uses. */
 export const PHOTO_MAX_PX = 160;
-export const PHOTO_QUALITY = 65;
+const PHOTO_QUALITY = 65;
 
 /** Above this the spreadsheet stops being something Excel opens comfortably. */
 export const MAX_EXPORT_PHOTOS = 3_000;
 
 /** Disk and sharp's thread pool both suffer if this goes much higher. */
-export const PHOTO_READ_CONCURRENCY = 8;
+const PHOTO_READ_CONCURRENCY = 8;
 
 export interface LoadedPhotos {
   /** Stored value as it appears in the row, mapped to a JPEG buffer. */

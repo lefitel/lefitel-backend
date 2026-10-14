@@ -13,9 +13,12 @@ const create = vi.fn();
 const save = vi.fn();
 const set = vi.fn();
 const findOne = vi.fn();
+// The tramo a pole stands on is read inside the transaction, under a lock; the
+// double answers "live" so that these cases reach the coordinates they are about.
+const tramoFindOne = vi.fn();
 
 vi.mock("../database/sequelize.js", () => ({
-  sequelize: { transaction: async (work: (t: unknown) => unknown) => work({}) },
+  sequelize: { transaction: async (work: (t: unknown) => unknown) => work({ LOCK: { SHARE: "SHARE", UPDATE: "UPDATE" } }) },
 }));
 vi.mock("../models/poste.model.js", () => ({
   PosteModel: { create: (...a: unknown[]) => create(...a), findOne: (...a: unknown[]) => findOne(...a) },
@@ -23,6 +26,13 @@ vi.mock("../models/poste.model.js", () => ({
 vi.mock("../models/adss.model.js", () => ({ AdssModel: { findAll: async () => [] } }));
 vi.mock("../models/adssPoste.model.js", () => ({ AdssPosteModel: { findAll: async () => [], create: vi.fn() } }));
 vi.mock("../models/ciudad.model.js", () => ({ CiudadModel: {} }));
+vi.mock("../models/departamento.model.js", () => ({ DepartamentoModel: {} }));
+vi.mock("../models/tramo.model.js", () => ({
+  TramoModel: { findOne: (...a: unknown[]) => tramoFindOne(...a), findByPk: vi.fn() },
+  TRAMO_PUBLIC_ATTRIBUTES: ["id", "id_ciudad_min", "id_ciudad_max", "id_departamento", "deletedAt"],
+}));
+// Pulled in by `tramo.controller.ts`, which the pole controller imports for one sentence.
+vi.mock("../permissions/store.js", () => ({ can: async () => true }));
 vi.mock("../models/material.model.js", () => ({ MaterialModel: {} }));
 vi.mock("../models/propietario.model.js", () => ({ PropietarioModel: {} }));
 vi.mock("../models/usuario.model.js", () => ({ UsuarioModel: {}, USUARIO_AS_AUTHOR: ["id", "name", "lastname"] }));
@@ -37,10 +47,11 @@ app.use((req, _res, next) => { (req as unknown as { user: unknown }).user = { id
 app.post("/", createPoste);
 app.put("/:id", updatePoste);
 
-const BUENO = { name: "P52", lat: -22.0283, lng: -63.680898, id_ciudadA: 40, id_ciudadB: 41 };
+const BUENO = { name: "P52", lat: -22.0283, lng: -63.680898, id_tramo: 1 };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  tramoFindOne.mockResolvedValue({ id: 1 });
   create.mockResolvedValue({ dataValues: { id: 1, ...BUENO } });
   findOne.mockResolvedValue({ dataValues: { id: 1240, ...BUENO, image: null }, set, save });
 });

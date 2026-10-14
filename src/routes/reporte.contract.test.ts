@@ -45,7 +45,6 @@ const { PosteModel } = await import("../models/poste.model.js");
 const { RevisionModel } = await import("../models/revision.model.js");
 const { SolucionModel } = await import("../models/solucion.model.js");
 const { EventoObsModel } = await import("../models/eventoObs.model.js");
-const { Op } = await import("sequelize");
 const { consultaLimiter } = await import("../middleware/limiters.js");
 const { sequelize } = await import("../database/sequelize.js");
 const { allowedOrigins, CSRF_CLIENT_HEADER } = await import("../config/security.js");
@@ -78,7 +77,7 @@ const RANGO = "fechaInicial=2026-01-01&fechaFinal=2026-03-31";
 const LOS_SEIS = [
   ["general", RANGO],
   ["tramo", RANGO],
-  ["recorrido", `${RANGO}&TramoInicial=3&TramoFinal=7`],
+  ["recorrido", `${RANGO}&tramo=14`],
   ["estado-red", ""],
   ["frecuencia-obs", RANGO],
   ["resumen-tiempos", RANGO],
@@ -196,7 +195,7 @@ describe("the filter, now that it travels in the URL", () => {
     expect((await pedir("estado-red", "")).status).toBe(200);
   });
 
-  it("demands both ends of the stretch on recorrido alone", async () => {
+  it("demands the tramo on recorrido alone", async () => {
     expect((await pedir("recorrido", RANGO)).status).toBe(400);
     expect((await pedir("tramo", RANGO)).status).toBe(200);
   });
@@ -219,9 +218,9 @@ describe("the filter, now that it travels in the URL", () => {
 
   it("refuses a repeated parameter rather than widening the report", async () => {
     // Express builds an array from a repeated key. Read as "not sent", a
-    // repeated `TramoInicial` means *no stretch at all*, so the report covers
-    // every pole in the network while the URL names two cities.
-    const res = await pedir("tramo", `${RANGO}&TramoInicial=1&TramoInicial=2`);
+    // repeated `tramo` means *no stretch at all*, so the report covers
+    // every pole in the network while the URL names two of them.
+    const res = await pedir("tramo", `${RANGO}&tramo=1&tramo=2`);
 
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/tramo/i);
@@ -229,24 +228,21 @@ describe("the filter, now that it travels in the URL", () => {
 });
 
 describe("what the stretch does to the query", () => {
-  it("narrows tramo by the pair, in both directions", async () => {
-    await pedir("tramo", `${RANGO}&TramoInicial=3&TramoFinal=7`);
+  it("narrows tramo by its id", async () => {
+    await pedir("tramo", `${RANGO}&tramo=14`);
 
-    // A stretch is bidirectional: 3→7 and 7→3 are the same line, and a filter
-    // that names only one order silently halves the report. Read through the
-    // `Op.or` symbol rather than serialised — `JSON.stringify` drops symbol keys
-    // and turns this whole condition into `{}`, which is what the first version
-    // of this assertion was comparing against.
     const poste = (consulta(eventoFindAll)?.include as { model: unknown; where?: unknown; required?: boolean }[])
       ?.find((i) => i.model === PosteModel);
-    const pares = (poste?.where as Record<symbol, unknown> | undefined)?.[Op.or];
-    expect(pares).toEqual([
-      { id_ciudadA: 3, id_ciudadB: 7 },
-      { id_ciudadA: 7, id_ciudadB: 3 },
-    ]);
+    expect(poste?.where).toEqual({ id_tramo: 14 });
     // `required` is what turns the include into an inner join: without it the
     // filter narrows nothing, because every incident comes back with a null pole.
     expect(poste?.required).toBe(true);
+  });
+
+  it("refuses the two-city filter of the previous client instead of answering with everything", async () => {
+    const res = await pedir("tramo", `${RANGO}&TramoInicial=3&TramoFinal=7`);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/dos ciudades/);
   });
 
   it("does not narrow tramo when no stretch is named", async () => {
@@ -259,48 +255,111 @@ describe("what the stretch does to the query", () => {
   });
 });
 
+describe("the other four apply the stretch too, instead of accepting it and answering for the whole network", () => {
+  type Inc = { model: unknown; where?: unknown; required?: boolean; attributes?: unknown; include?: Inc[] };
+
+  it("general: the pole include carries the tramo and is an inner join; without a tramo it carries neither", async () => {
+    await pedir("general", `${RANGO}&tramo=14`);
+    const con = (consulta(eventoFindAll)?.include as Inc[]).find((i) => i.model === PosteModel);
+    expect(con?.where).toEqual({ id_tramo: 14 });
+    expect(con?.required).toBe(true);
+
+    vi.clearAllMocks();
+    eventoFindAll.mockResolvedValue([] as never);
+    revisionFindAll.mockResolvedValue([{ dataValues: { id_evento: 1 } }] as never);
+    await pedir("general", RANGO);
+    const sin = (consulta(eventoFindAll)?.include as Inc[]).find((i) => i.model === PosteModel);
+    expect(sin?.where).toBeUndefined();
+    expect(sin?.required).toBeUndefined();
+  });
+
+  it("estado-red: the poles are asked for by id_tramo; without a tramo there is no where at all", async () => {
+    await pedir("estado-red", "tramo=14");
+    expect(consulta(posteFindAll)?.where).toEqual({ id_tramo: 14 });
+
+    vi.clearAllMocks();
+    posteFindAll.mockResolvedValue([] as never);
+    await pedir("estado-red", "");
+    expect(consulta(posteFindAll)).not.toHaveProperty("where");
+  });
+
+  it("resumen-tiempos: only incidents whose pole is on the tramo (inner join); otherwise the pole include is as before", async () => {
+    await pedir("resumen-tiempos", `${RANGO}&tramo=14`);
+    const con = (consulta(eventoFindAll)?.include as Inc[]).find((i) => i.model === PosteModel);
+    expect(con?.where).toEqual({ id_tramo: 14 });
+    expect(con?.required).toBe(true);
+
+    vi.clearAllMocks();
+    eventoFindAll.mockResolvedValue([] as never);
+    solucionFindAll.mockResolvedValue([{ dataValues: { id_evento: 1 } }] as never);
+    await pedir("resumen-tiempos", RANGO);
+    const sin = (consulta(eventoFindAll)?.include as Inc[]).find((i) => i.model === PosteModel);
+    expect(sin?.where).toBeUndefined();
+    expect(sin?.required).toBeUndefined();
+  });
+
+  it("frecuencia-obs: the observations are joined to their incident and its pole on the tramo; without one there is no such join", async () => {
+    await pedir("frecuencia-obs", `${RANGO}&tramo=14`);
+    const evento = (consulta(eventoObsFindAll)?.include as Inc[]).find((i) => i.model === EventoModel);
+    expect(evento?.required).toBe(true);
+    expect(evento?.attributes).toEqual([]);
+    const posteInc = evento?.include?.find((i) => i.model === PosteModel);
+    expect(posteInc?.where).toEqual({ id_tramo: 14 });
+    expect(posteInc?.required).toBe(true);
+
+    vi.clearAllMocks();
+    eventoObsFindAll.mockResolvedValue([] as never);
+    revisionFindAll.mockResolvedValue([{ dataValues: { id_evento: 1 } }] as never);
+    await pedir("frecuencia-obs", RANGO);
+    expect((consulta(eventoObsFindAll)?.include as Inc[]).some((i) => i.model === EventoModel)).toBe(false);
+  });
+});
+
 describe("estado de la red, which had no coverage at all", () => {
-  /** One pole on the stretch between two cities, with `n` pending incidents. */
-  const poste = (id: number, a: number, b: number, pendientes: number, total = pendientes) => ({
+  /** One pole on the tramo `idTramo`, with `n` pending incidents. */
+  const poste = (id: number, idTramo: number, pendientes: number, total = pendientes) => ({
     toJSON: () => ({
       id,
-      id_ciudadA: a,
-      id_ciudadB: b,
-      ciudadA: { id: a, name: `C${a}` },
-      ciudadB: { id: b, name: `C${b}` },
+      id_tramo: idTramo,
+      tramo: {
+        id: idTramo, id_ciudad_min: idTramo * 10, id_ciudad_max: idTramo * 10 + 1,
+        id_departamento: null, departamento: null,
+        ciudadMin: { id: idTramo * 10, name: `C${idTramo * 10}`, lat: null, lng: null },
+        ciudadMax: { id: idTramo * 10 + 1, name: `C${idTramo * 10 + 1}`, lat: null, lng: null },
+      },
       eventos: Array.from({ length: total }, (_, i) => ({ id: i + 1, state: i >= pendientes })),
     }),
   });
 
-  it("counts the two directions of a stretch as one", async () => {
-    // (1,2) and (2,1) are the same line. Counted apart, every stretch in the
-    // report is split in two and both halves read as half as busy.
-    posteFindAll.mockResolvedValue([poste(1, 1, 2, 1), poste(2, 2, 1, 1)] as never);
+  it("groups by the tramo itself, so two poles of one stretch are one row whichever way they were stored", async () => {
+    // Two poles with the same id_tramo: one row, totalPostes 2. Which end each
+    // pole was once recorded first no longer exists to split them.
+    posteFindAll.mockResolvedValue([poste(1, 14, 1), poste(2, 14, 1)] as never);
 
     const res = await pedir("estado-red", "");
 
     expect(res.body).toHaveLength(1);
     expect(res.body[0].totalPostes).toBe(2);
+    expect(res.body[0].totalEventos).toBe(2);
+    expect(res.body[0].tramo).toMatchObject({ id: 14, nombre: "C140 – C141" });
+    expect(res.body[0]).not.toHaveProperty("ciudadAId");
   });
 
-  it("names the two cities in a stable order", async () => {
-    posteFindAll.mockResolvedValue([poste(1, 2, 1, 0)] as never);
+  it("reads the tramo off the pole, and asks the database for the tramo and not for two cities", async () => {
+    posteFindAll.mockResolvedValue([poste(1, 14, 0)] as never);
 
-    const res = await pedir("estado-red", "");
+    await pedir("estado-red", "");
 
-    // Normalised by id, so the same stretch reads the same whichever way round
-    // its poles were recorded. Crossed, the report would name the wrong city
-    // first for half of them.
-    expect(res.body[0].ciudadAId).toBe(1);
-    expect(res.body[0].ciudadAName).toBe("C1");
-    expect(res.body[0].ciudadBId).toBe(2);
+    const opciones = consulta(posteFindAll);
+    expect(opciones?.attributes).toEqual(["id", "id_tramo"]);
+    expect(JSON.stringify(opciones?.include)).not.toMatch(/ciudadA|ciudadB/);
   });
 
   it("calls a stretch with no incidents perfectly healthy", async () => {
     // Zero incidents is 100 % health, not 0 %. The division has to be guarded,
     // and the wrong guard puts every quiet stretch at the top of a list sorted
     // worst-first.
-    posteFindAll.mockResolvedValue([poste(1, 1, 2, 0, 0)] as never);
+    posteFindAll.mockResolvedValue([poste(1, 14, 0, 0)] as never);
 
     const res = await pedir("estado-red", "");
 
@@ -308,7 +367,7 @@ describe("estado de la red, which had no coverage at all", () => {
   });
 
   it("counts a pole as troubled only when something is actually pending", async () => {
-    posteFindAll.mockResolvedValue([poste(1, 1, 2, 0, 3), poste(2, 1, 2, 2, 2)] as never);
+    posteFindAll.mockResolvedValue([poste(1, 14, 0, 3), poste(2, 14, 2, 2)] as never);
 
     const res = await pedir("estado-red", "");
 
@@ -320,8 +379,8 @@ describe("estado de la red, which had no coverage at all", () => {
 
   it("puts the worst stretch first", async () => {
     posteFindAll.mockResolvedValue([
-      poste(1, 1, 2, 0, 2),
-      poste(2, 3, 4, 2, 2),
+      poste(1, 14, 0, 2),
+      poste(2, 15, 2, 2),
     ] as never);
 
     const res = await pedir("estado-red", "");
@@ -329,7 +388,7 @@ describe("estado de la red, which had no coverage at all", () => {
     // Ascending by health: the point of the screen is what needs attention.
     // Reversed, the list opens on everything that is fine.
     expect(res.body[0].pctSalud).toBeLessThanOrEqual(res.body[1].pctSalud);
-    expect(res.body[0].ciudadAId).toBe(3);
+    expect(res.body[0].tramo.id).toBe(15);
   });
 });
 

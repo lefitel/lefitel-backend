@@ -13,6 +13,15 @@ Este documento es la lista para el día del corte. Lo que hace falta saber antes
   `master` no arranca. La marcha atrás es restaurar la copia de la base (paso 2).
 - **La imagen nueva migra sola al arrancar.** No hay que configurar ningún comando de
   migración en Coolify, y si había uno de pre-despliegue hay que quitarlo.
+- **La imagen anterior se para ANTES de que arranque la nueva.** La migración del tramo
+  (`20261010000005`) elimina de `postes` las columnas `id_ciudadA` e `id_ciudadB`, y la imagen
+  anterior las consulta en toda lectura de postes, incidencias y reportes: si sigue
+  atendiendo mientras la nueva migra, todo eso falla. Es lo contrario de lo que cuenta el
+  paso 4 (cambio en caliente, con la vieja atendiendo hasta que la nueva esté sana): **para
+  este corte se renuncia a esa red**, y se asume que el servicio está caído desde que se
+  para la vieja hasta que la nueva queda sana. Como *Auto Deploy* arranca el despliegue con
+  el push a `master`, la vieja se para **antes** del push. Cómo se para en el panel de
+  Coolify no está comprobado desde aquí: verlo antes del día del corte.
 
 Cada paso dice qué está comprobado y qué no. Lo no comprobado es lo que no se puede ver
 desde el código: la base de producción y el panel de Coolify.
@@ -252,6 +261,105 @@ informes programados y una que hace único el nombre de un rol):
 Esta vez **no** se repitió el inicio de sesión de una cuenta por rol: nada de lo añadido
 toca la autenticación.
 
+**Pendiente, desde el 10 de octubre: dos migraciones más** — `20261010000005` (el tramo pasa
+a ser una tabla propia, se fusionan cinco ciudades duplicadas y `postes` pierde las columnas
+`id_ciudadA` e `id_ciudadB`) y `20261010000006` (los permisos del módulo `tramos`). Con ellas,
+y con la `…07` que se describe más abajo, son **26 ficheros y 25 aplicadas** el día del corte, no 23
+y 22. **La prueba sobre la copia de producción se repite entera**, con las 25, y esta vez trae por delante cuatro
+comprobaciones previas que la `…05` hace antes de tocar nada:
+
+1. Las diez ciudades de la fusión existen y se llaman como se espera, y las cinco que ganan
+   están activas.
+2. Ningún poste apunta a una ciudad inexistente.
+3. Ningún poste acaba con la misma ciudad en los dos extremos una vez aplicada la fusión.
+4. Ningún informe guardado, archivado o no, usa «Ciudad A/B» ni filtra por el texto del tramo.
+
+Si una se dispara, la `…05` se detiene **sin haber cambiado nada** y el mensaje nombra las
+filas (postes, ciudades o informes). Para la `…05` sola, corregir el dato y volver a
+ejecutar basta; no hace falta restaurar nada. **El día del corte no es así.** Cuando la `…05`
+se detiene, las 22 migraciones anteriores ya están confirmadas en la base; la imagen nueva
+sale al arrancar porque queda una pendiente, y la imagen anterior no puede arrancar sobre
+ese esquema. «Corregir el dato» sería entonces SQL escrito a mano sobre producción, con el
+servicio parado, o restaurar la copia del paso 2. Por eso la prueba sobre la copia de
+producción **es una puerta y no un trámite**: esas comprobaciones deben saltar en la
+repetición, con tiempo, y no el día del corte. Dirán si producción tiene algo que la base
+local no tenía.
+
+**Una migración más, aditiva: `20261010000007`** (`reporte_ejecucion_entregas`, a quién se
+envió cada ejecución de un informe programado). Crea una tabla nueva, con su índice y tres
+restricciones, y no toca ninguna existente; su `down` solo la borra. Con ella son **26
+ficheros y 25 aplicadas** el día del corte. No depende de los datos de producción: la tabla
+nace vacía y solo se llena con las ejecuciones posteriores.
+
+**Cómo se ensaya la `…05`.** Un volcado de producción sin tocar trae aplicada solo la
+migración más antigua; las tablas que leen las comprobaciones (por ejemplo `reporte_vistas`)
+no existen hasta que corren las anteriores. Por eso hay un tope, `MIGRAR_HASTA`:
+
+1. Restaurar el volcado de producción en una base que se llame exactamente `probe_tramos`
+   (un PostgreSQL desechable, nunca el de siempre).
+2. Migrar hasta la `…04`, con las variables de esa base:
+   `MIGRAR_HASTA=20261010000004-add-minuto-to-reporte-programaciones npm run migrate`.
+   El nombre va sin extensión; uno que no exista falla con un mensaje claro.
+3. Ejecutar `npx vitest run src/tramos/tramos.db.test.ts` con las mismas variables y exigir
+   ver **`11 passed`**, no solo que el código de salida sea 0. Esa suite es la única
+   comprobación poste por poste de la `…05`: cada poste conserva el tramo de las dos
+   ciudades que tenía. Con `PG_DATABASE=probe_tramos` se niega a salir en verde sobre una
+   base vacía o ya migrada (falla con una frase que lo dice), pero «skipped» no es
+   «passed»: si el recuento no dice 11 pasadas, la migración no se ha comprobado.
+4. Volver a restaurar el volcado: el paso 3 deja la base migrada por la `…05`.
+5. Entonces sí, el ensayo entero en el contenedor, con las 25 migraciones.
+
+**Hecho el 13 de octubre de 2026, los cinco pasos**, sobre un volcado de producción sacado
+de Coolify esa misma noche y con **el árbol tal como estaba ese día, sin commitear** (las
+migraciones `…05`, `…06` y `…07` aún no estaban en git). Si alguna migración cambia antes
+del commit que se despliega, se repite.
+
+- Las consultas del paso 1 sobre ese volcado: el registro tiene la fila de mayo, cero
+  usuarios duplicados o con espacios, solo los roles 1, 2 y 3, y los mismos 3 postes con
+  fotos de dos puntos seguidos.
+- Paso 2: 22 migraciones limpias hasta la `…04`. Paso 3: **`11 passed`**. Ninguna de las
+  cuatro comprobaciones previas de la `…05` se disparó.
+- Ensayo entero con la imagen construida del árbol (lint y 3.436 tests pasan en la puerta):
+  **25 migraciones aplicadas, contenedor sano a los 17 segundos, ninguna línea de aviso ni
+  de error en el log.**
+- **Los recuentos de las 16 tablas que trae producción son idénticos antes y después**:
+  1.917 eventos, 2.090 postes, 11.956 revisiones, 10.390 líneas de bitácora, 13 usuarios,
+  110 ciudades. Las tablas pasan de 16 a 32.
+- La `…05` sobre producción: **101 tramos** (134 pares con sentido, 109 sin él, y 8 que se
+  juntan por la fusión), ningún poste sin tramo, ningún tramo sin postes, y **los 101 sin
+  departamento**: hay que asignarlos a mano después del corte. De las cinco ciudades que
+  pierden en la fusión, «El Morro» (76) ya estaba archivada en producción; las otras
+  cuatro quedan archivadas.
+- Permisos sembrados: `generador.programar` 1=sí 2=no 3=no; `tramos.ver` para los tres,
+  `tramos.crear` y `tramos.editar` para 1 y 2, `tramos.archivar` solo para 1.
+- Inicio de sesión de una cuenta por rol contra la API migrada, y lectura de sesión,
+  postes, tramos, eventos, ciudades, dashboard y envíos programados: todo 200 en los tres.
+  La contraseña de esas tres cuentas se reescribió en la copia con un hash nuevo: **no**
+  prueba los hashes antiguos, que es lo que ya probó el ensayo del 9 de octubre.
+
+**Visto de paso, y cuenta el día del corte:** `MFA_ENCRYPTION_KEY_1` son exactamente 64
+caracteres hexadecimales. Con una clave mal formada el contenedor queda **sano** igual (es
+deliberado: solo se apaga el TOTP), así que Coolify dará el despliegue por bueno. Tras el
+corte, buscar en el log la línea `fatal` «la clave de cifrado del segundo factor no es
+válida»; si no está, la clave sirve.
+
+**Una migración más tras ese ensayo: `20261013000001`**, el departamento de cada tramo según
+la lista que mandó el cliente el 13 de octubre. Solo datos: escribe donde el departamento
+está vacío, busca cada tramo por su par de ciudades y comprueba los dos nombres, y una fila
+que no cuadra se salta sin parar el arranque. Con ella son **27 ficheros y 26 aplicadas** el
+día del corte. Probada esa misma noche sobre una restauración nueva del mismo volcado, con las
+26: **65 tramos con departamento y 36 vacíos**, exactamente los esperados, y los 65 coinciden
+con un emparejamiento hecho a ciegas desde cero. Quedan vacíos: 20 que la lista no menciona,
+8 que solo casan con un nombre dudoso, 3 a los que da dos departamentos y 5 donde la lista
+contradice el mapa (cuatro de la zona Guarayos, en Santa Cruz y listados como Beni, y
+Villamontes–Hito Paraguay, en Tarija y listado como Santa Cruz). Su `down` los deja vacíos,
+repetirla no cambia nada y respeta un departamento puesto a mano. No se repitió el ensayo con
+la imagen Docker: la migración no toca el esquema.
+**Tras el corte quedan 36 tramos por asignar a mano** en la pantalla de tramos. Ocho esperan
+al cliente: los tres con dos departamentos (Independencia–Inquisivi, Caracollo–Ayo Ayo,
+Villamontes–Boyuibe) y los cinco del mapa, que dependen de si su columna es el departamento
+o su zona.
+
 **No comprobado:** un despliegue real en Coolify.
 
 ## 5. Variables de `web` en Vercel
@@ -330,6 +438,12 @@ La marcha atrás es, en este orden:
 3. Redesplegar `master` en `api` y en `web`.
 
 Se pierde todo lo escrito en la base entre el corte y la restauración.
+
+**Desde la migración del tramo (`…05`) esta restauración es la única vuelta exacta.** Su
+`down` reconstruye las dos columnas de ciudad desde el tramo, pero no devuelve a cada poste
+el sentido que tenía, ni deshace la fusión de las cinco ciudades, ni los espacios de los
+nombres. Y no se puede volver a la imagen anterior dejando el esquema nuevo: no encuentra
+las columnas.
 
 ## 9. Lo que cambia para los usuarios
 

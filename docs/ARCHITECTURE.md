@@ -251,6 +251,29 @@ fallo de Postgres en la lista de incidencias sigue llegando al navegador.
 > versión de este párrafo nombraba cinco migrados como si fueran todos, que es el
 > error contrario y lleva a concluir que la lista no vale.
 
+### Tramos y departamentos
+
+Un tramo es una fila de `tramos` (migración `20261010000005`), no el par de ciudades que
+cada poste guardaba. Cada poste apunta a uno con `postes.id_tramo` (obligatorio, con
+índice `idx_postes_tramo`); `id_ciudadA` e `id_ciudadB` ya no existen.
+
+- `tramos`: `id_ciudad_min`, `id_ciudad_max` (los dos extremos, apuntan a `ciudads`),
+  `id_departamento` (opcional), `id_usuario` (quien lo creó) y archivado suave. `min` y
+  `max` describen cómo se evita el duplicado, no un sentido: no salen en ninguna respuesta
+  de la API, y el nombre del tramo (los dos extremos ordenados por nombre, unidos por « – »)
+  se construye al presentarlo.
+- **Regla del par único**, impuesta por la base y no por el controlador: `CHECK
+  (id_ciudad_min < id_ciudad_max)` rechaza el tramo volcado y el de una sola ciudad, y el
+  índice único `tramos_par_uniq` sobre `(id_ciudad_min, id_ciudad_max)` **cuenta también los
+  archivados**: un par existe una vez para siempre, y crearlo de nuevo devuelve el archivado.
+- `departamentos`: `id` y `name` único, sembrada con los nueve departamentos de Bolivia. No
+  se edita desde la aplicación; es tabla y no lista en el código porque el generador y las
+  exportaciones trabajan en SQL.
+
+La misma migración fusionó cinco ciudades que estaban cargadas dos veces (las perdedoras
+quedan archivadas) y limpió los espacios sobrantes de los nombres. Su `down` no es exacto:
+la vuelta atrás real es la copia de seguridad.
+
 ```sql
 -- eventos: subquery pendingEvents (crítico — se ejecuta 1 vez por poste)
 CREATE INDEX idx_eventos_poste_state_deleted
@@ -269,10 +292,11 @@ CREATE INDEX idx_eventos_id_usuario ON public.eventos (id_usuario);
 -- postes: la pestaña Archivados, igual que en eventos.
 CREATE INDEX idx_postes_deleted ON public.postes ("deletedAt");
 
--- postes: `getPoste` filtrado por `ciudadId`, o por `ciudadA`+`ciudadB`. (Los
--- nombres `getPosteByTramo` y `getPosteByCiudad` que decía aquí antes no existen
--- ni han existido: son parámetros de consulta sobre el mismo manejador.)
--- Nombre SIN comillas a propósito: en la base está en minúsculas. Ver el aviso.
+-- postes: estos dos índices ya NO existen. Los quitó la migración
+-- `20261010000005-create-tramos` junto con las columnas `id_ciudadA` e
+-- `id_ciudadB`, y puso `idx_postes_tramo` sobre `postes (id_tramo)`, que sí viene
+-- de una migración y por eso no está en esta lista. Se dejan escritos porque la
+-- migración E1 los crea antes, y una base restaurada de antes del tramo los trae.
 CREATE INDEX idx_postes_ciudadA ON public.postes ("id_ciudadA");
 CREATE INDEX idx_postes_ciudadB ON public.postes ("id_ciudadB");
 

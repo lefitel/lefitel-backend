@@ -124,6 +124,55 @@ editar, pausar, borrar, «enviar ahora» como prueba, e historial de envíos (`/
 En `web`: un selector de periodo en los filtros de fecha, y en cada informe guardado un
 panel «Programar envío» con su historial.
 
+### 3.9 Historial global y a quién se envió cada vez
+
+**El historial de todos los envíos.** La pantalla de Envíos tiene una segunda pestaña,
+«Historial», con todas las ejecuciones de todos los envíos que quien mira puede ver, la más
+reciente primero, paginadas y filtrables por resultado y por envío. La alimenta
+`GET /api/generator/schedules/runs` (permiso `generador.ver`, como el historial de un envío
+suelto). La visibilidad es la de la lista de envíos y se decide **en la consulta**, no sobre
+la página ya leída: quien no modera solo ve las ejecuciones de sus envíos, y pedir un envío
+ajeno devuelve una página vacía, no un 403, para que el filtro no sirva para averiguar qué
+números existen. Un envío eliminado conserva sus ejecuciones (`eliminada: true`), y un informe
+borrado o una cuenta archivada se nombran igualmente o salen como `null`. No hay migración
+por esto: sale todo de lo que ya se guardaba.
+
+**A quién se envió.** Cada ejecución anota, destinatario por destinatario y **a medida que
+termina cada envío** (no al final: un proceso que muera a mitad deja dicho quién ya lo recibió),
+una fila en `reporte_ejecucion_entregas` (migración `20261010000007`). Guarda una **copia**, no
+una referencia: el tipo (`usuario` o `externo`), el nombre que tenía en pantalla en ese
+momento (nombre y apellido de la cuenta, o la dirección si es externo), la dirección solo si es
+externa, y el resultado. Así la fila se sigue leyendo aunque la cuenta cambie de nombre o se
+elimine (`id_usuario` pasa a `NULL`; por eso el CHECK distingue cuenta de externo por `tipo` y
+no por qué columna está vacía). Los resultados son cuatro:
+
+- `entregado`: la cadena de correo lo aceptó.
+- `rechazado`: se rechazó la propia dirección (cuenta contra esa dirección, como antes).
+- `no_enviado`: cualquier otro fallo del envío; no dice nada de la dirección.
+- `sin_cupo`: no se intentó, porque se alcanzó el tope diario de correos de informes.
+
+Solo se anota a quien la ejecución escribe: quien se dio de baja o ya rebotó demasiadas veces
+no tiene fila. **Escribir esta fila nunca estropea una ejecución**: si falla, se registra un
+aviso y el bucle sigue; un informe sin enviar vale más que una fila de historial. Una ejecución
+devuelta porque el exportador estaba ocupado se borra y arrastra sus filas (`ON DELETE
+CASCADE`), pero para entonces no se había enviado a nadie.
+
+**Solo existe para las ejecuciones posteriores a la migración.** Las anteriores no tienen
+filas; no se inventa nada hacia atrás. Cada fila del historial trae `con_destinatarios` para
+distinguir unas de otras sin una petición por fila. La pantalla escribe «No se registró a quién»
+solo bajo una ejecución sin registro que sí llegó a intentar el envío a alguien (entregados más no
+entregados mayor que cero) y que ya no está en curso; una ejecución que no intentó a nadie (falló
+antes de enviar) o que aún está construyendo sus ficheros muestra únicamente la cifra, y una
+omitida, un guion. Si una ejecución se interrumpe a mitad, al cerrarla se cuentan sus filas:
+entregados los `entregado`, no entregados los otros tres resultados.
+
+**Quién puede ver a quién.** `GET /api/generator/schedules/runs/:id/recipients` (también
+`generador.ver`) sigue la regla del historial de un envío: lo lee el dueño del envío o
+administración; a cualquier otro se le niega (403) y se deja el rastro `READ_PROGRAMACION_DENIED`,
+y una ejecución que no existe es un 404. **La dirección de una cuenta no se sirve nunca**: ni
+se guarda en la fila, ni sale en la respuesta; la dirección solo aparece para un destinatario
+externo, porque es lo único que ese destinatario es.
+
 ## 4. Orden de construcción
 
 1. Adjuntos en la cadena de correo.

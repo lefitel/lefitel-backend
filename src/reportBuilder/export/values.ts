@@ -10,7 +10,6 @@ import { REPORT_TIME_ZONE } from "../catalog.js";
 // The zone belongs to the engine, not to this module: the builder filters by it
 // and these formatters render by it, and the two drifting apart is what let a
 // filter and the cell it produced disagree about which day a row belongs to.
-export { REPORT_TIME_ZONE };
 
 const dateFormatter = new Intl.DateTimeFormat("es-BO", {
   day: "2-digit",

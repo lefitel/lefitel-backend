@@ -40,6 +40,7 @@ const habilitado = process.env.PG_DATABASE === "probe_informes";
 
 const fila = async <T = Record<string, unknown>>(sql: string): Promise<T> =>
   ((await sequelize.query(sql))[0] as T[])[0];
+const filas = async <T = Record<string, unknown>>(sql: string): Promise<T[]> => (await sequelize.query(sql))[0] as T[];
 const sql = (texto: string) => sequelize.query(texto);
 
 interface Recibido {
@@ -59,6 +60,13 @@ const programador = dependenciasDelProgramadorReales({
     return respuesta(correo.para);
   },
 });
+
+/** An account that nothing refers to, so that it can be removed. */
+const usuarioSinHistorial = (id: number) =>
+  sql(
+    `INSERT INTO usuarios (id, name, lastname, birthday, image, phone, "user", pass, id_rol, pass_changed_at, "createdAt", "updatedAt")
+     VALUES (${id}, 'Nombre${id}', 'Apellido${id}', now(), '', '', 'u${id}', 'x', 3, now(), now(), now())`,
+  );
 
 /** Make a schedule due `haceSegundos` ago. */
 const vencer = (id: number, haceSegundos = 1) =>
@@ -84,11 +92,13 @@ beforeAll(async () => {
   const carpeta = fileURLToPath(new URL("../models/", import.meta.url));
   for (const f of readdirSync(carpeta).filter((n) => n.endsWith(".model.ts"))) await import(`../models/${f}`);
   await sequelize.sync({ force: true });
-  await sql("DROP TABLE IF EXISTS reporte_ejecuciones, reporte_programacion_destinatarios, reporte_programaciones CASCADE");
+  await sql("DROP TABLE IF EXISTS reporte_ejecucion_entregas, reporte_ejecuciones, reporte_programacion_destinatarios, reporte_programaciones CASCADE");
   const tablas = await import("../migrations/20261010000001-create-reporte-programaciones.js");
   await tablas.up({ context: sequelize.getQueryInterface() });
   const minuto = await import("../migrations/20261010000004-add-minuto-to-reporte-programaciones.js");
   await minuto.up({ context: sequelize.getQueryInterface() });
+  const entregas = await import("../migrations/20261010000007-create-reporte-ejecucion-entregas.js");
+  await entregas.up({ context: sequelize.getQueryInterface() });
 
   await sql(`INSERT INTO rols (id, name, description, "createdAt", "updatedAt") VALUES (1,'Administrador','a',now(),now()), (3,'Cliente','c',now(),now())`);
   await sql(`INSERT INTO permisos (id_rol, modulo, accion, permitido, "createdAt", "updatedAt") VALUES (1,'seguridad','ver',true,now(),now())`);
@@ -147,6 +157,18 @@ describe.skipIf(!habilitado).sequential("the scheduled reports against PostgreSQ
     const p = await fila(`SELECT activa, fallos_seguidos, proxima_ejecucion > now() AS futura, to_char(proxima_ejecucion AT TIME ZONE 'America/La_Paz', 'HH24:MI') AS hora FROM reporte_programaciones WHERE id = 1`);
     expect(p).toEqual({ activa: true, fallos_seguidos: 0, futura: true, hora: "07:20" });
     expect(await reales.enviadosHoy()).toBe(3);
+
+    // Who it was for, copied as it read at that moment: an account by name and
+    // never by address, an outside address by itself.
+    const entregas = await filas<{ tipo: string; id_usuario: number | null; correo: string | null; nombre: string; resultado: string }>(
+      `SELECT tipo, id_usuario, correo, nombre, resultado FROM reporte_ejecucion_entregas ORDER BY id`,
+    );
+    expect(entregas).toEqual([
+      { tipo: "usuario", id_usuario: 2, correo: null, nombre: "Nombre2 Apellido2", resultado: "entregado" },
+      { tipo: "externo", id_usuario: null, correo: "cliente@fuera.com", nombre: "cliente@fuera.com", resultado: "entregado" },
+      { tipo: "usuario", id_usuario: 4, correo: null, nombre: "Nombre4 Apellido4", resultado: "entregado" },
+    ]);
+    expect(JSON.stringify(entregas)).not.toMatch(/@osefi\.net/);
   });
 
   it("finds nothing due right after", async () => {
@@ -255,5 +277,53 @@ describe.skipIf(!habilitado).sequential("the scheduled reports against PostgreSQ
     invalidatePermissions();
     await tic(programador);
     expect(await fila(`SELECT activa, motivo_pausa FROM reporte_programaciones WHERE id = 1`)).toEqual({ activa: false, motivo_pausa: "sin_permiso" });
+  });
+
+  describe("the record of who each run was sent to", () => {
+    it("goes with its run when the run is deleted", async () => {
+      await sql(`INSERT INTO reporte_ejecuciones (id, id_programacion, programada_para, estado) VALUES (9001, 1, now() - interval '9 days', 'en_curso')`);
+      await sql(`INSERT INTO reporte_ejecucion_entregas (id_ejecucion, tipo, id_usuario, nombre, resultado) VALUES (9001, 'usuario', 2, 'Nombre2 Apellido2', 'entregado')`);
+      await reales.liberar(9001);
+      expect((await fila<{ n: number }>(`SELECT count(*)::int AS n FROM reporte_ejecucion_entregas WHERE id_ejecucion = 9001`)).n).toBe(0);
+    });
+
+    it("gives a run that died half way the counts its rows say, when it is closed", async () => {
+      await sql(`INSERT INTO reporte_ejecuciones (id, id_programacion, programada_para, estado, iniciada_at) VALUES (9003, 1, now() - interval '7 days', 'en_curso', now() - interval '7 days')`);
+      await sql(
+        `INSERT INTO reporte_ejecucion_entregas (id_ejecucion, tipo, id_usuario, nombre, resultado) VALUES
+           (9003, 'usuario', 2, 'Nombre2 Apellido2', 'entregado'),
+           (9003, 'usuario', 4, 'Nombre4 Apellido4', 'entregado'),
+           (9003, 'usuario', 2, 'Nombre2 Apellido2', 'rechazado'),
+           (9003, 'usuario', 4, 'Nombre4 Apellido4', 'sin_cupo')`,
+      );
+      await programador.cerrarAbandonadas(new Date());
+      expect(await fila(`SELECT estado, enviados, no_enviados, detalle FROM reporte_ejecuciones WHERE id = 9003`))
+        .toEqual({ estado: "fallido", enviados: 2, no_enviados: 2, detalle: "Interrumpida: el servidor se detuvo mientras se enviaba." });
+    });
+
+    it("leaves a dead run that recorded nobody at 0 of 0", async () => {
+      await sql(`INSERT INTO reporte_ejecuciones (id, id_programacion, programada_para, estado, iniciada_at) VALUES (9004, 1, now() - interval '6 days', 'en_curso', now() - interval '6 days')`);
+      await programador.cerrarAbandonadas(new Date());
+      expect(await fila(`SELECT estado, enviados, no_enviados FROM reporte_ejecuciones WHERE id = 9004`))
+        .toEqual({ estado: "fallido", enviados: 0, no_enviados: 0 });
+    });
+
+    it("outlives an account that is removed, and still reads: the kind decides what it is, not the emptied column", async () => {
+      await usuarioSinHistorial(9);
+      await sql(`INSERT INTO reporte_ejecuciones (id, id_programacion, programada_para, estado) VALUES (9002, 1, now() - interval '8 days', 'enviado')`);
+      await sql(`INSERT INTO reporte_ejecucion_entregas (id_ejecucion, tipo, id_usuario, nombre, resultado) VALUES (9002, 'usuario', 9, 'Nombre9 Apellido9', 'rechazado')`);
+      await sql(`DELETE FROM usuarios WHERE id = 9`);
+      expect(await fila(`SELECT tipo, id_usuario, correo, nombre, resultado FROM reporte_ejecucion_entregas WHERE id_ejecucion = 9002`))
+        .toEqual({ tipo: "usuario", id_usuario: null, correo: null, nombre: "Nombre9 Apellido9", resultado: "rechazado" });
+    });
+
+    it("refuses a row that mixes the kinds, and a word outside the vocabulary", async () => {
+      const insertar = (valores: string) =>
+        sql(`INSERT INTO reporte_ejecucion_entregas (id_ejecucion, tipo, id_usuario, correo, nombre, resultado) VALUES (9002, ${valores})`);
+      await expect(insertar(`'externo', 2, 'a@fuera.com', 'a@fuera.com', 'entregado'`)).rejects.toThrow();
+      await expect(insertar(`'externo', NULL, NULL, 'a@fuera.com', 'quizá'`)).rejects.toThrow();
+      await expect(insertar(`'usuario', 2, 'a@fuera.com', 'Nombre2', 'entregado'`)).rejects.toThrow();
+      await expect(insertar(`'otro', NULL, NULL, 'x', 'entregado'`)).rejects.toThrow();
+    });
   });
 });

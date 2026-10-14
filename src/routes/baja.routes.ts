@@ -14,7 +14,7 @@ import { postConsultarBaja, postDarDeBaja } from "../controllers/baja.controller
 // minutes is far past any person opening a link and pressing a button.
 const WINDOW_MS = 15 * 60 * 1000;
 
-export const bajaLimiter = rateLimit({
+const bajaLimiter = rateLimit({
   windowMs: WINDOW_MS,
   limit: 30,
   message: { message: "Demasiadas solicitudes. Espere unos minutos." },

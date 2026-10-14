@@ -1,16 +1,16 @@
 import { Request, Response } from "express";
-import { literal, Op } from "sequelize";
+import { literal, Op, type Transaction } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
 import { authoredBy, withoutAuthor } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
-import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
+import { archivar, NADA_QUE_ARCHIVAR, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
 import { AdssModel } from "../models/adss.model.js";
 import { AdssPosteModel } from "../models/adssPoste.model.js";
-import { CiudadModel } from "../models/ciudad.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
+import { TramoModel } from "../models/tramo.model.js";
 import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 import type { IPoste } from "../interfaces/index.js";
 import {
@@ -19,7 +19,9 @@ import {
 } from "../exports/tabla.js";
 import { exportSlot } from "../reportBuilder/export/queue.js";
 import { MAX_EXPORT_ROWS } from "../reportBuilder/export/index.js";
-import { nombreDeTramo } from "../utils/tramo.js";
+import { INCLUDE_TRAMO, presentarTramo, presentarTramos } from "../tramos/presentacion.js";
+import { sqlNombreDelTramo } from "../tramos/nombre.js";
+import { TRAMO_NO_DISPONIBLE } from "./tramo.controller.js";
 import { coordenadasInvalidas } from "../utils/coordenadas.js";
 
 import { log } from "../utils/logger.js";
@@ -49,7 +51,7 @@ const handler = makeHandler(posteLog);
  */
 export interface FiltroPostes {
   where: Record<string, unknown>;
-  order: [[string, string]];
+  order: [string, string][];
   paranoid: boolean;
   isArchived: boolean;
   /**
@@ -60,21 +62,44 @@ export interface FiltroPostes {
   descripcion: string[];
 }
 
+const ENTERO = /^\d+$/;
+/** The largest value of a PostgreSQL `integer` column. */
+const ENTERO_MAXIMO = 2_147_483_647;
+/**
+ * A positive id the database can hold, out of a query string.
+ *
+ * Digits alone are not enough: four hundred of them become `Infinity` once
+ * turned into a number and written into SQL, and eleven overflow `integer` —
+ * both answered 500 instead of the sentence.
+ */
+const esIdDeQuery = (v: unknown): boolean =>
+  typeof v === "string" && ENTERO.test(v) && Number(v) > 0 && Number(v) <= ENTERO_MAXIMO;
+const TRAMO_INVALIDO = "El tramo indicado no es válido.";
+const CIUDAD_INVALIDA = "La ciudad indicada no es válida.";
+const DOS_CIUDADES_YA_NO =
+  "La lista de postes ya no se filtra por dos ciudades: indique el tramo.";
+
+/** The tramos that touch a city, as a subquery. The id is digits only by the time it gets here. */
+const tramosDeLaCiudad = (id: number) =>
+  literal(`(SELECT "id" FROM "tramos" WHERE "id_ciudad_min" = ${id} OR "id_ciudad_max" = ${id})`);
+
 export const filtroDePostes = (query: Request["query"]): FiltroPostes | string => {
-  const { ciudadA, ciudadB, ciudadId, archived, filterColumn, filterValue, sortBy, sortOrder } = query;
+  const { tramo, ciudadA, ciudadB, ciudadId, archived, filterColumn, filterValue, sortBy, sortOrder } = query;
   const isArchived = archived === "true";
+
+  // A client from before the cut. Refused by name: answering with every pole
+  // to somebody who asked for one stretch is the failure this file exists to
+  // prevent.
+  if (ciudadA !== undefined || ciudadB !== undefined) return DOS_CIUDADES_YA_NO;
+  if (tramo !== undefined && !esIdDeQuery(tramo)) return TRAMO_INVALIDO;
+  if (ciudadId !== undefined && !esIdDeQuery(ciudadId)) return CIUDAD_INVALIDA;
 
   const where: Record<string, unknown> = isArchived
     ? { deletedAt: { [Op.ne]: null } }
     : ciudadId
-    ? { [Op.or]: [{ id_ciudadA: Number(ciudadId) }, { id_ciudadB: Number(ciudadId) }] }
-    : (ciudadA && ciudadB)
-      ? {
-          [Op.or]: [
-            { id_ciudadA: Number(ciudadA), id_ciudadB: Number(ciudadB) },
-            { id_ciudadA: Number(ciudadB), id_ciudadB: Number(ciudadA) },
-          ],
-        }
+    ? { id_tramo: { [Op.in]: tramosDeLaCiudad(Number(ciudadId)) } }
+    : tramo
+      ? { id_tramo: Number(tramo) }
       : {};
 
   const filterCols = Array.isArray(filterColumn) ? filterColumn as string[] : filterColumn ? [filterColumn as string] : [];
@@ -105,7 +130,7 @@ export const filtroDePostes = (query: Request["query"]): FiltroPostes | string =
   const descripcion: string[] = [];
   if (isArchived) descripcion.push("archivados");
   else if (ciudadId) descripcion.push("una ciudad");
-  else if (ciudadA && ciudadB) descripcion.push("un tramo");
+  else if (tramo) descripcion.push("un tramo");
   filterCols.forEach((col, i) => {
     const val = filterVals[i];
     if (typeof val !== "string" || !val.trim()) return;
@@ -140,18 +165,28 @@ export const filtroDePostes = (query: Request["query"]): FiltroPostes | string =
   const SORTABLE = new Set(["id", "name", "date", "createdAt", "updatedAt", "deletedAt"]);
   const sortByCols = Array.isArray(sortBy) ? sortBy as string[] : sortBy ? [sortBy as string] : [];
   const sortOrderVals = Array.isArray(sortOrder) ? sortOrder as string[] : sortOrder ? [sortOrder as string] : [];
-  const orderEntries = sortByCols.map((col, i) => {
+  const orderEntries = sortByCols.flatMap<unknown[]>((col, i) => {
     const dir = sortOrderVals[i] === "asc" ? "ASC" : "DESC";
-    if (col === "usuario")      return [UsuarioModel, "name", dir];
-    if (col === "material")     return [MaterialModel, "name", dir];
-    if (col === "propietario")  return [PropietarioModel, "name", dir];
-    if (col === "tramo")        return [{ model: CiudadModel, as: "ciudadA" }, "name", dir];
-    return SORTABLE.has(col) ? [col, col === "id" && !!ciudadA && !!ciudadB ? "ASC" : dir] : null;
-  }).filter(Boolean);
+    if (col === "usuario")      return [[UsuarioModel, "name", dir]];
+    if (col === "material")     return [[MaterialModel, "name", dir]];
+    if (col === "propietario")  return [[PropietarioModel, "name", dir]];
+    // By the name people read, under the collation that name is built with
+    // (see `tramos/nombre.ts`) — the same expression and the same reason as the
+    // order of `getTramo`. It names the root column and no include, so it holds
+    // whatever alias the join to `tramos` ends up with.
+    // The id tie-breaker (many poles share a tramo) goes at the end of the whole
+    // list, below, so it never shadows a key the screen asked for after this one.
+    if (col === "tramo")        return [[literal(`(${sqlNombreDelTramo('"poste"."id_tramo"')}) COLLATE "C"`), dir]];
+    return SORTABLE.has(col) ? [[col, col === "id" && !!tramo ? "ASC" : dir]] : [];
+  });
+
+  // Without a tie-breaker the database may order the poles of one tramo
+  // differently from one page to the next.
+  if (sortByCols.includes("tramo")) orderEntries.push(["id", "ASC"]);
 
   return {
     where,
-    order: (orderEntries.length ? orderEntries : [["id", ciudadA && ciudadB ? "ASC" : "DESC"]]) as [[string, string]],
+    order: (orderEntries.length ? orderEntries : [["id", tramo ? "ASC" : "DESC"]]) as [string, string][],
     paranoid: !isArchived,
     isArchived,
     descripcion,
@@ -184,15 +219,14 @@ export const getPoste = handler("getPoste", async (req: Request, res: Response) 
     include: [
       { model: MaterialModel, paranoid: false, attributes: ["id", "name"] },
       { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
-      { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
-      { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+      INCLUDE_TRAMO,
       { model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] },
     ],
   };
 
   const listado = await listar(PosteModel, queryOptions, paginacion);
   if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
-  return res.status(200).json(listado);
+  return res.status(200).json({ ...listado, data: presentarTramos(listado.data) });
 });
 
 // ── Export ────────────────────────────────────────────────────────────
@@ -229,8 +263,7 @@ const COLUMNAS_POSTE: readonly Columna[] = [
 type PosteExportado = Pick<IPoste, "id" | "name" | "lat" | "lng" | "date"> & {
   material?: { name?: string | null } | null;
   propietario?: { name?: string | null } | null;
-  ciudadA?: { name?: string | null } | null;
-  ciudadB?: { name?: string | null } | null;
+  tramo?: unknown;
 };
 
 /**
@@ -276,8 +309,7 @@ export const exportarPostes = handler("exportarPostes", async (req: Request, res
       include: [
         { model: MaterialModel, paranoid: false, attributes: ["id", "name"] },
         { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
-        { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
-        { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+        INCLUDE_TRAMO,
         // Joined so that `sortBy=usuario` has a table to order by, and read by no
         // column below: the file does not name who registered each pole, and §6
         // is the reason. Without the join Postgres answers "missing FROM-clause
@@ -292,7 +324,7 @@ export const exportarPostes = handler("exportarPostes", async (req: Request, res
       return {
         n: i + 1,
         name: p.name,
-        tramo: nombreDeTramo(p.ciudadA, p.ciudadB),
+        tramo: p.tramo ? presentarTramo(p.tramo).nombre : "",
         material: p.material?.name ?? null,
         propietario: p.propietario?.name ?? null,
         lat: p.lat,
@@ -330,27 +362,36 @@ export const exportarPostes = handler("exportarPostes", async (req: Request, res
   }
 });
 
-// `getTramos` and its route `GET /api/poste/tramos` were removed with C2.
-//
-// It served the distinct city pairs poles run between, and its only caller
-// anywhere was `useTramoNeighbors` in the client, which now reads the same
-// pairs from the `tramos` block of `GET /api/reporte/options` — a block that
-// additionally drops pairs naming an archived city, which this handler
-// returned and no combobox could render.
-//
-// **Two repositories, so two commits, and this is the first task in the arc
-// that does not tolerate half of it.** §11 asks that both shores of a task ship
-// in the same *cut*, not the same commit — which is impossible across repos.
-// C1 and C3 leave tolerating code behind them; this one does not: an `api` that
-// has dropped the route beside a `web` that still calls it answers 404, and the
-// stretch comboboxes on all three report screens go empty. The pair to ship
-// together is named in the C2 entry of §9.
-//
-// It buys no privacy, and saying otherwise would contradict §6 of the standard,
-// which already says this in as many words: `GET /api/poste/` is ungated too and
-// projects `id_ciudadA`/`id_ciudadB` on every row, so any live session
-// reconstructs exactly the same pairs with one request. One address fewer, one
-// dead handler fewer, and nothing closed. C5 is what closes it.
+// `getTramos` and its route `GET /api/poste/tramos` no longer exist. They served
+// the distinct city pairs poles run between; a tramo is now a row of its own,
+// listed by `GET /api/tramo/` and, for the pole form, in the `tramos` block of
+// `GET /api/poste/options`.
+
+/** Thrown inside a transaction so it rolls back, and answered as a 400 outside it. */
+class TramoNoDisponible extends Error {}
+
+/** The id of a tramo out of a body, or `null` when it is not one. */
+const leerIdTramo = (valor: unknown): number | null => {
+  const n = typeof valor === "number" ? valor : typeof valor === "string" && ENTERO.test(valor) ? Number(valor) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= ENTERO_MAXIMO ? n : null;
+};
+
+/**
+ * The tramo a pole is about to stand on, locked and live, or a refusal.
+ *
+ * Shared lock on the tramo for the length of the write: archiving it takes the
+ * row FOR UPDATE and counts its poles (`deleteTramo`), so one of the two waits.
+ * Whichever goes second sees what the first did — the archive counts this
+ * pole, or this read no longer finds a live row. Without it a pole could land
+ * on a tramo archived a millisecond before.
+ *
+ * The read is the default, paranoid one on purpose: an archived tramo is not
+ * found, and that is the refusal.
+ */
+const tramoParaEscribir = async (id: number, t: Transaction): Promise<void> => {
+  const tramo = await TramoModel.findOne({ where: { id }, attributes: ["id"], transaction: t, lock: t.LOCK.SHARE });
+  if (!tramo) throw new TramoNoDisponible();
+};
 
 export const createPoste = handler("createPoste", async (req: Request, res: Response) => {
   const { adss_ids, ...posteBody } = req.body;
@@ -358,20 +399,30 @@ export const createPoste = handler("createPoste", async (req: Request, res: Resp
   // pair costs the rest of its stretch.
   const fallo = coordenadasInvalidas(posteBody);
   if (fallo) return res.status(400).json({ message: fallo });
-  const TempPoste = await sequelize.transaction(async (t) => {
-    // Same as evento: the author is the session, not a field of the body.
-    const poste = await PosteModel.create(authoredBy(posteBody, req), { transaction: t });
-    const posteId = poste.dataValues.id as number;
-    if (Array.isArray(adss_ids) && adss_ids.length > 0) {
-      await Promise.all(
-        (adss_ids as number[]).map((id_adss) =>
-           
-          AdssPosteModel.create({ id_adss, id_poste: posteId }, { transaction: t })
-        )
-      );
-    }
-    return poste;
-  });
+  const idTramo = leerIdTramo(posteBody.id_tramo);
+  if (idTramo === null) return res.status(400).json({ message: TRAMO_NO_DISPONIBLE });
+
+  let TempPoste;
+  try {
+    TempPoste = await sequelize.transaction(async (t) => {
+      await tramoParaEscribir(idTramo, t);
+      // Same as evento: the author is the session, not a field of the body.
+      const poste = await PosteModel.create(authoredBy(posteBody, req), { transaction: t });
+      const posteId = poste.dataValues.id as number;
+      if (Array.isArray(adss_ids) && adss_ids.length > 0) {
+        await Promise.all(
+          (adss_ids as number[]).map((id_adss) =>
+
+            AdssPosteModel.create({ id_adss, id_poste: posteId }, { transaction: t })
+          )
+        );
+      }
+      return poste;
+    });
+  } catch (error) {
+    if (error instanceof TramoNoDisponible) return res.status(400).json({ message: TRAMO_NO_DISPONIBLE });
+    throw error;
+  }
   const posteId = TempPoste.dataValues.id as number;
 
   let adssLabel: string | null = null;
@@ -405,8 +456,7 @@ export const searchPoste = handler("searchPoste", async (req: Request, res: Resp
     include: [
       { model: MaterialModel, paranoid: false },
       { model: PropietarioModel, paranoid: false },
-      { model: CiudadModel, as: "ciudadA", paranoid: false },
-      { model: CiudadModel, as: "ciudadB", paranoid: false },
+      INCLUDE_TRAMO,
       // Never the bare model: it would send `pass`. See USUARIO_AS_AUTHOR.
       { model: UsuarioModel, attributes: [...USUARIO_AS_AUTHOR] },
     ],
@@ -419,7 +469,7 @@ export const searchPoste = handler("searchPoste", async (req: Request, res: Resp
   // was worse still — it reads `dataPoste.id` with no guard, and this
   // application has no error boundary anywhere, so the whole app went white.
   if (!TempPoste) return res.status(404).json({ message: "El poste no existe." });
-  res.status(200).json(TempPoste);
+  res.status(200).json(presentarTramos(TempPoste));
 });
 export const updatePoste = handler("updatePoste", async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -442,7 +492,7 @@ export const updatePoste = handler("updatePoste", async (req: Request, res: Resp
   // that records the refused change is worse than no log at all: the bitácora is
   // the one place a reader goes to find out who reassigned a row.
   const editable = withoutAuthor(bodyWithoutAdss);
-  const fkKeys = new Set(["id_propietario", "id_material", "id_ciudadA", "id_ciudadB"]);
+  const fkKeys = new Set(["id_propietario", "id_material", "id_tramo"]);
   const beforeMeta: Record<string, unknown> = {};
   const afterMeta:  Record<string, unknown> = {};
 
@@ -459,7 +509,7 @@ export const updatePoste = handler("updatePoste", async (req: Request, res: Resp
     return row ? { id: row.dataValues.id, name: row.dataValues.name } : null;
   };
   await Promise.all((
-    [["id_propietario", PropietarioModel], ["id_material", MaterialModel], ["id_ciudadA", CiudadModel], ["id_ciudadB", CiudadModel]] as [string, unknown][]
+    [["id_propietario", PropietarioModel], ["id_material", MaterialModel]] as [string, unknown][]
   ).map(async ([k, Model]) => {
     const bv = dv[k] as number | null | undefined;
     const av = editable[k] as number | null | undefined;
@@ -471,41 +521,72 @@ export const updatePoste = handler("updatePoste", async (req: Request, res: Resp
     [beforeMeta[k], afterMeta[k]] = await Promise.all([fkRef(Model, bv), fkRef(Model, av)]);
   }));
 
+  // The tramo apart from the other two: it has no `name` column — its name is
+  // built out of its two cities — and moving a pole onto one has a condition.
+  const tramoAntes = dv.id_tramo as number;
+  let tramoDespues: number | null = null;
+  if (Object.hasOwn(editable, "id_tramo")) {
+    const pedido = leerIdTramo(editable.id_tramo);
+    if (pedido === null) return res.status(400).json({ message: TRAMO_NO_DISPONIBLE });
+    if (pedido !== tramoAntes) tramoDespues = pedido;
+  }
+
   let adssLogData: { before: string | null; after: string | null } | null = null;
 
-  await sequelize.transaction(async (t) => {
-    TempPoste.set(editable);
-    await TempPoste.save({ transaction: t });
+  try {
+    await sequelize.transaction(async (t) => {
+      // The destination is checked here and not before: under the same lock as on
+      // creating, held until the pole is saved. See `tramoParaEscribir`.
+      if (tramoDespues !== null) await tramoParaEscribir(tramoDespues, t);
+      TempPoste.set(editable);
+      await TempPoste.save({ transaction: t });
 
-    if (Array.isArray(adss_ids)) {
+      if (Array.isArray(adss_ids)) {
        
-      const currentAdssPoste = await AdssPosteModel.findAll({ where: { id_poste: id }, transaction: t });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const currentIds = currentAdssPoste.map((a: any) => a.dataValues.id_adss as number);
-      const toAdd = (adss_ids as number[]).filter((aid) => !currentIds.includes(aid));
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const toRemove = currentAdssPoste.filter((a: any) => !(adss_ids as number[]).includes(a.dataValues.id_adss as number));
-
-      if (toAdd.length > 0 || toRemove.length > 0) {
-        const allIds = [...new Set([...currentIds, ...(adss_ids as number[])])];
-         
-        const allRows = await AdssModel.findAll({ where: { id: allIds }, attributes: ["id", "name"], paranoid: false, transaction: t });
+        const currentAdssPoste = await AdssPosteModel.findAll({ where: { id_poste: id }, transaction: t });
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const nameMap = new Map(allRows.map((r: any) => [r.dataValues.id as number, r.dataValues.name as string]));
-        const beforeAdss = currentIds.map((aid: number) => nameMap.get(aid)).filter(Boolean).join(", ");
-        const afterAdss = (adss_ids as number[]).map((aid) => nameMap.get(aid)).filter(Boolean).join(", ");
+        const currentIds = currentAdssPoste.map((a: any) => a.dataValues.id_adss as number);
+        const toAdd = (adss_ids as number[]).filter((aid) => !currentIds.includes(aid));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const toRemove = currentAdssPoste.filter((a: any) => !(adss_ids as number[]).includes(a.dataValues.id_adss as number));
 
-        await Promise.all([
-           
-          ...toAdd.map((id_adss: number) => AdssPosteModel.create({ id_adss, id_poste: Number(id) }, { transaction: t })),
+        if (toAdd.length > 0 || toRemove.length > 0) {
+          const allIds = [...new Set([...currentIds, ...(adss_ids as number[])])];
+         
+          const allRows = await AdssModel.findAll({ where: { id: allIds }, attributes: ["id", "name"], paranoid: false, transaction: t });
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ...toRemove.map((a: any) => a.destroy({ transaction: t })),
-        ]);
+          const nameMap = new Map(allRows.map((r: any) => [r.dataValues.id as number, r.dataValues.name as string]));
+          const beforeAdss = currentIds.map((aid: number) => nameMap.get(aid)).filter(Boolean).join(", ");
+          const afterAdss = (adss_ids as number[]).map((aid) => nameMap.get(aid)).filter(Boolean).join(", ");
 
-        adssLogData = { before: beforeAdss || null, after: afterAdss || null };
+          await Promise.all([
+           
+            ...toAdd.map((id_adss: number) => AdssPosteModel.create({ id_adss, id_poste: Number(id) }, { transaction: t })),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ...toRemove.map((a: any) => a.destroy({ transaction: t })),
+          ]);
+
+          adssLogData = { before: beforeAdss || null, after: afterAdss || null };
+        }
       }
-    }
-  });
+    });
+  } catch (error) {
+    if (error instanceof TramoNoDisponible) return res.status(400).json({ message: TRAMO_NO_DISPONIBLE });
+    throw error;
+  }
+
+  // After the write, so a refused move costs no reads; archived rows included,
+  // because the tramo the pole leaves may be archived by the time this runs.
+  if (tramoDespues !== null) {
+    const tramoRef = async (pk: number | null | undefined) => {
+      if (pk == null) return null;
+      const fila = await TramoModel.findByPk(pk, {
+        paranoid: false, attributes: INCLUDE_TRAMO.attributes, include: INCLUDE_TRAMO.include,
+      });
+      return fila ? { id: pk, name: presentarTramo(fila).nombre } : null;
+    };
+    [beforeMeta.id_tramo, afterMeta.id_tramo] = await Promise.all([tramoRef(tramoAntes), tramoRef(tramoDespues)]);
+  }
 
   // Still `bodyWithoutAdss` and not `editable`, and they are the same thing
   // here: `withoutAuthor` drops id/createdAt/updatedAt/deletedAt/id_usuario and
@@ -542,7 +623,35 @@ export const deletePoste = handler("deletePoste", async (req: Request, res: Resp
 export const desarchivarPoste = handler("desarchivarPoste", async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  if (!(await desarchivar(PosteModel, id))) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
+  // A live pole cannot stand on an archived tramo: nothing would list it under
+  // a stretch, and the pair could not be created again to give it one. So the
+  // two restores are one write, and the tramo row is locked for it — the same
+  // row `deleteTramo` locks, so an archive of the tramo either sees this pole
+  // live and refuses, or finishes first and is undone here.
+  //
+  // Not through `desarchivar`: that helper takes no transaction, and its look
+  // and its write would be two statements outside this one.
+  const resultado = await sequelize.transaction(async (t) => {
+    const poste = await PosteModel.findOne({
+      where: { id }, paranoid: false, attributes: ["id", "id_tramo", "deletedAt"], transaction: t, lock: t.LOCK.UPDATE,
+    });
+    if (!poste || poste.get("deletedAt") == null) return null;
+
+    const idTramo = poste.get("id_tramo") as number;
+    const tramo = await TramoModel.findOne({
+      where: { id: idTramo }, paranoid: false, attributes: ["id", "deletedAt"], transaction: t, lock: t.LOCK.UPDATE,
+    });
+    const tramoArchivado = tramo != null && tramo.get("deletedAt") != null;
+    if (tramoArchivado) await TramoModel.restore({ where: { id: idTramo }, transaction: t });
+    await PosteModel.restore({ where: { id }, transaction: t });
+    return { idTramo, tramoArchivado };
+  });
+
+  if (!resultado) return res.status(404).json({ message: NADA_QUE_DESARCHIVAR });
   logAction({ id_usuario: req.user?.id, action: "RESTORE_POSTE", entity: "Poste", entity_id: Number(id), detail: `Desarchivó Poste #${id}`, severity: 'info' });
+  if (resultado.tramoArchivado) {
+    const { idTramo } = resultado;
+    logAction({ id_usuario: req.user?.id, action: "RESTORE_TRAMO", entity: "Tramo", entity_id: idTramo, detail: `Desarchivó tramo #${idTramo} al desarchivar el Poste #${id}`, severity: 'info' });
+  }
   return res.status(204).end();
 });

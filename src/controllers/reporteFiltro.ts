@@ -18,9 +18,9 @@ import type { Request } from "express";
 //     arrastradas" would have started ignoring its own off position — silently,
 //     with a plausible report on screen.
 //   - **A repeated parameter arrives as an array**, and the first version of
-//     this file read one as "not sent". `?TramoInicial=1&TramoInicial=2` then
-//     meant *no stretch at all*, so the report covered every pole in the network
-//     while the URL named two cities. Its own audit found that, and the file had
+//     this file read one as "not sent". `?tramo=1&tramo=2` then meant
+//     *no stretch at all*, so the report covered every pole in the network while
+//     the URL named two of them. Its own audit found that, and the file had
 //     a comment promising exactly the opposite.
 //
 // So there are three answers this file tells apart, and the middle one is the
@@ -33,14 +33,13 @@ const AUSENTE = Symbol("ausente");
 /** A value that was sent and cannot be read: an array, an empty field, a shape. */
 const ILEGIBLE = Symbol("ilegible");
 
-/** The five values the six reports filter by, parsed. */
+/** The four values the six reports filter by, parsed. */
 export interface FiltroReporte {
   fechaInicial: Date;
   fechaFinal: Date;
   excludeOld: boolean;
-  /** The two ends of a stretch of line, or null when the report does not name one. */
-  tramoInicial: number | null;
-  tramoFinal: number | null;
+  /** The stretch of line the report is narrowed to, or null when it names none. */
+  tramo: number | null;
 }
 
 /**
@@ -68,8 +67,8 @@ export type FiltroSinRango = Omit<FiltroReporte, "fechaInicial" | "fechaFinal"> 
  *
  * An array is the case that matters: Express builds one from a repeated
  * parameter, and reading it as absent is what makes a filter silently wider. An
- * empty parameter — `?TramoInicial=` — is treated the same way, because a
- * parameter that is present should be readable.
+ * empty parameter — `?tramo=` — is unreadable for the same reason: a parameter
+ * that is present should be readable, and one that is not is refused.
  */
 function escalar(valor: unknown): string | typeof AUSENTE | typeof ILEGIBLE {
   if (valor === undefined || valor === null) return AUSENTE;
@@ -101,7 +100,7 @@ const MAX_INT4 = 2_147_483_647;
  *
  * The shape is checked with a pattern rather than with `Number`, which reads
  * `"3abc"` as `NaN` and `"3.5"` as a number that is not an id. And the ceiling
- * is not decoration: `id_ciudadA` is an `integer`, so a larger value comes back
+ * is not decoration: `id_tramo` is an `integer`, so a larger value comes back
  * from Postgres as `integer out of range` — another neutral 500 for input this
  * file is supposed to have judged.
  */
@@ -134,14 +133,15 @@ const RANGO_INCOMPLETO = "Indique las dos fechas del período, o ninguna.";
 const FECHA_INVALIDA = "Las fechas del período no son válidas.";
 const RANGO_AL_REVES = "La fecha inicial debe ser anterior a la final.";
 const TRAMO_INVALIDO = "El tramo indicado no es válido.";
-const TRAMO_REQUERIDO = "Indique las dos ciudades del tramo.";
+const TRAMO_REQUERIDO = "Indique el tramo.";
+const DOS_CIUDADES_YA_NO = "Los reportes ya no se filtran por dos ciudades: indique el tramo.";
 const EXCLUDE_INVALIDO = "El valor de excludeOld debe ser true o false.";
 
 /** What every report shares, once it is readable. */
-type Comunes = Pick<FiltroReporte, "excludeOld" | "tramoInicial" | "tramoFinal">;
+type Comunes = Pick<FiltroReporte, "excludeOld" | "tramo">;
 
 /**
- * The part every report shares: the switch and the two ends of a stretch.
+ * The part every report shares: the switch and the stretch.
  *
  * Returns the values, or the sentence explaining why there are none — as a bare
  * string, so that the callers discriminate with `typeof === "string"`.
@@ -155,16 +155,16 @@ function comunes(consulta: Request["query"]): Comunes | string {
   const excludeOld = booleano(query.excludeOld);
   if (excludeOld === ILEGIBLE) return EXCLUDE_INVALIDO;
 
-  const tramoInicial = id(query.TramoInicial);
-  if (tramoInicial === ILEGIBLE) return TRAMO_INVALIDO;
-  const tramoFinal = id(query.TramoFinal);
-  if (tramoFinal === ILEGIBLE) return TRAMO_INVALIDO;
+  // A client from before the cut. Ignoring the two parameters would answer a
+  // question about one stretch with the whole network.
+  if (query.TramoInicial !== undefined || query.TramoFinal !== undefined) return DOS_CIUDADES_YA_NO;
 
-  return {
-    excludeOld,
-    tramoInicial: tramoInicial === AUSENTE ? null : tramoInicial,
-    tramoFinal: tramoFinal === AUSENTE ? null : tramoFinal,
-  };
+  // An empty `tramo=` is refused like any other unreadable value: a client that
+  // wants every stretch leaves the parameter out.
+  const tramo = id(query.tramo);
+  if (tramo === ILEGIBLE) return TRAMO_INVALIDO;
+
+  return { excludeOld, tramo: tramo === AUSENTE ? null : tramo };
 }
 
 /** The five reports that cannot answer anything without a period. */
@@ -184,9 +184,7 @@ export function leerFiltro(
   if (fechaInicial === ILEGIBLE || fechaFinal === ILEGIBLE) return FECHA_INVALIDA;
   if (fechaInicial > fechaFinal) return RANGO_AL_REVES;
 
-  if (opciones.tramo === "obligatorio" && (base.tramoInicial === null || base.tramoFinal === null)) {
-    return TRAMO_REQUERIDO;
-  }
+  if (opciones.tramo === "obligatorio" && base.tramo === null) return TRAMO_REQUERIDO;
 
   return { ...base, fechaInicial, fechaFinal };
 }

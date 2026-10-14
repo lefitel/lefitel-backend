@@ -35,7 +35,7 @@ export interface ReportTemplate {
   /** Stable id. The client keys on it; never reuse one for a different report. */
   key: string;
   name: string;
-  /** The question it answers, in one sentence, for somebody choosing between six. */
+  /** The question it answers, in one sentence, for somebody choosing between them. */
   description: string;
   config: ReportConfig;
 }
@@ -47,14 +47,14 @@ export interface ReportTemplate {
  *
  *  - **No absolute dates.** A template filtered to one fixed month would be
  *    filtered to it forever, and would go on calling itself "del mes" long
- *    after it stopped being one. When these six were written no date operator
+ *    after it stopped being one. When the first six were written no date operator
  *    was relative, so recency is expressed by sorting, which never expires.
  *    Since then `period` exists ("el mes pasado", "esta semana") and a
  *    template may use it; none does yet.
- *  - **Nothing personal.** Not one of them reads a `staffOnly` field, so all six
- *    survive `pruneConfig` intact for every role that can open this screen.
+ *  - **Nothing personal.** Not one of them reads a `staffOnly` field, so all of
+ *    them survive `pruneConfig` intact for every role that can open this screen.
  *    That is what makes them a starting point for the Cliente role rather than
- *    six reports that quietly lose a column.
+ *    reports that quietly lose a column.
  */
 export const TEMPLATES: ReportTemplate[] = [
   {
@@ -153,6 +153,25 @@ export const TEMPLATES: ReportTemplate[] = [
     },
   },
   {
+    key: "tramos-y-su-estado",
+    name: "Tramos y su estado",
+    description: "Postes, eventos y pendientes de cada tramo, también de los que no tienen ningún poste.",
+    config: {
+      root: "tramo",
+      columns: [
+        { path: "nombre" },
+        { path: "departamento" },
+        { path: "numPostes" },
+        { path: "numEventos" },
+        { path: "numPendientes" },
+      ],
+      limit: PAGE_SIZE,
+      filters: { op: "and", conditions: [] },
+      groupBy: [],
+      sort: [{ path: "nombre", dir: "asc" }],
+    },
+  },
+  {
     key: "tiempos-de-resolucion",
     name: "Tiempos de resolución",
     description: "Cuántos días tarda de media en repararse un evento, tramo por tramo.",
@@ -180,7 +199,7 @@ export const TEMPLATES: ReportTemplate[] = [
  * never offered with a column the caller may not ask for. A template that lost
  * anything is dropped rather than served narrower: these exist to be a working
  * example, and an example that comes up missing a column teaches the wrong
- * lesson about the screen. None of the six loses anything today — the test
+ * lesson about the screen. None of them loses anything today — the test
  * beside this file is what keeps that true.
  */
 export function templatesFor(viewer: Viewer): ReportTemplate[] {

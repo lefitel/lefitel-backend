@@ -22,7 +22,7 @@ const ORS_URL = "https://api.openrouteservice.org/v2/directions/driving-car/geoj
  * Twelve seconds because a person is watching. There is no deferred caller for
  * this; every one of the four screens draws as soon as it answers.
  */
-export const ORS_PLAZO_TOTAL_MS = 12_000;
+const ORS_PLAZO_TOTAL_MS = 12_000;
 
 export interface DependenciasRuta {
   /** Injected so the tests drive the loop without a network. */

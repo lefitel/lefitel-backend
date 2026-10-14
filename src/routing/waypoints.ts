@@ -17,7 +17,7 @@
  * two ends, which is exactly this; the other three screens trim to nothing,
  * which is why their long tramos have never drawn a real route.
  */
-export const ORS_MAX_WAYPOINTS = 50;
+const ORS_MAX_WAYPOINTS = 50;
 
 export type Waypoints = [number, number][];
 

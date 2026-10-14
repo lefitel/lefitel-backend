@@ -121,10 +121,13 @@ const LISTADOS = [
   "/api/evento/",
   "/api/evento/:id/obs",
   "/api/evento/:id/revisiones",
-  // Scheduled reports: the schedules themselves, the runs of one, and the
-  // accounts that can be picked as recipients. All three are rows of a table.
+  // Scheduled reports: the schedules themselves, the runs of one, the runs of
+  // all of them, and the accounts that can be picked as recipients. All four
+  // are rows of a table.
   "/api/generator/schedules/",
   "/api/generator/schedules/:id/runs",
+  "/api/generator/schedules/runs",
+  "/api/generator/schedules/runs/:id/recipients",
   "/api/generator/schedules/recipients",
   "/api/material/",
   "/api/obs/",
@@ -134,6 +137,7 @@ const LISTADOS = [
   "/api/propietario/",
   "/api/rol/",
   "/api/tipo-obs/",
+  "/api/tramo/",
   "/api/usuario/",
   "/api/usuario/:id/bitacora",
   "/api/usuario/:id/eventos",
@@ -145,6 +149,7 @@ const DETALLES = [
   "/api/evento/:id",
   "/api/generator/reportes/:id",
   "/api/poste/:id",
+  "/api/tramo/:id",
   "/api/usuario/:id",
   "/api/usuario/user/:user",
 ];
@@ -188,6 +193,7 @@ const AGREGADAS = [
   "/api/reporte/resumen-tiempos",
   "/api/reporte/tramo",
   "/api/tipo-obs/stats",
+  "/api/tramo/options",
 ];
 
 /** Outside this document altogether: §2 stops at the authentication module. */
@@ -231,7 +237,7 @@ describe("the ledger of every GET", () => {
 const { SESSION_COOKIE_NAME } = await import("../auth/sessionCookie.js");
 const { SesionModel } = await import("../models/sesion.model.js");
 const { UsuarioModel } = await import("../models/usuario.model.js");
-const { ReporteProgramacionModel, ReporteEjecucionModel } = await import("../models/reporteProgramacion.model.js");
+const { ReporteProgramacionModel, ReporteEjecucionModel, ReporteEntregaModel } = await import("../models/reporteProgramacion.model.js");
 const { AdssModel } = await import("../models/adss.model.js");
 const { AdssPosteModel } = await import("../models/adssPoste.model.js");
 const { BitacoraModel } = await import("../models/bitacora.model.js");
@@ -245,6 +251,7 @@ const { PropietarioModel } = await import("../models/propietario.model.js");
 const { RevisionModel } = await import("../models/revision.model.js");
 const { RolModel } = await import("../models/rol.model.js");
 const { TipoObsModel } = await import("../models/tipoObs.model.js");
+const { TramoModel } = await import("../models/tramo.model.js");
 
 /**
  * The audit log, spied so that a download does not write to the production copy.
@@ -279,6 +286,7 @@ const sesionUpdate = vi.spyOn(SesionModel, "update");
  * has an owner. So the parent is handed over, owned by the caller.
  */
 const programacionFindByPk = vi.spyOn(ReporteProgramacionModel, "findByPk");
+const ejecucionFindByPk = vi.spyOn(ReporteEjecucionModel, "findByPk");
 
 /** Every model a listing reads, by the address that reads it. */
 const MODELOS = {
@@ -290,6 +298,8 @@ const MODELOS = {
   "/api/evento/": EventoModel,
   "/api/generator/schedules/": ReporteProgramacionModel,
   "/api/generator/schedules/:id/runs": ReporteEjecucionModel,
+  "/api/generator/schedules/runs": ReporteEjecucionModel,
+  "/api/generator/schedules/runs/:id/recipients": ReporteEntregaModel,
   "/api/poste/:id/eventos": EventoModel,
   "/api/usuario/:id/eventos": EventoModel,
   "/api/evento/:id/obs": EventoObsModel,
@@ -300,6 +310,7 @@ const MODELOS = {
   "/api/evento/:id/revisiones": RevisionModel,
   "/api/rol/": RolModel,
   "/api/tipo-obs/": TipoObsModel,
+  "/api/tramo/": TramoModel,
   "/api/usuario/": UsuarioModel,
 } as const;
 
@@ -349,6 +360,9 @@ beforeEach(() => {
     },
   } as never);
   programacionFindByPk.mockResolvedValue({ dataValues: { id: 1, id_usuario: YO } } as never);
+  ejecucionFindByPk.mockResolvedValue({
+    dataValues: { id: 1, reporteProgramacion: { dataValues: { id: 1, id_usuario: YO } } },
+  } as never);
   sesionUpdate.mockRejectedValue(
     new Error("touchSession corrió: este test habría escrito en la base de datos") as never,
   );
@@ -682,8 +696,13 @@ describe("what a download actually contains", () => {
       id: 40, name: "P-001", lat: -16.5, lng: -68.1, date: new Date("2026-03-01T12:00:00Z"),
       material: { name: "Madera" },
       propietario: { name: "Osefi" },
-      ciudadA: { name: "Sucre" },
-      ciudadB: { name: "Potosí" },
+      // Raw, as `INCLUDE_TRAMO` brings it: the name is built from the two cities.
+      tramo: {
+        id: 14, id_ciudad_min: 3, id_ciudad_max: 7, id_departamento: null, deletedAt: null,
+        ciudadMin: { id: 3, name: "Sucre", lat: -19.04, lng: -65.26 },
+        ciudadMax: { id: 7, name: "Potosí", lat: -19.58, lng: -65.75 },
+        departamento: null,
+      },
       // Joined for `sortBy=usuario`, and must not reach a single cell.
       usuario: { id: 7, name: "Isaias", lastname: "Salas" },
       id_usuario: 7,
@@ -694,7 +713,7 @@ describe("what a download actually contains", () => {
     const [cabecera, fila] = res.text.slice(1).split("\r\n");
 
     expect(cabecera).toBe("#,Nombre,Tramo,Material,Propietario,Lat,Lng,Fecha en campo");
-    expect(fila).toBe("1,P-001,Sucre > Potosí,Madera,Osefi,-16.5,-68.1,01/03/2026");
+    expect(fila).toBe("1,P-001,Potosí – Sucre,Madera,Osefi,-16.5,-68.1,01/03/2026");
     // 🔴 Dicho por separado del `toBe` de arriba, porque un `toBe` que cambie
     // por cualquier motivo se arregla mirando la línea nueva; esto no se puede
     // arreglar sin verlo. §6 cerró el expediente de actividad de un empleado y
@@ -709,7 +728,13 @@ describe("what a download actually contains", () => {
       id: 5, description: "Cable suelto", state: false, priority: true,
       poste: {
         name: "P-001", lat: -16.5, lng: -68.1,
-        ciudadA: { name: "Sucre" }, ciudadB: { name: "Potosí" },
+        // Raw, as `INCLUDE_TRAMO` brings it: the name is built from the two cities.
+        tramo: {
+          id: 14, id_ciudad_min: 3, id_ciudad_max: 7, id_departamento: null, deletedAt: null,
+          ciudadMin: { id: 3, name: "Sucre", lat: -19.04, lng: -65.26 },
+          ciudadMax: { id: 7, name: "Potosí", lat: -19.58, lng: -65.75 },
+          departamento: null,
+        },
         propietario: { name: "Osefi" },
       },
       // Desordenadas a propósito: la columna dice **la última**, no la primera.
@@ -727,7 +752,7 @@ describe("what a download actually contains", () => {
       "#,Poste,Tramo,Propietario,Lat,Lng,Descripción,Resuelto,Gravedad,Clasificación,Prioritario,Última revisión,Observaciones",
     );
     expect(fila).toBe(
-      '1,P-001,Sucre > Potosí,Osefi,-16.5,-68.1,Cable suelto,No,5,Vano bajo,Sí,02/05/2026,"Fricción, Vano bajo"',
+      '1,P-001,Potosí – Sucre,Osefi,-16.5,-68.1,Cable suelto,No,5,Vano bajo,Sí,02/05/2026,"Fricción, Vano bajo"',
     );
     expect(res.text).not.toContain("Isaias");
   });

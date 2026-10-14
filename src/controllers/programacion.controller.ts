@@ -17,7 +17,9 @@ import { Request, Response } from "express";
 import { Op } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import {
+  ESTADOS_DE_EJECUCION,
   ReporteEjecucionModel,
+  ReporteEntregaModel,
   ReporteProgramacionDestinatarioModel,
   ReporteProgramacionModel,
 } from "../models/reporteProgramacion.model.js";
@@ -33,6 +35,7 @@ import { dependenciasDeInformes } from "../reportSchedule/runtime.js";
 import { aProgramacion } from "../reportSchedule/store.js";
 import type {
   IReporteEjecucion,
+  IReporteEjecucionEntrega,
   IReporteProgramacion,
   IReporteProgramacionDestinatario,
   IReporteVista,
@@ -54,12 +57,20 @@ function idDe(req: Request): number | null {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-function deny(req: Request, res: Response, action: BitacoraAction, detail: string, message: string) {
+function deny(
+  req: Request,
+  res: Response,
+  action: BitacoraAction,
+  detail: string,
+  message: string,
+  /** The schedule refused, when the address names something else (a run). */
+  entityId: number | null = idDe(req),
+) {
   logAction({
     id_usuario: req.user?.id,
     action,
     entity: "ReporteProgramacion",
-    entity_id: idDe(req),
+    entity_id: entityId,
     detail,
     severity: "warning",
     ip_address: req.ip ?? null,
@@ -455,6 +466,228 @@ export async function getEjecucionesDeProgramacion(req: Request, res: Response) 
     res.status(200).json(listado);
   } catch (error) {
     fallo(res, error, "el historial");
+  }
+}
+
+/** The largest id an `integer` column holds; anything above it cannot be one. */
+const ID_MAXIMO = 2_147_483_647;
+
+/**
+ * One optional filter of the history, read strictly.
+ *
+ * The house rule: a parameter that is present and empty, repeated or not a
+ * value of its kind is a 400, never "all" — a filter that silently stops
+ * filtering shows a user a page that looks like the answer and is not.
+ */
+function leerFiltrosDelHistorial(
+  query: Request["query"],
+): { estado?: (typeof ESTADOS_DE_EJECUCION)[number]; id_programacion?: number } | string {
+  const filtros: { estado?: (typeof ESTADOS_DE_EJECUCION)[number]; id_programacion?: number } = {};
+
+  const estado = query.estado;
+  if (estado !== undefined) {
+    const conocido = ESTADOS_DE_EJECUCION.find((e) => e === estado);
+    if (!conocido) return `El parámetro «estado» debe ser uno de: ${ESTADOS_DE_EJECUCION.join(", ")}.`;
+    filtros.estado = conocido;
+  }
+
+  const programacion = query.id_programacion;
+  if (programacion !== undefined) {
+    const id = typeof programacion === "string" && /^\d+$/.test(programacion) ? Number(programacion) : 0;
+    if (id < 1 || id > ID_MAXIMO) return "El parámetro «id_programacion» debe ser un número entero positivo.";
+    filtros.id_programacion = id;
+  }
+
+  return filtros;
+}
+
+/**
+ * Every run of every schedule the viewer may see, newest first: the history
+ * the Envíos screen shows beside the list of schedules.
+ *
+ * **Who sees what is decided by the query, not by the page.** The schedule is
+ * joined as an inner join carrying the owner's condition, so a run of somebody
+ * else's schedule is not a row the database returns, whichever page it would
+ * have fallen on — filtering afterwards would leave short pages and a `total`
+ * that counts what the viewer may not see. Naming a schedule that is not theirs
+ * therefore gives an empty page, the same as one that does not exist: this
+ * must not be a way to learn which ids are taken.
+ *
+ * **A deleted schedule keeps its runs** — they are what happened — so the join
+ * reads archived rows too and says so (`eliminada`). The report and the owner
+ * are named the way the list of schedules names them, archived or not, in one
+ * read each for the whole page, and are `null` only when truly gone.
+ */
+export async function getHistorialDeEjecuciones(req: Request, res: Response) {
+  try {
+    const paginacion = leerPaginacion(req.query);
+    if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
+    const filtros = leerFiltrosDelHistorial(req.query);
+    if (typeof filtros === "string") return res.status(400).json({ message: filtros });
+
+    const soloLasMias = !(await mayModerate(req));
+
+    const listado = await listar<{ dataValues: IReporteEjecucion & { reporteProgramacion?: { dataValues: IReporteProgramacion } } }>(
+      ReporteEjecucionModel,
+      {
+        where: filtros,
+        order: [["programada_para", "DESC"], ["id", "DESC"]],
+        include: [
+          {
+            model: ReporteProgramacionModel,
+            required: true,
+            paranoid: false,
+            attributes: ["id", "id_reporte", "id_usuario", "formato", "deleted_at"],
+            ...(soloLasMias ? { where: { id_usuario: req.user!.id } } : {}),
+          },
+        ],
+      },
+      paginacion,
+    );
+    if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+
+    const filas = listado.data.map(({ dataValues: { reporteProgramacion, ...propios } }) => ({
+      propios,
+      programacion: reporteProgramacion!.dataValues,
+    }));
+    if (filas.length === 0) return res.status(200).json({ ...listado, data: [] });
+
+    const [informes, cuentas, conDestinatarios] = await Promise.all([
+      ReporteVistaModel.findAll({
+        where: { id: [...new Set(filas.map((f) => f.programacion.id_reporte))] },
+        attributes: ["id", "name"],
+        paranoid: false,
+      }),
+      UsuarioModel.findAll({
+        where: { id: [...new Set(filas.map((f) => f.programacion.id_usuario))] },
+        attributes: [...USUARIO_AS_AUTHOR],
+        paranoid: false,
+      }),
+      // Which of these runs have recipients recorded: the runs from before the
+      // record have none, and the screen must tell them from the ones that do
+      // without a request per row. **A convenience on top of the history, not
+      // part of it**: if this table cannot be read the runs are still served,
+      // all marked as having no record, and the failure is warned about.
+      ReporteEntregaModel.findAll({
+        where: { id_ejecucion: filas.map((f) => f.propios.id) },
+        attributes: ["id_ejecucion"],
+        group: ["id_ejecucion"],
+      }).catch((error: unknown) => {
+        programacionLog.warn({ err: error }, "programaciones: no se pudo saber qué ejecuciones tienen destinatarios");
+        return [];
+      }),
+    ]);
+    const informe = new Map(informes.map((i) => [i.dataValues.id, i.dataValues as IReporteVista]));
+    const cuenta = new Map(cuentas.map((c) => [c.dataValues.id, c.dataValues]));
+    const conRegistro = new Set(conDestinatarios.map((e) => e.dataValues.id_ejecucion));
+
+    res.status(200).json({
+      ...listado,
+      data: filas.map(({ propios, programacion: p }) => {
+        const inf = informe.get(p.id_reporte);
+        const dueno = cuenta.get(p.id_usuario);
+        return {
+          ...propios,
+          con_destinatarios: conRegistro.has(propios.id),
+          programacion: {
+            id: p.id,
+            formato: p.formato,
+            eliminada: Boolean(p.deleted_at),
+            informe: inf ? { id: inf.id, name: inf.name } : null,
+            dueno: dueno ? { id: dueno.id, name: dueno.name, lastname: dueno.lastname } : null,
+          },
+        };
+      }),
+    });
+  } catch (error) {
+    fallo(res, error, "el historial general");
+  }
+}
+
+/**
+ * Who one run was sent to, and what became of each of them.
+ *
+ * **The same rule as the history of one schedule**, because it is the same
+ * information: the owner of the run's schedule reads it, and so does
+ * administration; anybody else is refused and the attempt recorded, and a run
+ * that does not exist is a 404. The first read finds the run with its schedule
+ * (archived ones too: a deleted schedule keeps its runs); the second, the
+ * recipients, repeats the owner's condition in its own query, so that the check
+ * is not the only thing between a viewer and somebody else's recipients.
+ *
+ * It is a listing of a table's rows and answers the house envelope. At most ten
+ * a run is not a reason to exempt it: section 3.3 of the API standard says a
+ * handful of rows is exactly the weak criterion it removed.
+ *
+ * **An account's address is never served.** The row does not even keep it, and
+ * the response has no field for an address at all: an outside recipient appears
+ * under its address because that is its `nombre`.
+ */
+export async function getDestinatariosDeEjecucion(req: Request, res: Response) {
+  try {
+    const id = idDe(req);
+    const ejecucion = id === null
+      ? null
+      : await ReporteEjecucionModel.findByPk(id, {
+          attributes: ["id"],
+          include: [{ model: ReporteProgramacionModel, attributes: ["id", "id_usuario"], required: true, paranoid: false }],
+        });
+    if (!ejecucion) return res.status(404).json({ message: "El envío no existe." });
+
+    const programacion = (ejecucion.dataValues as { reporteProgramacion?: { dataValues: IReporteProgramacion } }).reporteProgramacion!.dataValues;
+    const modera = await mayModerate(req);
+    if (programacion.id_usuario !== req.user?.id && !modera) {
+      return deny(
+        req, res, "READ_PROGRAMACION_DENIED",
+        `Intentó leer a quién se envió la ejecución #${ejecucion.dataValues.id} del envío programado #${programacion.id} de otra persona`,
+        "Este envío programado es de otra persona.",
+        programacion.id,
+      );
+    }
+
+    const paginacion = leerPaginacion(req.query);
+    if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
+
+    const listado = await listar<{ dataValues: IReporteEjecucionEntrega }>(
+      ReporteEntregaModel,
+      {
+        where: { id_ejecucion: ejecucion.dataValues.id },
+        order: [["id", "ASC"]],
+        include: [
+          {
+            model: ReporteEjecucionModel,
+            required: true,
+            attributes: [],
+            include: [
+              {
+                model: ReporteProgramacionModel,
+                required: true,
+                paranoid: false,
+                attributes: [],
+                ...(modera ? {} : { where: { id_usuario: req.user!.id } }),
+              },
+            ],
+          },
+        ],
+      },
+      paginacion,
+    );
+    if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+
+    res.status(200).json({
+      ...listado,
+      data: listado.data.map(({ dataValues: e }) => ({
+        id: e.id,
+        tipo: e.tipo,
+        // An outside recipient is called by its address, so `nombre` is all
+        // there is to show: no field of its own for an address, which is how an
+        // account's could never be served by mistake.
+        nombre: e.nombre,
+        resultado: e.resultado,
+      })),
+    });
+  } catch (error) {
+    fallo(res, error, "los destinatarios del envío");
   }
 }
 

@@ -5,7 +5,6 @@ import { deleteImageIfUnreferenced } from "../utils/imageRefs.js";
 import { authoredBy, withoutAuthor } from "../utils/authorship.js";
 import { logAction } from "../utils/logAction.js";
 import { archivar, NADA_QUE_ARCHIVAR, desarchivar, NADA_QUE_DESARCHIVAR } from "../utils/archivado.js";
-import { CiudadModel } from "../models/ciudad.model.js";
 import { EventoModel } from "../models/evento.model.js";
 import { EventoObsModel } from "../models/eventoObs.model.js";
 import { ObsModel } from "../models/obs.model.js";
@@ -22,7 +21,8 @@ import {
 import { exportSlot } from "../reportBuilder/export/queue.js";
 import { MAX_EXPORT_ROWS } from "../reportBuilder/export/index.js";
 import { etiquetaCriticidad, peorCriticidad } from "../utils/criticidad.js";
-import { nombreDeTramo } from "../utils/tramo.js";
+import { INCLUDE_TRAMO, presentarTramo, presentarTramos } from "../tramos/presentacion.js";
+import { sqlNombreDelTramoDelPoste } from "../tramos/nombre.js";
 
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
@@ -57,7 +57,7 @@ export interface FiltroEventos {
   descripcion: string[];
 }
 
-export const filtroDeEventos = (query: Request["query"]): FiltroEventos | string => {
+const filtroDeEventos = (query: Request["query"]): FiltroEventos | string => {
   const { archived, filterColumn, filterValue, sortBy, sortOrder } = query;
   const isArchived = archived === "true";
 
@@ -100,9 +100,30 @@ export const filtroDeEventos = (query: Request["query"]): FiltroEventos | string
     descripcion.push(`descripción contiene «${descVal}»`);
   }
 
+  // The incidents of one tramo, for that tramo's card. A parameter of its own
+  // and not one of the filter columns, as on the pole list: it is the scope of
+  // the question, not something a person types into the filter bar.
+  //
+  // Refused when it is not an id, not ignored: answering every incident to
+  // somebody who asked for one tramo is the failure to prevent. The ceiling is
+  // `integer`'s — one digit more reaches PostgreSQL as a 500 instead of this.
+  const { tramo } = query;
+  const esIdDeTramo = typeof tramo === "string" && /^\d+$/.test(tramo) && Number(tramo) > 0 && Number(tramo) <= 2_147_483_647;
+  if (tramo !== undefined && !esIdDeTramo) return "El tramo indicado no es válido.";
+
   const posteVal = getFilterVal("poste");
-  const posteWhere = posteVal ? { name: { [Op.iLike]: `%${posteVal}%` } } : undefined;
+  // An incident has no tramo of its own; its pole has. And only live poles:
+  // the pole include reads archived ones too, so that an incident can still
+  // name its pole, but the tramo list counts `pendientes` over live poles and
+  // this has to list the rows that count counted.
+  const posteWhere = posteVal || tramo !== undefined
+    ? {
+      ...(posteVal ? { name: { [Op.iLike]: `%${posteVal}%` } } : {}),
+      ...(tramo !== undefined ? { id_tramo: Number(tramo), deletedAt: null } : {}),
+    }
+    : undefined;
   if (posteVal) descripcion.push(`poste contiene «${posteVal}»`);
+  if (tramo !== undefined) descripcion.push(`tramo ${Number(tramo)}`);
 
   // `state` is nullable, so "pendiente" cannot be `state = false`: that misses
   // the rows where nobody ever set it. The screen calls anything that is not
@@ -205,17 +226,26 @@ export const filtroDeEventos = (query: Request["query"]): FiltroEventos | string
   const SORTABLE = new Set(["id", "description", "date", "state", "priority", "createdAt", "updatedAt", "deletedAt"]);
   const sortByCols = Array.isArray(sortBy) ? sortBy as string[] : sortBy ? [sortBy as string] : [];
   const sortOrderVals = Array.isArray(sortOrder) ? sortOrder as string[] : sortOrder ? [sortOrder as string] : [];
-  const orderEntries = sortByCols.map((col, i) => {
+  const orderEntries = sortByCols.flatMap<unknown[]>((col, i) => {
     const dir = sortOrderVals[i] === "asc" ? "ASC" : "DESC";
-    if (col === "ultimaRev")        return [literal('(SELECT MAX("date") FROM "revicions" WHERE "revicions"."id_evento" = "evento"."id" AND "revicions"."deletedAt" IS NULL)'), `${dir} NULLS LAST`];
-    if (col === "fechaResolucion")  return [literal('(SELECT "date" FROM "solucions" WHERE "solucions"."id_evento" = "evento"."id" AND "solucions"."deletedAt" IS NULL LIMIT 1)'), `${dir} NULLS LAST`];
-    if (col === "criticality")      return [literal(WORST_CRITICALITY), `${dir} NULLS LAST`];
-    if (col === "poste")            return [PosteModel, "name", dir];
-    if (col === "usuario")      return [UsuarioModel, "name", dir];
-    if (col === "propietario")  return [PosteModel, PropietarioModel, "name", dir];
-    if (col === "tramo")        return [PosteModel, { model: CiudadModel, as: "ciudadA" }, "name", dir];
-    return SORTABLE.has(col) ? [col, dir] : null;
-  }).filter(Boolean);
+    if (col === "ultimaRev")        return [[literal('(SELECT MAX("date") FROM "revicions" WHERE "revicions"."id_evento" = "evento"."id" AND "revicions"."deletedAt" IS NULL)'), `${dir} NULLS LAST`]];
+    if (col === "fechaResolucion")  return [[literal('(SELECT "date" FROM "solucions" WHERE "solucions"."id_evento" = "evento"."id" AND "solucions"."deletedAt" IS NULL LIMIT 1)'), `${dir} NULLS LAST`]];
+    if (col === "criticality")      return [[literal(WORST_CRITICALITY), `${dir} NULLS LAST`]];
+    if (col === "poste")            return [[PosteModel, "name", dir]];
+    if (col === "usuario")      return [[UsuarioModel, "name", dir]];
+    if (col === "propietario")  return [[PosteModel, PropietarioModel, "name", dir]];
+    // By the name people read, under the collation that name is built with (see
+    // `tramos/nombre.ts`), and through the incident's own `id_poste` rather than
+    // the alias of the joined pole: this list paginates with a subquery, where
+    // that alias does not exist. The id tie-breaker goes at the end of the whole
+    // list, below, so it never shadows a key asked for after this one.
+    if (col === "tramo")        return [[literal(`(${sqlNombreDelTramoDelPoste('"evento"."id_poste"')}) COLLATE "C"`), dir]];
+    return SORTABLE.has(col) ? [[col, dir]] : [];
+  });
+
+  // Many incidents share a tramo and the database may otherwise order them
+  // differently from one page to the next.
+  if (sortByCols.includes("tramo")) orderEntries.push(["id", "ASC"]);
 
   return {
     where: critCondition ? { ...where, [Op.and]: [critCondition] } : where,
@@ -253,11 +283,10 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
       {
         model: PosteModel,
         paranoid: false,
-        attributes: ["id", "name", "lat", "lng", "id_ciudadA", "id_ciudadB", "id_propietario"],
+        attributes: ["id", "name", "lat", "lng", "id_tramo", "id_propietario"],
         ...(filtro.posteWhere ? { where: filtro.posteWhere, required: true } : {}),
         include: [
-          { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
-          { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+          INCLUDE_TRAMO,
           { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
         ],
       },
@@ -282,7 +311,7 @@ export const getEvento = handler("getEvento", async (req: Request, res: Response
   // one row per revision and the total is several times the number of incidents.
   const listado = await listar(EventoModel, queryOptions, paginacion, true);
   if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
-  return res.status(200).json(listado);
+  return res.status(200).json({ ...listado, data: presentarTramos(listado.data) });
 });
 
 // ── Export ────────────────────────────────────────────────────────────
@@ -330,8 +359,7 @@ type EventoExportado = Pick<IEvento, "id" | "description" | "state" | "priority"
     name?: string | null;
     lat?: number | null;
     lng?: number | null;
-    ciudadA?: { name?: string | null } | null;
-    ciudadB?: { name?: string | null } | null;
+    tramo?: unknown;
     propietario?: { name?: string | null } | null;
   } | null;
   revisions?: { date: Date | string }[] | null;
@@ -377,11 +405,10 @@ export const exportarEventos = handler("exportarEventos", async (req: Request, r
         {
           model: PosteModel,
           paranoid: false,
-          attributes: ["id", "name", "lat", "lng"],
+          attributes: ["id", "name", "lat", "lng", "id_tramo", "id_propietario"],
           ...(filtro.posteWhere ? { where: filtro.posteWhere, required: true } : {}),
           include: [
-            { model: CiudadModel, as: "ciudadA", paranoid: false, attributes: ["id", "name"] },
-            { model: CiudadModel, as: "ciudadB", paranoid: false, attributes: ["id", "name"] },
+            INCLUDE_TRAMO,
             { model: PropietarioModel, paranoid: false, attributes: ["id", "name"] },
           ],
         },
@@ -410,7 +437,7 @@ export const exportarEventos = handler("exportarEventos", async (req: Request, r
       return {
         n: i + 1,
         poste: e.poste?.name ?? null,
-        tramo: nombreDeTramo(e.poste?.ciudadA, e.poste?.ciudadB),
+        tramo: e.poste?.tramo ? presentarTramo(e.poste.tramo).nombre : "",
         propietario: e.poste?.propietario?.name ?? null,
         lat: e.poste?.lat ?? null,
         lng: e.poste?.lng ?? null,
@@ -495,9 +522,8 @@ export const searchEvento = handler("searchEvento", async (req: Request, res: Re
         model: PosteModel,
         attributes: [...POSTE_PUBLIC_ATTRIBUTES],
         include: [
-          { model: CiudadModel, as: "ciudadA" },
-          { model: CiudadModel, as: "ciudadB" },
-          { model: PropietarioModel },
+          INCLUDE_TRAMO,
+          { model: PropietarioModel, attributes: ["id", "name"] },
         ],
       },
       // Never the bare model: it would send `pass`. See USUARIO_AS_AUTHOR.
@@ -509,7 +535,7 @@ export const searchEvento = handler("searchEvento", async (req: Request, res: Re
   // guard every read with `?.`, so the result was a detail page with every
   // field empty and nothing saying why.
   if (!TempEvento) return res.status(404).json({ message: "El evento no existe." });
-  res.status(200).json(TempEvento);
+  res.status(200).json(presentarTramos(TempEvento));
 });
 
 export const createEvento = handler("createEvento", async (req: Request, res: Response) => {

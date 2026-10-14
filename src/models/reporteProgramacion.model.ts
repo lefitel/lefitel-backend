@@ -14,6 +14,7 @@ import { ReporteVistaModel } from "./reporteVista.model.js";
 import { UsuarioModel } from "./usuario.model.js";
 import type {
   IReporteEjecucion,
+  IReporteEjecucionEntrega,
   IReporteProgramacion,
   IReporteProgramacionDestinatario,
 } from "../interfaces/index.js";
@@ -44,21 +45,18 @@ export const ESTADOS_DE_EJECUCION = [
   "omitido",
 ] as const;
 
+/** Whether a recipient of a run was an account or an outside address. */
+export const TIPOS_DE_DESTINATARIO = ["usuario", "externo"] as const;
+
 /**
- * Why a schedule is not running. `null` on an active one.
+ * What became of one recipient of one run.
  *
- * Kept as words the screen can translate, not sentences: the reason is shown
- * to the owner beside the schedule, and a sentence stored today is a sentence
- * that cannot be reworded tomorrow.
+ * - `entregado` — the mail chain accepted the message.
+ * - `rechazado` — the address itself was refused.
+ * - `no_enviado` — the send failed for any other reason.
+ * - `sin_cupo` — held back by the day's ceiling; nothing was attempted.
  */
-export const MOTIVOS_DE_PAUSA = [
-  "manual",
-  "fallos",
-  "sin_permiso",
-  "dueno_inactivo",
-  "informe_archivado",
-  "sin_destinatarios",
-] as const;
+export const RESULTADOS_DE_ENTREGA = ["entregado", "rechazado", "no_enviado", "sin_cupo"] as const;
 
 type ProgramacionCreation = Optional<
   IReporteProgramacion,
@@ -205,3 +203,27 @@ ReporteProgramacionDestinatarioModel.belongsTo(UsuarioModel, { foreignKey: "id_u
 
 ReporteProgramacionModel.hasMany(ReporteEjecucionModel, { foreignKey: "id_programacion", as: "ejecuciones" });
 ReporteEjecucionModel.belongsTo(ReporteProgramacionModel, { foreignKey: "id_programacion" });
+
+type EntregaCreation = Optional<IReporteEjecucionEntrega, "id" | "id_usuario" | "correo" | "created_at">;
+
+/**
+ * One row per recipient of a run, from the run's own send loop. Created by
+ * `store.ts` and read by the history endpoints; nothing edits one afterwards.
+ * `20261010000007-create-reporte-ejecucion-entregas.ts` has the reasoning.
+ */
+export const ReporteEntregaModel: ModelDefined<IReporteEjecucionEntrega, EntregaCreation> = sequelize.define(
+  "reporteEntrega",
+  {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
+    id_ejecucion: { type: DataTypes.INTEGER, allowNull: false },
+    tipo: { type: DataTypes.STRING(10), allowNull: false },
+    id_usuario: { type: DataTypes.INTEGER, allowNull: true },
+    correo: { type: DataTypes.STRING(255), allowNull: true },
+    nombre: { type: DataTypes.STRING(255), allowNull: false },
+    resultado: { type: DataTypes.STRING(12), allowNull: false },
+  },
+  { tableName: "reporte_ejecucion_entregas", createdAt: "created_at", updatedAt: false },
+);
+
+ReporteEjecucionModel.hasMany(ReporteEntregaModel, { foreignKey: "id_ejecucion", as: "entregas" });
+ReporteEntregaModel.belongsTo(ReporteEjecucionModel, { foreignKey: "id_ejecucion" });

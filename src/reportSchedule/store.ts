@@ -10,6 +10,7 @@ import { enviarCorreo } from "../auth/mailer.js";
 import { sequelize } from "../database/sequelize.js";
 import {
   ReporteEjecucionModel,
+  ReporteEntregaModel,
   ReporteProgramacionDestinatarioModel,
   ReporteProgramacionModel,
 } from "../models/reporteProgramacion.model.js";
@@ -33,7 +34,7 @@ const scheduleLog = log("reportSchedule");
  * when the schedule is made: a role that loses it stops sending that night,
  * and the schedule pauses with `sin_permiso` as its reason.
  */
-export const PERMISO_PARA_PROGRAMAR = { modulo: "generador", accion: "programar" } as const;
+const PERMISO_PARA_PROGRAMAR = { modulo: "generador", accion: "programar" } as const;
 
 /** How many due schedules one tick takes. More than this wait for the next. */
 const MAXIMO_POR_TIC = 50;
@@ -58,6 +59,17 @@ export function aProgramacion(fila: IReporteProgramacion): Programacion {
 const nombreCompleto = (u: { name?: string; lastname?: string; user?: string }): string =>
   [u.name, u.lastname].filter(Boolean).join(" ").trim() || u.user || "un usuario de Osefi";
 
+/**
+ * How a recipient account is called in the history of a run: name and surname,
+ * else a generic label. **Never the login name**, which may be an e-mail address
+ * and an account's address is the one thing this record must not keep.
+ */
+const nombreParaElHistorial = (u: { name?: string; lastname?: string }): string =>
+  [u.name, u.lastname].filter(Boolean).join(" ").trim() || "un usuario de Osefi";
+
+/** The widest a name or an address goes in `reporte_ejecucion_entregas`. */
+const ANCHO_DE_COLUMNA = 255;
+
 async function cargarContexto(p: Programacion): Promise<Contexto> {
   // Both models are paranoid: an archived report and a disabled account are
   // simply not found, which is exactly the answer wanted.
@@ -76,7 +88,9 @@ async function cargarContexto(p: Programacion): Promise<Contexto> {
   const cuentas = idsDeUsuario.length
     ? await UsuarioModel.findAll({
         where: { id: idsDeUsuario },
-        attributes: ["id", "email", "email_verified_at", "id_rol"],
+        // The name is for the history row of this run, which keeps it as it
+        // reads now. It goes nowhere else.
+        attributes: ["id", "name", "lastname", "email", "email_verified_at", "id_rol"],
       })
     : [];
   const cuentaPorId = new Map(cuentas.map((c) => [c.dataValues.id, c.dataValues]));
@@ -92,6 +106,8 @@ async function cargarContexto(p: Programacion): Promise<Contexto> {
       if (!cuenta?.email || !cuenta.email_verified_at) continue;
       destinatarios.push({
         id: f.id,
+        nombre: nombreParaElHistorial(cuenta),
+        id_usuario: f.id_usuario,
         email: cuenta.email,
         externo: false,
         staff: await can(cuenta.id_rol, "seguridad", "ver"),
@@ -101,6 +117,8 @@ async function cargarContexto(p: Programacion): Promise<Contexto> {
     } else if (f.email) {
       destinatarios.push({
         id: f.id,
+        // An outside address has no name but itself.
+        nombre: f.email,
         email: f.email,
         externo: true,
         staff: false,
@@ -185,6 +203,20 @@ export function dependenciasReales(opciones: {
         });
       }
     },
+    async anotarEntregaDeEjecucion(id_ejecucion, { destinatario: d, resultado }) {
+      // An account is kept by its id and its name and **never its address**; an
+      // outside address is kept as it was, since it is the only thing it has.
+      await ReporteEntregaModel.create({
+        id_ejecucion,
+        tipo: d.externo ? "externo" : "usuario",
+        id_usuario: d.externo ? null : (d.id_usuario ?? null),
+        // Cut to the column, not refused by it: a name past 255 characters would
+        // fail the insert and lose the row, and a history row is not worth that.
+        correo: d.externo ? d.email.slice(0, ANCHO_DE_COLUMNA) : null,
+        nombre: d.nombre.slice(0, ANCHO_DE_COLUMNA),
+        resultado,
+      });
+    },
     enlaceDeBaja: opciones.enlaceDeBaja,
     async reprogramar(id_programacion, cambios) {
       await ReporteProgramacionModel.update(cambios, { where: { id: id_programacion } });
@@ -232,11 +264,21 @@ export function dependenciasDelProgramadorReales(deps: Dependencias): Dependenci
       });
     },
     async cerrarAbandonadas(antesDe) {
+      // Who got it was written as each send finished, so the counts of a run
+      // that died half way are what those rows say: delivered is `enviados`,
+      // the other three results are `no_enviados`. Left alone they would read
+      // «0 de 0» over a list of «Entregado».
+      const contar = (condicion: string) =>
+        sequelize.literal(
+          `(SELECT count(*) FROM reporte_ejecucion_entregas WHERE id_ejecucion = reporte_ejecuciones.id AND resultado ${condicion})`,
+        );
       const [cuantas] = await ReporteEjecucionModel.update(
         {
           estado: "fallido",
           terminada_at: new Date(),
           detalle: "Interrumpida: el servidor se detuvo mientras se enviaba.",
+          enviados: contar("= 'entregado'"),
+          no_enviados: contar("<> 'entregado'"),
         },
         { where: { estado: "en_curso", iniciada_at: { [Op.lt]: antesDe } } },
       );

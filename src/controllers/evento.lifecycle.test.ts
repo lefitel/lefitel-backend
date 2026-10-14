@@ -40,6 +40,12 @@ vi.mock("../models/eventoObs.model.js", () => ({
 vi.mock("../models/obs.model.js", () => ({ ObsModel: { findAll: vi.fn().mockResolvedValue([]) } }));
 vi.mock("../models/poste.model.js", () => ({ PosteModel: { findByPk: vi.fn() } }));
 vi.mock("../models/ciudad.model.js", () => ({ CiudadModel: {} }));
+// Pulled in by `tramos/presentacion.ts`, which the list and the detail use.
+vi.mock("../models/departamento.model.js", () => ({ DepartamentoModel: {} }));
+vi.mock("../models/tramo.model.js", () => ({
+  TramoModel: {},
+  TRAMO_PUBLIC_ATTRIBUTES: ["id", "id_ciudad_min", "id_ciudad_max", "id_departamento", "deletedAt"],
+}));
 vi.mock("../models/propietario.model.js", () => ({ PropietarioModel: {} }));
 vi.mock("../models/revision.model.js", () => ({
   RevisionModel: { create: vi.fn() },

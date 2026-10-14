@@ -47,6 +47,20 @@ export interface IPropietario {
   deletedAt?: Date | null;
 }
 
+export interface IDepartamento {
+  id: number;
+  name: string;
+}
+
+export interface ITramo {
+  id: number;
+  id_ciudad_min: number;
+  id_ciudad_max: number;
+  id_departamento?: number | null;
+  id_usuario?: number | null;
+  deletedAt?: Date | null;
+}
+
 export interface IPoste {
   id: number;
   name: string;
@@ -56,8 +70,7 @@ export interface IPoste {
   lng: number;
   id_propietario: number;
   id_material: number;
-  id_ciudadA: number;
-  id_ciudadB: number;
+  id_tramo: number;
   id_usuario?: number;
   deletedAt?: Date | null;
 }
@@ -220,6 +233,23 @@ export interface IReporteEjecucion {
   enviados: number;
   no_enviados: number;
   detalle?: string | null;
+}
+
+/**
+ * Who one run was sent to, and what became of them. A copy, not a reference:
+ * the name and the address are what they were at that moment.
+ */
+export interface IReporteEjecucionEntrega {
+  id: number;
+  id_ejecucion: number;
+  tipo: "usuario" | "externo";
+  /** The account, until it is removed; always `null` for an outside address. */
+  id_usuario?: number | null;
+  /** The outside address. `null` for an account, whose address is never kept here. */
+  correo?: string | null;
+  nombre: string;
+  resultado: "entregado" | "rechazado" | "no_enviado" | "sin_cupo";
+  created_at?: Date;
 }
 
 

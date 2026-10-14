@@ -12,6 +12,7 @@ import {
 } from "./fieldOptions.js";
 import { buildCatalogView } from "./catalogView.js";
 import { CiudadModel } from "../models/ciudad.model.js";
+import { DepartamentoModel } from "../models/departamento.model.js";
 import { MaterialModel } from "../models/material.model.js";
 import { ObsModel } from "../models/obs.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
@@ -25,6 +26,8 @@ const MODELS = {
   "tipoObs.name": TipoObsModel,
   "obs.name": ObsModel,
   "rol.name": RolModel,
+  "tramo.departamento": DepartamentoModel,
+  "poste.departamento": DepartamentoModel,
 };
 
 /** Every model answers one name per row unless a test says otherwise. */
@@ -47,6 +50,11 @@ describe("las marcas del catálogo y los lectores", () => {
     for (const [entityKey, entity] of Object.entries(catalog.entities)) {
       for (const [fieldName, field] of Object.entries(entity.fields)) {
         if (field.optionList === true) marcados.push(`${entityKey}.${fieldName}`);
+      }
+      // A calculated field can name its list too: the department of a tramo is
+      // not a stored column of the table it is read from.
+      for (const [fieldName, calc] of Object.entries(entity.calculated ?? {})) {
+        if (calc.optionList === true) marcados.push(`${entityKey}.${fieldName}`);
       }
     }
     expect([...marcados].sort()).toEqual([...OPTION_SOURCES].sort());
@@ -85,6 +93,29 @@ describe("las marcas del catálogo y los lectores", () => {
   });
 });
 
+describe("la lista de departamentos", () => {
+  const view = buildCatalogView({ role: 1, staff: true });
+  const campo = (root: string, path: string) =>
+    view.roots.find((r) => r.key === root)!.fields.find((f) => f.path === path);
+
+  it("la ofrecen el tramo y el poste, y desde un evento también", () => {
+    expect(campo("tramo", "departamento")?.optionList).toBe("tramo.departamento");
+    expect(campo("poste", "departamento")?.optionList).toBe("poste.departamento");
+    expect(campo("evento", "poste.departamento")?.optionList).toBe("poste.departamento");
+  });
+
+  it("no la ofrece el nombre del tramo, que no es una lista cerrada", () => {
+    expect(campo("tramo", "nombre")?.optionList).toBeUndefined();
+  });
+
+  it("se lee de la tabla de departamentos, ordenada", async () => {
+    stub({ "tramo.departamento": ["Tarija", "La Paz", "Beni"], "poste.departamento": ["Tarija", "La Paz", "Beni"] });
+    const listas = await loadOptionLists(["tramo.departamento", "poste.departamento"]);
+    expect(listas["tramo.departamento"]).toEqual(["Beni", "La Paz", "Tarija"]);
+    expect(listas["poste.departamento"]).toEqual(["Beni", "La Paz", "Tarija"]);
+  });
+});
+
 describe("lo que se lee de la base", () => {
   it("devuelve solo las listas pedidas", async () => {
     stub();
@@ -118,8 +149,9 @@ describe("lo que se lee de la base", () => {
   });
 
   it("respeta los espacios con los que el valor está guardado", async () => {
-    // 17 of the 98 cities are stored with a trailing space, and they carry real
-    // data: `Yacuiba ` alone holds 121 poles. Tidying the value here would put
+    // Before the city migration tidied the names, 17 of the 98 cities were stored
+    // with a trailing space, and they carried real data: `Yacuiba ` alone held
+    // 121 poles. Tidying the value here would put
     // a choice in the list that matches nothing — the exact failure this whole
     // feature exists to remove, only now suggested by the screen itself.
     stub({ "ciudad.name": ["Yacuiba ", "Ventillas", "Ventillas "] });

@@ -46,7 +46,7 @@ export const FORMA_DEL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 export const nuevoToken = (): string => randomBytes(32).toString("base64url");
 
 /** Where the page that confirms an unsubscribe lives, under the web application. */
-export const RUTA_DE_BAJA = "/baja-informe";
+const RUTA_DE_BAJA = "/baja-informe";
 
 /**
  * The web application's own address — the first origin this server accepts

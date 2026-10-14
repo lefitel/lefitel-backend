@@ -18,9 +18,13 @@ const handler = makeHandler(ciudadLog);
 
 type Columna = [ReturnType<typeof literal>, string];
 
+/** The tramos a city is one end of. */
+const TRAMOS_DE_LA_CIUDAD =
+  `(SELECT "t"."id" FROM "tramos" AS "t" WHERE "t"."id_ciudad_min" = "ciudad"."id" OR "t"."id_ciudad_max" = "ciudad"."id")`;
+
 /** The live poles of a city: a pole belongs to both ends of its tramo. */
 const DE_LA_CIUDAD =
-  `("postes"."id_ciudadA" = "ciudad"."id" OR "postes"."id_ciudadB" = "ciudad"."id") AND "postes"."deletedAt" IS NULL`;
+  `"postes"."id_tramo" IN ${TRAMOS_DE_LA_CIUDAD} AND "postes"."deletedAt" IS NULL`;
 
 /** The live incidents on those poles. */
 const EVENTOS_DE_LA_CIUDAD =
@@ -30,8 +34,9 @@ const EVENTOS_DE_LA_CIUDAD =
 /**
  * What a city's row says about its poles. Behind `postes.ver`.
  *
- * `vecinas` is the ids of the cities it shares a tramo with, and only the live
- * ones — the rule `tramosEntre` in `opciones.controller.ts` already follows, so
+ * `vecinas` is the ids of the cities at the other end of a tramo it is one end
+ * of, and only the live ones, and only over a tramo that has a live pole on it:
+ * a stretch nobody has run a pole along does not make two cities neighbours, and
  * the list never names a city the same response does not carry.
  *
  * `::int` because `COUNT` is a bigint and the driver hands a bigint over as a
@@ -41,8 +46,9 @@ const CIFRAS_DE_POSTES: Columna[] = [
   [literal(`(SELECT COUNT(*)::int FROM "postes" WHERE ${DE_LA_CIUDAD})`), "postes"],
   [literal(
     `ARRAY(SELECT DISTINCT "vecina"."id" FROM "postes" ` +
-    `INNER JOIN "ciudads" AS "vecina" ON "vecina"."id" = CASE WHEN "postes"."id_ciudadA" = "ciudad"."id" ` +
-    `THEN "postes"."id_ciudadB" ELSE "postes"."id_ciudadA" END AND "vecina"."deletedAt" IS NULL ` +
+    `INNER JOIN "tramos" AS "tv" ON "tv"."id" = "postes"."id_tramo" ` +
+    `INNER JOIN "ciudads" AS "vecina" ON "vecina"."id" = CASE WHEN "tv"."id_ciudad_min" = "ciudad"."id" ` +
+    `THEN "tv"."id_ciudad_max" ELSE "tv"."id_ciudad_min" END AND "vecina"."deletedAt" IS NULL ` +
     `WHERE ${DE_LA_CIUDAD} AND "vecina"."id" <> "ciudad"."id" ORDER BY "vecina"."id")`,
   ), "vecinas"],
 ];

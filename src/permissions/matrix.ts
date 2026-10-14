@@ -50,6 +50,11 @@ export const PERMISSIONS = {
   postes: ["ver", "crear", "editar", "archivar"],
   eventos: ["ver", "crear", "editar", "archivar"],
   ciudades: ["ver", "crear", "editar", "archivar"],
+  // A stretch of line between two cities. Its own module rather than a reading
+  // of `ciudades`: who may say which stretches exist decides where every pole
+  // can be placed. Seeded with what each role holds on `ciudades`
+  // (`20261010000006`).
+  tramos: ["ver", "crear", "editar", "archivar"],
   parametros: ["ver", "crear", "editar", "archivar"],
   // `reportes` sits fifth because that is where the screen has always drawn it.
   // `MODULES` is `Object.keys` of this object now, so this order *is* the order
@@ -83,6 +88,7 @@ export const MODULE_LABELS: Record<Module, string> = {
   postes: "Postes",
   eventos: "Eventos",
   ciudades: "Ciudades",
+  tramos: "Tramos",
   parametros: "Parámetros",
   reportes: "Reportes",
   generador: "Generador",

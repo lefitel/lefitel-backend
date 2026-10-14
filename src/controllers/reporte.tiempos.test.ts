@@ -44,7 +44,6 @@ vi.mock("../models/revision.model.js", () => ({
 }));
 vi.mock("../models/eventoObs.model.js", () => ({ EventoObsModel: {} }));
 vi.mock("../models/poste.model.js", () => ({ PosteModel: {}, POSTE_PUBLIC_ATTRIBUTES: ["id"] }));
-vi.mock("../models/ciudad.model.js", () => ({ CiudadModel: {} }));
 vi.mock("../models/propietario.model.js", () => ({ PropietarioModel: {} }));
 vi.mock("../models/material.model.js", () => ({ MaterialModel: {} }));
 vi.mock("../models/adssPoste.model.js", () => ({ AdssPosteModel: {} }));
@@ -53,7 +52,7 @@ vi.mock("../models/tipoObs.model.js", () => ({ TipoObsModel: {} }));
 
 const { getTiemposResumen } = await import("./reporte.controller.js");
 
-/** One evento as Sequelize hands it over, with the two cities of its tramo. */
+/** One evento as Sequelize hands it over, with its tramo. */
 function evento(opts: {
   id: number;
   date: string;
@@ -71,10 +70,12 @@ function evento(opts: {
     revisions: (opts.revisionDates ?? []).map((d) => ({ date: new Date(d) })),
     poste: {
       id: 1,
-      id_ciudadA: 1,
-      id_ciudadB: 2,
-      ciudadA: { id: 1, name: "Cochabamba" },
-      ciudadB: { id: 2, name: "Sacaba" },
+      id_tramo: 14,
+      tramo: {
+        id: 14, id_ciudad_min: 1, id_ciudad_max: 2, id_departamento: null, departamento: null,
+        ciudadMin: { id: 1, name: "Cochabamba", lat: null, lng: null },
+        ciudadMax: { id: 2, name: "Sacaba", lat: null, lng: null },
+      },
     },
   };
   return { toJSON: () => row };
@@ -134,6 +135,45 @@ describe("getTiemposResumen", () => {
     await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.tramos[0].avgDias).toBe(10);
+  });
+
+  it("agrupa por el tramo mismo y lo presenta con su nombre, sin las dos ciudades sueltas", async () => {
+    eventoFindAll.mockResolvedValue([
+      evento({ id: 1, date: "2026-03-01", solucionDate: "2026-03-11" }),
+      evento({ id: 2, date: "2026-03-01", solucionDate: "2026-03-21" }),
+    ]);
+
+    const r = res();
+    await getTiemposResumen(req(RANGO), r);
+
+    expect(r.body.tramos).toHaveLength(1);
+    expect(r.body.tramos[0].count).toBe(2);
+    expect(r.body.tramos[0].tramo).toMatchObject({ id: 14, nombre: "Cochabamba – Sacaba" });
+    expect(JSON.stringify(r.body)).not.toMatch(/ciudadA|ciudadB|id_ciudad_m/);
+  });
+
+  it("skips an evento whose pole came without its tramo and still reports the others", async () => {
+    // Cannot happen today (`id_tramo` is NOT NULL and the include is not
+    // paranoid), but the presenter would throw a TypeError on it and turn the
+    // whole report into a 500. Built by taking the tramo off an otherwise
+    // normal row, so the only thing different about it is that one key.
+    const sinTramo = evento({ id: 2, date: "2026-03-01", solucionDate: "2026-03-21" });
+    // It carries another `id_tramo` and comes first, so it would open a group
+    // of its own and the controller would have to present its tramo.
+    const fila = sinTramo.toJSON() as { poste: { id_tramo: number; tramo?: unknown } };
+    delete fila.poste.tramo;
+    fila.poste.id_tramo = 15;
+    eventoFindAll.mockResolvedValue([
+      sinTramo,
+      evento({ id: 1, date: "2026-03-01", solucionDate: "2026-03-11" }),
+    ]);
+
+    const r = res();
+    await getTiemposResumen(req(RANGO), r);
+
+    expect(r.statusCode).toBe(200);
+    expect(r.body.tramos).toHaveLength(1);
+    expect(r.body.tramos[0]).toMatchObject({ count: 1, avgDias: 10 });
   });
 
   it("cuenta hasta la reparación, no hasta la última visita", async () => {
@@ -267,5 +307,18 @@ describe("getTiemposResumen", () => {
     await getTiemposResumen(req(RANGO), r);
 
     expect(r.body.descartados).toBe(0);
+  });
+
+  it("narrows to the incidents whose pole is on the tramo when one is named, and not otherwise", async () => {
+    eventoFindAll.mockResolvedValue([]);
+
+    await getTiemposResumen(req({ ...RANGO, tramo: "14" }), res());
+    const incluye = (n: number) => (eventoFindAll.mock.calls[n][0] as { include: { attributes?: string[]; required?: boolean; where?: unknown }[] })
+      .include.find((i) => i.attributes?.includes("id_tramo"));
+    expect(incluye(0)).toMatchObject({ required: true, where: { id_tramo: 14 } });
+
+    await getTiemposResumen(req(RANGO), res());
+    expect(incluye(1)?.where).toBeUndefined();
+    expect(incluye(1)?.required).toBeUndefined();
   });
 });

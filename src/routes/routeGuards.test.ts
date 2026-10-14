@@ -861,6 +861,8 @@ const GENERADOR_GATES: Record<string, string> = {
   // is `programar`, a permission of its own — see `programacion.routes.ts`.
   "GET /api/generator/schedules/": "generador.ver",
   "GET /api/generator/schedules/:id/runs": "generador.ver",
+  "GET /api/generator/schedules/runs": "generador.ver",
+  "GET /api/generator/schedules/runs/:id/recipients": "generador.ver",
   "GET /api/generator/schedules/recipients": "generador.programar",
   "POST /api/generator/schedules/": "generador.programar",
   "PUT /api/generator/schedules/:id": "generador.programar",
@@ -1020,6 +1022,17 @@ const CIUDADES_GATES: Record<string, string> = {
   "PUT /api/ciudad/:id": "ciudades.editar",
   "DELETE /api/ciudad/:id": "ciudades.archivar",
   "PATCH /api/ciudad/:id/restore": "ciudades.archivar",
+};
+
+/** The tramo register: a stretch between two cities, and where every pole is placed. */
+const TRAMOS_GATES: Record<string, string> = {
+  "GET /api/tramo/": "tramos.ver",
+  "GET /api/tramo/options": "tramos.ver",
+  "GET /api/tramo/:id": "tramos.ver",
+  "POST /api/tramo/": "tramos.crear",
+  "PUT /api/tramo/:id": "tramos.editar",
+  "DELETE /api/tramo/:id": "tramos.archivar",
+  "PATCH /api/tramo/:id/restore": "tramos.archivar",
 };
 
 /**
@@ -1297,18 +1310,19 @@ const ARCHIVOS_GATES: Record<string, string> = {
  */
 const TABULADOS = [
   "usuario", "rol", "permiso", "poste", "evento", "reporte", "bitacora",
-  "adss", "ciudad", "material", "obs", "propietario", "revision", "tipo-obs",
+  "adss", "ciudad", "tramo", "material", "obs", "propietario", "revision", "tipo-obs",
   "files",
 ] as const;
 
 const MODULOS_TABULADOS = new RegExp(`^\\/api\\/(${TABULADOS.join("|")})\\b`);
 
-/** The nine tables, kept as a list so they can be counted as well as merged. */
+/** The eleven tables, kept as a list so they can be counted as well as merged. */
 const TABLAS = [
   ["GENERADOR_GATES", GENERADOR_GATES],
   ["EVENTOS_GATES", EVENTOS_GATES],
   ["PARAMETROS_GATES", PARAMETROS_GATES],
   ["CIUDADES_GATES", CIUDADES_GATES],
+  ["TRAMOS_GATES", TRAMOS_GATES],
   ["POSTES_GATES", POSTES_GATES],
   ["REPORTES_GATES", REPORTES_GATES],
   ["SEGURIDAD_GATES", SEGURIDAD_GATES],
@@ -1321,7 +1335,7 @@ const TODAS_LAS_PUERTAS = Object.assign({}, ...TABLAS.map(([, t]) => t)) as Reco
 
 describe("which permission each gate asks for", () => {
   it("declares each route in one table only", () => {
-    // 🔴 The nine tables are merged with a spread, and a key written in two of
+    // 🔴 The eleven tables are merged with a spread, and a key written in two of
     // them is not an error — the last one silently wins and the other entry
     // asserts nothing for ever. It is not a theoretical risk: D1 moved seven
     // listings between routers, and `GET /api/usuario/:id/bitacora` is exactly
@@ -1340,7 +1354,7 @@ describe("which permission each gate asks for", () => {
     }
     expect(repetidas, `rutas declaradas en dos tablas:\n  ${repetidas.join("\n  ")}`).toEqual([]);
     // A second assertion stood here, comparing the size of the merged object
-    // against the sum of the nine tables. It was true by construction —
+    // against the sum of the eleven tables. It was true by construction —
     // `TODAS_LAS_PUERTAS` is built *from* `TABLAS`, so it could only fail when
     // the loop above had already failed — and its comment claimed to catch a
     // table added to the merge and forgotten, which cannot happen when there is

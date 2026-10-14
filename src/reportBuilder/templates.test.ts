@@ -1,4 +1,4 @@
-// The six templates, held to the promise they make.
+// The templates, held to the promise they make.
 //
 // A template is an example somebody presses to learn what this screen does, so
 // a broken one teaches the wrong lesson twice: once about the report, and once
@@ -9,7 +9,7 @@
 //
 // So this file asks four things of every template: that the builder can build
 // it, that Postgres accepts what comes out, that every role which can open the
-// screen gets all six intact, and that none of them carries a date that will
+// screen gets all of them intact, and that none of them carries a date that will
 // stop being true.
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -27,14 +27,14 @@ const VIEWERS: [string, Viewer][] = [["administrador", ADMIN], ["cliente", CLIEN
 
 describe("every template is a report the builder can actually build", () => {
   for (const [who, viewer] of VIEWERS) {
-    it(`builds all six for a ${who}`, () => {
+    it(`builds every one for a ${who}`, () => {
       for (const template of TEMPLATES) {
         // Not wrapped in expect().not.toThrow(): the thrown message names the
         // path that broke, and that is the whole diagnostic.
         buildQuery(template.config, viewer);
         buildCountQuery(template.config, viewer);
       }
-      expect(TEMPLATES).toHaveLength(6);
+      expect(TEMPLATES).toHaveLength(7);
     });
   }
 
@@ -69,7 +69,7 @@ describe("every template is a report the builder can actually build", () => {
   it("every template says what it is for", () => {
     for (const template of TEMPLATES) {
       expect(template.name.length, template.key).toBeGreaterThan(0);
-      // A description is what somebody chooses between six by. "Reporte de
+      // A description is what somebody chooses between them by. "Reporte de
       // eventos" beside "General de eventos" is a label repeated, not a reason.
       expect(template.description.length, template.key).toBeGreaterThan(30);
       expect(template.description, template.key).not.toContain(template.name);
@@ -134,7 +134,7 @@ const dbAvailable = await sequelize
 
 beforeAll(() => {
   if (!dbAvailable) {
-    console.warn("\n  !! templates: sin base de datos. Nadie comprueba que las seis se ejecuten.\n");
+    console.warn("\n  !! templates: sin base de datos. Nadie comprueba que las plantillas se ejecuten.\n");
   }
 });
 
@@ -142,7 +142,7 @@ afterAll(async () => {
   if (dbAvailable) await sequelize.close();
 });
 
-describe.skipIf(!dbAvailable)("Postgres accepts all six", () => {
+describe.skipIf(!dbAvailable)("Postgres accepts every one", () => {
   const explain = async (sql: string, binds: unknown[]): Promise<string | null> => {
     try {
       await sequelize.query(`EXPLAIN ${sql}`, { bind: binds, logging: false });
@@ -173,5 +173,30 @@ describe.skipIf(!dbAvailable)("Postgres accepts all six", () => {
     }
 
     expect(broken).toEqual([]);
+  });
+});
+
+describe("«Tramos y su estado»", () => {
+  const tramos = () => TEMPLATES.find((t) => t.key === "tramos-y-su-estado");
+
+  it("is a report of tramos, one row each, ordered by name", () => {
+    expect(tramos()?.name).toBe("Tramos y su estado");
+    expect(tramos()?.config.root).toBe("tramo");
+    expect(tramos()?.config.columns.map((c) => c.path)).toEqual([
+      "nombre", "departamento", "numPostes", "numEventos", "numPendientes",
+    ]);
+    expect(tramos()?.config.sort).toEqual([{ path: "nombre", dir: "asc" }]);
+    expect(tramos()?.config.groupBy).toEqual([]);
+    // No filter at all: any condition on a count or a join to poles would drop
+    // the tramos with nothing installed, which are the reason for the report.
+    expect(tramos()?.config.filters?.conditions).toEqual([]);
+  });
+
+  it("lists the tramos with nothing installed, not only those that have poles", () => {
+    const { sql } = buildQuery(tramos()!.config, ADMIN);
+    // No filter on the counts and no join to a pole: a tramo with no poles has
+    // to come out as a row of zeros.
+    expect(sql).not.toMatch(/JOIN "postes" t\d/);
+    expect(sql).toContain('FROM "tramos" t0');
   });
 });

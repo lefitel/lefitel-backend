@@ -121,6 +121,7 @@ const NEGOCIO_EN_ESPANOL = [
   "ruta",
   "solucion",
   "tipo-obs",
+  "tramo",
   "usuario",
 ];
 
@@ -371,7 +372,12 @@ describe("what every address is called", () => {
     // appearing at all". Written the coarse way this flagged the four addresses
     // the task had just made right.
     const raices = new Set(montajes.map((m) => m.prefijo.replace("/api/", "")));
+    // `/api/reporte/tramo` is the report about a tramo, not a tramo's address:
+    // no id of a tramo follows it. It became a "change of subject" the day
+    // `tramo` became a mount of its own, and renaming it is a client change.
+    const SIN_CAMBIO_DE_SUJETO = ["/api/reporte/tramo"];
     const malos = propias.filter((r) => {
+      if (SIN_CAMBIO_DE_SUJETO.includes(r)) return false;
       const trozos = r.split("/").filter(Boolean).slice(1);
       const primerParametro = trozos.findIndex((t) => t.startsWith(":"));
       const hasta = primerParametro === -1 ? trozos.length : primerParametro;

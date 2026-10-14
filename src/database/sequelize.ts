@@ -30,16 +30,6 @@ const dbLogger = (sql: string, timing?: number) => {
 let sequelize: Sequelize;
 
 /**
- * Where the connection settings came from.
- *
- * Exported because `index.ts` needs it to decide whether rewriting the schema is
- * survivable. A deployment configured with a single `DATABASE_URL` is the shape
- * a hosted database takes; the discrete variables are the shape a local one
- * takes. That is the only signal available at boot that tells the two apart.
- */
-let connectionSource: "discrete" | "url" = "url";
-
-/**
  * Explicit pool. The default is 5 connections shared by the whole API, and a
  * report can hold one for up to two statement timeouts. Five concurrent report
  * requests were enough to starve every other endpoint, login included.
@@ -63,7 +53,6 @@ const pool = { max: 15, min: 0, acquire: 30_000, idle: 10_000 };
  * logged so a wrong one is visible on the first line of the log.
  */
 if (process.env.PG_DATABASE && process.env.PG_USER) {
-  connectionSource = "discrete";
   dbLog.info(
     { base: process.env.PG_DATABASE, host: process.env.PG_IP, puerto: process.env.PG_PORT },
     `conectando a ${process.env.PG_DATABASE} en ${process.env.PG_IP}:${process.env.PG_PORT}`,
@@ -82,7 +71,6 @@ if (process.env.PG_DATABASE && process.env.PG_USER) {
     }
   );
 } else if (process.env.DATABASE_URL) {
-  connectionSource = "url";
   dbLog.info("conectando por DATABASE_URL");
   sequelize = new Sequelize(process.env.DATABASE_URL, { logging: dbLogger, benchmark: true, pool });
 } else {
@@ -96,4 +84,4 @@ if (process.env.PG_DATABASE && process.env.PG_USER) {
   process.exit(1);
 }
 
-export { sequelize, connectionSource };
+export { sequelize };
