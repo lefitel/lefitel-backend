@@ -8,7 +8,7 @@
 //
 // What changed is the other half of the sentence, which nobody had written:
 // ungated *and* unmetered. Any valid session could write to the server's disk at
-// five megabytes a request without limit, from the least-privileged role there
+// five megabytes a request (ten since October 2026) without limit, from the least-privileged role there
 // is. The orphan sweep on the Archivos screen collects files that nothing points
 // at, but it runs when a person opens that screen — housekeeping, not a brake.
 //
@@ -30,8 +30,8 @@ const UPLOAD_WINDOW_MS = 60_000;
  * shift trips is a budget somebody will remove. A technician registering events
  * in the field attaches one or two photographs per event; thirty a minute is one
  * every two seconds, sustained, which no hand does. It still turns "unlimited"
- * into a ceiling of 150 MB a minute per account, and an account is a thing an
- * administrator can suspend.
+ * into a ceiling of 300 MB a minute per account (30 × the 10 MB in
+ * `files.routes.ts`), and an account is a thing an administrator can suspend.
  */
 export const UPLOAD_LIMIT = 30;
 

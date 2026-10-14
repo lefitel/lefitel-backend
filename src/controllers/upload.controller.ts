@@ -10,6 +10,20 @@ const uploadLog = log("upload");
 const IMAGES_DIR = process.env.IMAGES_DIR ?? "/images";
 
 /**
+ * How a stored photograph comes out. The one compression in the whole chain:
+ * the browser only shrinks what is over 8 MB, and gently (`Upload.api.ts`).
+ *
+ * Field photographs get zoomed into — a plate, a label, a crack — so detail is
+ * the point. Until May 2026 this was 1000 px tall at JPEG 60, and that is why
+ * three in four photographs on the system look blurry (measured on the
+ * production copy of 14 October 2026; those cannot be recovered, the originals
+ * were never kept). Then 1920 px of *height* at webp 80, which left a portrait
+ * shot at 1440 px wide. Now the longest side, either way round, at webp 85: a
+ * phone photo lands around 400-900 KB.
+ */
+export const COMPRESION = { ladoMaximo: 2560, calidad: 85 } as const;
+
+/**
  * A file name of our making, from a name we were handed.
  *
  * The uploaded name went into the destination by string concatenation, so
@@ -70,8 +84,17 @@ export async function UploadImage(req: Request, res: Response) {
   let comprimida: Buffer;
   try {
     comprimida = await sharp(req.file.buffer)
-      .resize({ height: 1920, withoutEnlargement: true })
-      .webp({ quality: 80 })
+      // First, and it matters: phones store many photos sideways with an EXIF
+      // note saying how to turn them, and the webp below keeps no EXIF. Without
+      // this the note is lost and the photograph lies on its side.
+      .rotate()
+      .resize({
+        width: COMPRESION.ladoMaximo,
+        height: COMPRESION.ladoMaximo,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .webp({ quality: COMPRESION.calidad })
       .toBuffer();
   } catch {
     return res.status(400).json({ message: "El archivo no es una imagen que se pueda procesar." });

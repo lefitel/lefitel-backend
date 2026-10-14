@@ -58,7 +58,24 @@ const DEL_FRONTEND = {
 };
 
 /** The declared ceiling in `files.routes.ts`, written out so a change to it fails here. */
-const LIMITE_BYTES = 5 * 1024 * 1024;
+const LIMITE_BYTES = 10 * 1024 * 1024;
+
+/** A plain image of the given size, as `format`, optionally with an EXIF orientation. */
+const foto = (width: number, height: number, orientation?: number) => {
+  const base = sharp({ create: { width, height, channels: 3, background: { r: 120, g: 120, b: 120 } } }).jpeg();
+  return (orientation ? base.withMetadata({ orientation }) : base).toBuffer();
+};
+
+/** Uploads `buffer` and returns the stored file's metadata. */
+async function subir(buffer: Buffer) {
+  const res = await request(app)
+    .post("/api/files")
+    .set("Cookie", COOKIE)
+    .set(DEL_FRONTEND)
+    .attach("file", buffer, "foto.jpg");
+  expect(res.status).toBe(201);
+  return sharp(path.join(directory, res.body.path.slice(1))).metadata();
+}
 
 let imagen: Buffer;
 
@@ -122,9 +139,9 @@ describe("POST /api/files with a real multipart body", () => {
     const [escrito] = await stored();
     expect(escrito).toBe(res.body.path.slice(1));
 
-    // webp, and still 1200 tall — proof the whole chain ran, not just that a
-    // file appeared. The controller resizes to a height of 1920 with
-    // `withoutEnlargement`, and this source is shorter than that, so the
+    // webp, and still 2400x1200 — proof the whole chain ran, not just that a
+    // file appeared. The controller caps the longest side at 2560 with
+    // `withoutEnlargement`, and this source is smaller than that, so the
     // pixels are meant to survive untouched.
     const meta = await sharp(path.join(directory, escrito)).metadata();
     expect(meta.format).toBe("webp");
@@ -146,10 +163,38 @@ describe("POST /api/files with a real multipart body", () => {
     // alternative is retrying the same photograph, since nothing in a generic
     // failure suggests a smaller one would work.
     expect(res.status).toBe(413);
-    expect(res.body.message).toMatch(/5 MB/);
+    expect(res.body.message).toMatch(/10 MB/);
     // And the part that matters most: nothing on disk. multer's limit has to
     // stop the body before the controller ever sees a `req.file`.
     expect(await stored()).toEqual([]);
+  });
+
+  // Field photographs are zoomed into to read a plate or see a crack. Until May
+  // 2026 they were cut to 1000 px tall at JPEG 60, and that is what made three
+  // in four of them blurry; after it, to 1920 px *tall* only, so a landscape
+  // shot kept its width but a portrait lost a third of its detail.
+  it("caps the longest side at 2560, whichever way the photograph is held", async () => {
+    const apaisada = await subir(await foto(4000, 3000));
+    expect([apaisada.width, apaisada.height]).toEqual([2560, 1920]);
+
+    const vertical = await subir(await foto(3000, 4000));
+    expect([vertical.width, vertical.height]).toEqual([1920, 2560]);
+  });
+
+  it("accepts a photograph between the old ceiling and the new one", async () => {
+    // A phone photo of 6-9 MB used to be refused or squeezed twice; the browser
+    // now sends anything up to 8 MB untouched, so the server has to take it.
+    const pesada = Buffer.concat([await foto(800, 600), Buffer.alloc(6 * 1024 * 1024)]);
+    const meta = await subir(pesada);
+    expect(meta.format).toBe("webp");
+  });
+
+  it("turns the pixels the way the phone said, instead of losing the instruction", async () => {
+    // A phone stores many photos sideways with an EXIF note saying «rotate
+    // 90°». Converting to webp drops the note, so without applying it first the
+    // stored photo lies on its side. Measured on 14 October 2026: it did.
+    const meta = await subir(await foto(400, 200, 6));
+    expect([meta.width, meta.height]).toEqual([200, 400]);
   });
 
   it("refuses a file sent under a field name the route does not declare", async () => {

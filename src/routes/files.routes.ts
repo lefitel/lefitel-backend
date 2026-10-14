@@ -14,8 +14,15 @@ import { uploadLimiter } from "../middleware/uploadLimiters.js";
 
 const router = Router();
 
-/** The ceiling, named because the refusal below quotes it back to the caller. */
-const MAX_UPLOAD_MB = 5;
+/**
+ * The ceiling, named because the refusal below quotes it back to the caller.
+ *
+ * 10 and not 5 since October 2026: the browser now sends a phone photograph
+ * untouched up to 8 MB (`Upload.api.ts`), so that the server's compression is
+ * the only one. The margin above 8 is the multipart wrapping and a browser
+ * whose shrink lands a little over its target.
+ */
+const MAX_UPLOAD_MB = 10;
 
 // The gate used to sit on the mount in app.ts as `requireRole(1)`, which drew no
 // line between listing files and deleting them. Reading the module and erasing
@@ -59,7 +66,7 @@ router.delete("/:name", requirePermission("archivos", "archivar"), deleteFile);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 } });
 
 // `uploadLimiter` before `multer`, and the order is the point: `memoryStorage`
-// reads the whole five megabytes into memory before any handler runs, so a
+// reads the whole ten megabytes into memory before any handler runs, so a
 // request that is already over budget has to be turned away in front of it. The
 // budget itself, and why an endpoint outside the permission matrix needs one,
 // are in `middleware/uploadLimiters.ts`.
