@@ -20,8 +20,9 @@ Este documento es la lista para el día del corte. Lo que hace falta saber antes
   paso 4 (cambio en caliente, con la vieja atendiendo hasta que la nueva esté sana): **para
   este corte se renuncia a esa red**, y se asume que el servicio está caído desde que se
   para la vieja hasta que la nueva queda sana. Como *Auto Deploy* arranca el despliegue con
-  el push a `master`, la vieja se para **antes** del push. Cómo se para en el panel de
-  Coolify no está comprobado desde aquí: verlo antes del día del corte.
+  el push a `master`, la vieja se para **antes** del push. Cómo: el paso 6 apaga Auto
+  Deploy, pulsa «Stop» y despliega a mano después del push. Ese botón no se ha probado en
+  este panel; si no estuviera, no seguir.
 
 Cada paso dice qué está comprobado y qué no. Lo no comprobado es lo que no se puede ver
 desde el código: la base de producción y el panel de Coolify.
@@ -360,7 +361,16 @@ al cliente: los tres con dos departamentos (Independencia–Inquisivi, Caracollo
 Villamontes–Boyuibe) y los cinco del mapa, que dependen de si su columna es el departamento
 o su zona.
 
-**No comprobado:** un despliegue real en Coolify.
+**Ensayo final sobre el commit, 14 de octubre de 2026.** Con todo commiteado (`api`
+`ea1bf9d`), imagen construida desde un checkout limpio de ese commit (lint y 3.447 tests en
+la puerta) y arrancada sobre una restauración nueva del mismo volcado: **26 migraciones
+aplicadas, sana a los 6 segundos, ninguna línea de aviso ni de error**, las 16 tablas de
+producción con recuentos idénticos, 32 tablas en total, 101 tramos (65 con departamento, 36
+vacíos) y ningún poste sin tramo. Login por los tres roles y lecturas de sesión, postes,
+tramos, eventos, ciudades, dashboard, envíos e historial de envíos: todo 200.
+
+**No comprobado:** un despliegue real en Coolify, ni cómo se para en su panel la imagen
+anterior antes del push.
 
 ## 5. Variables de `web` en Vercel
 
@@ -386,17 +396,51 @@ rotar esa clave en OpenRouteService.
 
 Elegir una ventana tranquila y avisar: durante unos minutos nadie podrá entrar.
 
-1. Fusionar `isaias` en `master` en los dos repos y hacer push. **El push a `master`
-   despliega `api` automáticamente**: no hay un segundo paso de «desplegar» que esperar.
-2. Seguir el despliegue de `api` en Coolify (pestaña Deployments). Mirar el log del
-   contenedor nuevo, en este orden:
-   - la línea que dice a qué base se conecta;
-   - `22 migración(es) aplicada(s)` con la lista — son 23 en total, y la de mayo ya está
-     aplicada en producción. **El número es el del 10 de octubre**: si entra otra
-     migración antes del corte, será uno más;
-   - que el servidor queda escuchando y Coolify lo marca sano.
-3. Desplegar `web` en cuanto `api` esté sana.
-4. Recargar la web en el navegador (sin caché) e iniciar sesión.
+**Reescrito el 14 de octubre de 2026.** La versión anterior hacía el push con Auto Deploy
+encendido, que arranca el despliegue solo; eso chocaba con la regla de la cabecera (la
+imagen vieja tiene que estar parada antes de que la nueva migre). Ahora el despliegue se
+dispara a mano, y así el orden es el que se elige.
+
+1. Consultas del paso 1 en la terminal de la base en Coolify: las de duplicados, espacios
+   y roles deben devolver cero filas.
+2. Coolify, app `lefitel-backend`: **desactivar «Auto Deploy»** y repasar la lista del
+   paso 4 y las variables del paso 3 (`MFA_ENCRYPTION_KEY_1`: 64 caracteres hexadecimales).
+3. **«Stop» de la app.** Desde aquí el servicio está caído.
+4. Copia de la base (paso 2), ya con la API parada para que no entre nada después. Vale
+   «Backup now» en el recurso PostgreSQL de Coolify, **descargando el fichero fuera del
+   servidor**. Sin esa copia en mano no se sigue.
+4b. **Ensayo con esa misma copia, antes del push.** La prueba anterior es sobre un volcado
+   de la noche del 13; un dato creado después (un poste con la misma ciudad en los dos
+   extremos, un informe con «Ciudad A/B», un usuario duplicado) pararía la `…05` a mitad
+   del corte con la API caída. Con la copia del paso 4 en el PC, desde el scratchpad de la
+   sesión: `bash ensayo-4b.sh <ruta del .dmp>`. Restaura, arranca la imagen del commit
+   (`osefi-api:ensayo-ea1bf9d`) y termina en **ADELANTE** o **PARA**. Unos 2 minutos.
+   Probado el 14 de octubre con el volcado de la noche anterior: ADELANTE. Si dice PARA:
+   «Deploy» de la app en Coolify para levantar la versión de siempre, sin haber tocado nada.
+5. En `api`, sin cambiar de rama (el árbol lo comparten varias sesiones):
+   `git push lefitel isaias:master`. Es un avance directo: el 14 de octubre `master` no
+   tenía nada que no estuviera en `isaias`. Con Auto Deploy apagado no despliega nada aún.
+6. **«Deploy»** en Coolify. En el log del contenedor nuevo, en este orden:
+   - `configuración completa: se puede migrar y arrancar`;
+   - `conectando por DATABASE_URL`;
+   - `registro de migraciones normalizado: 0 duplicada(s), 1 renombrada(s)`;
+   - **`26 migración(es) aplicada(s)`** — son 27 ficheros, y la de mayo ya está aplicada.
+     Si entra otra migración antes del corte, será una más;
+   - `escuchando en el puerto 3000`, y Coolify la marca sana;
+   - que **no** aparezca la línea `fatal` «la clave de cifrado del segundo factor no es
+     válida» (ver el paso 4).
+7. Solo con `api` sana, en `web`: `git push lefitel isaias:master`. Vercel la publica sola;
+   esperar a que el build termine en verde.
+8. Recargar la web sin caché, iniciar sesión y hacer el paso 7.
+9. **Volver a activar «Auto Deploy».**
+
+Commits de `master` antes del corte, para la marcha atrás: `api` `1715571`, `web` `478c199`.
+
+🔴 **El remoto es `lefitel`, no `origin`.** Los dos repos tienen dos remotos: `lefitel`
+(`github.com/lefitel/lefitel-backend` y `lefitel-frontend`), que es de donde despliegan
+Coolify y Vercel, y `origin` (`github.com/isaiahsalah/…`), un repositorio personal antiguo.
+Un push a `origin` no despliega nada. Comprobado el 14 de octubre: el último despliegue de
+Coolify construyó `1715571`, que es `lefitel/master`.
 
 **Si `api` no queda sana:** Coolify debería quedarse con la versión anterior, pero la base
 puede haber quedado migrada a medias o entera. No reintentar a ciegas: leer el log, y ver
@@ -435,7 +479,8 @@ La marcha atrás es, en este orden:
 1. Parar `api`.
 2. Restaurar la copia del paso 2:
    `pg_restore --clean --if-exists --dbname="$DATABASE_URL" osefi-antes-del-corte.dump`
-3. Redesplegar `master` en `api` y en `web`.
+3. Devolver `master` a su commit anterior (`api` `1715571`, `web` `478c199`) y redesplegar
+   las dos.
 
 Se pierde todo lo escrito en la base entre el corte y la restauración.
 
