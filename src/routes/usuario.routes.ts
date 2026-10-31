@@ -20,6 +20,7 @@ import { asignarRol } from "../controllers/usuarioRol.controller.js";
 // They were `GET /api/evento/usuario/:id_usuario` and `GET /api/bitacora/:id_usuario`,
 // both under a parent that named the rows rather than the subject.
 import { getEvento_usuario } from "../controllers/evento.controller.js";
+import { getTramos_usuario } from "../controllers/tramo.controller.js";
 import { getBitacora } from "../controllers/bitacora.controller.js";
 import { requirePermission, requireSelfOrPermission } from "../middleware/requirePermission.js";
 import { exportLimiter } from "../middleware/limiters.js";
@@ -278,6 +279,9 @@ router.get("/:id", requireSelfOrPermission("seguridad", "ver"), searchUsuario);
  */
 router.get("/:id/eventos", requireSelfOrPermission("seguridad", "ver"), getEvento_usuario);
 router.get("/:id/bitacora", requireSelfOrPermission("bitacora", "ver"), getBitacora);
+// The tramos a person is in charge of: their own ficha, and the archive dialog,
+// which is reached with `seguridad.archivar` from the screen `seguridad.ver` opens.
+router.get("/:id/tramos", requireSelfOrPermission("seguridad", "ver"), getTramos_usuario);
 
 // The only route in the API that writes the `id_rol` of an account that
 // already exists. It came out of `PUT /:id` below, which is also the route a

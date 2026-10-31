@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { INCLUDE_TRAMO, presentarTramo, presentarTramos } from "./presentacion.js";
 import { TRAMO_PUBLIC_ATTRIBUTES } from "../models/tramo.model.js";
+import { USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 
 const crudo = (extra: Record<string, unknown> = {}) => ({
   id: 14,
@@ -26,6 +27,8 @@ describe("presentarTramo", () => {
       ],
       id_departamento: 5,
       departamento: { id: 5, name: "Potosí" },
+      id_encargado: null,
+      encargado: null,
       archivado: false,
     });
     expect(JSON.stringify(t)).not.toMatch(/min|max/);
@@ -47,6 +50,28 @@ describe("presentarTramo", () => {
     const t = presentarTramo(crudo({ id_departamento: null, departamento: null }));
     expect(t.departamento).toBeNull();
     expect(t.id_departamento).toBeNull();
+  });
+});
+
+describe("presentarTramo, the encargado", () => {
+  it("names the person in charge by name and lastname", () => {
+    const t = presentarTramo(crudo({
+      id_encargado: 9, encargado: { id: 9, name: "Ana", lastname: "Quispe" },
+    }));
+    expect(t.id_encargado).toBe(9);
+    expect(t.encargado).toEqual({ id: 9, nombre: "Ana Quispe" });
+  });
+
+  it("has no encargado when the join found no live account, whatever the id says", () => {
+    const t = presentarTramo(crudo({ id_encargado: 9, encargado: null }));
+    expect(t.encargado).toBeNull();
+  });
+
+  it("sends nothing of the user but the three things the presenter reads", () => {
+    const t = presentarTramo(crudo({
+      id_encargado: 9, encargado: { id: 9, name: "Ana", lastname: "Quispe", pass: "$2b$", email: "a@b" },
+    }));
+    expect(JSON.stringify(t)).not.toMatch(/pass|email/);
   });
 });
 
@@ -83,11 +108,17 @@ describe("INCLUDE_TRAMO", () => {
   it("names its columns, and brings an archived tramo and an archived city all the same", () => {
     expect(INCLUDE_TRAMO.attributes).toEqual([...TRAMO_PUBLIC_ATTRIBUTES]);
     expect(INCLUDE_TRAMO.paranoid).toBe(false);
-    const ciudades = INCLUDE_TRAMO.include.filter((i) => "as" in i);
+    const ciudades = INCLUDE_TRAMO.include.filter((i) => "as" in i && i.as.startsWith("ciudad"));
     expect(ciudades.map((i) => (i as { as: string }).as)).toEqual(["ciudadMin", "ciudadMax"]);
     for (const c of ciudades) {
       expect((c as { paranoid: boolean }).paranoid).toBe(false);
       expect(c.attributes).toEqual(["id", "name", "lat", "lng"]);
     }
+  });
+
+  it("brings a live encargado with the author's three columns and nothing more", () => {
+    const encargado = INCLUDE_TRAMO.include.find((i) => "as" in i && i.as === "encargado");
+    expect(encargado?.attributes).toEqual([...USUARIO_AS_AUTHOR]);
+    expect(encargado).not.toHaveProperty("paranoid");
   });
 });

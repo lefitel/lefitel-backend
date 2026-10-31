@@ -3,6 +3,8 @@ import { Op } from "sequelize";
 import { sequelize } from "../database/sequelize.js";
 import { RolModel } from "../models/rol.model.js";
 import { UsuarioModel } from "../models/usuario.model.js";
+import { TramoModel } from "../models/tramo.model.js";
+import { INCLUDE_TRAMO, presentarTramo, type TramoPresentado } from "../tramos/presentacion.js";
 import { revokeAllSessionsOf } from "../auth/sessionStore.js";
 import { revokeAllRememberedDevicesOf } from "../auth/rememberedDeviceStore.js";
 import { issueSession } from "../auth/issueSession.js";
@@ -1024,6 +1026,34 @@ export const updateUserPass = handler("updateUserPass", async (req: Request, res
   logAction({ id_usuario: req.user?.id, action: "CHANGE_PASSWORD", entity: "Usuario", entity_id: Number(id), detail: isSelf ? "Cambió su contraseña" : `Cambió contraseña del usuario #${id}`, metadata: { target_user_id: Number(id), self: isSelf, sesiones_revocadas: revocadas, dispositivos_revocados: dispositivos }, severity: 'critical', ip_address: req.ip ?? null });
   res.status(200).json(withoutPass(TempUsuario));
 });
+const CON_TRAMOS_A_CARGO =
+  "Este usuario es encargado de tramos. Quítelo de esos tramos para poder archivarlo.";
+
+/** The tramo ids of `?liberarTramos=14,15`, or null when absent or unreadable. */
+const leerTramosVistos = (valor: unknown): Set<number> | null => {
+  if (typeof valor !== "string" || !/^\d+(,\d+)*$/.test(valor)) return null;
+  return new Set(valor.split(",").map(Number));
+};
+
+/** One `UPDATE_TRAMO` per tramo an archive released, as the tramo card would have logged it. */
+const logTramosLiberados = (actor: number | undefined, tramos: readonly TramoPresentado[]) => {
+  for (const t of tramos) {
+    logAction({
+      id_usuario: actor, action: "UPDATE_TRAMO", entity: "Tramo", entity_id: t.id,
+      detail: `Editó tramo ${t.nombre}`,
+      metadata: {
+        before: {
+          name: t.nombre, departamento: t.departamento?.name ?? null,
+          encargado: t.encargado?.nombre ?? null, id_encargado: t.id_encargado,
+        },
+        after: { name: t.nombre, departamento: t.departamento?.name ?? null, encargado: null, id_encargado: null },
+        motivo: "encargado archivado",
+      },
+      severity: "warning",
+    });
+  }
+};
+
 export const deleteUsuario = handler("deleteUsuario", async (req: Request, res: Response) => {
   const { id } = req.params;
   if (!(await can(req.user?.id_rol, "seguridad", "archivar"))) {
@@ -1090,14 +1120,48 @@ export const deleteUsuario = handler("deleteUsuario", async (req: Request, res: 
    * account archived whose devices still work looks closed on the screen and
    * is open in the field. If any of the three fails the whole thing rolls
    * back, the caller gets a 500, and retrying does all of it.
+   *
+   * **And the tramos the person is in charge of, released or refused.** An
+   * archived encargado would stay on the general report with nobody behind
+   * the name, so archiving them is refused (409, with the list) unless the
+   * request names, in `?liberarTramos=14,15`, exactly the tramos the person
+   * carries: the ones the archive dialog showed. A different set — a tramo
+   * assigned while the dialog was open — is refused with the new list, so
+   * nothing is released that nobody saw. Archived tramos count and are
+   * released too: a tramo restored later must not come back with an archived
+   * encargado. Un-archiving does not give the tramos back.
+   *
+   * The account's row is locked FOR UPDATE first. `updateTramo` checks a new
+   * encargado under a share lock on the same row (`encargadoVivo`), so an
+   * assignment either lands before this look or waits and finds the account
+   * archived; it cannot slip in between the look and the archive.
    */
-  const revocadas = await sequelize.transaction(async (transaction) => {
+  const vistos = leerTramosVistos(req.query.liberarTramos);
+  const resultado = await sequelize.transaction(async (transaction) => {
+    await UsuarioModel.findByPk(Number(id), { attributes: ["id"], transaction, lock: true });
+    const aCargo = await TramoModel.findAll({
+      where: { id_encargado: Number(id) }, paranoid: false, transaction,
+      attributes: INCLUDE_TRAMO.attributes, include: INCLUDE_TRAMO.include,
+    });
+    const tramos = aCargo.map(presentarTramo);
+    const coinciden = vistos !== null && vistos.size === tramos.length && tramos.every((t) => vistos.has(t.id));
+    if (tramos.length > 0 && !coinciden) return { aCargo: tramos } as const;
+    if (tramos.length > 0) {
+      await TramoModel.update(
+        { id_encargado: null },
+        { where: { id: tramos.map((t) => t.id) }, paranoid: false, transaction },
+      );
+    }
     await UsuarioModel.destroy({ where: { id }, transaction });
     const sesiones = await revokeAllSessionsOf(Number(id), { transaction });
     const dispositivos = await revokeAllRememberedDevicesOf(Number(id), { transaction });
-    return { sesiones, dispositivos };
+    return { sesiones, dispositivos, liberados: tramos };
   });
-  logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, metadata: { sesiones_revocadas: revocadas.sesiones, dispositivos_revocados: revocadas.dispositivos }, severity: 'critical' });
+  if ("aCargo" in resultado) {
+    return res.status(409).json({ message: CON_TRAMOS_A_CARGO, tramos: resultado.aCargo });
+  }
+  logAction({ id_usuario: req.user?.id, action: "DELETE_USUARIO", entity: "Usuario", entity_id: Number(id), detail: `Archivó usuario #${id}`, metadata: { sesiones_revocadas: resultado.sesiones, dispositivos_revocados: resultado.dispositivos, tramos_liberados: resultado.liberados.length }, severity: 'critical' });
+  logTramosLiberados(req.user?.id, resultado.liberados);
   return res.status(204).end();
 });
 /**

@@ -15,6 +15,7 @@
 import { CiudadModel } from "../models/ciudad.model.js";
 import { DepartamentoModel } from "../models/departamento.model.js";
 import { TramoModel, TRAMO_PUBLIC_ATTRIBUTES } from "../models/tramo.model.js";
+import { UsuarioModel, USUARIO_AS_AUTHOR } from "../models/usuario.model.js";
 import { nombreDeTramo, ordenarExtremos } from "./nombre.js";
 
 /** What a caller needs of each end: a label and a point to draw. */
@@ -28,6 +29,11 @@ export const INCLUDE_TRAMO = {
     { model: CiudadModel, as: "ciudadMin", paranoid: false, attributes: [...CIUDAD_DE_TRAMO] },
     { model: CiudadModel, as: "ciudadMax", paranoid: false, attributes: [...CIUDAD_DE_TRAMO] },
     { model: DepartamentoModel, attributes: ["id", "name"] },
+    // `USUARIO_AS_AUTHOR` and never the bare model, which would send `pass`.
+    // Paranoid, unlike the cities: archiving a person in charge releases their
+    // tramos (`deleteUsuario`), so only a row edited by hand can point at an
+    // archived account, and that one reads as no encargado.
+    { model: UsuarioModel, as: "encargado", attributes: [...USUARIO_AS_AUTHOR] },
   ],
 };
 
@@ -38,6 +44,12 @@ export interface CiudadDeTramo {
   lng: number | null;
 }
 
+/** The person in charge of a tramo, as it travels. */
+export interface EncargadoDeTramo {
+  id: number;
+  nombre: string;
+}
+
 export interface TramoPresentado {
   id: number;
   nombre: string;
@@ -45,7 +57,15 @@ export interface TramoPresentado {
   ciudades: [CiudadDeTramo, CiudadDeTramo];
   id_departamento: number | null;
   departamento: { id: number; name: string } | null;
+  id_encargado: number | null;
+  encargado: EncargadoDeTramo | null;
   archivado: boolean;
+}
+
+interface UsuarioCrudo {
+  id: number;
+  name?: string | null;
+  lastname?: string | null;
 }
 
 interface TramoCrudo {
@@ -57,7 +77,16 @@ interface TramoCrudo {
   ciudadMin?: Partial<CiudadDeTramo> | null;
   ciudadMax?: Partial<CiudadDeTramo> | null;
   departamento?: { id: number; name: string } | null;
+  id_encargado?: number | null;
+  encargado?: UsuarioCrudo | null;
 }
+
+/** "Name Lastname", the way the rest of the application names a person. */
+export const nombreDeUsuario = (u: { name?: string | null; lastname?: string | null }): string =>
+  [u.name, u.lastname].map((p) => p?.trim()).filter(Boolean).join(" ");
+
+const encargado = (u: UsuarioCrudo | null | undefined): EncargadoDeTramo | null =>
+  u ? { id: u.id, nombre: nombreDeUsuario(u) } : null;
 
 const esCrudo = (v: unknown): v is TramoCrudo =>
   typeof v === "object" && v !== null && "id_ciudad_min" in v && "id_ciudad_max" in v;
@@ -83,6 +112,8 @@ export function presentarTramo(valor: unknown): TramoPresentado {
     ciudades,
     id_departamento: crudo.id_departamento ?? null,
     departamento: crudo.departamento ? { id: crudo.departamento.id, name: crudo.departamento.name } : null,
+    id_encargado: crudo.id_encargado ?? null,
+    encargado: encargado(crudo.encargado),
     archivado: crudo.deletedAt != null,
   };
 }

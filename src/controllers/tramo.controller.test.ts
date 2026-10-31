@@ -10,6 +10,7 @@ const tramo = {
 const ciudad = { count: vi.fn(), findAll: vi.fn() };
 const departamento = { findByPk: vi.fn(), findAll: vi.fn() };
 const poste = { count: vi.fn() };
+const usuario = { findByPk: vi.fn() };
 const logAction = vi.fn();
 const fallo = vi.fn();
 
@@ -20,13 +21,14 @@ vi.mock("../models/tramo.model.js", () => ({
 vi.mock("../models/ciudad.model.js", () => ({ CiudadModel: ciudad }));
 vi.mock("../models/departamento.model.js", () => ({ DepartamentoModel: departamento }));
 vi.mock("../models/poste.model.js", () => ({ PosteModel: poste }));
+vi.mock("../models/usuario.model.js", () => ({ UsuarioModel: usuario, USUARIO_AS_AUTHOR: ["id", "name", "lastname"] }));
 vi.mock("../utils/logAction.js", () => ({ logAction }));
 vi.mock("../utils/logger.js", () => ({
   log: () => ({ error: fallo, warn: vi.fn(), info: vi.fn(), debug: vi.fn(), isLevelEnabled: () => false }),
 }));
 // One transaction object for the whole file, so a test can say that a write
 // went through THE transaction and not merely through some transaction.
-const tx = { LOCK: { UPDATE: "UPDATE" } };
+const tx = { LOCK: { UPDATE: "UPDATE", SHARE: "SHARE" } };
 vi.mock("../database/sequelize.js", () => ({
   sequelize: { transaction: (cb: (t: unknown) => Promise<unknown>) => cb(tx) },
 }));
@@ -65,6 +67,7 @@ beforeEach(() => {
   ciudad.count.mockResolvedValue(2);
   departamento.findByPk.mockResolvedValue({ id: 5 });
   poste.count.mockResolvedValue(0);
+  usuario.findByPk.mockResolvedValue({ id: 9 });
 });
 
 describe("leerCiudades", () => {
@@ -206,6 +209,91 @@ describe("PUT /api/tramo/:id", () => {
     expect(t.set).toHaveBeenCalledWith({ id_departamento: 5 });
     expect(res.status).toHaveBeenCalledWith(200);
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: "UPDATE_TRAMO" }));
+  });
+
+  it("puts a person in charge of a tramo that has poles, and logs who it was and who it is", async () => {
+    const t = fila();
+    tramo.findOne.mockResolvedValue(t);
+    tramo.findByPk.mockResolvedValue(fila({
+      id_encargado: 9, encargado: { id: 9, name: "Ana", lastname: "Quispe" },
+    }));
+    poste.count.mockResolvedValue(30);
+    const res = resOf();
+    await updateTramo(reqOf({ params: { id: "14" }, body: { id_encargado: 9 } }), res);
+
+    // Asked under a share lock, in the transaction that writes: what makes it
+    // wait for an archive of the same account rather than race it.
+    expect(usuario.findByPk).toHaveBeenCalledWith(9, { attributes: ["id"], transaction: tx, lock: "SHARE" });
+    expect(t.set).toHaveBeenCalledWith({ id_encargado: 9 });
+    expect(t.save).toHaveBeenCalledWith({ transaction: tx });
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(cuerpo(res).encargado).toEqual({ id: 9, nombre: "Ana Quispe" });
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({
+      action: "UPDATE_TRAMO",
+      metadata: expect.objectContaining({
+        before: expect.objectContaining({ encargado: null, id_encargado: null }),
+        after: expect.objectContaining({ encargado: "Ana Quispe", id_encargado: 9 }),
+      }),
+    }));
+  });
+
+  it("clears the person in charge with null, without asking who null is", async () => {
+    const t = fila({ id_encargado: 9, encargado: { id: 9, name: "Ana", lastname: "Quispe" } });
+    tramo.findOne.mockResolvedValue(t);
+    tramo.findByPk.mockResolvedValue(fila());
+    const res = resOf();
+    await updateTramo(reqOf({ params: { id: "14" }, body: { id_encargado: null } }), res);
+
+    expect(usuario.findByPk).not.toHaveBeenCalled();
+    expect(t.set).toHaveBeenCalledWith({ id_encargado: null });
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it("refuses a person in charge who does not exist or is archived, and writes nothing", async () => {
+    const t = fila();
+    tramo.findOne.mockResolvedValue(t);
+    usuario.findByPk.mockResolvedValue(null);
+    const res = resOf();
+    await updateTramo(reqOf({ params: { id: "14" }, body: { id_encargado: 42 } }), res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(cuerpo(res).message).toBe("El encargado indicado no existe o está archivado.");
+    expect(t.save).not.toHaveBeenCalled();
+    expect(logAction).not.toHaveBeenCalled();
+  });
+
+  it("refuses an encargado archived meanwhile while moving the ends, and moves nothing", async () => {
+    const bloqueada = fila();
+    tramo.findOne.mockResolvedValueOnce(fila()).mockResolvedValueOnce(bloqueada).mockResolvedValue(null);
+    usuario.findByPk.mockResolvedValue(null);
+    const res = resOf();
+    await updateTramo(reqOf({ params: { id: "14" }, body: { ciudades: [3, 9], id_encargado: 42 } }), res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(cuerpo(res).message).toBe("El encargado indicado no existe o está archivado.");
+    expect(bloqueada.save).not.toHaveBeenCalled();
+  });
+
+  it("refuses a person in charge that is not an id", async () => {
+    tramo.findOne.mockResolvedValue(fila());
+    for (const id_encargado of ["x", 0, -1, 3.5, true]) {
+      const res = resOf();
+      await updateTramo(reqOf({ params: { id: "14" }, body: { id_encargado } }), res);
+      expect(res.status, JSON.stringify(id_encargado)).toHaveBeenCalledWith(400);
+      expect(cuerpo(res).message).toBe("El encargado indicado no es válido.");
+    }
+  });
+
+  it("does nothing, and logs nothing, when the same person is sent again", async () => {
+    const t = fila({ id_encargado: 9, encargado: { id: 9, name: "Ana", lastname: "Quispe" } });
+    tramo.findOne.mockResolvedValue(t);
+    tramo.findByPk.mockResolvedValue(t);
+    const res = resOf();
+    await updateTramo(reqOf({ params: { id: "14" }, body: { id_encargado: 9 } }), res);
+
+    expect(t.save).not.toHaveBeenCalled();
+    expect(logAction).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(200);
   });
 
   it("refuses to move the ends of a tramo that has poles, archived ones counted, with the row locked", async () => {

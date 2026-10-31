@@ -141,6 +141,7 @@ const LISTADOS = [
   "/api/usuario/",
   "/api/usuario/:id/bitacora",
   "/api/usuario/:id/eventos",
+  "/api/usuario/:id/tramos",
 ];
 
 /** One row, answered as the object — and **404** when there is no row. */
@@ -302,6 +303,7 @@ const MODELOS = {
   "/api/generator/schedules/runs/:id/recipients": ReporteEntregaModel,
   "/api/poste/:id/eventos": EventoModel,
   "/api/usuario/:id/eventos": EventoModel,
+  "/api/usuario/:id/tramos": TramoModel,
   "/api/evento/:id/obs": EventoObsModel,
   "/api/material/": MaterialModel,
   "/api/obs/": ObsModel,

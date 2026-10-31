@@ -28,6 +28,7 @@ export const TramoModel: ModelDefined<ITramo, TramoCreation> = sequelize.define(
   id_ciudad_max: { type: DataTypes.INTEGER, allowNull: false },
   id_departamento: { type: DataTypes.INTEGER, allowNull: true },
   id_usuario: { type: DataTypes.INTEGER, allowNull: true },
+  id_encargado: { type: DataTypes.INTEGER, allowNull: true },
 }, {
   tableName: "tramos",
   paranoid: true,
@@ -50,11 +51,12 @@ export const TramoModel: ModelDefined<ITramo, TramoCreation> = sequelize.define(
  *
  * `id_usuario` is the one left out, for the reason `POSTE_PUBLIC_ATTRIBUTES`
  * gives: a bare include ships the whole row, and the author of a record is
- * shown behind `seguridad.ver` and nowhere else. `deletedAt` is in because the
- * presenter turns it into `archivado`.
+ * shown behind `seguridad.ver` and nowhere else. `id_encargado` is in: the
+ * person in charge is an operational fact, shown to whoever sees the tramo.
+ * `deletedAt` is in because the presenter turns it into `archivado`.
  */
 export const TRAMO_PUBLIC_ATTRIBUTES = [
-  "id", "id_ciudad_min", "id_ciudad_max", "id_departamento", "deletedAt",
+  "id", "id_ciudad_min", "id_ciudad_max", "id_departamento", "id_encargado", "deletedAt",
 ] as const;
 
 CiudadModel.hasMany(TramoModel, { foreignKey: "id_ciudad_min", as: "tramosMin" });
@@ -68,3 +70,6 @@ TramoModel.belongsTo(DepartamentoModel, { foreignKey: "id_departamento" });
 
 UsuarioModel.hasMany(TramoModel, { foreignKey: "id_usuario" });
 TramoModel.belongsTo(UsuarioModel, { foreignKey: "id_usuario" });
+
+UsuarioModel.hasMany(TramoModel, { foreignKey: "id_encargado", as: "tramosACargo" });
+TramoModel.belongsTo(UsuarioModel, { foreignKey: "id_encargado", as: "encargado" });

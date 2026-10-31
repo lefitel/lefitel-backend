@@ -5,6 +5,7 @@ import { CiudadModel } from "../models/ciudad.model.js";
 import { DepartamentoModel } from "../models/departamento.model.js";
 import { PosteModel } from "../models/poste.model.js";
 import { TramoModel } from "../models/tramo.model.js";
+import { UsuarioModel } from "../models/usuario.model.js";
 import { can } from "../permissions/store.js";
 import { INCLUDE_TRAMO, presentarTramo, type TramoPresentado } from "../tramos/presentacion.js";
 import { sqlNombreDelTramo } from "../tramos/nombre.js";
@@ -22,6 +23,8 @@ const DOS_CIUDADES = "Un tramo une dos ciudades distintas.";
 const CIUDAD_INEXISTENTE = "Una de las ciudades no existe o está archivada.";
 const DEPARTAMENTO_INEXISTENTE = "El departamento indicado no existe.";
 const DEPARTAMENTO_ILEGIBLE = "El departamento indicado no es válido.";
+const ENCARGADO_INEXISTENTE = "El encargado indicado no existe o está archivado.";
+const ENCARGADO_ILEGIBLE = "El encargado indicado no es válido.";
 const YA_EXISTE = "Ese tramo ya existe.";
 const EXISTE_ARCHIVADO_SIN_PERMISO =
   "Ese tramo ya existe pero está archivado: debe desarchivarlo alguien con permiso para archivar y desarchivar tramos.";
@@ -57,6 +60,31 @@ const leerDepartamento = (body: unknown): number | null | undefined | string => 
   const valor = (body as { id_departamento: unknown }).id_departamento;
   if (valor === null || valor === "") return null;
   return entero(valor) ?? DEPARTAMENTO_ILEGIBLE;
+};
+
+/** Same contract as `leerDepartamento`: `undefined` leaves the encargado alone, `null` clears it. */
+const leerEncargado = (body: unknown): number | null | undefined | string => {
+  if (typeof body !== "object" || body === null || !Object.hasOwn(body, "id_encargado")) return undefined;
+  const valor = (body as { id_encargado: unknown }).id_encargado;
+  if (valor === null || valor === "") return null;
+  return entero(valor) ?? ENCARGADO_ILEGIBLE;
+};
+
+/**
+ * Whether the encargado a write is about to set is a live account, asked under
+ * a share lock on that account's row and inside the write's transaction.
+ *
+ * The lock is what makes archiving and assigning take turns. `deleteUsuario`
+ * locks the same row FOR UPDATE before it looks for the person's tramos, so an
+ * assignment either commits first — and the archive finds the tramo and asks
+ * for it to be released — or waits for the archive and then finds no live
+ * account (`findByPk` is paranoid). Without it, a check that passed a moment
+ * before the archive committed left a tramo with an archived encargado.
+ * True when the write sets no encargado, or clears it.
+ */
+const encargadoVivo = async (cambios: Record<string, unknown>, t: Transaction): Promise<boolean> => {
+  if (typeof cambios.id_encargado !== "number") return true;
+  return !!(await UsuarioModel.findByPk(cambios.id_encargado, { attributes: ["id"], transaction: t, lock: t.LOCK.SHARE }));
 };
 
 /** One tramo as it travels, archived or not; the caller decides what an archived one means. */
@@ -164,6 +192,32 @@ export const searchTramo = handler("searchTramo", async (req: Request, res: Resp
   res.status(200).json(tramo);
 });
 
+/**
+ * `GET /api/usuario/:id/tramos`: the tramos a person is in charge of, by name.
+ *
+ * Archived ones too, marked: archiving the person releases those as well
+ * (`deleteUsuario`), so a tramo restored later does not come back with an
+ * archived encargado. The ficha shows the live ones; the archive dialog lists
+ * all it is about to release. The gate is the route's.
+ */
+export const getTramos_usuario = handler("getTramos_usuario", async (req: Request, res: Response) => {
+  const paginacion = leerPaginacion(req.query);
+  if (typeof paginacion === "string") return res.status(400).json({ message: paginacion });
+  // A malformed id matches nobody, as an id that names nobody does.
+  const id = entero(req.params.id) ?? 0;
+
+  const listado = await listar(TramoModel, {
+    where: { id_encargado: id },
+    paranoid: false,
+    // As `getTramo` orders, and for the same reasons.
+    order: [[literal(`(${sqlNombreDelTramo(`"tramo"."id"`)}) COLLATE "C"`), "ASC"], ["id", "ASC"]],
+    attributes: INCLUDE_TRAMO.attributes,
+    include: INCLUDE_TRAMO.include,
+  }, paginacion);
+  if (excedeElTecho(listado)) return responderExcede(res, listado.excede);
+  return res.status(200).json({ ...listado, data: listado.data.map(presentarTramo) });
+});
+
 export const createTramo = handler("createTramo", async (req: Request, res: Response) => {
   const ciudades = leerCiudades(req.body);
   if (typeof ciudades === "string") return res.status(400).json({ message: ciudades });
@@ -255,6 +309,12 @@ export const updateTramo = handler("updateTramo", async (req: Request, res: Resp
     cambios.id_departamento = departamento;
   }
 
+  // Whether the account exists is asked inside the transaction that writes
+  // (`encargadoVivo`), not here.
+  const encargado = leerEncargado(req.body);
+  if (typeof encargado === "string") return res.status(400).json({ message: encargado });
+  if (encargado !== undefined && encargado !== antes.id_encargado) cambios.id_encargado = encargado;
+
   let extremos: [number, number] | null = null;
   if (Object.hasOwn(req.body ?? {}, "ciudades")) {
     const ciudades = leerCiudades(req.body);
@@ -264,8 +324,13 @@ export const updateTramo = handler("updateTramo", async (req: Request, res: Resp
 
   if (extremos === null) {
     if (Object.keys(cambios).length > 0) {
-      fila.set(cambios);
-      await fila.save();
+      const escrito = await sequelize.transaction(async (t) => {
+        if (!(await encargadoVivo(cambios, t))) return false;
+        fila.set(cambios);
+        await fila.save({ transaction: t });
+        return true;
+      });
+      if (!escrito) return res.status(400).json({ message: ENCARGADO_INEXISTENTE });
     }
   } else {
     const [min, max] = extremos;
@@ -284,6 +349,7 @@ export const updateTramo = handler("updateTramo", async (req: Request, res: Resp
         return "con-postes" as const;
       }
       if ((await CiudadModel.count({ where: { id: [min, max] }, transaction: t })) !== 2) return "sin-ciudad" as const;
+      if (!(await encargadoVivo(cambios, t))) return "sin-encargado" as const;
       const otro = await porPar(min, max, t);
       if (otro) return presentarTramo(otro);
       bloqueada.set({ ...cambios, id_ciudad_min: min, id_ciudad_max: max });
@@ -304,6 +370,7 @@ export const updateTramo = handler("updateTramo", async (req: Request, res: Resp
     if (resultado === "nada") return res.status(404).json({ message: NO_ENCONTRADO });
     if (resultado === "con-postes") return res.status(409).json({ message: CON_POSTES });
     if (resultado === "sin-ciudad") return res.status(400).json({ message: CIUDAD_INEXISTENTE });
+    if (resultado === "sin-encargado") return res.status(400).json({ message: ENCARGADO_INEXISTENTE });
     if (resultado !== "movido") return res.status(409).json(respuestaDeParOcupado(resultado));
     cambios.id_ciudad_min = min;
     cambios.id_ciudad_max = max;
@@ -315,8 +382,14 @@ export const updateTramo = handler("updateTramo", async (req: Request, res: Resp
       id_usuario: req.user?.id, action: "UPDATE_TRAMO", entity: "Tramo", entity_id: id,
       detail: `Editó tramo ${despues.nombre}`,
       metadata: {
-        before: { name: antes.nombre, departamento: antes.departamento?.name ?? null },
-        after: { name: despues.nombre, departamento: despues.departamento?.name ?? null },
+        before: {
+          name: antes.nombre, departamento: antes.departamento?.name ?? null,
+          encargado: antes.encargado?.nombre ?? null, id_encargado: antes.id_encargado,
+        },
+        after: {
+          name: despues.nombre, departamento: despues.departamento?.name ?? null,
+          encargado: despues.encargado?.nombre ?? null, id_encargado: despues.id_encargado,
+        },
       },
       severity: "warning",
     });

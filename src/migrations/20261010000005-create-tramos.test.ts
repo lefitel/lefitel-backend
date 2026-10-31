@@ -136,11 +136,14 @@ describe("create-tramos: what holds the rule", () => {
     expect(unico).not.toMatch(/WHERE/i);
   });
 
-  it("creates the columns the model declares", async () => {
+  it("creates the columns the model declares, but for those a later migration adds", async () => {
+    // `20261031000001-add-tramo-encargado` adds `id_encargado`.
+    const despues = new Set(["id_encargado"]);
     const qi = fakeQueryInterface();
     await up({ context: qi as never });
     const tabla = qi.calls.find((c) => c.fn === "createTable" && c.args[0] === "tramos");
-    expect(Object.keys(tabla?.args[1] as object).sort()).toEqual(Object.keys(TramoModel.getAttributes()).sort());
+    expect(Object.keys(tabla?.args[1] as object).sort())
+      .toEqual(Object.keys(TramoModel.getAttributes()).filter((c) => !despues.has(c)).sort());
   });
 });
 

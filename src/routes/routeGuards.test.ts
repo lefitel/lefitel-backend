@@ -1186,6 +1186,8 @@ const SEGURIDAD_GATES: Record<string, string> = {
   // compares `undefined`, everyone without the module loses their own history,
   // and the profile screen prints "Eventos atendidos: 0".
   "GET /api/usuario/:id/eventos": "seguridad.ver",
+  // The tramos a person is in charge of, for their ficha and the archive dialog.
+  "GET /api/usuario/:id/tramos": "seguridad.ver",
 };
 
 /**

@@ -137,6 +137,11 @@ const ciudad: EntityDef = {
  * the `rootOnly` flag below prunes nothing today; it states that these are
  * "one row per tramo" summaries, as the city's and the user's are.
  */
+/** The name of a tramo's live encargado, as `tramos/presentacion.ts` writes it. */
+const sqlEncargado = (a: string) =>
+  `(SELECT NULLIF(CONCAT_WS(' ', NULLIF(BTRIM(u."name"), ''), NULLIF(BTRIM(u."lastname"), '')), '')` +
+  ` FROM "${TABLE.usuario}" u WHERE u."id" = ${a}."id_encargado" AND u."deletedAt" IS NULL)`;
+
 const tramo: EntityDef = {
   table: TABLE.tramo,
   label: "Tramo",
@@ -178,6 +183,20 @@ const tramo: EntityDef = {
       label: "Departamento",
       sql: (a) =>
         `(SELECT d."name" FROM "${TABLE.departamento}" d WHERE d."id" = ${a}."id_departamento")`,
+    },
+    // The person in charge, by name, for anyone who can build a report: an
+    // operational fact, unlike "Registrado por" above. A name and not a
+    // relation to `usuario`, which would open that entity's other columns
+    // here. NULL when nobody is in charge, and for an archived account as the
+    // screens read it (`tramos/presentacion.ts`). Built as `nombreDeUsuario`
+    // builds it — each part trimmed, an empty one skipped — so that "= Ana"
+    // finds the row the screens call "Ana".
+    encargado: {
+      kind: "string",
+      label: "Encargado",
+      sql: (a) => sqlEncargado(a),
+      // By the account, as `nombre` groups by the tramo: two people can share a name.
+      groupKeys: (a) => [`${a}."id_encargado"`, sqlEncargado(a)],
     },
     numPostes: {
       kind: "number",

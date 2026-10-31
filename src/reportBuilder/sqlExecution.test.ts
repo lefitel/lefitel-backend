@@ -835,6 +835,22 @@ describe.skipIf(!dbAvailable)("a report rooted at tramo", () => {
     expect(rows).toHaveLength(truth);
   });
 
+  it("names the encargado of each tramo as the table holds it", async () => {
+    // Every tramo starts with nobody in charge (`20261031000001`), so on a copy
+    // where none has been assigned both sides are 0 and this proves the SQL
+    // runs, not that it names the right person; the builder test pins the SQL.
+    const { rows, keys } = await rowsOf({
+      root: "tramo",
+      columns: [{ path: "id" }, { path: "encargado" }],
+      limit: 50_000,
+    });
+    const truth = await scalar(
+      `SELECT count(*)::int AS n FROM "tramos" t JOIN "usuarios" u ON u."id" = t."id_encargado"
+         AND u."deletedAt" IS NULL WHERE t."deletedAt" IS NULL`,
+    );
+    expect(rows.filter((r) => r[keys[1]] != null)).toHaveLength(truth);
+  });
+
   it("lists every live tramo once, and names each the way the SQL twin does", async () => {
     const { rows, keys } = await rowsOf({
       root: "tramo",

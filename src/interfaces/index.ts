@@ -58,6 +58,7 @@ export interface ITramo {
   id_ciudad_max: number;
   id_departamento?: number | null;
   id_usuario?: number | null;
+  id_encargado?: number | null;
   deletedAt?: Date | null;
 }
 

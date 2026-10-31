@@ -122,6 +122,8 @@ const NEGOCIO_EN_ESPANOL = [
   "solucion",
   "tipo-obs",
   "tramo",
+  // The plural of a sub-resource, as `eventos` is: `/api/usuario/:id/tramos`.
+  "tramos",
   "usuario",
 ];
 

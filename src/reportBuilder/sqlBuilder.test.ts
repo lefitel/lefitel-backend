@@ -1663,6 +1663,18 @@ describe("a report rooted at tramo", () => {
     expect(sql).not.toMatch(/JOIN "departamentos"/);
   });
 
+  it("names the encargado by a scalar subquery over live accounts, for every viewer", () => {
+    for (const viewer of [ADMIN, OPERATIVO]) {
+      const { sql, columns } = buildQuery(TRAMO({ columns: [{ path: "encargado" }] }), viewer);
+      expect(sql, String(viewer.role)).toContain(
+        `(SELECT NULLIF(CONCAT_WS(' ', NULLIF(BTRIM(u."name"), ''), NULLIF(BTRIM(u."lastname"), '')), '')` +
+          ' FROM "usuarios" u WHERE u."id" = t0."id_encargado" AND u."deletedAt" IS NULL)',
+      );
+      expect(sql).not.toMatch(/JOIN "usuarios"/);
+      expect(columns.map((c) => c.label)).toEqual(["Encargado"]);
+    }
+  });
+
   it("counts live poles, live events on live poles, and the pending ones with IS NOT TRUE", () => {
     const { sql } = buildQuery(ESTADO, ADMIN);
     expect(sql).toContain(POSTES);

@@ -96,6 +96,21 @@ vi.mock("../database/sequelize.js", () => ({
   sequelize: { transaction: (...args: unknown[]) => transaction(...args) },
 }));
 vi.mock("../models/rol.model.js", () => ({ RolModel: { findByPk: vi.fn() } }));
+// The tramos an archive releases. The presenter is the identity: what it turns
+// a row into is `presentacion.test.ts`'s business, and the real one imports the
+// city and department models, which call `sequelize.define` on the mock above.
+const tramoFindAll = vi.fn();
+const tramoUpdate = vi.fn();
+vi.mock("../models/tramo.model.js", () => ({
+  TramoModel: {
+    findAll: (...args: unknown[]) => tramoFindAll(...args),
+    update: (...args: unknown[]) => tramoUpdate(...args),
+  },
+}));
+vi.mock("../tramos/presentacion.js", () => ({
+  INCLUDE_TRAMO: { attributes: [], include: [] },
+  presentarTramo: (t: unknown) => t,
+}));
 /**
  * The credential door, mocked — deliberately, and this is the one mock in this
  * file worth arguing for.
@@ -172,7 +187,7 @@ const SESION_POR_DEFECTO = "eeeeeeee-11cd-4111-8111-eeeeeeeeeeee";
  */
 function call(
   user: { id: number; id_rol: number; id_sesion?: string; estado?: EstadoSesion } | undefined,
-  { params = {}, body = {} }: { params?: Record<string, unknown>; body?: unknown } = {},
+  { params = {}, body = {}, query = {} }: { params?: Record<string, unknown>; body?: unknown; query?: Record<string, unknown> } = {},
 ) {
   const res = {
     statusCode: 0,
@@ -220,6 +235,7 @@ function call(
       },
       params,
       body,
+      query,
       ip: "::1",
     } as unknown as Request,
     res: res as unknown as Response,
@@ -279,6 +295,7 @@ beforeEach(() => {
   // the other roles hold nothing in these two modules.
   can.mockImplementation(async (rol: number) => rol === ADMIN);
   destroy.mockResolvedValue(1);
+  tramoFindAll.mockResolvedValue([]);
   revokeAllSessionsOf.mockResolvedValue(0);
   revokeAllRememberedDevicesOf.mockResolvedValue(0);
   // A default, so that the one test which makes the rotation fail cannot leak
@@ -1942,6 +1959,86 @@ describe("archiving an account ends its sessions and its remembered devices", ()
     await deleteUsuario(c.req, c.res);
 
     expect(c.status).toBe(500);
+  });
+
+  it("refuses, writing nothing, to archive somebody in charge of tramos unless told to release them", async () => {
+    const { logAction } = await import("../utils/logAction.js");
+    const tramos = [{ id: 14, nombre: "Potosí – Sucre", departamento: null, encargado: { id: OTHER, nombre: "Ana Quispe" } }];
+    tramoFindAll.mockResolvedValue(tramos);
+
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(409);
+    expect(c.payload).toEqual({ message: expect.stringContaining("encargado de tramos"), tramos });
+    // Looked up archived tramos too, and inside the archive's own transaction.
+    expect(tramoFindAll).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id_encargado: OTHER }, paranoid: false, transaction: TRANSACCION,
+    }));
+    // The account's row is locked before the look, so an assignment cannot
+    // slip in between the look and the archive.
+    expect(findByPk).toHaveBeenCalledWith(OTHER, { attributes: ["id"], transaction: TRANSACCION, lock: true });
+    expect(findByPk.mock.invocationCallOrder[0]).toBeLessThan(tramoFindAll.mock.invocationCallOrder[0]);
+    expect(tramoUpdate).not.toHaveBeenCalled();
+    expect(destroy).not.toHaveBeenCalled();
+    expect(revokeAllSessionsOf).not.toHaveBeenCalled();
+    expect(logAction).not.toHaveBeenCalled();
+  });
+
+  it("releases the tramos inside the archive's transaction when asked, and logs each tramo", async () => {
+    const { logAction } = await import("../utils/logAction.js");
+    tramoFindAll.mockResolvedValue([
+      { id: 14, nombre: "Potosí – Sucre", departamento: null, encargado: { id: OTHER, nombre: "Ana Quispe" } },
+      { id: 15, nombre: "Oruro – Sucre", departamento: { id: 5, name: "Oruro" }, encargado: { id: OTHER, nombre: "Ana Quispe" } },
+    ]);
+
+    // In any order: the dialog sends what it showed, the server compares sets.
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) }, query: { liberarTramos: "15,14" } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(204);
+    expect(tramoUpdate).toHaveBeenCalledWith(
+      { id_encargado: null },
+      { where: { id: [14, 15] }, paranoid: false, transaction: TRANSACCION },
+    );
+    expect(destroy).toHaveBeenCalledWith({ where: { id: String(OTHER) }, transaction: TRANSACCION });
+    const tramosLogged = vi.mocked(logAction).mock.calls.map(([e]) => e).filter((e) => e.action === "UPDATE_TRAMO");
+    expect(tramosLogged.map((e) => e.entity_id)).toEqual([14, 15]);
+    expect(tramosLogged[1].metadata).toMatchObject({
+      before: { encargado: "Ana Quispe", departamento: "Oruro" }, after: { encargado: null, departamento: "Oruro" },
+    });
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({
+      action: "DELETE_USUARIO", metadata: expect.objectContaining({ tramos_liberados: 2 }),
+    }));
+  });
+
+  it("refuses with the new list, releasing nothing, when the tramos are not the ones that were shown", async () => {
+    const { logAction } = await import("../utils/logAction.js");
+    const tramos = [
+      { id: 14, nombre: "Potosí – Sucre", departamento: null, encargado: { id: OTHER, nombre: "Ana Quispe" } },
+      { id: 16, nombre: "Tarija – Sucre", departamento: null, encargado: { id: OTHER, nombre: "Ana Quispe" } },
+    ];
+    tramoFindAll.mockResolvedValue(tramos);
+
+    // 16 was assigned while the dialog that showed 14 alone was open; and the
+    // old `=1` names nothing at all.
+    for (const liberarTramos of ["14", "14,16,17", "1", "14,x"]) {
+      const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) }, query: { liberarTramos } });
+      await deleteUsuario(c.req, c.res);
+      expect(c.status, liberarTramos).toBe(409);
+      expect((c.payload as { tramos: unknown }).tramos).toEqual(tramos);
+    }
+    expect(tramoUpdate).not.toHaveBeenCalled();
+    expect(destroy).not.toHaveBeenCalled();
+    expect(logAction).not.toHaveBeenCalled();
+  });
+
+  it("archives as before, releasing nothing, somebody in charge of no tramo", async () => {
+    const c = call({ id: ADMIN, id_rol: ADMIN }, { params: { id: String(OTHER) } });
+    await deleteUsuario(c.req, c.res);
+
+    expect(c.status).toBe(204);
+    expect(tramoUpdate).not.toHaveBeenCalled();
   });
 
   it("revokes nothing when the caller may not archive", async () => {

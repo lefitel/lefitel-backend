@@ -42,7 +42,9 @@ import { ObsModel } from "../models/obs.model.js";
 import { PropietarioModel } from "../models/propietario.model.js";
 import { TipoObsModel } from "../models/tipoObs.model.js";
 import { TramoModel } from "../models/tramo.model.js";
-import { INCLUDE_TRAMO, presentarTramo, type TramoPresentado } from "../tramos/presentacion.js";
+import { UsuarioModel } from "../models/usuario.model.js";
+import { can } from "../permissions/store.js";
+import { INCLUDE_TRAMO, nombreDeUsuario, presentarTramo, type TramoPresentado } from "../tramos/presentacion.js";
 import { log } from "../utils/logger.js";
 import { makeHandler } from "../utils/handler.js";
 
@@ -219,6 +221,15 @@ export const getOpcionesReporte = handler("getOpcionesReporte", async (_req: Req
   res.status(200).json({ ciudad, adss, material, propietario, obs, tramos });
 });
 
+/** Every live account as the encargado picker shows it, by name. `findAll` is paranoid. */
+const usuariosVivos = async (): Promise<{ id: number; nombre: string }[]> => {
+  const filas = (await UsuarioModel.findAll({ attributes: ["id", "name", "lastname"], raw: true })) as unknown as
+    { id: number; name: string | null; lastname: string | null }[];
+  return filas
+    .map((u) => ({ id: u.id, nombre: nombreDeUsuario(u) }))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
+};
+
 /**
  * `tramos:ver`, for the tramo dialog and the network map on the Tramos screen.
  *
@@ -230,8 +241,19 @@ export const getOpcionesReporte = handler("getOpcionesReporte", async (_req: Req
  * The same dialog opened from the pole form does not come here: that form is
  * reached with `postes.*` and possibly without `tramos.ver`, and it already
  * holds both lists from `/api/poste/options`.
+ *
+ * `usuarios` is the encargado picker of the tramo card, and only for somebody
+ * who can use it (`tramos.editar`). `GET /api/usuario/` asks `seguridad.ver`,
+ * which a tramo editor usually lacks; an id and a name of each live account is
+ * all a picker needs, and nothing of the security record comes with it.
  */
-export const getOpcionesTramo = handler("getOpcionesTramo", async (_req: Request, res: Response) => {
-  const [ciudad, departamento] = await Promise.all([lista(CiudadModel, CIUDAD_EDITABLE), departamentos()]);
-  res.status(200).json({ ciudad, departamento });
+export const getOpcionesTramo = handler("getOpcionesTramo", async (req: Request, res: Response) => {
+  const editor = await can(req.user?.id_rol, "tramos", "editar");
+  const [ciudad, departamento, usuarios] = await Promise.all([
+    lista(CiudadModel, CIUDAD_EDITABLE),
+    departamentos(),
+    editor ? usuariosVivos() : Promise.resolve(undefined),
+  ]);
+  res.status(200).json({ ciudad, departamento, ...(usuarios ? { usuarios } : {}) });
 });
+

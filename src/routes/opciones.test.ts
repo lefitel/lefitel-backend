@@ -363,7 +363,7 @@ describe("the tramos block", () => {
     expect((consulta(tramoFindAll) as { paranoid?: boolean })?.paranoid).not.toBe(false);
     // Its cities: asked for even when archived, so the name is whole.
     const incluye = (consulta(tramoFindAll) as unknown as { include: { as?: string; paranoid: boolean }[] }).include;
-    const ciudades = incluye.filter((i) => i.as);
+    const ciudades = incluye.filter((i) => i.as?.startsWith("ciudad"));
     expect(ciudades).toHaveLength(2);
     expect(ciudades.every((i) => i.paranoid === false)).toBe(true);
   });
@@ -389,7 +389,7 @@ describe("the tramo dialog's lists", () => {
     expect(consulta(ciudadFindAll)?.attributes).toEqual(["id", "name", "lat", "lng", "image"]);
   });
 
-  it("answers each city with id, name, lat, lng and image and nothing more, beside the departments", async () => {
+  it("answers each city with id, name, lat, lng and image and nothing more, beside the departments and, for an editor, the accounts", async () => {
     const conFoto = [
       { id: 3, name: "Tacna", lat: -18.01, lng: -70.25, image: "uploads/tacna.jpg" },
       { id: 7, name: "Ilo", lat: -17.64, lng: -71.34, image: null },
@@ -399,7 +399,8 @@ describe("the tramo dialog's lists", () => {
     const res = await request(app).get("/api/tramo/options").set("Cookie", COOKIE);
 
     expect(res.status).toBe(200);
-    expect(Object.keys(res.body).sort()).toEqual(["ciudad", "departamento"]);
+    // `can` answers yes to everything here; the editor's half is in `opciones.tramo.test.ts`.
+    expect(Object.keys(res.body).sort()).toEqual(["ciudad", "departamento", "usuarios"]);
     expect(res.body.ciudad).toEqual(conFoto);
     expect(res.body.departamento).toEqual([{ id: 5, name: "Potosí" }]);
   });
