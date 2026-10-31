@@ -88,6 +88,10 @@ const propietarioFindAll = vi.spyOn(PropietarioModel, "findAll");
 const tipoObsFindAll = vi.spyOn(TipoObsModel, "findAll");
 const tramoFindAll = vi.spyOn(TramoModel, "findAll");
 const departamentoFindAll = vi.spyOn(DepartamentoModel, "findAll");
+// The encargado picker of `/api/tramo/options`. Without it the handler reached
+// the configured database: green on a machine that has one, 500 in the Docker
+// gate, which has none — and that is how it was found, on a real deploy.
+const usuarioFindAll = vi.spyOn(UsuarioModel, "findAll");
 
 /**
  * The two queries that prove the ordering, by never running.
@@ -169,6 +173,7 @@ beforeEach(() => {
   posteFindAll.mockRejectedValue(new Error("PosteModel.findAll corrió: las opciones ya no leen el registro de postes") as never);
   tramoFindAll.mockResolvedValue([crudo()] as never);
   departamentoFindAll.mockResolvedValue([{ id: 5, name: "Potosí" }] as never);
+  usuarioFindAll.mockResolvedValue([{ id: 9, name: "Ana", lastname: "Quispe" }] as never);
   // Left rejecting: nothing in this file should reach either, and a bare spy
   // would answer `undefined` and let a shadowed route look merely empty.
   posteFindOne.mockRejectedValue(new Error("searchPoste corrió: /options quedó tapada por /:id") as never);
@@ -403,6 +408,7 @@ describe("the tramo dialog's lists", () => {
     expect(Object.keys(res.body).sort()).toEqual(["ciudad", "departamento", "usuarios"]);
     expect(res.body.ciudad).toEqual(conFoto);
     expect(res.body.departamento).toEqual([{ id: 5, name: "Potosí" }]);
+    expect(res.body.usuarios).toEqual([{ id: 9, nombre: "Ana Quispe" }]);
   });
 
   it("does not widen the pole form's cities with the photo", async () => {
